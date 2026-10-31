@@ -8,13 +8,19 @@ These are little helpers, not security products.
 A check that finds nothing does not mean something is safe.
 No guarantees, no warranty, and no liability if you get burned anyway.
 
-## Skills
+## Contents
 
-| Skill | What it does |
+| Item | What it does |
 | --- | --- |
-| [DANGER PROTOCOL](skills/danger-protocol/) | Read-only check of a GitHub repo before you install or run it: build scripts, what it does on your machine, what it sends out, hidden payloads. Ends with a verdict and what it could not prove. Comes with a worked example. |
+| [DANGER PROTOCOL](skills/danger-protocol/) | Read-only check of a GitHub repo before you install or run it. |
 
-## How to use one
+### Tern plug-ins
+
+| Plug-in | What it does |
+| --- | --- |
+| [TERN FLEET USAGE](skills/tern-fleet-usage/) | Read-only Tern plug-in for sanitized subscription usage feeds. |
+
+## How to use a skill
 
 - **Claude Code:** copy the skill's folder into `~/.claude/skills/` (or your project's `.claude/skills/`), then ask for it by name.
 - **Any other agent (Codex, Cursor, …):** paste the contents of `SKILL.md` as your prompt.
