@@ -18,7 +18,7 @@ No guarantees, no warranty, and no liability if you get burned anyway.
 
 | Plugin | What it does |
 | --- | --- |
-| [TERN FLEET USAGE](plugins/tern-fleet-usage/) | Read-only Tern plug-in for sanitized subscription usage feeds. |
+| [TERN FLEET USAGE](plugins/tern/tern-fleet-usage/) | Read-only Tern plug-in for sanitized subscription usage feeds. |
 
 ## Install a skill
 
