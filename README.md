@@ -1,45 +1,32 @@
-# tools
+<p align="center">
+  <a href="https://www.blastworks.ai/"><img src="https://raw.githubusercontent.com/blastworksai/howgozit/master/assets/blastworks-banner.png" alt="Blastworks.ai" width="100%"></a>
+</p>
 
-Skills and plug-ins from Blastworks, free to use under the MIT licence.
+# TOOLS
 
-## ⚠️ Not a condom. Not a guarantee.
+You'll find skills and tools that I've tinkered with, that I find useful, and that I want to share with the world here. Everything is MIT License, so fork away. Feedback is appreciated, and stars are a dopamine hit, so hit me.
 
-These are little helpers, not security products.
-A check that finds nothing does not mean something is safe.
-No guarantees, no warranty, and no liability if you get burned anyway.
-
-## Skills
+## SKILLS
 
 | Skill | What it does |
 | --- | --- |
-| [DANGER PROTOCOL](skills/dangerprotocol/) | Read-only check of a GitHub repo before you install or run it. |
+| [DANGER PROTOCOL](skills/dangerprotocol/README.md) | Read-only check of a GitHub repo before you install or run it. |
 
-## Plugins
+## PLUGINS
 
-| Plugin | What it does |
-| --- | --- |
-| [TERN FLEET USAGE](plugins/tern/tern-fleet-usage/) | Read-only Tern plug-in for sanitized subscription usage feeds. |
+| Name | Plugin for | What it does |
+| --- | --- | --- |
+| Glitch Work Overview | Tern | Gives you an on-demand pane that lists all ongoing projects in your Glitch available to `/work-on`. |
+| Tern Agent Spawner | Tern | Gives you the option to spawn your entire agent army at the click of the button, or one specific agent pane. No shell commands needed. Works both locally and for multi-device SSH ecosystems. |
+| [Agent Usage](plugins/tern/tern-fleet-usage/README.md) | Tern | Bottom Bar Pane for Tern that shows the usage of all your known AI accounts in Tern. |
+| Tern Orchestration | Tern | Orchestration+ to expand on basic Tern agent orchestration. |
 
-## Install a skill
+## Found a bug? Have an idea?
 
-- **Claude Code:** copy the skill's folder into `~/.claude/skills/` (or your project's `.claude/skills/`), then ask for it by name.
-- **Any other agent (Codex, Cursor, …):** paste the contents of `SKILL.md` as your prompt.
+Open an issue on this repository. Stars mean nothing, but they're free, and we like them. ⭐
 
-## Install a Tern plugin
-
-```sh
-tern plugin link /path/to/plugin
-tern plugin reload <plugin-id>
-tern plugin list --json
-```
-
-For DANGER PROTOCOL specifically:
-
-- Run it in a throwaway VM or container, not on the machine with your passwords, SSH keys and crypto.
-- Keep your agent's permission prompts on. No `--yolo`, no `--dangerously-skip-permissions`.
-- Don't open the repo in your editor in trusted mode.
-- It reads the source, not the installer you download. Those are not proven to be the same thing.
-
-## Licence
-
-MIT. See [LICENSE](LICENSE).
+<p align="center">
+  <a href="https://www.blastworks.ai/"><img src="https://raw.githubusercontent.com/blastworksai/howgozit/master/assets/blastworks-banner.png" alt="Blastworks.ai" width="360"></a><br>
+  <b>All built by <a href="https://www.blastworks.ai/">blastworks.ai</a></b>: AI won't replace you. It frees you up.<br>
+  <a href="https://www.blastworks.ai/">blastworks.ai</a> · MIT licence, see <a href="LICENSE">LICENSE</a>
+</p>
