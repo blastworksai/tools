@@ -1,6 +1,6 @@
-# skillshare
+# tools
 
-Skills and prompts from Blastworks, free to use under the MIT licence.
+Skills and plug-ins from Blastworks, free to use under the MIT licence.
 
 ## ⚠️ Not a condom. Not a guarantee.
 
@@ -8,22 +8,30 @@ These are little helpers, not security products.
 A check that finds nothing does not mean something is safe.
 No guarantees, no warranty, and no liability if you get burned anyway.
 
-## Contents
+## Skills
 
-| Item | What it does |
+| Skill | What it does |
 | --- | --- |
-| [DANGER PROTOCOL](skills/danger-protocol/) | Read-only check of a GitHub repo before you install or run it. |
+| [DANGER PROTOCOL](skills/dangerprotocol/) | Read-only check of a GitHub repo before you install or run it. |
 
-### Tern plug-ins
+## Plugins
 
-| Plug-in | What it does |
+| Plugin | What it does |
 | --- | --- |
-| [TERN FLEET USAGE](skills/tern-fleet-usage/) | Read-only Tern plug-in for sanitized subscription usage feeds. |
+| [TERN FLEET USAGE](plugins/tern-fleet-usage/) | Read-only Tern plug-in for sanitized subscription usage feeds. |
 
-## How to use a skill
+## Install a skill
 
 - **Claude Code:** copy the skill's folder into `~/.claude/skills/` (or your project's `.claude/skills/`), then ask for it by name.
 - **Any other agent (Codex, Cursor, …):** paste the contents of `SKILL.md` as your prompt.
+
+## Install a Tern plugin
+
+```sh
+tern plugin link /path/to/plugin
+tern plugin reload <plugin-id>
+tern plugin list --json
+```
 
 For DANGER PROTOCOL specifically:
 
