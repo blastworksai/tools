@@ -6,7 +6,7 @@
 
 You'll find skills and tools that I've tinkered with, that I find useful, and that I want to share with the world here. Everything is MIT License, so fork away. Feedback is appreciated, and stars are a dopamine hit, so hit me.
 
-Every skill here is reviewed with [Walkdown](https://github.com/BytesFromToby/Walkdown), Toby's tool that reads the instructions inside an AI skill and shows what they ask a model to do, each finding cited to file and line.
+Every skill here is reviewed with [Walkdown](https://github.com/BytesFromToby/Walkdown), each finding cited to file and line.
 The results are public for each skill: follow its Walkdown link in the table.
 
 ## SKILLS
