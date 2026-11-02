@@ -1,0 +1,15 @@
+schema = 1
+id = "tern-work"
+name = "WORK"
+version = "0.3.27"
+description = "Live active Glitch workspaces with Work On and GitHub actions."
+icon = "list"
+host = "host.luau"
+window = "window.luau"
+styles = ["styles.css"]
+
+[[blocks]]
+id = "panel"
+title = "WORK"
+icon = "list"
+palette = true

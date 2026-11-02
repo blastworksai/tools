@@ -16,7 +16,7 @@ You'll find skills and tools that I've tinkered with, that I find useful, and th
 
 | Name | Plugin for | What it does |
 | --- | --- | --- |
-| Glitch Work Overview | Tern | Gives you an on-demand pane that lists all ongoing projects in your Glitch available to `/work-on`. |
+| [WORK](plugins/tern/WORK/README.md) | Tern | Native pane listing active Glitch workspaces known to `/work-on`, with per-row GitHub links and Work On actions that start the default agent in a split pane. |
 | Tern Agent Spawner | Tern | Gives you the option to spawn your entire agent army at the click of the button, or one specific agent pane. No shell commands needed. Works both locally and for multi-device SSH ecosystems. |
 | [Agent Usage](plugins/tern/tern-fleet-usage/README.md) | Tern | Bottom Bar Pane for Tern that shows the usage of all your known AI accounts in Tern. |
 | Tern Orchestration | Tern | Orchestration+ to expand on basic Tern agent orchestration. |
