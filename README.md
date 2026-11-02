@@ -20,10 +20,10 @@ The results are public for each skill: follow its Walkdown link in the table.
 
 | Name | Plugin for | What it does |
 | --- | --- | --- |
-| [WORK](plugins/tern/WORK/README.md) | Tern | Native pane listing active Glitch workspaces known to `/work-on`, with per-row GitHub links and Work On actions that start the default agent in a split pane. |
-| Tern Agent Spawner | Tern | Gives you the option to spawn your entire agent army at the click of the button, or one specific agent pane. No shell commands needed. Works both locally and for multi-device SSH ecosystems. |
-| [Agent Usage](plugins/tern/tern-fleet-usage/README.md) | Tern | Bottom Bar Pane for Tern that shows the usage of all your known AI accounts in Tern. |
-| Tern Orchestration | Tern | Orchestration+ to expand on basic Tern agent orchestration. |
+| [WORK](plugins/tern/WORK/README.md) | Tern | Native pane listing active [Glitch](https://github.com/Glitch-Cat-Club) workspaces known to `/work-on`, with per-row GitHub links and Work On actions that start the default agent in a split pane. |
+| SPAWN | Tern | Define and SPAWN your (entire) agentic army. |
+| [USAGE](plugins/tern/tern-fleet-usage/README.md) | Tern | Show your subscription usage across all agents. DEPENDENCY: NEEDS SPAWN. |
+| ORCH+ | Tern | Orchestration+ Basic Improvements to Native Tern Orchestration. DEPENDENCY: NEEDS SPAWN. |
 
 ## Found a bug? Have an idea?
 
