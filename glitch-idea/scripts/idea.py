@@ -65,6 +65,7 @@ def parser():
     p.add_argument('--idea',dest='idea_id',required=True)
     p.add_argument('--actor',required=True)
     p.add_argument('--confirm',action='store_true')
+    p.add_argument('--runtime-root')
     for name in ('serve','session-open','browser-open'):
         p=commands.add_parser(name)
         p.launcher_errors=True
@@ -227,7 +228,8 @@ def _default_runtime_root():
         return home_default,None
 
 
-def launcher_configuration(args):
+def _launcher_paths(args):
+    """Store and runtime root exactly as the launcher resolves them (flag, then config, then the default)."""
     value,base,skill_dir,installed,argv,timeout=_configuration_source()
     store_value=args.store if args.store is not None else value.get('store_path',str(base/'ideas'))
     store=_launch_path(store_value,None if args.store is not None else base)
@@ -240,6 +242,11 @@ def launcher_configuration(args):
     runtime=_launch_path(root_value,absolute=True)
     require(runtime!=skill_dir and skill_dir not in runtime.parents and runtime not in skill_dir.parents,
             'Runtime must be outside the skill package','invalid_config')
+    return store,runtime,value,installed,argv,timeout
+
+
+def launcher_configuration(args):
+    store,runtime,value,installed,argv,timeout=_launcher_paths(args)
     configured_python=getattr(args,'runtime_python',None)
     if configured_python is None: configured_python=value.get('runtime_python')
     require(not installed or configured_python is not None,
@@ -256,6 +263,32 @@ def launcher_configuration(args):
     browser_port,_,_=_fixed_ports(value)
     if browser_port is not None: config['browser_port']=browser_port
     return store,runtime,config,executable
+
+
+def _session_check(args):
+    """remove-idea: this seat's saved browser sessions are the launcher's rows; the Store cannot see them.
+
+    Returns idea_id -> sorted binding ids that select it. Reads the bindings without a running service.
+    No runtime folder means no sessions. Only this seat's runtime is visible: another seat's session on a
+    shared store is not. Runs early (fast answer, preview) and again inside the Store's removal transaction.
+    """
+    from idea_runtime import Runtime, RuntimeError as RuntimeFailure
+    store,runtime,_,_,_,_=_launcher_paths(args)
+    def holders(idea_id):
+        try: rows=Runtime(store,runtime).list_bindings()
+        except RuntimeFailure as exc:
+            if exc.code=='owner_unavailable': return []
+            raise IdeaError('sessions_unreadable','The saved sessions could not be read, so the idea was not checked for use')
+        return sorted(row['binding_id'] for row in rows
+                      if row.get('selected_idea_id')==idea_id and re.fullmatch(r'binding_[0-9a-f]{32}',str(row.get('binding_id'))))
+    return holders
+
+
+def _refuse_idea_in_use(args,holders):
+    if not (type(args.idea_id) is str and re.fullmatch(r'idea_[0-9a-f]{32}',args.idea_id)): return
+    ids=holders(args.idea_id)
+    if ids:
+        raise IdeaError('idea_in_use','A saved browser session still selects this idea; discard it first (session-discard --binding)',binding_ids=ids)
 
 
 def _safe_launch_details(details):
@@ -462,7 +495,12 @@ def main(argv=None):
         elif args.command in AGENT_COMMANDS: result=run_agent(args)
         elif args.command in SESSION_COMMANDS: result=run_sessions(args)
         elif args.command in PROTOTYPE_COMMANDS: result=run_prototype(args)
-        else: result=dict(ok=True,**run(args,configuration()))
+        else:
+            holders=None
+            if args.command=='remove-idea':
+                holders=_session_check(args)
+                _refuse_idea_in_use(args,holders)
+            result=dict(ok=True,**(run(args,configuration()) if holders is None else run(args,configuration(),in_use=holders)))
     except IdeaError as exc:
         result=dict(ok=False,error=dict(code=exc.code,message=exc.code if launching else str(exc)),
                     **({} if launching else exc.details))

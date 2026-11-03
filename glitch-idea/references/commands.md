@@ -313,8 +313,14 @@ If the process dies in between, the next open of the store finishes it: every bl
 An immutable tombstone `history/removed/<id>.md` (`<id>.2.md`, `<id>.3.md` … when the same idea was imported again and removed again) is written in the same publish, sealed read-only (0400, or 0440 in a shared store): idea id, actor, time, first words and a manifest of the removed paths with their sha256.
 `IDEAS.md` pins each tombstone's sha256 in its `glitch_idea_removals` extension (`{idea_id, path, sha256}`), so a rewritten, deleted or unpinned tombstone makes the next open `corrupt_store`.
 Placement records (`history/backlog/*`) and session receipts stay as history.
-Refusals: `not_found` (also the answer to a second removal), `idea_moved`, `idea_delivered`, `unsupported_idea_version` (a held idea; the Store answers with its own sentence).
-The Store cannot see session rows, so this verb does not check whether a retained session selects the idea (`idea_in_use`); that check belongs to the launcher, which owns those rows.
+Refusals: `not_found` (also the answer to a second removal), `idea_moved`, `idea_delivered`, `unsupported_idea_version` (a held idea; the Store answers with its own sentence), `idea_in_use` (a saved session of this seat selects it).
+The Store cannot see session rows, so the launcher checks them first, for the preview and for `--confirm` alike (`remove-idea` also takes `--runtime-root`, resolved exactly as the launcher's verbs resolve it).
+If one of this seat's saved browser sessions still selects the idea, nothing is removed: `idea_in_use`, with `binding_ids` listing those sessions (typed `binding_` IDs only).
+Show the operator, then free it with `session-discard --binding binding_ID` (previewed, `--confirm` on their yes) and run the removal again.
+No runtime folder means no sessions, which is not an error.
+The check runs twice: early (a fast answer, and the preview), and again inside the Store's removal transaction under the store lock, before anything is published, so a session saved between the two is still refused.
+One window remains. The owner validates that the idea exists (a store read) and then saves the session, with the store lock released in between (`idea_sessions.py` `open_binding`: `application.state()` then `self.persist`; `after_application` persists a selection change the same way). A removal that commits in that gap is not seen. The next start of this seat's service sets that session aside, and its open tab gets the store's `not_found` on its next read.
+The check sees only this seat's sessions: another seat's session on the same shared store cannot be seen, and that seat's service sets such a session aside on its next start.
 After a removal `doctor` is healthy and `list` no longer shows the idea.
 
 ## Recovery

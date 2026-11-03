@@ -182,8 +182,22 @@ class OwnerService:
                                     memory_capability=True)
         for record in runtime.list_bindings():
             check(record['actor'] == self.actor,'session_binding_mismatch',403)
-            self.policy.open_binding(self.actor,record['receipt_session_id'],record['selected_idea_id'],
-                                     binding_id=record['binding_id'],resume=True)
+            try:
+                self.policy.open_binding(self.actor,record['receipt_session_id'],record['selected_idea_id'],
+                                         binding_id=record['binding_id'],resume=True)
+            except IdeaError as exc:
+                # The ideas store is shared, so an idea can be removed while a saved session still selects it; one
+                # such session must not keep the whole service from starting. Set it aside (never deleted) only when
+                # the store confirms the idea is gone; any other error still fails the start.
+                gone = record['selected_idea_id']
+                if exc.code != 'not_found' or gone is None: raise
+                with self.store.transaction() as state:
+                    missing = gone not in state['ideas']
+                if not missing: raise
+                self.runtime.park_binding(record['binding_id'],'idea_removed')
+                logging.getLogger('idea.activity').info('session parked binding=%s idea=%s reason=idea_removed',
+                                                        record['binding_id'],gone)
+                continue
             self.members.add(record['binding_id'])
         self._restoring = False
         # Warm the store's load cache before the server listens: a large store takes seconds to parse cold, and

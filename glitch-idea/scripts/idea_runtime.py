@@ -602,6 +602,72 @@ class Runtime:
             except OSError:
                 raise RuntimeError('runtime_persistence_failed') from None
 
+    def park_binding(self, binding_id, reason):
+        """Owner only: set one retained binding aside, never delete it.
+
+        The record moves, byte for byte, to <runtime_root>/parked-bindings/<store_sha256>/ (0700, file 0600): at
+        the runtime root because stores/<sha>/ refuses names it does not know. Durable there before it leaves
+        bindings/. A name already parked keeps its earlier copy; the new one gets a random suffix.
+        """
+        _check(type(binding_id) is str and BINDING.fullmatch(binding_id) is not None)
+        _check(type(reason) is str and re.fullmatch(r'[a-z_]{1,64}', reason) is not None)
+        with self._mutex:
+            self._owner()
+            records, _ = self._scan(self._directory_fd, self._bindings_fd)
+            _check(binding_id in records, 'binding_not_found')
+            name = binding_id + '.json'
+            raw = _raw(self._bindings_fd, name)  # Refuses anything but a private regular file.
+            descriptors = []
+            flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+            try:
+                descriptors.append(_open_chain(self.runtime_root, create=True, private_leaf=True))
+                for child in ('parked-bindings', self.store_sha256):
+                    parent = descriptors[-1]
+                    try:
+                        descriptor = os.open(child, flags, dir_fd=parent)
+                    except FileNotFoundError:
+                        try:
+                            os.mkdir(child, 0o700, dir_fd=parent); os.fsync(parent)
+                        except FileExistsError:
+                            pass
+                        descriptor = os.open(child, flags, dir_fd=parent)
+                    descriptors.append(descriptor)
+                    _directory(descriptor, private=True)
+                parked = descriptors[-1]
+                temporary = '.parking_' + secrets.token_hex(16) + '.tmp'
+                descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                                     0o600, dir_fd=parked)
+                try:
+                    try:
+                        _private_file(descriptor)
+                        offset = 0
+                        while offset < len(raw):
+                            written = os.write(descriptor, raw[offset:]); _check(written > 0)
+                            offset += written
+                        os.fsync(descriptor)
+                    finally:
+                        os.close(descriptor)
+                    target = name
+                    while True:
+                        try:
+                            os.link(temporary, target, src_dir_fd=parked, dst_dir_fd=parked, follow_symlinks=False)
+                            break
+                        except FileExistsError:
+                            target = binding_id + '.' + secrets.token_hex(4) + '.json'
+                finally:
+                    # The temp file's whole life: any failure before the link succeeds leaves nothing behind,
+                    # and the original binding is untouched until the parked copy is durable.
+                    try: os.unlink(temporary, dir_fd=parked)
+                    except FileNotFoundError: pass
+                os.fsync(parked)
+                os.unlink(name, dir_fd=self._bindings_fd)
+                os.fsync(self._bindings_fd)
+                return target
+            except OSError:
+                raise RuntimeError('runtime_persistence_failed') from None
+            finally:
+                for descriptor in reversed(descriptors): os.close(descriptor)
+
     def publish_discovery(self, port):
         _check(type(port) is int and 1 <= port <= 65535)
         with self._mutex:
