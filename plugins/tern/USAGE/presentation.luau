@@ -56,9 +56,13 @@ function presentation.tone(used: number?): string
 	return "ok"
 end
 
-function presentation.surface_tone(tone: string): string
-	-- Status segments and surface nodes use different semantic spellings.
-	return if tone == "ok" then "success" elseif tone == "warn" then "warning" else tone
+-- Text-node role for a measured, current percentage: usage.css colours
+-- `usage-heat-0` (green) through `usage-heat-100` (red) in 10% steps.
+-- Anything not current gets nil and stays muted, so old values never look live.
+function presentation.heat(used: number?, state: string): string?
+	if used == nil or state ~= "fresh" then return nil end
+	local step = math.floor(math.clamp(used, 0, 100) / 10 + 0.5) * 10
+	return "usage-heat-" .. tostring(step)
 end
 
 function presentation.ring(used: number?): string
@@ -91,6 +95,7 @@ function presentation.account_projection(account: any, now_ms: number?): any
 				.. (if state == "stale" then " last-known · stale" elseif state == "reset_passed" then " last-known · Reset passed"
 					elseif state == "last_known" then " last-known" else ""),
 		tone = if state == "fresh" then presentation.tone(used) else "muted",
+		heat = presentation.heat(used, state),
 	}
 end
 

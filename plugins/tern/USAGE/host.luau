@@ -218,12 +218,26 @@ local function window_usage(window: UsageWindow, now_ms: number): string
 	return percent_text(window.used) .. " used"
 end
 
+-- Text coloured along usage.css's green-to-red used gradient: Tern drops a
+-- role on a bare text node, so a row carries it; spans without their own
+-- style inherit the colour. A nil role returns the plain text node.
+local function heat_text(spans: any, role: string?): Node
+	local node = ui.text(spans)
+	if role == nil then return node end
+	return ui.node("row", { role = role, gap = "none" }, { node })
+end
+
+local function quota_span(text: string, role: string?): any
+	return ui.span(text, if role == nil then "muted" else nil)
+end
+
 local function window_detail_node(window: UsageWindow, now_ms: number, selected: boolean, provider: string): Node
+	local role = presentation.heat(window.used, presentation.window_state(window, now_ms))
+	local usage = if provider == "muse" and window.used == nil then presentation.MUSE_WAITING else window_usage(window, now_ms)
 	local children: { Node } = {
 		ui.node("row", { role = "usage-quota-heading" }, {
 			ui.text(ui.span(window_name(window) .. (if selected then " · summary" else ""), "strong")),
-			ui.text(ui.span(if provider == "muse" and window.used == nil then presentation.MUSE_WAITING else window_usage(window, now_ms), if presentation.window_state(window, now_ms) == "fresh"
-				then presentation.surface_tone(presentation.tone(window.used)) else "muted")),
+			heat_text(quota_span(usage, role), role),
 		}),
 	}
 	if window.used ~= nil then
@@ -256,7 +270,7 @@ local function account_hovercard(account: Account, now_ms: number): Node
 		ui.node("row", { role = "usage-account-heading" }, {
 			ui.node("icon", { name = value.icon }),
 			ui.text(ui.span((account.provider_label or title_key(account.provider)) .. " · " .. account.account_label, "strong")),
-			ui.text(ui.span(value.text, presentation.surface_tone(value.tone))),
+			heat_text(quota_span(value.text, value.heat), value.heat),
 		}),
 		ui.text(ui.span("Source: " .. (USAGE_SOURCES[account.usage_source] or account.usage_source)
 			.. (if account.plan ~= nil then " · " .. account.plan else ""), "muted")),
@@ -318,9 +332,9 @@ local function compact_view(mode: string): Node
 			end
 			local label = (account.provider_label or title_key(account.provider)) .. " · " .. account.account_label
 			local link = ui.link(label, "usage://account/" .. view_layout.encode(account.id), "strong")
-			local quota = ui.span(value.text, presentation.surface_tone(value.tone))
+			local quota = quota_span(value.text, value.heat)
 			local countdown = presentation.compact_countdown(value, now_ms)
-			local usage_node = if countdown ~= nil then ui.text({ quota, ui.span(" · " .. countdown, "muted") }) else ui.text(quota)
+			local usage_node = heat_text(if countdown ~= nil then { quota, ui.span(" · " .. countdown, "muted") } else quota, value.heat)
 			if bottom then
 				table.insert(rows, ui.node("row", { key = account.id, role = "usage-compact-account", gap = "xs" }, {
 					ui.node("icon", { name = value.icon }),

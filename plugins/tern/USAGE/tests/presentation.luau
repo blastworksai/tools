@@ -66,6 +66,11 @@ check(presentation.account_projection(ordered[2]).used == 0 and presentation.acc
 	and segments[2].text ~= segments[3].text, "missing quota never appears as zero")
 check(segments[1].tone == "warn" and segments[2].tone == "ok" and segments[3].tone == "muted"
 	and presentation.account_projection(ordered[4]).tone == "error", "only supported status tones are emitted")
+check(presentation.heat(0, "fresh") == "usage-heat-0" and presentation.heat(54, "fresh") == "usage-heat-50"
+	and presentation.heat(55, "fresh") == "usage-heat-60" and presentation.heat(100, "fresh") == "usage-heat-100",
+	"current usage maps onto the green-to-red gradient in 10% steps")
+check(presentation.heat(nil, "fresh") == nil and presentation.heat(80, "stale") == nil and presentation.heat(80, "reset_passed") == nil
+	and presentation.heat(80, "last_known") == nil, "missing and non-current usage is never coloured as live")
 local stale = snapshot.project({ [source.publisher] = source }, now + 900001)
 check(presentation.account_projection(stale.accounts[1]).state == "stale"
 	and presentation.segments(stale)[1].tone == "muted", "stale numeric observations are not current usage")
@@ -73,7 +78,7 @@ local expired = table.clone(ordered[1])
 expired.windows = { window("weekly", 100) }
 expired.windows[1].resets_at_ms = now - 1
 local expired_value = presentation.account_projection(expired, now)
-check(expired_value.state == "reset_passed" and expired_value.used == 100 and expired_value.tone == "muted"
+check(expired_value.state == "reset_passed" and expired_value.used == 100 and expired_value.tone == "muted" and expired_value.heat == nil
 	and expired_value.text ~= presentation.account_projection(ordered[4]).text, "past reset preserves last known usage without presenting it as current")
 check(select(2, expired_value.text:gsub("Reset passed", "")) == 1 and presentation.compact_countdown(expired_value, now) == nil,
 	"an expired compact row states the passed reset exactly once")

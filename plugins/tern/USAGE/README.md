@@ -131,6 +131,8 @@ Provider icons appear in every layout.
 
 **Used, not remaining.** Every percentage is the share of the quota already used. A full bar means 100% used. Where a provider reports *remaining* (Antigravity), USAGE converts it.
 
+**Colours.** Current percentages and their ring are coloured on a gradient from green (0% used) to red (100% used), in 10% steps. Last-known, stale and unavailable values stay grey, so an old reading never looks live. The status-bar summary uses Tern's three status tones: green, amber from 70% and red from 90%.
+
 **Compact rows** show one quota per account: a measured weekly quota when there is one (the account-wide pool before model-specific pools), otherwise the next measured window. The countdown next to it belongs to that same quota:
 
 ```text
