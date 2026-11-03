@@ -94,7 +94,16 @@ Supported keys, and only these:
 | `validator_timeout_seconds` | Integer from 1 to 120 (default 30). |
 | `runtime_root` | Absolute path of the owner-private runtime directory. No symlink components. |
 | `runtime_python` | Absolute path of the runtime interpreter. |
+| `browser_port` | `null` or absent (random port), or an integer from 1024 to 65535. The idea page listens on this fixed loopback port. |
+| `prototype_port` | The same bounds, for `prototype-serve`. When both are set they must differ. |
+| `browser_mode` | `null` or absent (unset), `"link"` or `"system"`. The default for `browser-open` when `--browser` is omitted. |
 | `default_workspace` | Optional `{"name": ..., "path": ...}`: an absolute, existing folder that capture prefills (the field stays editable). A configured folder that does not exist is an `invalid_config` error. |
+
+Unset keeps random ports: with `browser_port` and `prototype_port` null or absent, each launch picks a fresh port as before.
+Set them when a standing SSH tunnel must forward the same port every time (see the runbook, "Tern on a remote host").
+With `browser_mode` unset, `browser-open` needs `--browser` and fails with `browser_mode_required` without it.
+`--browser link` prints a click-to-open link instead of opening a tab.
+If the configured port is taken, launch fails with `port_in_use` (or `prototype_port_in_use`) and never falls back to another port.
 
 Unknown keys, a key present with `null` for `runtime_root` or `runtime_python` (omit the key instead), a relative or symlinked `runtime_root`, and over-limit values are refused with an error rather than quietly dropped.
 That validation happens when the installer runs: the helper itself reads only the keys it uses and ignores others, so after editing an installed `config.json` by hand, rerun the installer to validate it.

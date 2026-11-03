@@ -17,7 +17,8 @@ import uuid
 PRODUCT = "glitch-idea-personal"
 MANIFEST = ".glitch-idea-install.json"
 SUPPORTED_KEYS = frozenset(("store_path", "plan_validator_argv", "validator_timeout_seconds",
-                            "runtime_root", "runtime_python", "default_workspace"))
+                            "runtime_root", "runtime_python", "default_workspace",
+                            "browser_port", "prototype_port", "browser_mode"))
 MINIMUM_PYTHON = (3, 10)
 # A Glitch Brain is identified by its engine updater beside its operations manual.
 BRAIN_MARKERS = (Path(".claude") / "scripts" / "update.py", Path("operations-reference.md"))
@@ -216,6 +217,19 @@ def effective_config(source, destination, explicit_store, recognized, explicit_r
                 or not os.path.isabs(workspace["path"])):
             raise InstallError("default_workspace must be null or an object with a one-line name and an absolute path")
         result["default_workspace"] = {"name": workspace["name"], "path": workspace["path"]}
+    # Same bounds the helper enforces at run time; each key is written only when the seat sets it.
+    for key in ("browser_port", "prototype_port"):
+        if config.get(key) is not None:  # a JSON null is unset, as the helper reads it
+            port = config[key]
+            if type(port) is not int or not 1024 <= port <= 65535:
+                raise InstallError(f"{key} must be an integer from 1024 to 65535")
+            result[key] = port
+    if "browser_port" in result and "prototype_port" in result and result["browser_port"] == result["prototype_port"]:
+        raise InstallError("browser_port and prototype_port must differ")
+    if config.get("browser_mode") is not None:
+        if config["browser_mode"] not in ("link", "system"):
+            raise InstallError("browser_mode must be 'link' or 'system'")
+        result["browser_mode"] = config["browser_mode"]
     if len(json_bytes(result)) > LAUNCH_CONFIG_LIMIT:
         raise InstallError(f"store_path and plan_validator_argv together exceed the {LAUNCH_CONFIG_LIMIT}-byte launch limit")
     explicit_runtime = explicit_runtime or {}

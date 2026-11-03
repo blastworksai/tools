@@ -626,6 +626,15 @@ class Runtime:
             _check(_POSIX and self._owner_holds_lock(directory), 'owner_unavailable')
             return discovery, credential
 
+    def owner_lock_held(self):
+        # Read-only: is an owner of this store holding service.lock (starting or running)? Uses the same non-blocking
+        # shared try-lock a client probe takes (the owner's acquire retries over it for a bounded window), released at once.
+        try:
+            with self._directories() as (directory, bindings):
+                return _POSIX and self._owner_holds_lock(directory)
+        except RuntimeError:
+            return False
+
     @staticmethod
     def _owner_holds_lock(directory):
         try:

@@ -155,6 +155,25 @@ class CliSeamTests(unittest.TestCase):
                 self.assertEqual(status,1);opened.assert_not_called();browser.assert_not_called()
                 self.assertNotIn('forged',json.dumps(error))
 
+    def test_browser_mode_resolves_from_flag_or_config_and_link_refuses_orca_options(self):
+        self.config()
+        with patch.object(launch,'open_browser_session') as browser:
+            status,error=self.invoke(*self.options('browser-open'))
+        self.assertEqual((status,error['error']['code']),(1,'browser_mode_required'));browser.assert_not_called()
+        self.config(browser_mode='link')
+        with patch.object(launch,'open_browser_session',return_value={'browser':{'mode':'link'}}) as browser:
+            self.assertEqual(self.invoke(*self.options('browser-open'))[0],0)
+            self.assertEqual(browser.call_args.kwargs['mode'],'link')
+            self.invoke(*self.options('browser-open','--browser','system'))
+            self.assertEqual(browser.call_args.kwargs['mode'],'system')
+        for extra in (['--orca-terminal','t'],['--reconnect','binding_'+'a'*32]):
+            with patch.object(launch,'open_browser_session') as browser:
+                status,error=self.invoke(*self.options('browser-open','--browser','link',*extra))
+            self.assertEqual((status,error['error']['code']),(1,'usage'));browser.assert_not_called()
+        self.config(browser_mode='bogus')
+        status,error=self.invoke(*self.options('browser-open'))
+        self.assertEqual(error['error']['code'],'invalid_config')
+
     def test_explicit_browser_selector_forwarding_and_native_failure_resume_details(self):
         self.config()
         worktree='12345678-1234-1234-1234-123456789012::fixture'

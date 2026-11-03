@@ -493,7 +493,7 @@ class SessionPolicy(TrustedSessionPolicy):
             secure = '; Secure' if request.origin.startswith('https://') else ''
             return Response(dict(ok=True,code='ok',binding_id=entry.record['binding_id'],
                                  session_id=entry.record['receipt_session_id'],csrf_token=csrf,tab_secret=tab),
-                headers={'Set-Cookie': self._cookie_name(entry)+'='+cookie+'; Path=/; HttpOnly; SameSite=Strict'+secure})
+                headers={'Set-Cookie': self._cookie_name(entry)+'='+cookie+'; Path=/; HttpOnly; SameSite=Strict; Max-Age=86400'+secure})
         finally:
             lock.release()
 

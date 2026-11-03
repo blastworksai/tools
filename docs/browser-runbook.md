@@ -147,6 +147,45 @@ A different local port, a hostname or a wildcard address is rejected, because th
 Use `session-open` for this case: `browser-open --browser system` would open a browser on the remote machine, and it is not an SSH route.
 The port changes whenever the service restarts, so reopen the tunnel with the new port after a restart.
 
+### 5.2a Tern on a remote host
+
+Use this when you work in a Tern pane on your own computer, attached to a remote machine that runs the seat.
+The seat's config sets `browser_port`, `prototype_port` and `browser_mode: "link"` (README, Configuration).
+The estate keeps one standing `ssh -N` tunnel on your computer that forwards every seat's fixed ports, so nobody opens a tunnel by hand.
+How that tunnel is built and undone is in the estate kit's own README, kept beside the seat configs on the remote host.
+
+**Why the same port on both ends.**
+The page checks the `Host` and `Origin` of every request, exactly.
+The link says `127.0.0.1:<port>`, so the page must be reached as `127.0.0.1:<port>`.
+Each forward therefore uses the seat's port number on your computer and on the remote host.
+A different local port is refused.
+
+**The click.**
+Run `browser-open` without `--browser` (or with `--browser link`).
+It prints one link, `http://127.0.0.1:<port>/#pair=<code>`.
+Click it.
+Tern opens the page, which reads the code from the link, removes it from the address bar and pairs itself within 60 seconds.
+You type nothing.
+
+**A fresh link.**
+If the 60 seconds passed or the click was missed, run `browser-open --browser link --resume binding_ID` and click the new link.
+Your saved selection and save receipts stay with the binding.
+
+**If it does not open.**
+`ERR_CONNECTION_REFUSED` means the standing tunnel is down.
+A page that never answers with the tunnel up usually means the seat's service idled out after 15 minutes; run `browser-open --browser link --resume binding_ID` to start it again.
+`port_in_use` means another process holds the seat's port on the remote host.
+`port_mismatch` means a service is already running on a different port than the seat's configured `browser_port` (started before the port was set): wait for it to idle out (15 minutes) or stop it, then open again. `port_in_use` is now reported only after the readiness budget runs out, because a starting owner may hold the port briefly.
+
+**Safety note.**
+While a seat's service is idle, another local account on the same host could bind that seat's fixed port and serve a fake page.
+Cookies alone never authorise anything: a request also needs the tab secret (`_current` in `idea_sessions.py` checks the cookie and the tab secret together).
+So one remaining risk is a fake page that asks you to type a code.
+The other is lasting: a fake page opened while the port was squatted can register a browser service worker for that address, and after the real service returns, that worker can serve a page that reads the pairing code from the link.
+Only an account on the same host can do this; the owner accepted that risk for fixed ports on 3 Nov 2026.
+If a seat's page ever looks or behaves oddly, clear that address's site data in the browser before clicking a new link.
+In link mode you never type a code, so a page that asks for one is not the real page: close it and run `browser-open --browser link --resume binding_ID` for a fresh link.
+
 ### 5.3 Orca unavailable or misrouted
 
 `browser-open --browser orca` needs `--orca-worktree 'UUID::WORKTREE_PATH'` and `--orca-terminal HANDLE`, taken from the pane that is actually running the agent; `--orca-host` is optional.

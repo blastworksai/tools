@@ -130,6 +130,12 @@ class SkillTextTests(unittest.TestCase):
         self.assertIn("session-open --resume", flat)
         self.assertNotIn("Tell the operator only the fallback code line", flat)
 
+    def test_link_mode_paragraph_names_link_and_resume(self):
+        para = next(p for p in SKILL.split("\n\n") if p.startswith("**Link mode"))
+        flat = " ".join(para.split())
+        self.assertIn("browser.link", flat)
+        self.assertIn("--resume", flat)
+
 
 class VisualizeTextTests(unittest.TestCase):
     def test_visualize_section_documents_three_choices_and_prototype(self):
@@ -314,6 +320,12 @@ class RemoveIdeaTextTests(unittest.TestCase):
         body = flat(SKILL)
         self.assertRegex(body, r"`remove-idea` is always previewed first.{0,60}`--confirm` only on the operator's explicit yes")
         self.assertIn("Removing an idea", SKILL)
+
+class ReadinessRetryTextTests(unittest.TestCase):
+    def test_skill_retries_service_readiness_timeout_once_more(self):
+        body = flat(SKILL)
+        self.assertRegex(body, r"`service_readiness_timeout`.{0,300}once more")
+
 
 if __name__ == "__main__":
     unittest.main()

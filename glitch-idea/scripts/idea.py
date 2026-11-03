@@ -75,7 +75,7 @@ def parser():
             p.add_argument('--resume')
             p.add_argument('--idea-id')
         if name == 'browser-open':
-            p.add_argument('--browser',choices=('orca','system'),required=True)
+            p.add_argument('--browser',choices=('link','orca','system'))
             p.add_argument('--orca-worktree')
             p.add_argument('--orca-terminal')
             p.add_argument('--orca-host')
@@ -131,6 +131,20 @@ def _configuration_source():
     number(timeout,'validator_timeout_seconds',1,120)
     base=path.parent if path else skill_dir.parent
     return value,base,skill_dir,installed,argv,timeout
+
+
+def _fixed_ports(value):
+    # prototype_port and browser_mode stay out of the launch config, whose allow-list refuses them.
+    ports={}
+    for key in ('browser_port','prototype_port'):
+        port=value.get(key)
+        require(port is None or (type(port) is int and 1024<=port<=65535),'Invalid '+key.replace('_',' '),'invalid_config')
+        ports[key]=port
+    mode=value.get('browser_mode')
+    require(mode is None or mode in ('link','system'),'Invalid browser mode','invalid_config')
+    require(ports['browser_port'] is None or ports['browser_port']!=ports['prototype_port'],
+            'browser_port and prototype_port must differ','invalid_config')
+    return ports['browser_port'],ports['prototype_port'],mode
 
 
 def configuration():
@@ -239,6 +253,8 @@ def launcher_configuration(args):
     config=dict(store_path=str(store),plan_validator_argv=argv,validator_timeout_seconds=timeout)
     workspace=default_workspace(value.get('default_workspace'))  # a bad value is a plain config error here too
     if workspace is not None: config['default_workspace']=workspace
+    browser_port,_,_=_fixed_ports(value)
+    if browser_port is not None: config['browser_port']=browser_port
     return store,runtime,config,executable
 
 
@@ -252,6 +268,7 @@ def _safe_launch_details(details):
         elif type(value) is str and re.fullmatch(prefix+r'[0-9a-f]{32}',value):
             result[key]=value
     if type(details.get('resume_required')) is bool: result['resume_required']=details['resume_required']
+    if type(details.get('port')) is int and 1 <= details['port'] <= 65535: result['port']=details['port']
     return result
 
 
@@ -288,6 +305,10 @@ def run_launcher(args):
             require(args.idea_id is None or (type(args.idea_id) is str and re.fullmatch(r'idea_[0-9a-f]{32}',args.idea_id)),
                     'Invalid idea ID','invalid_input')
         orcabinding=None
+        if args.command=='browser-open':
+            # Effective mode first: the flag, else the configured browser_mode (validated by _fixed_ports).
+            if args.browser is None: args.browser=_fixed_ports(_configuration_source()[0])[2]
+            require(args.browser is not None,'Browser mode is required: pass --browser or set browser_mode','browser_mode_required')
         reconnect=getattr(args,'reconnect',None)
         if reconnect is not None:
             # Re-pair the recorded Orca page in place; never with a resume, an idea choice or the system browser.
@@ -297,7 +318,7 @@ def run_launcher(args):
         if args.command=='browser-open':
             selectors=(args.orca_worktree,args.orca_terminal,args.orca_host)
             require(args.browser=='orca' or not any(value is not None for value in selectors),
-                    'System mode does not accept Orca selectors','usage')
+                    'Only Orca mode accepts Orca selectors','usage')
             if args.browser=='orca':
                 require(args.orca_worktree is not None and args.orca_terminal is not None,
                         'Orca requires originating worktree and terminal','origin_missing')
@@ -364,7 +385,9 @@ def run_prototype(args):
         return dict(ok=False,error=dict(code='launcher_failed',message='launcher_failed'))
     try:
         store,runtime,_,_=launcher_configuration(args)
-        return serve_prototype(args.session,args.dir,store,runtime)
+        _,prototype_port,_=_fixed_ports(_configuration_source()[0])
+        extra={} if prototype_port is None else dict(port=prototype_port)
+        return serve_prototype(args.session,args.dir,store,runtime,**extra)
     except (RuntimeError,IdeaError) as exc:
         return dict(ok=False,error=dict(code=exc.code,message=exc.code))
     except Exception:

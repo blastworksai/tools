@@ -186,6 +186,8 @@ class HistoricalHandoffStoreTests(unittest.TestCase):
     def test_only_named_sessions_read_and_missing_original_session_refuses(self):
         unrelated = self.store.create_session()
         (self.root/'session-recovery'/(unrelated+'.json')).write_bytes(b'unrelated malformed record')
+        # create_session keeps the remembered load (SKILLS-116); drop it so this read takes the load path under test.
+        self.store._load_cache = None
         with patch.object(self.store,'_read_receipts',wraps=self.store._read_receipts) as reads:
             with self.store.transaction() as state: self.assertEqual(self.store.handoffs(state,self.key),self.packets)
         self.assertEqual([call.args[0] for call in reads.call_args_list],[self.sid])

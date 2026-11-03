@@ -175,10 +175,22 @@ class Handler(BaseHTTPRequestHandler):
 
 class PrototypeServer(ThreadingHTTPServer):
     daemon_threads = True
+    allow_reuse_address = False
+    allow_reuse_port = False
 
-    def __init__(self, root):
+    def __init__(self, root, port=0):
+        if not (type(port) is int and (port == 0 or 1024 <= port <= 65535)):
+            raise ValueError('Invalid trusted port')
         self.root = str(root)
-        super().__init__(('127.0.0.1', 0), Handler)
+        if port and os.name == 'posix':
+            # A fixed port must rebind straight after a stop (TIME_WAIT); POSIX SO_REUSEADDR still refuses a live listener.
+            self.allow_reuse_address = True
+        try:
+            super().__init__(('127.0.0.1', port), Handler)
+        except OSError as exc:
+            if exc.errno == errno.EADDRINUSE:
+                raise _fail('prototype_port_in_use') from None
+            raise
 
 
 def supervise(server, alive, *, poll=POLL_SECONDS, max_lifetime=MAX_LIFETIME, clock=time.monotonic, stop=None):
@@ -213,7 +225,7 @@ def make_liveness(store_path, runtime_root, session_id):
 
 
 def serve_prototype(session_id, directory, store_path, runtime_root, *, alive=None, out=None,
-                    poll=POLL_SECONDS, max_lifetime=MAX_LIFETIME, host='<host>'):
+                    poll=POLL_SECONDS, max_lifetime=MAX_LIFETIME, host='<host>', port=0):
     if type(session_id) is not str or not SESSION.fullmatch(session_id):
         raise _fail('invalid_session')
     root = validate_directory(directory, runtime_root)
@@ -224,7 +236,8 @@ def serve_prototype(session_id, directory, store_path, runtime_root, *, alive=No
         live = False
     if not live:
         raise _fail('invalid_session')
-    server = PrototypeServer(root)
+    server = PrototypeServer(root, port)
+    fixed_port = bool(port)
     port = server.server_address[1]
     out = out or sys.stdout
     stop = threading.Event()
@@ -234,7 +247,8 @@ def serve_prototype(session_id, directory, store_path, runtime_root, *, alive=No
     worker = threading.Thread(target=server.serve_forever, kwargs={'poll_interval': .1}, daemon=True)
     worker.start()
     out.write(json.dumps(dict(ok=True, origin='http://127.0.0.1:%d/' % port, port=port,
-                              ssh_line='ssh -L %d:127.0.0.1:%d %s' % (port, port, host)),
+                              ssh_line='ssh -L %d:127.0.0.1:%d %s' % (port, port, host),
+                              fixed_port=fixed_port),
                          separators=(',', ':')) + '\n')
     out.flush()
     try:

@@ -8,6 +8,7 @@ Explicit initiating helpers receive a one-time code through open_session().
 import argparse
 from contextlib import contextmanager
 import copy
+import errno
 import getpass
 import json
 import logging
@@ -15,11 +16,13 @@ import math
 import os
 from pathlib import Path
 import re
+import socket
 import subprocess
 import sys
 import threading
 import time
 import tempfile
+from urllib.parse import urlsplit
 
 from idea_bridge import BridgeError, BridgeServer, Response, check
 from idea_domain import IdeaError, check_id, decode, encoded, require
@@ -56,7 +59,7 @@ class LaunchError(Exception):
 
 def _config(config, store_path):
     value = {} if config is None else copy.deepcopy(config)
-    require(type(value) is dict and set(value) <= {'store_path','plan_validator_argv','validator_timeout_seconds','default_workspace'},
+    require(type(value) is dict and set(value) <= {'store_path','plan_validator_argv','validator_timeout_seconds','default_workspace','browser_port'},
             'Unexpected trusted launch configuration','invalid_config')
     argv = value.get('plan_validator_argv')
     require(argv is None or (type(argv) is list and 0 < len(argv) <= 32 and
@@ -65,7 +68,11 @@ def _config(config, store_path):
     timeout = value.get('validator_timeout_seconds',30)
     require(type(timeout) in (int,float) and math.isfinite(timeout) and 1 <= timeout <= 120,
             'Invalid trusted validator timeout','invalid_config')
+    port = value.get('browser_port')
+    require(port is None or (type(port) is int and 1024 <= port <= 65535),'Invalid browser port','invalid_config')
     result = dict(store_path=str(store_path),plan_validator_argv=argv,validator_timeout_seconds=timeout)
+    # Only when set, so a config without a fixed port encodes exactly as it always did.
+    if port is not None: result['browser_port'] = port
     if value.get('default_workspace') is not None:
         from idea_service import default_workspace
         result['default_workspace'] = default_workspace(value['default_workspace'])
@@ -179,7 +186,16 @@ class OwnerService:
                                      binding_id=record['binding_id'],resume=True)
             self.members.add(record['binding_id'])
         self._restoring = False
-        self.server = server_factory(self.policy,routes=self.routes,control=self.control,activity=runtime,agent=self.agent)
+        # Warm the store's load cache before the server listens: a large store takes seconds to parse cold, and
+        # the first binding-open would otherwise spend its whole client budget on that read and fail owner_unavailable
+        # after the owner still created the session. A slow start now shows as service_readiness_timeout (safe to retry).
+        # A store error here propagates exactly as it does from the restore above; a cache hit makes this near-free.
+        try:
+            with self.store.transaction(): pass
+        except Exception:
+            pass  # a store error is not a startup failure: the first real read raises the same typed error to the client
+        self.server = server_factory(self.policy,routes=self.routes,control=self.control,activity=runtime,agent=self.agent,
+                                    port=self.config.get('browser_port',0))
         self.worker = None
 
     def application(self,record):
@@ -528,6 +544,34 @@ def serve(store_path,runtime_root,config=None,*,clock=time.monotonic,on_ready=No
         else: runtime.close()
 
 
+def _port_held(port):
+    # SO_REUSEADDR matches the child's bind, so a port in TIME_WAIT is not misreported as held.
+    probe = socket.socket(socket.AF_INET,socket.SOCK_STREAM)
+    try:
+        if os.name == 'posix': probe.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)
+        probe.bind(('127.0.0.1',port))
+        return False
+    except OSError as exc:
+        if exc.errno == errno.EADDRINUSE: return True
+        raise LaunchError('service_spawn_failed') from None
+    finally:
+        probe.close()
+
+
+def _check_port_free(port):
+    if _port_held(port): raise LaunchError('port_in_use',port=port)
+
+
+def _check_origin_port(probe,port):
+    # A service started before browser_port was configured keeps its random port; refuse it rather than hand out an origin outside the tunnel.
+    try:
+        value = probe['origin']
+        found = urlsplit(value).port if type(value) is str else None
+    except (KeyError,TypeError,ValueError):
+        found = None
+    if found != port: raise LaunchError('port_mismatch',port=port)
+
+
 def ensure_service(store_path,runtime_root,config=None,*,runtime_python=None,readiness_timeout=5,
                    spawn=subprocess.Popen,clock=time.monotonic,sleep=time.sleep):
     require(type(readiness_timeout) in (int,float) and math.isfinite(readiness_timeout) and 0 < readiness_timeout <= 5,
@@ -539,9 +583,13 @@ def ensure_service(store_path,runtime_root,config=None,*,runtime_python=None,rea
     spawned = False
     mismatched = False
     busy = None
+    fixed = config.get('browser_port')
+    port_held = False
     while clock() < deadline:
         try:
-            return runtime.probe_owner(timeout=min(1,max(.001,deadline-clock())))
+            found = runtime.probe_owner(timeout=min(1,max(.001,deadline-clock())))
+            if fixed is not None: _check_origin_port(found,fixed)
+            return found
         except OwnerError as exc:
             if exc.code not in ('owner_unavailable','runtime_busy','owner_identity_mismatch','busy'): raise
             mismatched |= exc.code == 'owner_identity_mismatch'
@@ -549,6 +597,9 @@ def ensure_service(store_path,runtime_root,config=None,*,runtime_python=None,rea
             # time, never a reason to start a second service, and busy is what gets reported.
             if exc.code in ('busy','runtime_busy'): busy = exc.code
             if not spawned and not mismatched and not busy and exc.code == 'owner_unavailable':
+                # A held fixed port may be a starting owner, so never raise here: keep probing and decide at the deadline.
+                port_held = fixed is not None and _port_held(fixed)
+            if not spawned and not mismatched and not busy and exc.code == 'owner_unavailable' and not port_held:
                 argv = [executable,str(CHILD),'--store',str(runtime.store_path),'--runtime-root',str(runtime.runtime_root),
                         '--config-stdin','serve']
                 try:
@@ -564,9 +615,14 @@ def ensure_service(store_path,runtime_root,config=None,*,runtime_python=None,rea
                     _children[:] = [value for value in _children if value.poll() is None]
                     _children.append(child)
                 spawned = True
+            # The child's output is discarded, so a child that lost the bind race is only visible as an exit; keep probing, the deadline decides.
+            if spawned and fixed is not None and child.poll() is not None and _port_held(fixed): port_held = True
             sleep(min(.05,max(0,deadline-clock())))
     if mismatched: raise OwnerError('owner_identity_mismatch')
     if busy: raise OwnerError(busy)
+    # Decide on a fresh look, not on what the loop saw: a held port is foreign only when no owner of our store holds its
+    # lock (a starting owner takes the lock, then binds, then publishes discovery).
+    if fixed is not None and _port_held(fixed) and not runtime.owner_lock_held(): raise LaunchError('port_in_use',port=fixed)
     raise LaunchError('service_readiness_timeout')
 
 
@@ -592,15 +648,22 @@ def _check_orcabinding(orcabinding):
 
 def open_browser_session(store_path,runtime_root,config=None,*,mode,orcabinding=None,runner=subprocess.run,**options):
     # Validate the caller's launch choice before startup or receipt allocation.
-    if mode not in ('system','orca'): raise LaunchError('invalid_mode')
+    if mode not in ('system','orca','link'): raise LaunchError('invalid_mode')
     if mode == 'orca': _check_orcabinding(orcabinding)
     result = open_session(store_path,runtime_root,config,**options)
     try:
         code = result['pairing_code']
-        launched = open_browser(result['origin'].rstrip('/') + '/#pair=' + code,mode=mode,binding=orcabinding,runner=runner)
+        launched = None if mode == 'link' else open_browser(result['origin'].rstrip('/') + '/#pair=' + code,mode=mode,binding=orcabinding,runner=runner)
     except NativeError as exc:
         raise LaunchError(exc.code,binding_id=result['binding_id'],session_id=result['session_id'],
                           selected_idea_id=result['selected_idea_id'],resume_required=True) from None
+    if mode == 'link':
+        # No pane can drive the member's browser (agent on a VM, browser elsewhere), so open nothing and hand back
+        # a ready-paired link to show. The code is one-time (60 s) and the fragment never reaches the server; it
+        # lives only in this result field, never in a log, argv or file.
+        browser = dict(mode='link',url=result['origin'],link=result['origin'].rstrip('/') + '/#pair=' + code)
+        return dict(result,browser=browser,
+                    fallback_line=f'Only if the tab did not open paired: type {code} within 60 s.')
     # browser.url is the root-only origin: the fragment URL (code) is never returned.
     browser = dict(mode=launched.mode,url=result['origin'],browser_page_id=launched.browser_page_id)
     if mode == 'orca':

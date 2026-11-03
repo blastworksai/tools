@@ -1536,6 +1536,7 @@ class Store:
         return after, changes, changed
 
     def _publish_commit(self, state, context, after, changes, extra=None, extra_expected=None, move_out=None, removals=None):
+        prior_cache = self._load_cache
         self._load_cache = None  # any publish attempt invalidates the remembered load
         self._check_cas(context)
         if context['kind'] == 'legacy' and (changes or extra):
@@ -1562,6 +1563,14 @@ class Store:
             migration_evidence = context.get('migration_evidence', {})
         result.raise_for_error()
         initialize_marker(context['lock']).raise_for_error()
+        if prior_cache is not None and context['kind'] != 'legacy' and not changes:
+            # A commit that changed no authority/evidence file (create_session: only a new session
+            # file nobody has linked) leaves every byte the remembered load read as it was, so that
+            # load is still true. Re-arm it. _reuse_load re-compares every byte it read on the next
+            # read, so a change by anyone else still misses; a written path the load read does not re-arm.
+            read_paths = set(prior_cache[1]) | set(prior_cache[4])
+            if not read_paths & set(extra or {}):
+                self._load_cache = prior_cache
         md = _markdown()
         context.update(kind='markdown', baseline=copy.deepcopy(state), files=after,
                        docs={path:md.parse_document(raw) for path,raw in after.items() if path == 'IDEAS.md' or _IDEA_FILE.fullmatch(path)})

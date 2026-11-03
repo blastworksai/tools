@@ -11,9 +11,11 @@ available, with twelve total handlers including bounded header parsing.
 from dataclasses import dataclass, field
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import errno
 import hashlib
 import json
 import math
+import os
 from pathlib import Path
 import re
 import socket
@@ -290,8 +292,9 @@ class BridgeServer(ThreadingHTTPServer):
     daemon_threads = True
     request_queue_size = 8
     allow_reuse_address = False
+    allow_reuse_port = False
 
-    def __init__(self, policy=None, *, routes=None, body_deadline=BODY_DEADLINE, control=None, activity=None, agent=None):
+    def __init__(self, policy=None, *, routes=None, body_deadline=BODY_DEADLINE, control=None, activity=None, agent=None, port=0):
         self.policy = policy if policy is not None else TrustedSessionPolicy()
         _, packaged = load_registry()
         self.routes = packaged if routes is None else dict(routes)
@@ -307,6 +310,8 @@ class BridgeServer(ThreadingHTTPServer):
             raise ValueError('Invalid trusted activity tracker')
         if agent is not None and not callable(agent):
             raise ValueError('Invalid trusted agent callback')
+        if not (type(port) is int and (port == 0 or 1024 <= port <= 65535)):
+            raise ValueError('Invalid trusted port')
         self.control, self.activity, self.agent = control, activity, agent
         self._admission = threading.Condition()
         self._accepting, self._admitted = True, 0
@@ -316,7 +321,15 @@ class BridgeServer(ThreadingHTTPServer):
         self.wait_slots = threading.BoundedSemaphore(MAX_AGENT_WAITS)
         self.total_slots = threading.BoundedSemaphore(MAX_TOTAL_HANDLERS)
         self.web = Path(__file__).resolve().parent.parent / 'web'
-        super().__init__(('127.0.0.1', 0), Handler)
+        if port and os.name == 'posix':
+            # A fixed port must rebind straight after a stop (TIME_WAIT); POSIX SO_REUSEADDR still refuses a live listener.
+            self.allow_reuse_address = True
+        try:
+            super().__init__(('127.0.0.1', port), Handler)
+        except OSError as exc:
+            if exc.errno == errno.EADDRINUSE:
+                raise BridgeError('port_in_use', 409) from None
+            raise
         self.origin = 'http://127.0.0.1:' + str(self.server_port)
         self.host = '127.0.0.1:' + str(self.server_port)
 
