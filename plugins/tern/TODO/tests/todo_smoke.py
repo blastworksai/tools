@@ -79,8 +79,8 @@ local function captureFixtureState()
 end
 tern.timer(100, captureFixtureState)
 ''')
-        def command(*parts, check=True):
-            result = subprocess.run([TERN, *map(str, parts)], env=env, capture_output=True, text=True, timeout=15)
+        def command(*parts, check=True, timeout=15):
+            result = subprocess.run([TERN, *map(str, parts)], env=env, capture_output=True, text=True, timeout=timeout)
             if check and result.returncode:
                 raise AssertionError(result.stderr + result.stdout)
             return result.stdout
@@ -117,6 +117,7 @@ tern.timer(100, captureFixtureState)
             first=int(command('new','session','interactive-test','--','/bin/sh').strip())
             processes.append(subprocess.Popen(['xvfb-run','-a',TERN,'--control',str(control)],env=env,cwd=base,stdout=log,stderr=log,start_new_session=True))
             wait_for(lambda:control.exists(),'private window',40)
+            command('ctl', '--control', control, 'state', timeout=45)
             command('focus',first)
             wait_for(lambda: any(p.get('id')==first for p in ctl('state').get('panes',[])), 'native window attached to fixture')
             ctl('action','files')
