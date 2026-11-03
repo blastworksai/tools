@@ -82,6 +82,28 @@ class SourceContract(unittest.TestCase):
         self.assertIn('UpdateHostKeys=no', argv)
         self.assertEqual(argv[-3:-1], ['--', 'reviewed-test'])
 
+    def test_ssh_disables_forwarding_and_connection_sharing_despite_config(self):
+        # Resolve the exact production argv against an adverse, synthetic config;
+        # ssh -G performs no connection and reads no personal SSH configuration.
+        record, env = self.ssh_fixture()
+        self.cli('source', '--plan', self.path, '--ssh', 'reviewed-test', env=env)
+        config = self.base/'ssh.conf'
+        config.write_text('Host reviewed-test\n HostName 192.0.2.1\n ForwardAgent yes\n ForwardX11 yes\n ControlMaster auto\n ControlPath /synthetic/shared-socket\n')
+        argv = json.loads(record.read_text())
+        result = subprocess.run(['/usr/bin/ssh', '-G', '-F', str(config), *argv[:-1]],
+                                capture_output=True, text=True, check=True, timeout=4)
+        effective = dict(line.split(' ', 1) for line in result.stdout.splitlines() if ' ' in line)
+        self.assertEqual((effective['forwardagent'], effective['forwardx11']), ('no', 'no'))
+        self.assertEqual(effective['controlmaster'], 'false')
+        self.assertNotIn('controlpath', effective)
+
+    def test_remote_plan_failure_preserves_the_actionable_source_error(self):
+        record, env = self.ssh_fixture()
+        self.path.write_text('# A plan not yet deliberately adopted\n')
+        result = self.cli('source', '--plan', self.path, '--ssh', 'reviewed-test', env=env)
+        error = json.loads(result.stdout)['error']
+        self.assertEqual((result.returncode, 'TERN-SESSION' in error), (1, True))
+
 
 if __name__ == '__main__':
     unittest.main()

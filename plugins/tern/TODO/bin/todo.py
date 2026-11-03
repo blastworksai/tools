@@ -90,16 +90,23 @@ def read_ssh(destination, path):
         raise ValueError('seat-* forced agent launchers are not SSH file-reading destinations')
     # Only this reviewed reader travels to the configured POSIX host; no install or writes.
     remote = shlex.join(['python3', '-I', '-', 'source', '--plan', str(path)])
-    result = subprocess.run(['ssh', '-T', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=3',
+    result = subprocess.run(['ssh', '-T', '-a', '-x', '-o', 'ControlMaster=no', '-o', 'ControlPath=none',
+                             '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=3',
                              '-o', 'ClearAllForwardings=yes', '-o', 'StrictHostKeyChecking=yes',
                              '-o', 'UpdateHostKeys=no', '--', destination, remote],
                             input=Path(__file__).read_text(encoding='utf-8'),
                             capture_output=True, text=True, timeout=4)
-    if result.returncode or len(result.stdout) > 65536:
-        raise ValueError('SSH source unavailable; verify the reviewed destination, existing trust/authentication and Python 3')
-    envelope = json.loads(result.stdout)
-    if not isinstance(envelope, dict) or envelope.get('ok') is not True:
-        raise ValueError('SSH source did not return a valid checkpoint report')
+    unavailable = 'SSH source unavailable; verify the reviewed destination, existing trust/authentication and Python 3'
+    if len(result.stdout) > 65536:
+        raise ValueError(unavailable)
+    try:
+        envelope = json.loads(result.stdout)
+    except ValueError:
+        raise ValueError(unavailable) from None
+    if isinstance(envelope, dict) and envelope.get('ok') is False and isinstance(envelope.get('error'), str) and envelope['error'].strip():
+        raise ValueError('Remote PLAN: ' + envelope['error'][:400])
+    if result.returncode or not isinstance(envelope, dict) or envelope.get('ok') is not True:
+        raise ValueError(unavailable)
     return validate(envelope.get('plan'))
 
 

@@ -149,6 +149,7 @@ tern.timer(100, captureFixtureState)
             evidence['checks'].append('SSH source edits automatically refresh native view state')
             remote.unlink()
             wait_for(lambda:observed(remote).get('error') and observed(remote).get('failures')==1,'SSH error backoff',20)
+            assert 'Remote PLAN:' in observed(remote).get('error',''), 'remote source failure was reported as an SSH transport problem'
             time.sleep(2.2)
             assert observed(remote).get('failures')==1, 'failed SSH source retried at the local refresh rate'
             evidence['checks'].append('failed real SSH source clears success and does not retry at the local polling rate')
