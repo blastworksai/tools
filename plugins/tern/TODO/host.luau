@@ -8,6 +8,7 @@ local instances = {}
 local function sourceValid(source)
     return type(source) == "table" and type(source.path) == "string" and source.path ~= ""
         and (source.ssh == nil or (type(source.ssh) == "string" and source.ssh ~= ""))
+        and (source.label == nil or (type(source.label) == "string" and #source.label <= 400))
 end
 local function live(state)
     if instances[state.panel] ~= state then return false end
@@ -73,13 +74,13 @@ tern.block.define("list", {
             local ok, source = pcall(tern.json.decode, args[1])
             if ok and sourceValid(source) then state.source = source end
         end
-        if not state.source then state.error = "No plan is attached. Close this panel and use TODO: attach to this tab." end
+        if not state.source then state.error = "No plan is attached. Close this panel and use TODO: attach to this panel." end
         instances[cx.pane] = state
         tern.timer(1, function() refresh(state, cx) end)
         return state
     end,
     view = function(state)
-        local source = if state.source then (if state.source.ssh then "SSH " .. state.source.ssh .. ": " else "Local: ") .. state.source.path else ""
+        local source = if state.source then (if state.source.label then state.source.label .. ": " elseif state.source.ssh then "SSH " .. state.source.ssh .. ": " else "Local: ") .. state.source.path else ""
         return view.draw(tern.ui, state.plan, source, state.error, state.updated)
     end,
     title = function(state) return if state.plan then state.plan.title else "TODO" end,

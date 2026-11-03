@@ -2,7 +2,7 @@
 
 Checkpoint visibility for the interactive `/glitch-plan` → `/glitch-execute` workflow. The canonical plan contains explicit agreed checkpoints, their current state and a blocked reason. The panel is a read-only native Tern checklist.
 
-TODO is adapted from [Felipe Carneiro's session-list](https://github.com/felipevdc1/tern-session-list), MIT. 
+TODO is adapted from [Felipe Carneiro's session-list](https://github.com/felipevdc1/tern-session-list), MIT.
 
 ## Scope
 
@@ -28,10 +28,15 @@ The companion is a source integration asset, **not an installed override of mana
 
 ## Local or SSH
 
-Choose **TODO: attach to this tab** in Tern's palette, select the agent's plan location and enter its absolute path:
+Choose **TODO: attach to this panel** in Tern's palette. TODO detects the panel's native execution host, then asks for the absolute plan path there:
 
-- **Local:** the file is on the machine running this Tern session's daemon, even when a different desktop displays it. The agent can itself be SSH-launched if that host shares the canonical plan filesystem.
-- **SSH:** the plan is on an explicitly reviewed ordinary SSH destination. The read-only reader is sent over SSH stdin to Python 3; no remote package installation or source write occurs. Existing host-key trust and authentication remain required. No key is copied, no host is trusted automatically and no forwarding is enabled. Forced agent-launch aliases (`seat-*`) are refused.
+- **Native Tern remote host:** the detected host/address is shown and its existing session backend reads the file directly. A remote desktop's identity hop is not mistaken for the agent host. No second SSH login or agent-launch command is run.
+- **Local panel:** a bounded native `tern process` query identifies the actual local foreground/child process. Ordinary local execution skips the Local/SSH chooser.
+- **Terminal running SSH:** the destination/login is extracted from structured native process arguments and prefilled. Confirm that it accepts ordinary file commands before using it. The original remote command is never replayed. Known `seat-*` launch aliases, custom ports/keys/jumps/options and opaque wrappers require a reviewed file-reading alias that preserves that route; TODO never silently drops a port or key override.
+
+Unavailable or ambiguous metadata retains explicit source selection. **TODO: attach with another source** always offers the manual override. A host/tab change, or a local process change while the path prompt is open, cancels attachment instead of using stale detection. Detection metadata and pane/process numbers are never saved; the view still pins only its selected file source and stable plan id.
+
+“Local” means local to the selected Tern session host, even when another computer displays it. A genuinely remote SSH file source requires existing authentication/host trust, Python 3 and a POSIX remote shell. No key is copied, host trusted automatically, remote package installed or agent prompted. SSH destinations must accept ordinary file-reading commands; an agent-launch key cannot be reused just because its destination was detected.
 
 The remote source requires Python 3 and a POSIX shell. Native local reading is portable Python; the Windows command shim uses existing `py` or `python3`. No new package dependency or listening service is added. Authentication errors, unsupported shells, missing Python and invalid checkpoint blocks fail visibly. SSH access never falls back to another source or identity.
 
@@ -69,4 +74,8 @@ The package contains only its active implementation and tests. Upstream legacy r
 
 ## Attribution
 
-Original plugin/native-checklist approach: Felipe Carneiro (`felipevdc1/tern-session-list`), MIT, based on f5920de0cc1018fa9814e5f0c6cca83a7ddf34dc. Original LICENSE remains. Explicit checkpoint reader, local/SSH source path and workflow contract: BlastworksAI, MIT. This fork does not claim independent origin of the native checklist design. 
+Original plugin/native-checklist approach: Felipe Carneiro (`felipevdc1/tern-session-list`), MIT, based on f5920de0cc1018fa9814e5f0c6cca83a7ddf34dc. Original LICENSE remains. Explicit checkpoint reader, local/SSH source path and workflow contract: BlastworksAI, MIT. This fork does not claim independent origin of the native checklist design.
+
+### Quick invocation
+
+Click **TODO** in Tern’s Files pane header to attach the current panel’s plan. It runs the same connection-aware attach flow as **TODO: attach to this panel** in the command palette. The existing bindable action remains `plugin.todo.show`.

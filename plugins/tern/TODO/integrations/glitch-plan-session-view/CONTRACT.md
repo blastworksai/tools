@@ -23,7 +23,7 @@ Update the dated Progress evidence, checkpoint state and START HERE consistently
 
 ## Attaching the view
 
-In the Tern tab that displays the interactive session, choose **TODO: attach to this tab**. Select Local if the file is accessible on that Tern session host; select SSH for an explicitly approved ordinary SSH destination and the plan's absolute path there. “Local” is relative to the session host, not necessarily the desktop showing the window.
+In the Tern tab that displays the interactive session, choose **TODO: attach to this panel**. Select Local if the file is accessible on that Tern session host; select SSH for an explicitly approved ordinary SSH destination and the plan's absolute path there. “Local” is relative to the session host, not necessarily the desktop showing the window.
 
 The view pins the selected source and its stable plan id. It polls read-only and shows active, blocked, pending and done checkpoints. Different plan ids at the same path are refused. No agent prompt, source write, task takeover or fleet dispatch occurs. Existing gates remain in the plan.
 

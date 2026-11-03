@@ -49,15 +49,19 @@ def main():
         remote_value['title'] = 'SSH interactive task'
         write_plan(remote, remote_value)
         path = stack.enter_context(loopback_ssh(base/'ssh'))
-        env = dict(os.environ, PATH=path, TERN_CONFIG_DIR=str(config),
+        env = dict(os.environ, PATH=str(base/'cli')+os.pathsep+path, TERN_CONFIG_DIR=str(config),
                    TERN_DAEMON_SOCKET=str(base/'daemon.sock'), STENCIL_GPU='cpu',
                    STENCIL_LOG_DIR=str(base/'logs'), STENCIL_LOG='warn,stencil=info,tern::plugin=debug')
+        (base/'cli').mkdir()
+        (base/'cli/tern').symlink_to(TERN)
         control = base/'window.sock'
         source_file = base/'plugin/window.luau'
         with source_file.open('a') as stream:
             for name, source in [('test_local', {'path': str(local)}), ('test_ssh', {'path': str(remote), 'ssh': 'session-plan-test'})]:
                 encoded = json.dumps(json.dumps(source))
                 stream.write('\ntern.command({id="'+name+'", title="Isolated fixture", run=function(cx) openSource(cx,cx.session:focused(),tern.json.decode('+encoded+')) end})\n')
+        with source_file.open('a') as stream:
+            stream.write('\ntern.command({id="test_auto", title="Isolated auto attach", run=function(cx) controller.start(cx,false) end})\n')
         host = base/'plugin/host.luau'
         with host.open('a') as stream:
             stream.write('\nlocal suite=require("./tests/native_suite")\ntern.fs.write(tern.plugin.data.."/library-tests.json",tern.json.encode(suite))\n')
@@ -78,7 +82,7 @@ tern.timer(100, captureFixtureState)
         def command(*parts, check=True):
             result = subprocess.run([TERN, *map(str, parts)], env=env, capture_output=True, text=True, timeout=15)
             if check and result.returncode:
-                raise AssertionError(result.stderr)
+                raise AssertionError(result.stderr + result.stdout)
             return result.stdout
         def ctl(*parts):
             result = json.loads(command('ctl', '--control', control, *parts))
@@ -112,10 +116,16 @@ tern.timer(100, captureFixtureState)
             evidence['luau_view_tests_passed']=library['passed']
             first=int(command('new','session','interactive-test','--','/bin/sh').strip())
             processes.append(subprocess.Popen(['xvfb-run','-a',TERN,'--control',str(control)],env=env,cwd=base,stdout=log,stderr=log,start_new_session=True))
-            wait_for(lambda:control.exists(),'private window',15)
+            wait_for(lambda:control.exists(),'private window',40)
             command('focus',first)
             wait_for(lambda: any(p.get('id')==first for p in ctl('state').get('panes',[])), 'native window attached to fixture')
-            action('test_local')
+            ctl('action','files')
+            wait_for(lambda: bool(ctl('tree', '.ft-plugin[data-plugin="todo-test"][data-id="todo"]').get('nodes', [])), 'TODO Files button', 8)
+            ctl('click', '.ft-plugin[data-plugin="todo-test"][data-id="todo"]')
+            wait_for(lambda:'Absolute plan path' in json.dumps(ctl('tree')),'automatic local source path prompt',8)
+            evidence['checks'].append('real TODO Files button detects the local panel and skips the source chooser')
+            ctl('type',json.dumps(str(local)))
+            ctl('key','Enter')
             wait_for(lambda:has_row('pending','Prove the outcome'),'local source checklist')
             evidence['checks'].append('explicit local checkpoint block renders native pending state')
             write_plan(local,plan(state='done'))
@@ -158,11 +168,13 @@ tern.timer(100, captureFixtureState)
             evidence['checks'].append('local and SSH views keep independent plan identities and state')
             evidence['visual_qualification']='Initial local pending/done rows observed; later checks use actual host callback state because the closed-beta sign-in overlay hides the client UI. Remote/restored visual qualification remains open.'
             evidence['runtime']=command('--version').strip()
-            evidence['source_hashes']={name:hashlib.sha256((ROOT/name).read_bytes()).hexdigest() for name in ['host.luau','window.luau','lib/plan_view.luau','lib/polling.luau','bin/todo.py']}
+            evidence['source_hashes']={name:hashlib.sha256((ROOT/name).read_bytes()).hexdigest() for name in ['host.luau','window.luau','lib/plan_view.luau','lib/polling.luau','lib/connection.luau','lib/attach.luau','bin/todo.py']}
             evidence['passed']=True
         except Exception as error:
             evidence['passed']=False;evidence['error']=str(error)
             log.flush();log.seek(0);evidence['process_log_tail']=log.read()[-3000:]
+            evidence['native_logs']={str(p.relative_to(base/'logs')):p.read_text(errors='replace')[-5000:] for p in (base/'logs').rglob('*.log')}
+            evidence['process_exit_codes']=[p.poll() for p in processes]
             try:
                 evidence['last_native_rows']=rows()
                 evidence['last_native_state']=ctl('state')
