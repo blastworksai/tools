@@ -46,7 +46,7 @@ The reader returns only the validated checkpoint object, not whole plan prose, i
 
 ## Runtime and rollout
 
-**Tern 0.9.10 or later is the minimum supported runtime for both the session daemon and viewing client.** Evidence uses 0.9.10. The existing estate daemons observed on 0.9.8 are not qualified; changing a symlink does not update a running daemon. Confirm the actual running binary/client versions and obtain the normal maintenance approval before an update. This fork does not update or restart Tern.
+**Tern 0.9.8 or later is the minimum supported runtime for both the session daemon and viewing client.** The same connected suite passes on 0.9.8 (`f21d9a3`) and 0.9.10 (`2ad447b`). Both runs observe initial local rendering and test later SSH/restore behavior through real native host callbacks; authenticated remote/restored client visuals remain a pilot check. Confirm the actual running binary/client versions; changing a symlink does not update a running daemon. This plugin does not update or restart Tern.
 
 After exact-head cross-family review and owner-approved pilot, install the package with Tern's ordinary installer:
 

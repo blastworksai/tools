@@ -54,7 +54,7 @@ local function refresh(state, cx)
     end)
     if not ok then
         state.reading = false; state.plan = nil
-        state.error = "Could not start the read-only source reader. Tern 0.9.10+ and Python 3 are required."
+        state.error = "Could not start the read-only source reader. Tern 0.9.8+ and Python 3 are required."
         redraw(state, cx)
         tern.timer(POLL_MS, function() refresh(state, cx) end)
     end
