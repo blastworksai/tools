@@ -11,6 +11,10 @@ Kimi · Main       ◇ —  usage source could not read this account
 
 USAGE reads the usage figures through each provider's own CLI or account endpoint, the same figures the CLI's `/usage` view shows. It does this headlessly: it never types into your agent sessions, never starts a model turn and never signs in for you. Percentages always mean **used**.
 
+![USAGE in the narrow sidebar (right) with two account PIPs open (left): per-window bars, reset times, countdowns and observation times](assets/screenshots/usage-views.png)
+
+*Narrow sidebar with two account PIPs, taken on a pre-release build. Account labels are blurred. Wording and colours differ slightly in 2.0.0: the source reads "headless read", and current values use the [colour gradient](#reading-the-numbers).*
+
 USAGE supersedes the older `tern-fleet-usage` plugin ("Agent Usage Block"). See [Moving from tern-fleet-usage](#moving-from-tern-fleet-usage).
 
 ## How it relates to SPAWN
@@ -106,6 +110,10 @@ Nothing is deleted. Tern keeps `plugin-data/tern-fleet-usage/` after removal, an
 | **USAGE Setup** | Private runtime, headless-read permission, summary and optional sharing. |
 | **USAGE Show Summary** | Turns the status-bar summary on once. |
 | **USAGE Diagnostics** | Companion, refresh and sharing state. |
+
+The speedometer button in the Files pane header opens the same view:
+
+![The USAGE speedometer button in the Files pane header, with its tooltip](assets/screenshots/files-button.png)
 
 ### Layouts
 
@@ -245,6 +253,7 @@ All fixtures are synthetic. Keep runtime data, logs and screenshots out of the p
 - `provider_metadata.py`, `metadata_providers.py`: the read-only helper that runs as the account's OS user.
 - `requirements.lock`, `pyproject.toml`: locked Python dependencies.
 - `tests/`, `tools/verify.py`: test suites and the Luau runner.
+- `assets/screenshots/`: the screenshots in this README (account labels blurred).
 
 ## License
 
