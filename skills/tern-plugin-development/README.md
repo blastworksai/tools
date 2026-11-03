@@ -21,5 +21,5 @@ It emphasizes the boundaries that make Tern plugins reliable:
 Read [`SKILL.md`](SKILL.md) for the agent workflow and acceptance checklist.
 
 ## License
-
+In collaboration with [felipevdc1](https://github.com/felipevdc1).
 MIT. See the repository [LICENSE](../../LICENSE).
