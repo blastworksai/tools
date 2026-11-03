@@ -21,6 +21,7 @@ The results are public for each skill: follow its Walkdown link in the table.
 
 | Name | Plugin for | What it does |
 | --- | --- | --- |
+| [TODO](plugins/tern/TODO/README.md) | Tern | English-first interactive `$glitch-plan` checkpoints, read from the agent’s canonical plan locally or over SSH. |
 | [WORK](plugins/tern/WORK/README.md) | Tern | Native pane listing active [Glitch](https://github.com/Glitch-Cat-Club) workspaces known to `/work-on`, with per-row GitHub links and a Work On button that opens your default agent beside WORK, already running `/work-on <workspace>`. |
 | [SPAWN](plugins/tern/SPAWN/README.md) | Tern | Define and SPAWN your (entire) agentic army. |
 | [USAGE](plugins/tern/USAGE/README.md) | Tern | Show your subscription usage across all agents. DEPENDENCY: NEEDS [SPAWN](plugins/tern/SPAWN/README.md). |
