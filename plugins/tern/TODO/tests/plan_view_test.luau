@@ -1,6 +1,7 @@
 -- Active view contract: explicit current/blocked state and no stale success on error.
 -- CodexBWAI, COMMANDER-993.
 local view = require("../lib/plan_view")
+local polling = require("../lib/polling")
 local ui = {
     node=function(kind,props,children) return {kind=kind,props=props,children=children} end,
     text=function(value) return {text=value} end,
@@ -8,6 +9,11 @@ local ui = {
     col=function(children) return {children=children} end,
 }
 return {
+    {"SSH errors back off without penalizing local or recovered sources",function()
+        assert(polling.delay(false, 20) == 1500 and polling.delay(true, 0) == 15000)
+        assert(polling.delay(true, 1) >= 60000 and polling.delay(true, 2) > polling.delay(true, 1))
+        assert(polling.delay(true, 1000) == 300000 and polling.delay(true, 0) == 15000)
+    end},
     {"current blocked checkpoint remains visible",function()
         local plan={title="Task",current="cp1",checkpoints={{id="cp1",text="Review",state="blocked",reason="Owner approval required"}}}
         local card=view.draw(ui,plan,"Local",nil,"now")

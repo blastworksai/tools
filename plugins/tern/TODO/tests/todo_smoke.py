@@ -66,7 +66,7 @@ local function captureFixtureState()
     local out = {}
     for _, state in instances do
         if state.source then
-            out[state.source.path] = {plan_id=state.plan_id, plan=state.plan, error=state.error,
+            out[state.source.path] = {plan_id=state.plan_id, plan=state.plan, error=state.error,failures=state.failures,
                 saved={schema=2,source=state.source,plan_id=state.plan_id}}
         end
     end
@@ -145,14 +145,19 @@ tern.timer(100, captureFixtureState)
             evidence['checks'].append('real loopback SSH key-authenticated source reaches native host view state')
             remote_value['checkpoints'][0]['state']='done'
             write_plan(remote,remote_value)
-            wait_for(lambda:source_state(remote,'done'),'SSH canonical edit refresh')
+            wait_for(lambda:source_state(remote,'done'),'SSH canonical edit refresh',20)
             evidence['checks'].append('SSH source edits automatically refresh native view state')
+            remote.unlink()
+            wait_for(lambda:observed(remote).get('error') and observed(remote).get('failures')==1,'SSH error backoff',20)
+            time.sleep(2.2)
+            assert observed(remote).get('failures')==1, 'failed SSH source retried at the local refresh rate'
+            evidence['checks'].append('failed real SSH source clears success and does not retry at the local polling rate')
             command('focus',first)
             wait_for(lambda:source_state(local,'pending'),'independent local source')
             evidence['checks'].append('local and SSH views keep independent plan identities and state')
             evidence['visual_qualification']='Initial local pending/done rows observed; later checks use actual host callback state because the closed-beta sign-in overlay hides the client UI. Remote/restored visual qualification remains open.'
             evidence['runtime']=command('--version').strip()
-            evidence['source_hashes']={name:hashlib.sha256((ROOT/name).read_bytes()).hexdigest() for name in ['host.luau','window.luau','lib/plan_view.luau','bin/todo.py']}
+            evidence['source_hashes']={name:hashlib.sha256((ROOT/name).read_bytes()).hexdigest() for name in ['host.luau','window.luau','lib/plan_view.luau','lib/polling.luau','bin/todo.py']}
             evidence['passed']=True
         except Exception as error:
             evidence['passed']=False;evidence['error']=str(error)

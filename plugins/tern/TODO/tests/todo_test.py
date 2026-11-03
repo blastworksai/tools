@@ -52,18 +52,35 @@ class SourceContract(unittest.TestCase):
         self.assertEqual(self.cli('source', '--mistyped').returncode, 1)
         self.assertEqual(self.cli('unrecognized').returncode, 1)
 
-    def test_ssh_command_preserves_path_boundaries_and_sends_only_the_reader(self):
-        # Contract fixture executes the transmitted reader through a real subprocess.
-        # The separate connected smoke uses a real loopback SSH client/server.
+    def ssh_fixture(self):
         binary = self.base/'ssh'
-        binary.write_text('#!'+sys.executable+'\nimport subprocess,sys,shlex\n'
+        record = self.base/'ssh-argv.json'
+        binary.write_text('#!'+sys.executable+'\nimport subprocess,sys,shlex,json\n'
+                          'from pathlib import Path\n'
+                          'Path('+repr(str(record))+').write_text(json.dumps(sys.argv[1:]))\n'
                           'r=subprocess.run(shlex.split(sys.argv[-1]),input=sys.stdin.read(),text=True,capture_output=True)\n'
                           'sys.stdout.write(r.stdout); sys.exit(r.returncode)\n')
         binary.chmod(0o700)
-        result = self.cli('source', '--plan', self.path, '--ssh', 'reviewed-test',
-                          env=dict(os.environ, PATH=str(self.base)+os.pathsep+os.environ['PATH']))
+        return record, dict(os.environ, PATH=str(self.base)+os.pathsep+os.environ['PATH'])
+
+    def test_ssh_command_preserves_path_boundaries_and_sends_only_the_reader(self):
+        record, env = self.ssh_fixture()
+        result = self.cli('source', '--plan', self.path, '--ssh', 'reviewed-test', env=env)
         self.assertEqual((result.returncode, json.loads(result.stdout)['plan']), (0, plan()))
         self.assertEqual(self.cli('source', '--plan', self.path, '--ssh', 'seat-claudebwai').returncode, 1)
+
+    def test_option_destination_is_rejected_before_any_ssh_process(self):
+        record, env = self.ssh_fixture()
+        result = self.cli('source', '--plan', self.path, '--ssh=-Ex@host', env=env)
+        self.assertEqual((result.returncode, record.exists()), (1, False))
+
+    def test_ssh_requires_existing_trust_and_separates_options_from_destination(self):
+        record, env = self.ssh_fixture()
+        self.cli('source', '--plan', self.path, '--ssh', 'reviewed-test', env=env)
+        argv = json.loads(record.read_text())
+        self.assertIn('StrictHostKeyChecking=yes', argv)
+        self.assertIn('UpdateHostKeys=no', argv)
+        self.assertEqual(argv[-3:-1], ['--', 'reviewed-test'])
 
 
 if __name__ == '__main__':

@@ -1,9 +1,9 @@
 -- Interactive-plan view. CodexBWAI, COMMANDER-993, MIT.
 -- Identity is the explicitly selected source + immutable plan_id, never another pane number.
 local view = require("./lib/plan_view")
+local polling = require("./lib/polling")
 local KIND = tern.plugin.id .. ".list"
 local instances = {}
-local POLL_MS = 1500
 
 local function sourceValid(source)
     return type(source) == "table" and type(source.path) == "string" and source.path ~= ""
@@ -48,15 +48,17 @@ local function refresh(state, cx)
                 state.updated = os.date("!%Y-%m-%d %H:%M:%S UTC")
                 if firstBinding then pcall(function() cx:save() end) end
             end
+            state.failures = if state.error then (state.failures or 0) + 1 else 0
             redraw(state, cx)
-            tern.timer(POLL_MS, function() refresh(state, cx) end)
+            tern.timer(polling.delay(state.source.ssh ~= nil, state.failures), function() refresh(state, cx) end)
         end)
     end)
     if not ok then
         state.reading = false; state.plan = nil
         state.error = "Could not start the read-only source reader. Tern 0.9.8+ and Python 3 are required."
+        state.failures = (state.failures or 0) + 1
         redraw(state, cx)
-        tern.timer(POLL_MS, function() refresh(state, cx) end)
+        tern.timer(polling.delay(state.source.ssh ~= nil, state.failures), function() refresh(state, cx) end)
     end
 end
 
