@@ -29,7 +29,8 @@ local function github_url(value: any): string?
 	return normalized
 end
 
-local function brain_root(): string
+
+function M.brain_root(): string
 	local plugin_dir = string.gsub(tern.plugin.dir, "\\", "/")
 	local root = string.match(plugin_dir, "^(.*)/_local/[^/]+$")
 	return if root ~= nil then root else plugin_dir
@@ -78,7 +79,7 @@ function M.decode_registry(value: any, root: string)
 end
 
 function M.load()
-	local root = brain_root()
+	local root = M.brain_root()
 	local registry_path = root .. "/workspaces/registry.json"
 	local read_ok, text = pcall(tern.fs.read, registry_path, REGISTRY_MAX_BYTES)
 	if not read_ok or type(text) ~= "string" then
@@ -117,10 +118,6 @@ function M.save_selection(selection: any)
 	tern.kv.set("selection", selection)
 end
 
-function M.work_prompt(item: any): string
-	return "Work on " .. item.name
-end
-
 local function url_encode(value: string): string
 	return (string.gsub(value, "([^%w%-_%.~])", function(char)
 		return string.format("%%%02X", string.byte(char))
@@ -132,5 +129,7 @@ function M.work_on_url(workspace_id: string, cwd: string?): string
 	if cwd ~= nil then url = url .. "&cwd=" .. url_encode(cwd) end
 	return url
 end
+
+
 
 return M

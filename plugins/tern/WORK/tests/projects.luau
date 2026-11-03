@@ -58,7 +58,6 @@ check(selected.workspace_id == "zeta-project", "selection retained")
 local fallback = projects.selection(catalog, { workspace_id = "missing" })
 check(fallback.workspace_id == "alpha-project", "stale selection falls back")
 check(projects.selection(projects.empty(), nil).workspace_id == nil, "empty selection")
-check(projects.work_prompt(catalog.items[2]) == "Work on zeta-project", "work prompt")
 
 local invalid = projects.decode_registry({ workspaces = "bad" }, test_root)
 check(invalid == nil, "reject malformed registry")

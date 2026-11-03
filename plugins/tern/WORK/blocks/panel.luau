@@ -11,6 +11,7 @@ type State = {
 	next_action: number,
 }
 
+
 type BlockCx = { pane: number, open: (target: string) -> () }
 type UiEvent = { ev: string, act: string?, value: any? }
 
@@ -24,6 +25,7 @@ local function action(state: State, kind: string, payload: any): string
 	state.actions[token] = { kind = kind, payload = payload }
 	return token
 end
+
 
 local function workspace_meta(item: any): any
 	local spans = { ui.span(item.kind, "muted") }
@@ -73,6 +75,7 @@ local function view(state: State): any
 		for _, item in ipairs(state.catalog.items) do
 			table.insert(rows, plan_row(state, item))
 		end
+
 	end
 
 	if state.notice ~= nil then
@@ -80,6 +83,8 @@ local function view(state: State): any
 	end
 	return ui.col(rows)
 end
+
+
 
 local function on_event(state: State, event: UiEvent, cx: BlockCx)
 	if event.ev ~= "action" or event.act == nil or type(event.value) ~= "string" then return end
@@ -91,7 +96,7 @@ local function on_event(state: State, event: UiEvent, cx: BlockCx)
 		if item == nil then
 			cx:toast("error", "Workspace unavailable", "It is no longer an active Glitch workspace.")
 		else
-			cx:open(projects.work_on_url(item.id, item.path))
+			cx:open(projects.work_on_url(item.id, projects.brain_root()))
 		end
 		return
 	end
@@ -101,6 +106,7 @@ local function on_event(state: State, event: UiEvent, cx: BlockCx)
 		save_selection(state)
 		return
 	end
+
 end
 
 local function catalog_from_args(args: { string }): (any, string?)
