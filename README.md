@@ -15,6 +15,7 @@ The results are public for each skill: follow its Walkdown link in the table.
 | Skill | What it does | Walkdown review |
 | --- | --- | --- |
 | [DANGER PROTOCOL](skills/dangerprotocol/README.md) | Read-only check of a GitHub repo before you install or run it. | [results](https://blastworksai.github.io/tools/skills/dangerprotocol/walkdown/summary.html) |
+| [TERN PLUGIN DEVELOPMENT](skills/tern-plugin-development/README.md) | Create, test, debug, and package Tern plugins with isolated integration tests and pure Luau modules. | [results](https://blastworksai.github.io/tools/skills/tern-plugin-development/walkdown/summary.html) |
 
 ## PLUGINS
 
