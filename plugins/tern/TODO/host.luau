@@ -72,7 +72,10 @@ tern.block.define("list", {
             state.source = saved.source; state.plan_id = saved.plan_id
         elseif saved == nil and args and type(args[1]) == "string" then
             local ok, source = pcall(tern.json.decode, args[1])
-            if ok and sourceValid(source) then state.source = source end
+            if ok and sourceValid(source) then
+                state.source = source
+                if type(args[2])=="string" and #args[2]<=80 and args[2]:match("^plan%-%x+$") then state.plan_id=args[2] end
+            end
         end
         if not state.source then state.error = "No plan is attached. Close this panel and use TODO: attach to this panel." end
         instances[cx.pane] = state

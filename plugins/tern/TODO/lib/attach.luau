@@ -1,10 +1,12 @@
 -- Window controller: detect first, then ask only for the canonical plan path.
 -- CodexBWAI; MIT.
 local connection = require("./connection")
+local planRequest = require("./plan_request")
 local attach = {}
 function attach.new(api)
     local KIND = api.plugin.id .. ".list"
     local controller = {}
+    local queryPlan=planRequest.new(api)
     local function existing(cx, target)
         local owner = cx.session:pane(target)
         if not owner then return true end
@@ -13,9 +15,9 @@ function attach.new(api)
         end
         return false
     end
-    function controller.openSource(cx, target, source)
+    function controller.openSource(cx, target, source, planId)
         if existing(cx,target) then cx:toast("info","This tab already has a plan view.");return end
-        cx:new_block(KIND,{api.json.encode(source)},"beside",{target=target,dir="right",ratio=0.3,focus=false})
+        cx:new_block(KIND,{api.json.encode(source),planId},"beside",{target=target,dir="right",ratio=0.3,focus=false})
     end
     local function same(cx, origin)
         local pane = cx.session:pane(origin.target)
@@ -50,72 +52,78 @@ function attach.new(api)
         end
         run(1,cx)
     end
-    local function pathPrompt(cx, origin, source, detectedProcess)
-        local snapshot = connection.fingerprint(detectedProcess)
-        cx:prompt({placeholder="Absolute plan path — " .. (source.label or "selected source")}):next(function(path,err,fresh)
-            if not fresh or not path or path=="" then return end
-            if not same(fresh,origin) then changed(fresh);return end
-            local function bind(latest)
-                source.path=path
-                controller.openSource(latest,origin.target,source)
-            end
-            if snapshot then
-                process(fresh,origin,function(now,latest)
-                    if connection.fingerprint(now)~=snapshot then changed(latest);return end
-                    bind(latest)
-                end)
-            else bind(fresh) end
-        end)
-    end
-    local function sshPrompt(cx, origin, detail)
-        cx:prompt({placeholder="Reviewed file-reading SSH alias — " .. (detail or "not a forced agent launcher")}):next(function(destination,err,fresh)
-            if not fresh or not destination or destination=="" then return end
-            if not same(fresh,origin) then changed(fresh);return end
-            pathPrompt(fresh,origin,{ssh=destination,label="SSH " .. destination},nil)
-        end)
-    end
-    local function manual(cx, origin, reason)
-        cx:pick({placeholder=reason or "Choose the plan's file location",items={
-            {label="Local to this session host",mode="host"},
-            {label="SSH file source",mode="ssh",detail="Ordinary file commands, not agent-launch keys"},
-        }}):next(function(choice,err,fresh)
-            if not fresh or not choice then return end
-            if not same(fresh,origin) then changed(fresh);return end
-            if choice.mode=="host" then pathPrompt(fresh,origin,{label="Session host"},nil)
-            else sshPrompt(fresh,origin,nil) end
-        end)
-    end
-    local function detected(cx, origin, route, metadata)
-        if route.kind=="host" then
-            pathPrompt(cx,origin,{label=route.label},metadata)
-        elseif route.kind=="ssh" then
-            if route.needs_alias then sshPrompt(cx,origin,route.label .. ". " .. route.reason);return end
-            -- Knowing an agent's SSH destination does not prove its key permits file reads.
-            cx:pick({placeholder="Detected SSH " .. route.label,items={
-                {label="Use detected SSH " .. route.ssh,mode="detected",detail="Confirm ordinary file commands; forced agent-launch keys cannot be reused"},
-                {label="Use another SSH file source",mode="other"},
-            }}):next(function(choice,err,fresh)
-                if not fresh or not choice then return end
-                if not same(fresh,origin) then changed(fresh);return end
-                if choice.mode=="detected" then pathPrompt(fresh,origin,{ssh=route.ssh,label="SSH " .. route.label},metadata)
-                else sshPrompt(fresh,origin,route.label) end
-            end)
-        else
-            manual(cx,origin,route.reason .. (if route.detected then " (" .. route.detected .. ")" else ""))
-        end
-    end
-    function controller.start(cx, forceManual)
-        local target = cx.session:focused()
+    function controller.start(cx, _forceManual, selected)
+        local target=selected or cx.session:focused()
         if not target then return end
-        local pane = cx.session:pane(target)
-        local host = cx.hosts:current()
-        if not pane or pane.exited~=nil or host.state~="connected" then cx:toast("error","Choose a live panel on a connected host.");return end
+        local pane=cx.session:pane(target)
+        local host=cx.hosts:current()
+        if not pane or pane.exited~=nil or host.state~="connected" then changed(cx);return end
         if existing(cx,target) then cx:toast("info","This tab already has a plan view.");return end
         local origin={target=target,tab=pane.tab,host=host.id,window=cx:window_key()}
-        if forceManual then manual(cx,origin,nil);return end
-        if host.kind=="remote" then detected(cx,origin,connection.detect(host,pane,nil),nil);return end
-        process(cx,origin,function(metadata,fresh)
-            detected(fresh,origin,connection.detect(fresh.hosts:current(),fresh.session:pane(target),metadata),metadata)
+        local function begin(metadata,fresh)
+            local route=connection.detect(fresh.hosts:current(),fresh.session:pane(target),metadata)
+            if route.kind~="host" or route.needs_alias then
+                fresh:toast("error","TODO could not establish a verified file-reading route for this session. Use a native Tern remote connection. "..(route.reason or ""));return
+            end
+            local fingerprint=connection.fingerprint(metadata)
+            queryPlan(fresh,target,function(latest) return same(latest,origin) end,function(latest,reply,error)
+                if not latest then return end
+                if error then latest:toast("error",error.." The TODO flow has ended.");return end
+                if reply.state=="unsupported" then latest:toast("error","This session has a plan without an explicit TODO checkpoint block. The TODO flow has ended.");return end
+                if reply.state=="none" then latest:toast("info","This session is not working on a plan. The TODO flow has ended.");return end
+                if not same(latest,origin) then changed(latest);return end
+                local function bind(now)
+                    controller.openSource(now,target,{path=reply.path,ssh=route.ssh,label=route.label},reply.plan_id)
+                end
+                if fingerprint then
+                    process(latest,origin,function(current,last)
+                        if connection.fingerprint(current)~=fingerprint then changed(last);return end
+                        bind(last)
+                    end)
+                else bind(latest) end
+            end)
+        end
+        if host.kind=="remote" then begin(nil,cx) else process(cx,origin,begin) end
+    end
+    function controller.chooseSession(cx)
+        local hosts, sessions, items = {}, {}, {}
+        for _, host in cx.hosts:list() do
+            if host.state=="connected" then
+                for _, id in host.panes do hosts[id]=host end
+            end
+        end
+        for _, session in cx.session:sessions() do
+            for _, tab in session.tabs do sessions[tab]=session.name end
+        end
+        for _, pane in cx.session:panes() do
+            local host=hosts[pane.pane]
+            -- CLI agents run in terminal panes; do not restrict this to native OMP.
+            if host and pane.tab and not pane.parked and pane.exited==nil and (pane.kind=="agent" or pane.kind=="terminal") then
+                table.insert(items,{
+                    label=(pane.title~="" and pane.title or pane.program or "Terminal") .. " · " .. string.format("%.0f",pane.pane),
+                    detail=(host.address or host.name) .. " · " .. (sessions[pane.tab] or "Session") .. " · " .. (pane.program or "Terminal"),
+                    target=pane.pane,host=host.id,tab=pane.tab,program=pane.program,cwd=pane.cwd,title=pane.title,
+                })
+            end
+        end
+        table.sort(items,function(a,b) return a.label<b.label end)
+        if #items==0 then cx:toast("info","No live agent or terminal sessions are available on connected hosts.");return end
+        cx:pick({placeholder="Which agent session should TODO attach to?",items=items}):next(function(choice,err,fresh)
+            if not fresh or not choice then return end
+            local pane=fresh.session:pane(choice.target)
+            local host=nil
+            for _, candidate in fresh.hosts:list() do
+                if candidate.id==choice.host and candidate.state=="connected" then
+                    for _, id in candidate.panes do if id==choice.target then host=candidate end end
+                end
+            end
+            if not host or not pane or pane.exited~=nil or pane.parked or pane.tab~=choice.tab or pane.program~=choice.program or pane.cwd~=choice.cwd or pane.title~=choice.title then
+                changed(fresh);return
+            end
+            fresh.hosts:switch(host.id)
+            fresh.layout:focus(choice.target)
+            if fresh.hosts:current().id~=host.id then changed(fresh);return end
+            controller.start(fresh,false,choice.target)
         end)
     end
     return controller

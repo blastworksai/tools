@@ -8,19 +8,16 @@ function view.draw(ui, plan, source, errorText, updated)
     if not plan then
         return {main = ui.text({ui.span("Reading the selected interactive plan…", "muted")})}
     end
-    local items, done, active = {}, 0, false
+    local items, done = {}, 0
     for _, cp in plan.checkpoints do
         table.insert(items, {id = cp.id, text = if plan.current == cp.id then "Current · " .. cp.text else cp.text,
             status = cp.state, note = cp.reason})
         if cp.state == "done" then done += 1 end
-        if cp.state == "active" then active = true end
     end
     return {main = ui.col({
-        ui.node("tool", {name = "todo", title = plan.title, target = tostring(done) .. "/" .. tostring(#items),
-            targetKind = "text", frame = "card", collapsible = true, collapsed = false,
-            preview = "none", status = if active then "running" else if done == #items then "done" else "pending"}, {
-            ui.node("checklist", {mode = "full", phases = {{id = "checkpoints", items = items}}}),
-        }),
+        ui.text({ui.span(plan.title .. " · " .. tostring(done) .. "/" .. tostring(#items), "muted")}),
+        -- Use the same unframed native checklist family as OMP's ACP todos.
+        ui.node("checklist", {mode = "full", phases = {{id = "checkpoints", items = items}}}),
         ui.text({ui.span(source, "muted")}),
         ui.text({ui.span("Read-only plan view · Last read " .. tostring(updated), "muted")}),
     })}

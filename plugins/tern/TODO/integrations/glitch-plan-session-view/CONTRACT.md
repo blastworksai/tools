@@ -32,3 +32,8 @@ For SSH, the destination must support ordinary noninteractive POSIX commands and
 ## Deployment boundary
 
 The managed Glitch engine remains read-only. Integrate this companion through a reviewed supported customization or upstream skill change; do not edit a live managed `glitch-plan`/`glitch-execute` file or install hooks automatically. Before claiming end-to-end live adoption, prove an actual new interactive plan receives the block, its executor maintains it and the real local/SSH panel reflects its verified checkpoint changes. Fleet execution uses its own workflow; BWPM/FORGE are not panel sources.
+
+
+### Owner-authorized discovery update
+
+The TODO Files button selects the agent session, then sends one native Tern metadata request to that agent's communication endpoint. The agent returns its existing canonical plan path and checkpoint plan id using `TODO_PLAN_REPLY v1`, or explicitly reports `none`/`unsupported` as described in agents/INSTRUCTIONS.md. The operator is not asked for the plan. No plan means exit TODO's attachment flow, never close or interrupt the agent pane. This explicit discovery request supersedes older prose forbidding all agent prompts; it authorizes neither work nor automatic continuation. Ordinary canonical checkpoint maintenance remains deliberate. A generic terminal with no native agent communication endpoint is unsupported; never type discovery text into a shell or existing draft.

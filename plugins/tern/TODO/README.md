@@ -26,19 +26,15 @@ Canonical plan files use UTF-8 with LF or CRLF line endings. The reader never re
 
 The companion is a source integration asset, **not an installed override of managed Glitch skills**. Live customization/upstream integration is not planned.
 
-## Local or SSH
+## Session discovery and source location
 
-Choose **TODO: attach to this panel** in Tern's palette. TODO detects the panel's native execution host, then asks for the absolute plan path there:
+Click **TODO** in the Files pane and choose the live agent session to follow. TODO uses Tern's native agent communication to request that session's active canonical plan path and existing checkpoint plan id. The operator is not asked for the path. The request is metadata only: it must not start, resume, adopt or modify work. This explicit user-requested query supersedes the earlier no-agent-prompt design.
 
-- **Native Tern remote host:** the detected host/address is shown and its existing session backend reads the file directly. A remote desktop's identity hop is not mistaken for the agent host. No second SSH login or agent-launch command is run.
-- **Local panel:** a bounded native `tern process` query identifies the actual local foreground/child process. Ordinary local execution skips the Local/SSH chooser.
-- **Terminal running SSH:** the destination/login is extracted from structured native process arguments and prefilled. Confirm that it accepts ordinary file commands before using it. The original remote command is never replayed. Known `seat-*` launch aliases, custom ports/keys/jumps/options and opaque wrappers require a reviewed file-reading alias that preserves that route; TODO never silently drops a port or key override.
+An explicit `none` reply shows **This session is not working on a plan** and exits the TODO attachment flow; the agent remains open. An active plan without a TODO checkpoint block is reported as unsupported. Busy agents, missing native communication, timeout, changed sessions or malformed replies end the flow with a detection error, never an invented no-plan result. There is no raw terminal-input fallback, automatic retry or automatic continuation.
 
-Unavailable or ambiguous metadata retains explicit source selection. **TODO: attach with another source** always offers the manual override. A host/tab change, or a local process change while the path prompt is open, cancels attachment instead of using stale detection. Detection metadata and pane/process numbers are never saved; the view still pins only its selected file source and stable plan id.
+Native remote Tern sessions use their execution host directly. Local panels use bounded, window-scoped native process metadata to identify their file-reading route. Raw SSH destinations can be detected, but the automatic discovery flow currently requires a native Tern remote connection for remote reads. A detected SSH alias does not prove that its key permits ordinary file commands; TODO will not reuse an unverified agent-launch key. Raw SSH, custom command-line port/key/jump overrides and opaque wrappers end the flow rather than ask the operator or silently change the route. Existing SSH trust/authentication and a POSIX remote shell with Python 3 are required. No credential is copied, host trusted automatically or remote package installed. The accepted reply's stable plan id is pinned before the first read.
 
-“Local” means local to the selected Tern session host, even when another computer displays it. A genuinely remote SSH file source requires existing authentication/host trust, Python 3 and a POSIX remote shell. No key is copied, host trusted automatically, remote package installed or agent prompted. SSH destinations must accept ordinary file-reading commands; an agent-launch key cannot be reused just because its destination was detected.
-
-The remote source requires Python 3 and a POSIX shell. Native local reading is portable Python; the Windows command shim uses existing `py` or `python3`. No new package dependency or listening service is added. Authentication errors, unsupported shells, missing Python and invalid checkpoint blocks fail visibly. SSH access never falls back to another source or identity.
+The protocol and current qualification limits are in [agents/INSTRUCTIONS.md](agents/INSTRUCTIONS.md) and [docs/VALIDATION.md](docs/VALIDATION.md). Native agent-protocol support is required; a generic terminal is not treated as a safe agent input endpoint.
 
 Direct source checks (no Tern environment required):
 
@@ -78,4 +74,4 @@ Original plugin/native-checklist approach: Felipe Carneiro (`felipevdc1/tern-ses
 
 ### Quick invocation
 
-Click **TODO** in Tern’s Files pane header to attach the current panel’s plan. It runs the same connection-aware attach flow as **TODO: attach to this panel** in the command palette. The existing bindable action remains `plugin.todo.show`.
+Click **TODO** in Tern’s Files pane header, choose a live agent session, then let TODO query that session for its active canonical plan. The picker lists native agents and terminal panes (including CLI agents), labelled with their host, Tern session, program and pane identity. Selection reveals the chosen panel, detects its connection and requests its active plan through native Tern agent communication. Closed, parked or disconnected targets are excluded; a target that changes while the picker is open must be selected again. **TODO: attach to this panel** in the command palette remains the direct route for the focused panel. The existing bindable action remains `plugin.todo.show`.

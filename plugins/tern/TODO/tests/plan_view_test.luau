@@ -17,7 +17,8 @@ return {
     {"current blocked checkpoint remains visible",function()
         local plan={title="Task",current="cp1",checkpoints={{id="cp1",text="Review",state="blocked",reason="Owner approval required"}}}
         local card=view.draw(ui,plan,"Local",nil,"now")
-        local item=card.main.children[1].children[1].props.phases[1].items[1]
+        local item=card.main.children[2].props.phases[1].items[1]
+        assert(card.main.children[2].kind=="checklist" and card.main.children[2].props.mode=="full")
         assert(item.text=="Current · Review")
         assert(item.status=="blocked")
         assert(item.note=="Owner approval required")
