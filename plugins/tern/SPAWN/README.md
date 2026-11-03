@@ -1,0 +1,151 @@
+# SPAWN for Tern
+
+Define your agent roster once, then start all of it, or one account, with a single action in [Tern](https://docs.stencil.so/tern/).
+
+SPAWN keeps one saved launch record per provider account (Claude, Codex, Kimi, Muse, Agy, Grok, OMP or anything else with a command line). **Spawn all** opens every included account in the current Tern session, each in its own named, coloured tab with its provider's icon. SPAWN then tracks each launch and shows what happened to it: running, waiting for input, exited or failed.
+
+[USAGE](../tern-fleet-usage/README.md) and ORCH+ build on SPAWN's roster.
+
+## What it does
+
+- **One record per account.** Provider, account suffix (`Work`, `Personal`, …), command, arguments, working directory and placement. Optionally an OS user, an SSH destination and, for OMP, a startup prompt.
+- **Spawn all / Spawn specific.** Spawn all starts every enabled record you included, one after another. Spawn specific starts one account.
+- **No accidental duplicates.** With the default duplicate policy (`skip`), an account that is already running, or whose last launch is still unresolved, is skipped rather than started twice. `allow` is an explicit per-record choice.
+- **Honest outcomes.** Every launch is reported as `Starting`, `Running`, `Waiting for input`, `Exited`, `Failed` or `Unknown`. A closed pane is never counted as a successful exit. `Unknown` stays visible until you resolve it.
+- **Output is kept.** Terminal launches run inside an ordinary shell, so a failing command leaves its error and exit status on screen.
+- **Native OMP.** OMP records start as genuine native Tern OMP sessions with their saved startup prompt, which is delivered once per launch and never resent on reload.
+- **Tabs you can tell apart.** Tabs are named `ProviderSuffix` (for example `CodexWork`), coloured per provider, and show the provider's icon on local and remote hosts.
+- **Guided setup.** An OMP-driven conversation asks which providers and how many accounts you have, discovers each command on the execution host, and produces a roster you review before import. You can also add records by hand or paste JSON.
+- **Plain `+` is untouched.** Tern's normal new-tab button keeps working as before. Loading SPAWN never starts anything by itself.
+
+## Requirements
+
+- Tern 0.9.10 or later.
+- The provider CLIs you want to run, already installed and signed in on the machine where the agents will run (the *execution host*).
+- Native OMP launches need a POSIX shell (`sh`, `bash`, `dash`, `ksh`, `zsh`) on the execution host. Terminal launches also work under PowerShell (`pwsh`/`powershell`).
+
+## Install
+
+Install SPAWN on the Tern host that will run your agents. If you work from a desktop connected to a remote host, also install it on the desktop so its window half (menus, tab icons) loads there.
+
+```sh
+tern plugin link /path/to/SPAWN
+tern plugin reload spawn --json
+```
+
+Tern reloads plugins whenever a linked package directory changes. Edit a copy, not the linked directory, while agents are running.
+
+## Use
+
+Open SPAWN from the command palette (**SPAWN**, **SPAWN: Config**, **SPAWN: Guided setup**, **SPAWN: Running agents**) or from the SPAWN button in the Files pane header.
+
+1. **Set up the roster.** Run **Guided setup**, or open **Config** and add records on the Setup page. Every command and argument is shown for review before anything is saved; importing never launches anything.
+2. **Choose what Spawn all includes.** On **Configured agents**, mark records as enabled and included.
+3. **Spawn.** Pick **Spawn all** or **Spawn specific** from the SPAWN menu. Launches go into the Tern session you are in when you start the batch, and changing focus mid-batch cannot redirect them.
+4. **Watch.** **Running agents** lists this session's SPAWN launches, failed and exited history, and other Tern sessions (read-only). When a batch finishes cleanly, SPAWN hides its Config view; Config and the SPAWN menu bring it back.
+5. **Resolve.** If a launch ends up `Unknown`, inspect its pane first, then choose **Mark no longer running**. That releases the reservation only; it never closes or kills anything.
+
+### Launch modes
+
+| Mode | Use it for | How it runs |
+| --- | --- | --- |
+| **Terminal** | Most CLIs | Opens a normal shell pane on the execution host and types the approved command into it once. The shell stays after the command ends. |
+| **SSH terminal** | An account on another machine | Runs `ssh` from that shell with the saved destination, user and key path, then the command on the other side. The remote command is quoted for a POSIX shell. |
+| **Native OMP** | OMP only | Starts a native Tern OMP session with the saved command, working directory and startup prompt. |
+
+### Record fields
+
+| Field | Meaning |
+| --- | --- |
+| `id` | Stable identifier (`codex-work`). |
+| `provider`, `account_label` | Provider name and account suffix; together they form the tab name. |
+| `backend` | `local-terminal`, `ssh-command` or `native-agent` (Terminal, SSH terminal, Native OMP). |
+| `command`, `arguments` | The executable and its separate arguments. SPAWN never guesses a command from a label. |
+| `cwd` | Working directory (default `~`). |
+| `user` | Optional OS user; the command runs through `sudo -u <user> -H`. |
+| `host`, `key_path` | SSH destination and optional key file path (never the key itself). |
+| `prompt` | OMP startup prompt. Native OMP needs a non-empty prompt. |
+| `enabled`, `include_all` | Whether the record can be launched, and whether Spawn all includes it. |
+| `duplicate_policy` | `skip` (default) or `allow`. |
+| `placement` | `tab`, `split` or `replace_if_alone`. |
+
+Example for **Config → Paste JSON**:
+
+```json
+{
+  "schema": 2,
+  "agents": [
+    {
+      "id": "codex-work", "provider": "Codex", "account_label": "Work",
+      "backend": "local-terminal", "enabled": true, "include_all": true,
+      "command": "codex", "arguments": [], "cwd": "~",
+      "duplicate_policy": "skip", "placement": "tab"
+    }
+  ]
+}
+```
+
+## How it works
+
+Everything runs on the execution host. The desktop window never builds or types a provider command.
+
+1. The window records which host and session you are in and sends a versioned request through the host's Config block.
+2. The host checks the request, reserves the account and stores the reply in one atomic write.
+3. The window opens a pane carrying a harmless one-time ticket.
+4. The host's spawn hook recognises the ticket and keeps the shell. Outside the hook's 50 ms budget, it re-checks the session and then writes the approved command into that shell once.
+5. Host events (command started/finished, pane exited) become saved outcomes, which the window displays.
+
+Everything is stored in Tern's per-plugin key-value store on the execution host; no extra service or daemon is needed. On POSIX hosts each launch line starts with `SPAWN_PROVIDER=<provider>`, which is how Tern's built-in provider icons reach remote tabs.
+
+### Storage limits and cleanup
+
+The saved state has a 120,000-byte ceiling (about 1.6 KB per launch). SPAWN keeps itself under it automatically:
+
+- History of Tern sessions that no longer exist is forgotten when Config refreshes. A session that still has an active launch is always kept.
+- Each session keeps only its 26 most recent finished launches. Running launches and unresolved `Unknown` launches are never trimmed.
+
+**Clear history** on the Running agents page removes finished entries by hand.
+
+## Security
+
+- SPAWN stores no secrets: no passwords, tokens or key contents. Sign in through each provider's own login flow.
+- Commands are split into an executable plus arguments and quoted for the target shell. They are never evaluated as free-form scripts. Lines containing terminal control characters are refused.
+- Account labels are not isolation. If accounts must not see each other's files, give each its own OS user or machine; SPAWN does not create users or profiles.
+- Any window in the same Tern session can ask the host to launch saved records. It cannot change what a record runs without going through Config's revision checks.
+
+## Known limitations
+
+- Custom colour artwork for Kimi, Muse, Agy and Grok appears only on local panes. Remote tabs show Tern's built-in provider icons, because remote pane IDs cannot yet be matched to tab elements ([tern-sdk#221](https://github.com/stencil-hq/tern-sdk/issues/221)).
+- A provider tab shows its icon while the provider is running; after it exits, the tab shows the shell icon again.
+- Closing a provider pane can leave its launch shown as `Running` until the SPAWN host reloads, which then marks it `Unknown` for you to resolve.
+- After a client restart, Config opens a new view instead of reusing a previously hidden one. After a host reload, a hidden Config view stops updating until Config is reopened.
+- Native OMP needs a non-empty startup prompt; Tern's start API rejects blank ones ([tern-sdk#213](https://github.com/stencil-hq/tern-sdk/issues/213)).
+- `Running` means the process is alive. It does not prove the provider is signed in or its model is ready.
+
+## Tests
+
+The tests run inside Tern's Lua runtime with `tern shot`:
+
+```sh
+env SPAWN_PACKAGE_DIR="/path/to/SPAWN" tern shot /path/to/SPAWN/tests/behavior.txt --out /tmp/spawn-behavior
+env SPAWN_PACKAGE_DIR="/path/to/SPAWN" tern shot /path/to/SPAWN/tests/authority.txt --out /tmp/spawn-authority
+```
+
+Both exit 0 when every scenario prints its `PASS` line.
+
+## Files
+
+- `plugin.toml`: package and Config block declaration
+- `window.luau`: menus, Files button, request transport, pane allocation, outcome display, tab names, colours and icons
+- `host.luau`: Config, setup and Running agents block on the execution host
+- `authority.luau`: saved configuration, reservations and request handling (the only writer of SPAWN's state)
+- `host_executor.luau`: tickets, shell detection, command rendering and submission, outcome observation
+- `launch_state.luau`: launch phases, duplicate decisions and history trimming
+- `config.luau`: record validation, migration and the guided-setup prompt
+- `native_cli.luau`: bounded calls to Tern's own CLI for session inspection
+- `assets/icons/`: provider artwork from [lobe-icons](https://github.com/lobehub/lobe-icons) (MIT, see `assets/icons/LICENSE.lobe-icons.txt`)
+- `tests/`: behaviour and storage regression suites
+
+## License
+
+MIT. See the repository [LICENSE](../../../LICENSE). Provider artwork is © LobeHub under its own MIT licence.

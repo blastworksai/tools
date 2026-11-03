@@ -1,0 +1,3 @@
+carly lua "local root=assert(tern.getenv('SPAWN_PACKAGE_DIR'), 'Set SPAWN_PACKAGE_DIR to the package under test'); return assert(loadstring(tern.fs.read(root..'/tests/behavior.luau'), 'spawn-behavior'))(root)"
+carly ok
+carly last "PASS"

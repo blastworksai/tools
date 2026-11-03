@@ -1,0 +1,72 @@
+carly lua "local root = assert(tern.getenv('SPAWN_PACKAGE_DIR'), 'set SPAWN_PACKAGE_DIR'); return assert(loadstring(tern.fs.read(root..'/tests/authority.luau'), 'spawn-authority'))(root, 'interleaving')"
+carly ok
+carly last "PASS interleaving"
+carly lua "local root = assert(tern.getenv('SPAWN_PACKAGE_DIR'), 'set SPAWN_PACKAGE_DIR'); return assert(loadstring(tern.fs.read(root..'/tests/authority.luau'), 'spawn-authority'))(root, 'stale_config')"
+carly ok
+carly last "PASS stale_config"
+carly lua "local root = assert(tern.getenv('SPAWN_PACKAGE_DIR'), 'set SPAWN_PACKAGE_DIR'); return assert(loadstring(tern.fs.read(root..'/tests/authority.luau'), 'spawn-authority'))(root, 'stale_resolution')"
+carly ok
+carly last "PASS stale_resolution"
+carly lua "local root = assert(tern.getenv('SPAWN_PACKAGE_DIR'), 'set SPAWN_PACKAGE_DIR'); return assert(loadstring(tern.fs.read(root..'/tests/authority.luau'), 'spawn-authority'))(root, 'recovery')"
+carly ok
+carly last "PASS recovery"
+carly lua "local root = assert(tern.getenv('SPAWN_PACKAGE_DIR'), 'set SPAWN_PACKAGE_DIR'); return assert(loadstring(tern.fs.read(root..'/tests/authority.luau'), 'spawn-authority'))(root, 'reply_capacity')"
+carly ok
+carly last "PASS reply_capacity"
+carly lua "local root = assert(tern.getenv('SPAWN_PACKAGE_DIR'), 'set SPAWN_PACKAGE_DIR'); return assert(loadstring(tern.fs.read(root..'/tests/authority.luau'), 'spawn-authority'))(root, 'observer_capacity')"
+carly ok
+carly last "PASS observer_capacity"
+carly lua "local root = assert(tern.getenv('SPAWN_PACKAGE_DIR'), 'set SPAWN_PACKAGE_DIR'); return assert(loadstring(tern.fs.read(root..'/tests/authority.luau'), 'spawn-authority'))(root, 'byte_capacity')"
+carly ok
+carly last "PASS byte_capacity"
+carly lua "local root = assert(tern.getenv('SPAWN_PACKAGE_DIR'), 'set SPAWN_PACKAGE_DIR'); return assert(loadstring(tern.fs.read(root..'/tests/authority.luau'), 'spawn-authority'))(root, 'review_conflict')"
+carly ok
+carly last "PASS review_conflict"
+carly lua "local root = assert(tern.getenv('SPAWN_PACKAGE_DIR'), 'set SPAWN_PACKAGE_DIR'); return assert(loadstring(tern.fs.read(root..'/tests/authority.luau'), 'spawn-authority'))(root, 'transport_reset')"
+carly ok
+carly last "PASS transport_reset"
+carly lua "local root = assert(tern.getenv('SPAWN_PACKAGE_DIR'), 'set SPAWN_PACKAGE_DIR'); return assert(loadstring(tern.fs.read(root..'/tests/authority.luau'), 'spawn-authority'))(root, 'empty_client')"
+carly ok
+carly last "PASS empty_client"
+carly lua "local root = assert(tern.getenv('SPAWN_PACKAGE_DIR'), 'set SPAWN_PACKAGE_DIR'); return assert(loadstring(tern.fs.read(root..'/tests/authority.luau'), 'spawn-authority'))(root, 'migration')"
+carly ok
+carly last "PASS migration"
+carly lua "local root = assert(tern.getenv('SPAWN_PACKAGE_DIR'), 'set SPAWN_PACKAGE_DIR'); return assert(loadstring(tern.fs.read(root..'/tests/authority.luau'), 'spawn-authority'))(root, 'invalid_authority')"
+carly ok
+carly last "PASS invalid_authority"
+carly lua "local root = assert(tern.getenv('SPAWN_PACKAGE_DIR'), 'set SPAWN_PACKAGE_DIR'); return assert(loadstring(tern.fs.read(root..'/tests/authority.luau'), 'spawn-authority'))(root, 'invalid_migration')"
+carly ok
+carly last "PASS invalid_migration"
+carly lua "local root = assert(tern.getenv('SPAWN_PACKAGE_DIR'), 'set SPAWN_PACKAGE_DIR'); return assert(loadstring(tern.fs.read(root..'/tests/authority.luau'), 'spawn-authority'))(root, 'backup_failure')"
+carly ok
+carly last "PASS backup_failure"
+carly lua "local root = assert(tern.getenv('SPAWN_PACKAGE_DIR'), 'set SPAWN_PACKAGE_DIR'); return assert(loadstring(tern.fs.read(root..'/tests/authority.luau'), 'spawn-authority'))(root, 'execution_lifecycle')"
+carly ok
+carly last "PASS execution_lifecycle"
+carly lua "local root = assert(tern.getenv('SPAWN_PACKAGE_DIR'), 'set SPAWN_PACKAGE_DIR'); return assert(loadstring(tern.fs.read(root..'/tests/authority.luau'), 'spawn-authority'))(root, 'execution_approval')"
+carly ok
+carly last "PASS execution_approval"
+carly lua "local root = assert(tern.getenv('SPAWN_PACKAGE_DIR'), 'set SPAWN_PACKAGE_DIR'); return assert(loadstring(tern.fs.read(root..'/tests/authority.luau'), 'spawn-authority'))(root, 'admission_expiry')"
+carly ok
+carly last "PASS admission_expiry"
+carly lua "local root = assert(tern.getenv('SPAWN_PACKAGE_DIR'), 'set SPAWN_PACKAGE_DIR'); return assert(loadstring(tern.fs.read(root..'/tests/authority.luau'), 'spawn-authority'))(root, 'clear_history')"
+carly ok
+carly last "PASS clear_history"
+carly lua "local root = assert(tern.getenv('SPAWN_PACKAGE_DIR'), 'set SPAWN_PACKAGE_DIR'); return assert(loadstring(tern.fs.read(root..'/tests/authority.luau'), 'spawn-authority'))(root, 'late_completion')"
+carly ok
+carly last "PASS late_completion"
+carly lua "local root = assert(tern.getenv('SPAWN_PACKAGE_DIR'), 'set SPAWN_PACKAGE_DIR'); return assert(loadstring(tern.fs.read(root..'/tests/authority.luau'), 'spawn-authority'))(root, 'legacy_job')"
+carly ok
+carly last "PASS legacy_job"
+carly lua "local root = assert(tern.getenv('SPAWN_PACKAGE_DIR'), 'set SPAWN_PACKAGE_DIR'); return assert(loadstring(tern.fs.read(root..'/tests/authority.luau'), 'spawn-authority'))(root, 'forget_sessions')"
+carly ok
+carly last "PASS forget_sessions"
+carly lua "local root = assert(tern.getenv('SPAWN_PACKAGE_DIR'), 'set SPAWN_PACKAGE_DIR'); return assert(loadstring(tern.fs.read(root..'/tests/authority.luau'), 'spawn-authority'))(root, 'transient_reply')"
+carly ok
+carly last "PASS transient_reply"
+carly lua "local root = assert(tern.getenv('SPAWN_PACKAGE_DIR'), 'set SPAWN_PACKAGE_DIR'); return assert(loadstring(tern.fs.read(root..'/tests/authority.luau'), 'spawn-authority'))(root, 'trim_history')"
+carly ok
+carly last "PASS trim_history"
+carly lua "local root = assert(tern.getenv('SPAWN_PACKAGE_DIR'), 'set SPAWN_PACKAGE_DIR'); return assert(loadstring(tern.fs.read(root..'/tests/authority.luau'), 'spawn-authority'))(root, 'auto_forget')"
+carly ok
+carly last "PASS auto_forget"

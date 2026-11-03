@@ -1,0 +1,14 @@
+schema = 1
+id = "spawn"
+name = "SPAWN"
+version = "0.1.0"
+description = "SPAWN agent spawner with a plugin-owned roster and active-session spawn actions."
+icon = "sparkle"
+host = "host.luau"
+window = "window.luau"
+
+[[blocks]]
+id = "spawner"
+title = "SPAWN"
+icon = "sparkle"
+palette = false
