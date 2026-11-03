@@ -72,7 +72,7 @@ def read_plan(path):
         raw = stream.read(LIMIT + 1)
     if len(raw) > LIMIT:
         raise ValueError('PLAN exceeds 1 MiB')
-    text = raw.decode('utf-8')
+    text = raw.decode('utf-8').replace('\r\n', '\n')
     if text.count(START) != 1 or text.count(END) != 1:
         raise ValueError('PLAN needs one explicit TERN-SESSION checkpoint block; deliberately adopt it through the planning workflow')
     before, block = text.split(START, 1)
@@ -91,7 +91,8 @@ def read_ssh(destination, path):
     # Only this reviewed reader travels to the configured POSIX host; no install or writes.
     remote = shlex.join(['python3', '-I', '-', 'source', '--plan', str(path)])
     result = subprocess.run(['ssh', '-T', '-a', '-x', '-o', 'ControlMaster=no', '-o', 'ControlPath=none',
-                             '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=3',
+                             '-o', 'PermitLocalCommand=no', '-o', 'GSSAPIDelegateCredentials=no',
+                             '-o', 'ForkAfterAuthentication=no', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=3',
                              '-o', 'ClearAllForwardings=yes', '-o', 'StrictHostKeyChecking=yes',
                              '-o', 'UpdateHostKeys=no', '--', destination, remote],
                             input=Path(__file__).read_text(encoding='utf-8'),

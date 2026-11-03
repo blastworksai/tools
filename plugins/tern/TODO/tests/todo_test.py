@@ -43,6 +43,13 @@ class SourceContract(unittest.TestCase):
         self.assertEqual((result.returncode, json.loads(result.stdout)['plan']), (0, plan()))
         self.assertEqual(self.path.read_bytes(), before)
 
+    def test_crlf_plan_reads_without_changing_identity_or_source_bytes(self):
+        before = self.path.read_bytes().replace(b'\r\n', b'\n').replace(b'\n', b'\r\n')
+        self.path.write_bytes(before)
+        result = self.cli('source', '--plan', self.path)
+        self.assertEqual((result.returncode, json.loads(result.stdout).get('plan'), self.path.read_bytes()),
+                         (0, plan(), before))
+
     def test_schema_failure_and_cli_usage_are_errors_not_stop_continuations(self):
         write_plan(self.path, plan(state='blocked'))
         value = plan(state='blocked')
@@ -88,12 +95,12 @@ class SourceContract(unittest.TestCase):
         record, env = self.ssh_fixture()
         self.cli('source', '--plan', self.path, '--ssh', 'reviewed-test', env=env)
         config = self.base/'ssh.conf'
-        config.write_text('Host reviewed-test\n HostName 192.0.2.1\n ForwardAgent yes\n ForwardX11 yes\n ControlMaster auto\n ControlPath /synthetic/shared-socket\n')
+        config.write_text('Host reviewed-test\n HostName 192.0.2.1\n ForwardAgent yes\n ForwardX11 yes\n ControlMaster auto\n ControlPath /synthetic/shared-socket\n PermitLocalCommand yes\n GSSAPIDelegateCredentials yes\n ForkAfterAuthentication yes\n')
         argv = json.loads(record.read_text())
-        result = subprocess.run(['/usr/bin/ssh', '-G', '-F', str(config), *argv[:-1]],
+        result = subprocess.run(['/usr/bin/ssh', '-G', '-F', str(config), *argv],
                                 capture_output=True, text=True, check=True, timeout=4)
         effective = dict(line.split(' ', 1) for line in result.stdout.splitlines() if ' ' in line)
-        self.assertEqual((effective['forwardagent'], effective['forwardx11']), ('no', 'no'))
+        self.assertEqual((effective['forwardagent'], effective['forwardx11'], effective['permitlocalcommand'], effective['gssapidelegatecredentials'], effective['forkafterauthentication']), ('no', 'no', 'no', 'no', 'no'))
         self.assertEqual(effective['controlmaster'], 'false')
         self.assertNotIn('controlpath', effective)
 
