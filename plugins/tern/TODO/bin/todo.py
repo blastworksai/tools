@@ -92,11 +92,11 @@ def read_ssh(destination, path):
     remote = shlex.join(['python3', '-I', '-', 'source', '--plan', str(path)])
     result = subprocess.run(['ssh', '-T', '-a', '-x', '-o', 'ControlMaster=no', '-o', 'ControlPath=none',
                              '-o', 'PermitLocalCommand=no', '-o', 'GSSAPIDelegateCredentials=no',
-                             '-o', 'ForkAfterAuthentication=no', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=3',
+                             '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=3',
                              '-o', 'ClearAllForwardings=yes', '-o', 'StrictHostKeyChecking=yes',
                              '-o', 'UpdateHostKeys=no', '--', destination, remote],
-                            input=Path(__file__).read_text(encoding='utf-8'),
-                            capture_output=True, text=True, timeout=4)
+                            input=Path(__file__).read_bytes(),
+                            capture_output=True, timeout=4)
     unavailable = 'SSH source unavailable; verify the reviewed destination, existing trust/authentication and Python 3'
     if len(result.stdout) > 65536:
         raise ValueError(unavailable)
