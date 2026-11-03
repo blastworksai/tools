@@ -23,8 +23,10 @@ The results are public for each skill: follow its Walkdown link in the table.
 | --- | --- | --- |
 | [WORK](plugins/tern/WORK/README.md) | Tern | Native pane listing active [Glitch](https://github.com/Glitch-Cat-Club) workspaces known to `/work-on`, with per-row GitHub links and Work On actions that start the default agent in a split pane. |
 | [SPAWN](plugins/tern/SPAWN/README.md) | Tern | Define and SPAWN your (entire) agentic army. |
-| [USAGE](plugins/tern/USAGE/README.md) | Tern | Show your subscription usage across all agents. DEPENDENCY: NEEDS SPAWN. |
-| ORCH+ | Tern | Orchestration+ Basic Improvements to Native Tern Orchestration. DEPENDENCY: NEEDS SPAWN and USAGE. |
+| [USAGE](plugins/tern/USAGE/README.md) | Tern | Show your subscription usage across all agents. 
+DEPENDENCY: NEEDS [SPAWN](plugins/tern/SPAWN/README.md). |
+| ORCH+ | Tern | Orchestration+ Basic Improvements to Native Tern Orchestration. 
+DEPENDENCY: NEEDS [SPAWN](plugins/tern/SPAWN/README.md) and USAGE. |
 
 ## Found a bug? Have an idea?
 
