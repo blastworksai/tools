@@ -1,10 +1,10 @@
-# Changes: 2026-11-03_dc2d8a2 -> 2026-11-03_8d97351
+# Changes: 2026-11-03_8d97351 -> 2026-11-03_606c9ba
 
-Old: sha256 dc2d8a248ac8, 7 files. New: sha256 8d97351c07cc, 2 files.
+Old: sha256 8d97351c07cc, 2 files. New: sha256 606c9ba6813d, 2 files.
 
 What a newer version adds, from the findings both runs already made. Model reads (stage 6) are not compared. A change is a location to read; none is a verdict.
 
-Summary: trifecta leg Can send data out: yes -> no; trifecta leg Can read your data: yes -> no; 5 files removed, 29 phrase hits gone; cost: not used at run time 6 files -> 1 file (21,879 -> 273 tokens).
+Summary: 1 files changed, 1 phrase hits gone; cost: largest at its fullest 5,168 -> 5,170 tokens (+2).
 
 ## What it costs (estimated tokens)
 
@@ -12,20 +12,11 @@ Summary: trifecta leg Can send data out: yes -> no; trifecta leg Can read your d
 |---|---|---|---|
 | Every session | 56 | 56 | +0 |
 | Every session in this folder | none | none |  |
-| Largest at its fullest | 5,168 | 5,168 | +0 |
-| Not used at run time | 21,879 | 273 | -21,606 |
+| Largest at its fullest | 5,168 | 5,170 | +2 |
+| Not used at run time | 273 | 273 | +0 |
 
-## Trifecta legs that changed (2)
+## Files changed (1)
 
-- Can send data out: yes -> no
-- Can read your data: yes -> no
+- SKILL.md (model)
 
-## Files removed (5)
-
-- walkdown/README.md
-- walkdown/details.html
-- walkdown/full.md
-- walkdown/review.html
-- walkdown/summary.html
-
-Phrase hits gone: 29.
+Phrase hits gone: 1.

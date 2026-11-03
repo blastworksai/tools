@@ -257,6 +257,7 @@ tern ctl --control "$scratch/window.sock" tree
 
 Start that script under the supervisor, for example:
 
+```sh
 set -euo pipefail
 scratch="$(mktemp -d "${TMPDIR:-/tmp}/tern-plugin.XXXXXX")"
 systemd-run --user --scope --wait --collect \

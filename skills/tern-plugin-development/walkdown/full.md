@@ -1,7 +1,7 @@
 # tern-plugin-development: full report
 
-/tmp/tern-plugin-development-audit.2ECsda | retrieved 2026-11-03 | sha256 8d97351c07cc38d736bf5eb53b42a29f807c1b56bd5b972ce4ce2a6425d3e150
-Run 2026-11-03_8d97351 | Walkdown 0.3.1+blastworks.1
+/tmp/tern-plugin-development-audit.tNlzzf | retrieved 2026-11-03 | sha256 606c9ba6813d84fe3d7d8966b3d6063c94b48f9c63a9fa05bbf355273efcd807
+Run 2026-11-03_606c9ba | Walkdown 0.3.1+blastworks.1
 Static examination only. Nothing executed. Every finding below is a location to look at; none is a verdict. Stage order; nothing is ranked.
 
 ## 1 What ships
@@ -10,7 +10,7 @@ Static examination only. Nothing executed. Every finding below is a location to 
 
 Validation: PASS (gate 26/26, negative 7/7; measured 2026-11-03, same code and fixtures)
 
-Pin: sha256 8d97351c07cc38d736bf5eb53b42a29f807c1b56bd5b972ce4ce2a6425d3e150, 2 files, 21,762 bytes.
+Pin: sha256 606c9ba6813d84fe3d7d8966b3d6063c94b48f9c63a9fa05bbf355273efcd807, 2 files, 21,768 bytes.
 
 Formats: md 2.
 
@@ -50,12 +50,13 @@ None.
 
 Programs are the ones Walkdown recognizes (`stages/04-phrases/tools.yaml`); declared means named in a dependency file, a skill's compatibility field, or an install line.
 
-- `node`: not declared; used at SKILL.md:365 (instructions)
+- `bash`: not declared; used at SKILL.md:273 (instructions)
 - No package imported.
 
 ### What ties it to one machine
 
-Nothing found that ties it to one machine.
+Scripts or commands for one system only (1): the other systems do not have them.
+- SKILL.md:273: runs bash
 
 ## 2 What the model actually reads
 
@@ -69,7 +70,7 @@ None.
 
 ### Lines changed by folding (1)
 
-- SKILL.md:300: removed or replaced U+201C, U+201D
+- SKILL.md:301: removed or replaced U+201C, U+201D
 
 ### Non-Latin script runs (0)
 
@@ -89,7 +90,7 @@ None.
 
 ## 3 What loads what
 
-2 entry points. 0 orphans. 11 dangling references (11 code). 0 dynamic loads: 0 files loaded only through one (named by nothing), 0 files reached only through a mention of a folder or wildcards.
+2 entry points. 0 orphans. 12 dangling references (12 code). 0 dynamic loads: 0 files loaded only through one (named by nothing), 0 files reached only through a mention of a folder or wildcards.
 
 Validation: PASS (gate 11/11, negative 7/7; measured 2026-11-03, same code and fixtures)
 
@@ -120,7 +121,7 @@ None.
 
 None.
 
-### Dangling references (11)
+### Dangling references (12)
 
 - SKILL.md:26: `plugin.toml` (code)
 - SKILL.md:102: `plugin.toml` (code)
@@ -130,9 +131,10 @@ None.
 - SKILL.md:224: `$STENCIL_LOG_DIR/tern-daemon.log` (code)
 - SKILL.md:236: `$scratch/tree.json` (code)
 - SKILL.md:237: `$scratch/tree.json` (code)
-- SKILL.md:331: `$STENCIL_LOG_DIR/tern-daemon.log` (code)
-- SKILL.md:332: `$STENCIL_LOG_DIR/tern.log` (code)
-- SKILL.md:397: `plugin.toml` (code)
+- SKILL.md:273: `./test-isolated.sh` (code)
+- SKILL.md:332: `$STENCIL_LOG_DIR/tern-daemon.log` (code)
+- SKILL.md:333: `$STENCIL_LOG_DIR/tern.log` (code)
+- SKILL.md:398: `plugin.toml` (code)
 
 ### Dangling references into a folder the repository does not have (often one the workflow creates when it runs) (0)
 
@@ -149,7 +151,7 @@ None.
 
 ## 4 What the text asks for
 
-4a 0 · 4b 3 · 4c 6 · 4d 0 hits on 9 lines (9 read by a model); benign share not measured (stage 6 labels did not run). Hosts: 2, 1 not named in the docs. Confirm-first or prohibited actions in instruction text: 0, 0 with no confirmation step, 0 stated as prohibitions. Conditionals: 4 error, 1 absence. Definitions: 0, 0 conflicts, 0 safety-word definitions. Long files with flagged lines: 0, 0 with some past the reader window. Sentences repeated across files: 0, 0 flagged. Lines that look like committed secrets: 0.
+4a 0 · 4b 3 · 4c 5 · 4d 0 hits on 8 lines (8 read by a model); benign share not measured (stage 6 labels did not run). Hosts: 2, 1 not named in the docs. Confirm-first or prohibited actions in instruction text: 0, 0 with no confirmation step, 0 stated as prohibitions. Conditionals: 4 error, 1 absence. Definitions: 0, 0 conflicts, 0 safety-word definitions. Long files with flagged lines: 0, 0 with some past the reader window. Sentences repeated across files: 0, 0 flagged. Lines that look like committed secrets: 0.
 
 Validation: PASS (gate 153/153, negative 121/121, recall 43/43; measured 2026-11-03, same code and fixtures)
 
@@ -184,7 +186,7 @@ None.
 Patterns: B.safety-exception 2
 
 - SKILL.md:49 [B.safety-exception] (model): `Do not put generated files or build output in a released package unless the`
-- SKILL.md:379 [B.safety-exception] (model): `commands; do not manufacture a PATH in a hook unless the full intended`
+- SKILL.md:380 [B.safety-exception] (model): `commands; do not manufacture a PATH in a hook unless the full intended`
 
 #### phrase.H.anti-review (0 lines)
 
@@ -194,16 +196,15 @@ None.
 
 Patterns: I.failure-path 1
 
-- SKILL.md:281 [I.failure-path] (model): `` returns successfully and the daemon socket is gone. On failure, `set -e` ``
+- SKILL.md:282 [I.failure-path] (model): `` returns successfully and the daemon socket is gone. On failure, `set -e` ``
 
 ### 4c Changing the environment
 
-#### phrase.E.perms (2 lines)
+#### phrase.E.perms (1 line)
 
-Patterns: E.install-global 1, E.write-then-exec 1
+Patterns: E.install-global 1
 
 - SKILL.md:103 [E.install-global] (model): `` their install root and are installed with `tern plugin install SRC`. ``
-- SKILL.md:261 [E.write-then-exec] (model): `scratch="$(mktemp -d "${TMPDIR:-/tmp}/tern-plugin.XXXXXX")"\nsystemd-run --user --scope --wait --collect \`
 
 #### phrase.C.second-order (0 lines)
 
@@ -238,7 +239,7 @@ Hosts: 2, 1 not named in the docs. Confirm-first or prohibited actions in instru
 
 ### Endpoints (hosts named anywhere; documented = named in the docs) (2)
 
-- tern.log.info: not in the docs, other; 1 instructions; first at SKILL.md:341
+- tern.log.info: not in the docs, other; 1 instructions; first at SKILL.md:342
 - docs.stencil.so: documented, other; 13 instructions, 1 docs; first at README.md:4
 
 ### Confirm-first and prohibited actions in instruction text (0)
@@ -250,8 +251,8 @@ None.
 - SKILL.md:100: error: if `when a daemon is running; it exits nonzero for a` then `meaningful load check`
 - SKILL.md:139: absence: if `If no such boundary is` then ``
 - SKILL.md:222: error: if `before reload so old evidence cannot pass.` then `Capture log offsets`
-- SKILL.md:281: error: if `On failure` then `` `set -e` ``
-- SKILL.md:344: error: if `When a plugin fails` then `classify the failure before changing code:`
+- SKILL.md:282: error: if `On failure` then `` `set -e` ``
+- SKILL.md:345: error: if `When a plugin fails` then `classify the failure before changing code:`
 
 ### Definitions (0)
 
@@ -361,17 +362,17 @@ Bytes at load: descriptions 223 (1, exact).
 Expected context: 32,000 tokens (a line for 200,000 beside it). Tokens are estimated from size: about 4 bytes of English text per token; text in other scripts runs high.
 
 - Every session, once installed (descriptions, hooks): 56 tokens, under 1% of 32,000, under 1% of 200,000
-- When the largest skill runs: 5,168 tokens, 16% of 32,000, 3% of 200,000
-- That skill and everything it names: 5,168 tokens, 16% of 32,000, 3% of 200,000
+- When the largest skill runs: 5,170 tokens, 16% of 32,000, 3% of 200,000
+- That skill and everything it names: 5,170 tokens, 16% of 32,000, 3% of 200,000
 - The largest is `SKILL.md`, of 1 skill, agent, or command.
 
 Every skill, agent, or command, by tier (tokens):
 
-- SKILL.md: runs 5,168, with what it names 5,168, with wildcard loads 5,168
+- SKILL.md: runs 5,170, with what it names 5,170, with wildcard loads 5,170
 
-#### Loads into the AI: 1 file, 20.2 KB, 5,168 tokens
+#### Loads into the AI: 1 file, 20.2 KB, 5,170 tokens
 
-- `SKILL.md`: skills, agents, and commands, 20.2 KB, 5,168 tokens
+- `SKILL.md`: skills, agents, and commands, 20.2 KB, 5,170 tokens
 
 #### Used another way: 0 files, 0 bytes, 0 tokens
 
@@ -421,7 +422,7 @@ Every tool granted is one the words ask for, and nothing asks for a tool it lack
 
 ## 6 Needs a human read
 
-10 questions (9 labeling, 1 relational). Packet only: no model read (06-packet.md in the run folder).
+9 questions (8 labeling, 1 relational). Packet only: no model read (06-packet.md in the run folder).
 
 Validation: PASS (gate 125/125, negative 11/11, recall 0/165; skipped: 124 rows; measured 2026-11-03, same code and fixtures)
 
@@ -443,11 +444,9 @@ Questions a pattern cannot settle, and the answers of the backends named here. E
     - soft.label: skipped (no labeling backend)
 - SKILL.md:159 [label] Does this line tell the reader to do the matched action, tell them not to, describe it, or quote / give an example of it?
     - soft.label: skipped (no labeling backend)
-- SKILL.md:261 [label] Does this line tell the reader to do the matched action, tell them not to, describe it, or quote / give an example of it?
+- SKILL.md:282 [label] Does this line tell the reader to do the matched action, tell them not to, describe it, or quote / give an example of it?
     - soft.label: skipped (no labeling backend)
-- SKILL.md:281 [label] Does this line tell the reader to do the matched action, tell them not to, describe it, or quote / give an example of it?
-    - soft.label: skipped (no labeling backend)
-- SKILL.md:379 [label] Does this line tell the reader to do the matched action, tell them not to, describe it, or quote / give an example of it?
+- SKILL.md:380 [label] Does this line tell the reader to do the matched action, tell them not to, describe it, or quote / give an example of it?
     - soft.label: skipped (no labeling backend)
 - (repo) [relational] Describe, as capability and not intent, how these three capabilities could combine in this artifact, citing the evidence given.
     - soft.read: skipped (no relational backend)
@@ -464,7 +463,7 @@ Questions a pattern cannot settle, and the answers of the backends named here. E
 - (05-capability) stage 5 limit: hook bytes are an estimate from the sizes of files the hook script references (stage 3 static edges); hooks are never run to measure their output
 - soft.label skipped for SKILL.md: no labeling backend
 - soft.read skipped for None: no relational backend
-- (06-soft) skipped: soft.label x9: no labeling backend
+- (06-soft) skipped: soft.label x8: no labeling backend
 - (06-soft) skipped: soft.read x1: no relational backend
 - Static examination only. Nothing in the artifact was executed, fetched, or installed.
 - Stage 6 answers are located observations from the backends section 6 names; they never change a stage 1 to 5 finding. Hit counts carry a benign share only when stage 6 labels ran.
