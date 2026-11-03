@@ -4,6 +4,10 @@ Define your agent roster once, then start all of it, or one account, with a sing
 
 SPAWN keeps one saved launch record per provider account (Claude, Codex, Kimi, Muse, Agy, Grok, OMP or anything else with a command line). **Spawn all** opens every included account in the current Tern session, each in its own named, coloured tab with its provider's icon. SPAWN then tracks each launch and shows what happened to it: running, waiting for input, exited or failed.
 
+![Tern tab strip after Spawn all: one named, coloured tab with a provider icon per account](assets/screenshots/spawn-all-tabs.png)
+
+*After **Spawn all**: one tab per account, named `ProviderSuffix`, coloured per provider. Account suffixes are blurred.*
+
 [USAGE](../USAGE/README.md) and ORCH+ build on SPAWN's roster.
 
 ## What it does
@@ -39,6 +43,10 @@ Tern reloads plugins whenever a linked package directory changes. Edit a copy, n
 
 Open SPAWN from the command palette (**SPAWN**, **SPAWN: Config**, **SPAWN: Guided setup**, **SPAWN: Running agents**) or from the SPAWN button in the Files pane header.
 
+![The SPAWN button in the Files pane header, with its tooltip](assets/screenshots/files-button.png)
+
+![The SPAWN menu: Guided setup, Config, Spawn all, Spawn specific, Running agents and Review setup result](assets/screenshots/menu.png)
+
 1. **Set up the roster.** Run **Guided setup**, or open **Config** and add records on the Setup page. Every command and argument is shown for review before anything is saved; importing never launches anything.
 2. **Choose what Spawn all includes.** On **Configured agents**, mark records as enabled and included.
 3. **Spawn.** Pick **Spawn all** or **Spawn specific** from the SPAWN menu. Launches go into the Tern session you are in when you start the batch, and changing focus mid-batch cannot redirect them.
@@ -68,6 +76,10 @@ Open SPAWN from the command palette (**SPAWN**, **SPAWN: Config**, **SPAWN: Guid
 | `enabled`, `include_all` | Whether the record can be launched, and whether Spawn all includes it. |
 | `duplicate_policy` | `skip` (default) or `allow`. |
 | `placement` | `tab`, `split` or `replace_if_alone`. |
+
+![SPAWN Config, Configured agents page: overview counts, filters and one record's fields](assets/screenshots/configured-agents.png)
+
+*The **Configured agents** page with one record open. The account suffix, stable id and working directory are blurred.*
 
 Example for **Config → Paste JSON**:
 
@@ -144,6 +156,7 @@ Both exit 0 when every scenario prints its `PASS` line.
 - `config.luau`: record validation, migration and the guided-setup prompt
 - `native_cli.luau`: bounded calls to Tern's own CLI for session inspection
 - `assets/icons/`: provider artwork from [lobe-icons](https://github.com/lobehub/lobe-icons) (MIT, see `assets/icons/LICENSE.lobe-icons.txt`)
+- `assets/screenshots/`: the screenshots in this README (account labels and paths blurred)
 - `tests/`: behaviour and storage regression suites
 
 ## License
