@@ -1,0 +1,27 @@
+schema = 1
+id = "usage"
+name = "USAGE"
+version = "2.0.0"
+description = "Subscription usage for the accounts defined in SPAWN: headless refresh, compact, wide and bottom views, and account PIPs."
+icon = "gauge"
+host = "host.luau"
+window = "window.luau"
+styles = ["usage.css"]
+
+[[blocks]]
+id = "accounts"
+title = "USAGE"
+icon = "gauge"
+palette = false
+
+[[blocks]]
+id = "account"
+title = "USAGE Account"
+icon = "gauge"
+palette = false
+
+[[blocks]]
+id = "config"
+title = "USAGE Configuration"
+icon = "gauge"
+palette = false

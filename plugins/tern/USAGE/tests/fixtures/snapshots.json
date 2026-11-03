@@ -1,0 +1,501 @@
+[
+  {
+    "name": "measured-fraction",
+    "raw": "{\"version\":3,\"publisher\":\"11111111-1111-4111-8111-111111111111:source\",\"as_of_ms\":1700000000123,\"readings\":[{\"id\":\"synthetic-agent\",\"provider\":\"openai\",\"provider_label\":\"OpenAI\",\"source_label\":\"Synthetic source\",\"usage_source\":\"headless\",\"account_id\":\"synthetic-scope\",\"account_label\":\"Synthetic account\",\"canonical_id\":\"openai:synthetic-principal:synthetic-scope\",\"principal_id\":\"synthetic-principal\",\"plan\":\"Synthetic plan\",\"windows\":[{\"key\":\"session\",\"pool\":\"all\",\"used\":25.5,\"remaining\":74.5,\"observed_at_ms\":1700000000000,\"resets_at_ms\":1700001000000}]}]}",
+    "accepted": true,
+    "expected": {
+      "version": 3,
+      "publisher": "11111111-1111-4111-8111-111111111111:source",
+      "as_of_ms": 1700000000123,
+      "readings": [
+        {
+          "id": "synthetic-agent",
+          "provider": "openai",
+          "provider_label": "OpenAI",
+          "source_label": "Synthetic source",
+          "usage_source": "headless",
+          "account_id": "synthetic-scope",
+          "account_label": "Synthetic account",
+          "canonical_id": "openai:synthetic-principal:synthetic-scope",
+          "principal_id": "synthetic-principal",
+          "plan": "Synthetic plan",
+          "windows": [
+            {
+              "key": "session",
+              "pool": "all",
+              "used": 25.5,
+              "remaining": 74.5,
+              "observed_at_ms": 1700000000000,
+              "resets_at_ms": 1700001000000
+            }
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "name": "inventory-no-window",
+    "raw": "{\"version\":3,\"publisher\":\"11111111-1111-4111-8111-111111111111:source\",\"as_of_ms\":1700000000123,\"readings\":[{\"id\":\"synthetic-agent\",\"provider\":\"openai\",\"provider_label\":\"OpenAI\",\"source_label\":\"Synthetic source\",\"usage_source\":\"headless\",\"account_id\":\"synthetic-scope\",\"account_label\":\"Synthetic account\",\"canonical_id\":\"openai:synthetic-principal:synthetic-scope\",\"principal_id\":\"synthetic-principal\",\"plan\":\"Synthetic plan\",\"windows\":[]}]}",
+    "accepted": true,
+    "expected": {
+      "version": 3,
+      "publisher": "11111111-1111-4111-8111-111111111111:source",
+      "as_of_ms": 1700000000123,
+      "readings": [
+        {
+          "id": "synthetic-agent",
+          "provider": "openai",
+          "provider_label": "OpenAI",
+          "source_label": "Synthetic source",
+          "usage_source": "headless",
+          "account_id": "synthetic-scope",
+          "account_label": "Synthetic account",
+          "canonical_id": "openai:synthetic-principal:synthetic-scope",
+          "principal_id": "synthetic-principal",
+          "plan": "Synthetic plan",
+          "windows": []
+        }
+      ]
+    }
+  },
+  {
+    "name": "unavailable-is-not-zero",
+    "raw": "{\"version\":3,\"publisher\":\"11111111-1111-4111-8111-111111111111:source\",\"as_of_ms\":1700000000123,\"readings\":[{\"id\":\"synthetic-agent\",\"provider\":\"openai\",\"provider_label\":\"OpenAI\",\"source_label\":\"Synthetic source\",\"usage_source\":\"headless\",\"account_id\":\"synthetic-scope\",\"account_label\":\"Synthetic account\",\"canonical_id\":\"openai:synthetic-principal:synthetic-scope\",\"principal_id\":\"synthetic-principal\",\"plan\":\"Synthetic plan\",\"windows\":[{\"key\":\"session\",\"pool\":\"all\",\"observed_at_ms\":1700000000000,\"unavailable_reason\":\"not_yet_measured\"}]}]}",
+    "accepted": true,
+    "expected": {
+      "version": 3,
+      "publisher": "11111111-1111-4111-8111-111111111111:source",
+      "as_of_ms": 1700000000123,
+      "readings": [
+        {
+          "id": "synthetic-agent",
+          "provider": "openai",
+          "provider_label": "OpenAI",
+          "source_label": "Synthetic source",
+          "usage_source": "headless",
+          "account_id": "synthetic-scope",
+          "account_label": "Synthetic account",
+          "canonical_id": "openai:synthetic-principal:synthetic-scope",
+          "principal_id": "synthetic-principal",
+          "plan": "Synthetic plan",
+          "windows": [
+            {
+              "key": "session",
+              "pool": "all",
+              "observed_at_ms": 1700000000000,
+              "unavailable_reason": "not_yet_measured"
+            }
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "name": "zero-is-measured",
+    "raw": "{\"version\":3,\"publisher\":\"11111111-1111-4111-8111-111111111111:source\",\"as_of_ms\":1700000000123,\"readings\":[{\"id\":\"synthetic-agent\",\"provider\":\"openai\",\"provider_label\":\"OpenAI\",\"source_label\":\"Synthetic source\",\"usage_source\":\"headless\",\"account_id\":\"synthetic-scope\",\"account_label\":\"Synthetic account\",\"canonical_id\":\"openai:synthetic-principal:synthetic-scope\",\"principal_id\":\"synthetic-principal\",\"plan\":\"Synthetic plan\",\"windows\":[{\"key\":\"session\",\"pool\":\"all\",\"used\":0,\"remaining\":100,\"observed_at_ms\":1700000000000,\"resets_at_ms\":1700001000000}]}]}",
+    "accepted": true,
+    "expected": {
+      "version": 3,
+      "publisher": "11111111-1111-4111-8111-111111111111:source",
+      "as_of_ms": 1700000000123,
+      "readings": [
+        {
+          "id": "synthetic-agent",
+          "provider": "openai",
+          "provider_label": "OpenAI",
+          "source_label": "Synthetic source",
+          "usage_source": "headless",
+          "account_id": "synthetic-scope",
+          "account_label": "Synthetic account",
+          "canonical_id": "openai:synthetic-principal:synthetic-scope",
+          "principal_id": "synthetic-principal",
+          "plan": "Synthetic plan",
+          "windows": [
+            {
+              "key": "session",
+              "pool": "all",
+              "used": 0,
+              "remaining": 100,
+              "observed_at_ms": 1700000000000,
+              "resets_at_ms": 1700001000000
+            }
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "name": "unknown-account",
+    "raw": "{\"version\":3,\"publisher\":\"11111111-1111-4111-8111-111111111111:source\",\"as_of_ms\":1700000000123,\"readings\":[{\"id\":\"synthetic-agent\",\"provider\":\"openai\",\"provider_label\":\"OpenAI\",\"source_label\":\"Synthetic source\",\"usage_source\":\"headless\",\"plan\":\"Synthetic plan\",\"windows\":[{\"key\":\"session\",\"pool\":\"all\",\"used\":25.5,\"remaining\":74.5,\"observed_at_ms\":1700000000000,\"resets_at_ms\":1700001000000}]}]}",
+    "accepted": true,
+    "expected": {
+      "version": 3,
+      "publisher": "11111111-1111-4111-8111-111111111111:source",
+      "as_of_ms": 1700000000123,
+      "readings": [
+        {
+          "id": "synthetic-agent",
+          "provider": "openai",
+          "provider_label": "OpenAI",
+          "source_label": "Synthetic source",
+          "usage_source": "headless",
+          "plan": "Synthetic plan",
+          "windows": [
+            {
+              "key": "session",
+              "pool": "all",
+              "used": 25.5,
+              "remaining": 74.5,
+              "observed_at_ms": 1700000000000,
+              "resets_at_ms": 1700001000000
+            }
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "name": "calendar",
+    "raw": "{\"version\":3,\"publisher\":\"11111111-1111-4111-8111-111111111111:source\",\"as_of_ms\":1700000000123,\"readings\":[{\"id\":\"synthetic-agent\",\"provider\":\"openai\",\"provider_label\":\"OpenAI\",\"source_label\":\"Synthetic source\",\"usage_source\":\"headless\",\"account_id\":\"synthetic-scope\",\"account_label\":\"Synthetic account\",\"canonical_id\":\"openai:synthetic-principal:synthetic-scope\",\"principal_id\":\"synthetic-principal\",\"plan\":\"Synthetic plan\",\"windows\":[{\"key\":\"session\",\"pool\":\"all\",\"used\":25.5,\"remaining\":74.5,\"observed_at_ms\":1700000000000,\"resets_at_ms\":1700001000000,\"reset_calendar\":{\"year\":2025,\"month\":12,\"day\":31,\"hour\":23,\"minute\":30,\"timezone\":\"America/Chicago\"}}]}]}",
+    "accepted": true,
+    "expected": {
+      "version": 3,
+      "publisher": "11111111-1111-4111-8111-111111111111:source",
+      "as_of_ms": 1700000000123,
+      "readings": [
+        {
+          "id": "synthetic-agent",
+          "provider": "openai",
+          "provider_label": "OpenAI",
+          "source_label": "Synthetic source",
+          "usage_source": "headless",
+          "account_id": "synthetic-scope",
+          "account_label": "Synthetic account",
+          "canonical_id": "openai:synthetic-principal:synthetic-scope",
+          "principal_id": "synthetic-principal",
+          "plan": "Synthetic plan",
+          "windows": [
+            {
+              "key": "session",
+              "pool": "all",
+              "used": 25.5,
+              "remaining": 74.5,
+              "observed_at_ms": 1700000000000,
+              "resets_at_ms": 1700001000000,
+              "reset_calendar": {
+                "year": 2025,
+                "month": 12,
+                "day": 31,
+                "hour": 23,
+                "minute": 30,
+                "timezone": "America/Chicago"
+              }
+            }
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "name": "aliases",
+    "raw": "{\"version\":3,\"publisher\":\"11111111-1111-4111-8111-111111111111:source\",\"as_of_ms\":1700000000123,\"readings\":[{\"id\":\"synthetic-agent\",\"provider\":\"openai\",\"provider_label\":\"OpenAI\",\"source_label\":\"Synthetic source\",\"usage_source\":\"headless\",\"account_id\":\"synthetic-scope\",\"account_label\":\"Synthetic account\",\"canonical_id\":\"openai:synthetic-principal:synthetic-scope\",\"principal_id\":\"synthetic-principal\",\"plan\":\"Synthetic plan\",\"windows\":[{\"key\":\"session\",\"pool\":\"all\",\"used\":25.5,\"remaining\":74.5,\"observed_at_ms\":1700000000000,\"resets_at_ms\":1700001000000}],\"account_aliases\":[\"synthetic-alias\"]}]}",
+    "accepted": true,
+    "expected": {
+      "version": 3,
+      "publisher": "11111111-1111-4111-8111-111111111111:source",
+      "as_of_ms": 1700000000123,
+      "readings": [
+        {
+          "id": "synthetic-agent",
+          "provider": "openai",
+          "provider_label": "OpenAI",
+          "source_label": "Synthetic source",
+          "usage_source": "headless",
+          "account_id": "synthetic-scope",
+          "account_label": "Synthetic account",
+          "canonical_id": "openai:synthetic-principal:synthetic-scope",
+          "principal_id": "synthetic-principal",
+          "plan": "Synthetic plan",
+          "windows": [
+            {
+              "key": "session",
+              "pool": "all",
+              "used": 25.5,
+              "remaining": 74.5,
+              "observed_at_ms": 1700000000000,
+              "resets_at_ms": 1700001000000
+            }
+          ],
+          "account_aliases": [
+            "synthetic-alias"
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "name": "empty-snapshot",
+    "raw": "{\"version\":3,\"publisher\":\"11111111-1111-4111-8111-111111111111:source\",\"as_of_ms\":1700000000123,\"readings\":[]}",
+    "accepted": true,
+    "expected": {
+      "version": 3,
+      "publisher": "11111111-1111-4111-8111-111111111111:source",
+      "as_of_ms": 1700000000123,
+      "readings": []
+    }
+  },
+  {
+    "name": "empty-object-array",
+    "raw": "{\"version\":3,\"publisher\":\"11111111-1111-4111-8111-111111111111:source\",\"as_of_ms\":1700000000123,\"readings\":{}}",
+    "accepted": true,
+    "expected": {
+      "version": 3,
+      "publisher": "11111111-1111-4111-8111-111111111111:source",
+      "as_of_ms": 1700000000123,
+      "readings": []
+    }
+  },
+  {
+    "name": "extra-fields-projected",
+    "raw": "{\"version\":3,\"publisher\":\"11111111-1111-4111-8111-111111111111:source\",\"as_of_ms\":1700000000123,\"readings\":[{\"id\":\"synthetic-agent\",\"provider\":\"openai\",\"provider_label\":\"OpenAI\",\"source_label\":\"Synthetic source\",\"usage_source\":\"headless\",\"account_id\":\"synthetic-scope\",\"account_label\":\"Synthetic account\",\"canonical_id\":\"openai:synthetic-principal:synthetic-scope\",\"principal_id\":\"synthetic-principal\",\"plan\":\"Synthetic plan\",\"windows\":[{\"key\":\"session\",\"pool\":\"all\",\"used\":25.5,\"remaining\":74.5,\"observed_at_ms\":1700000000000,\"resets_at_ms\":1700001000000,\"response\":\"SECRET_RESPONSE_SENTINEL\"}],\"environment\":\"SECRET_ENV_SENTINEL\",\"path\":\"/SECRET_PATH_SENTINEL\"}],\"raw\":\"SECRET_RAW_SENTINEL\"}",
+    "accepted": true,
+    "expected": {
+      "version": 3,
+      "publisher": "11111111-1111-4111-8111-111111111111:source",
+      "as_of_ms": 1700000000123,
+      "readings": [
+        {
+          "id": "synthetic-agent",
+          "provider": "openai",
+          "provider_label": "OpenAI",
+          "source_label": "Synthetic source",
+          "usage_source": "headless",
+          "account_id": "synthetic-scope",
+          "account_label": "Synthetic account",
+          "canonical_id": "openai:synthetic-principal:synthetic-scope",
+          "principal_id": "synthetic-principal",
+          "plan": "Synthetic plan",
+          "windows": [
+            {
+              "key": "session",
+              "pool": "all",
+              "used": 25.5,
+              "remaining": 74.5,
+              "observed_at_ms": 1700000000000,
+              "resets_at_ms": 1700001000000
+            }
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "name": "optional-null-omitted",
+    "raw": "{\"version\":3,\"publisher\":\"11111111-1111-4111-8111-111111111111:source\",\"as_of_ms\":1700000000123,\"readings\":[{\"id\":\"synthetic-agent\",\"provider\":\"openai\",\"provider_label\":\"OpenAI\",\"source_label\":\"Synthetic source\",\"usage_source\":\"headless\",\"account_id\":\"synthetic-scope\",\"account_label\":\"Synthetic account\",\"canonical_id\":\"openai:synthetic-principal:synthetic-scope\",\"principal_id\":\"synthetic-principal\",\"plan\":\"Synthetic plan\",\"windows\":[{\"key\":\"session\",\"pool\":\"all\",\"used\":25.5,\"remaining\":74.5,\"observed_at_ms\":1700000000000,\"resets_at_ms\":1700001000000}],\"agent_id\":null}]}",
+    "accepted": true,
+    "expected": {
+      "version": 3,
+      "publisher": "11111111-1111-4111-8111-111111111111:source",
+      "as_of_ms": 1700000000123,
+      "readings": [
+        {
+          "id": "synthetic-agent",
+          "provider": "openai",
+          "provider_label": "OpenAI",
+          "source_label": "Synthetic source",
+          "usage_source": "headless",
+          "account_id": "synthetic-scope",
+          "account_label": "Synthetic account",
+          "canonical_id": "openai:synthetic-principal:synthetic-scope",
+          "principal_id": "synthetic-principal",
+          "plan": "Synthetic plan",
+          "windows": [
+            {
+              "key": "session",
+              "pool": "all",
+              "used": 25.5,
+              "remaining": 74.5,
+              "observed_at_ms": 1700000000000,
+              "resets_at_ms": 1700001000000
+            }
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "name": "top-version-11",
+    "raw": "{\"version\":4,\"publisher\":\"11111111-1111-4111-8111-111111111111:source\",\"as_of_ms\":1700000000123,\"readings\":[{\"id\":\"synthetic-agent\",\"provider\":\"openai\",\"provider_label\":\"OpenAI\",\"source_label\":\"Synthetic source\",\"usage_source\":\"headless\",\"account_id\":\"synthetic-scope\",\"account_label\":\"Synthetic account\",\"canonical_id\":\"openai:synthetic-principal:synthetic-scope\",\"principal_id\":\"synthetic-principal\",\"plan\":\"Synthetic plan\",\"windows\":[{\"key\":\"session\",\"pool\":\"all\",\"used\":25.5,\"remaining\":74.5,\"observed_at_ms\":1700000000000,\"resets_at_ms\":1700001000000}]}]}",
+    "accepted": false
+  },
+  {
+    "name": "top-version-12",
+    "raw": "{\"version\":true,\"publisher\":\"11111111-1111-4111-8111-111111111111:source\",\"as_of_ms\":1700000000123,\"readings\":[{\"id\":\"synthetic-agent\",\"provider\":\"openai\",\"provider_label\":\"OpenAI\",\"source_label\":\"Synthetic source\",\"usage_source\":\"headless\",\"account_id\":\"synthetic-scope\",\"account_label\":\"Synthetic account\",\"canonical_id\":\"openai:synthetic-principal:synthetic-scope\",\"principal_id\":\"synthetic-principal\",\"plan\":\"Synthetic plan\",\"windows\":[{\"key\":\"session\",\"pool\":\"all\",\"used\":25.5,\"remaining\":74.5,\"observed_at_ms\":1700000000000,\"resets_at_ms\":1700001000000}]}]}",
+    "accepted": false
+  },
+  {
+    "name": "top-as_of_ms-13",
+    "raw": "{\"version\":3,\"publisher\":\"11111111-1111-4111-8111-111111111111:source\",\"as_of_ms\":-1,\"readings\":[{\"id\":\"synthetic-agent\",\"provider\":\"openai\",\"provider_label\":\"OpenAI\",\"source_label\":\"Synthetic source\",\"usage_source\":\"headless\",\"account_id\":\"synthetic-scope\",\"account_label\":\"Synthetic account\",\"canonical_id\":\"openai:synthetic-principal:synthetic-scope\",\"principal_id\":\"synthetic-principal\",\"plan\":\"Synthetic plan\",\"windows\":[{\"key\":\"session\",\"pool\":\"all\",\"used\":25.5,\"remaining\":74.5,\"observed_at_ms\":1700000000000,\"resets_at_ms\":1700001000000}]}]}",
+    "accepted": false
+  },
+  {
+    "name": "top-as_of_ms-14",
+    "raw": "{\"version\":3,\"publisher\":\"11111111-1111-4111-8111-111111111111:source\",\"as_of_ms\":1.5,\"readings\":[{\"id\":\"synthetic-agent\",\"provider\":\"openai\",\"provider_label\":\"OpenAI\",\"source_label\":\"Synthetic source\",\"usage_source\":\"headless\",\"account_id\":\"synthetic-scope\",\"account_label\":\"Synthetic account\",\"canonical_id\":\"openai:synthetic-principal:synthetic-scope\",\"principal_id\":\"synthetic-principal\",\"plan\":\"Synthetic plan\",\"windows\":[{\"key\":\"session\",\"pool\":\"all\",\"used\":25.5,\"remaining\":74.5,\"observed_at_ms\":1700000000000,\"resets_at_ms\":1700001000000}]}]}",
+    "accepted": false
+  },
+  {
+    "name": "top-as_of_ms-15",
+    "raw": "{\"version\":3,\"publisher\":\"11111111-1111-4111-8111-111111111111:source\",\"as_of_ms\":9007199254740992,\"readings\":[{\"id\":\"synthetic-agent\",\"provider\":\"openai\",\"provider_label\":\"OpenAI\",\"source_label\":\"Synthetic source\",\"usage_source\":\"headless\",\"account_id\":\"synthetic-scope\",\"account_label\":\"Synthetic account\",\"canonical_id\":\"openai:synthetic-principal:synthetic-scope\",\"principal_id\":\"synthetic-principal\",\"plan\":\"Synthetic plan\",\"windows\":[{\"key\":\"session\",\"pool\":\"all\",\"used\":25.5,\"remaining\":74.5,\"observed_at_ms\":1700000000000,\"resets_at_ms\":1700001000000}]}]}",
+    "accepted": false
+  },
+  {
+    "name": "top-as_of_ms-16",
+    "raw": "{\"version\":3,\"publisher\":\"11111111-1111-4111-8111-111111111111:source\",\"as_of_ms\":true,\"readings\":[{\"id\":\"synthetic-agent\",\"provider\":\"openai\",\"provider_label\":\"OpenAI\",\"source_label\":\"Synthetic source\",\"usage_source\":\"headless\",\"account_id\":\"synthetic-scope\",\"account_label\":\"Synthetic account\",\"canonical_id\":\"openai:synthetic-principal:synthetic-scope\",\"principal_id\":\"synthetic-principal\",\"plan\":\"Synthetic plan\",\"windows\":[{\"key\":\"session\",\"pool\":\"all\",\"used\":25.5,\"remaining\":74.5,\"observed_at_ms\":1700000000000,\"resets_at_ms\":1700001000000}]}]}",
+    "accepted": false
+  },
+  {
+    "name": "top-publisher-17",
+    "raw": "{\"version\":3,\"publisher\":\"\",\"as_of_ms\":1700000000123,\"readings\":[{\"id\":\"synthetic-agent\",\"provider\":\"openai\",\"provider_label\":\"OpenAI\",\"source_label\":\"Synthetic source\",\"usage_source\":\"headless\",\"account_id\":\"synthetic-scope\",\"account_label\":\"Synthetic account\",\"canonical_id\":\"openai:synthetic-principal:synthetic-scope\",\"principal_id\":\"synthetic-principal\",\"plan\":\"Synthetic plan\",\"windows\":[{\"key\":\"session\",\"pool\":\"all\",\"used\":25.5,\"remaining\":74.5,\"observed_at_ms\":1700000000000,\"resets_at_ms\":1700001000000}]}]}",
+    "accepted": false
+  },
+  {
+    "name": "top-publisher-18",
+    "raw": "{\"version\":3,\"publisher\":\"\\nsecret\",\"as_of_ms\":1700000000123,\"readings\":[{\"id\":\"synthetic-agent\",\"provider\":\"openai\",\"provider_label\":\"OpenAI\",\"source_label\":\"Synthetic source\",\"usage_source\":\"headless\",\"account_id\":\"synthetic-scope\",\"account_label\":\"Synthetic account\",\"canonical_id\":\"openai:synthetic-principal:synthetic-scope\",\"principal_id\":\"synthetic-principal\",\"plan\":\"Synthetic plan\",\"windows\":[{\"key\":\"session\",\"pool\":\"all\",\"used\":25.5,\"remaining\":74.5,\"observed_at_ms\":1700000000000,\"resets_at_ms\":1700001000000}]}]}",
+    "accepted": false
+  },
+  {
+    "name": "top-publisher-19",
+    "raw": "{\"version\":3,\"publisher\":\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\",\"as_of_ms\":1700000000123,\"readings\":[{\"id\":\"synthetic-agent\",\"provider\":\"openai\",\"provider_label\":\"OpenAI\",\"source_label\":\"Synthetic source\",\"usage_source\":\"headless\",\"account_id\":\"synthetic-scope\",\"account_label\":\"Synthetic account\",\"canonical_id\":\"openai:synthetic-principal:synthetic-scope\",\"principal_id\":\"synthetic-principal\",\"plan\":\"Synthetic plan\",\"windows\":[{\"key\":\"session\",\"pool\":\"all\",\"used\":25.5,\"remaining\":74.5,\"observed_at_ms\":1700000000000,\"resets_at_ms\":1700001000000}]}]}",
+    "accepted": false
+  },
+  {
+    "name": "top-readings-20",
+    "raw": "{\"version\":3,\"publisher\":\"11111111-1111-4111-8111-111111111111:source\",\"as_of_ms\":1700000000123,\"readings\":null}",
+    "accepted": false
+  },
+  {
+    "name": "top-readings-21",
+    "raw": "{\"version\":3,\"publisher\":\"11111111-1111-4111-8111-111111111111:source\",\"as_of_ms\":1700000000123,\"readings\":{\"1\":{\"id\":\"synthetic-agent\",\"provider\":\"openai\",\"provider_label\":\"OpenAI\",\"source_label\":\"Synthetic source\",\"usage_source\":\"headless\",\"account_id\":\"synthetic-scope\",\"account_label\":\"Synthetic account\",\"canonical_id\":\"openai:synthetic-principal:synthetic-scope\",\"principal_id\":\"synthetic-principal\",\"plan\":\"Synthetic plan\",\"windows\":[{\"key\":\"session\",\"pool\":\"all\",\"used\":25.5,\"remaining\":74.5,\"observed_at_ms\":1700000000000,\"resets_at_ms\":1700001000000}]}}}",
+    "accepted": false
+  },
+  {
+    "name": "reading-id-22",
+    "raw": "{\"version\":3,\"publisher\":\"11111111-1111-4111-8111-111111111111:source\",\"as_of_ms\":1700000000123,\"readings\":[{\"id\":\"\",\"provider\":\"openai\",\"provider_label\":\"OpenAI\",\"source_label\":\"Synthetic source\",\"usage_source\":\"headless\",\"account_id\":\"synthetic-scope\",\"account_label\":\"Synthetic account\",\"canonical_id\":\"openai:synthetic-principal:synthetic-scope\",\"principal_id\":\"synthetic-principal\",\"plan\":\"Synthetic plan\",\"windows\":[{\"key\":\"session\",\"pool\":\"all\",\"used\":25.5,\"remaining\":74.5,\"observed_at_ms\":1700000000000,\"resets_at_ms\":1700001000000}]}]}",
+    "accepted": false
+  },
+  {
+    "name": "reading-provider-23",
+    "raw": "{\"version\":3,\"publisher\":\"11111111-1111-4111-8111-111111111111:source\",\"as_of_ms\":1700000000123,\"readings\":[{\"id\":\"synthetic-agent\",\"provider\":true,\"provider_label\":\"OpenAI\",\"source_label\":\"Synthetic source\",\"usage_source\":\"headless\",\"account_id\":\"synthetic-scope\",\"account_label\":\"Synthetic account\",\"canonical_id\":\"openai:synthetic-principal:synthetic-scope\",\"principal_id\":\"synthetic-principal\",\"plan\":\"Synthetic plan\",\"windows\":[{\"key\":\"session\",\"pool\":\"all\",\"used\":25.5,\"remaining\":74.5,\"observed_at_ms\":1700000000000,\"resets_at_ms\":1700001000000}]}]}",
+    "accepted": false
+  },
+  {
+    "name": "reading-source_label-24",
+    "raw": "{\"version\":3,\"publisher\":\"11111111-1111-4111-8111-111111111111:source\",\"as_of_ms\":1700000000123,\"readings\":[{\"id\":\"synthetic-agent\",\"provider\":\"openai\",\"provider_label\":\"OpenAI\",\"source_label\":\"     \",\"usage_source\":\"headless\",\"account_id\":\"synthetic-scope\",\"account_label\":\"Synthetic account\",\"canonical_id\":\"openai:synthetic-principal:synthetic-scope\",\"principal_id\":\"synthetic-principal\",\"plan\":\"Synthetic plan\",\"windows\":[{\"key\":\"session\",\"pool\":\"all\",\"used\":25.5,\"remaining\":74.5,\"observed_at_ms\":1700000000000,\"resets_at_ms\":1700001000000}]}]}",
+    "accepted": false
+  },
+  {
+    "name": "reading-account_label-25",
+    "raw": "{\"version\":3,\"publisher\":\"11111111-1111-4111-8111-111111111111:source\",\"as_of_ms\":1700000000123,\"readings\":[{\"id\":\"synthetic-agent\",\"provider\":\"openai\",\"provider_label\":\"OpenAI\",\"source_label\":\"Synthetic source\",\"usage_source\":\"headless\",\"account_id\":\"synthetic-scope\",\"account_label\":null,\"canonical_id\":\"openai:synthetic-principal:synthetic-scope\",\"principal_id\":\"synthetic-principal\",\"plan\":\"Synthetic plan\",\"windows\":[{\"key\":\"session\",\"pool\":\"all\",\"used\":25.5,\"remaining\":74.5,\"observed_at_ms\":1700000000000,\"resets_at_ms\":1700001000000}]}]}",
+    "accepted": false
+  },
+  {
+    "name": "reading-canonical_id-26",
+    "raw": "{\"version\":3,\"publisher\":\"11111111-1111-4111-8111-111111111111:source\",\"as_of_ms\":1700000000123,\"readings\":[{\"id\":\"synthetic-agent\",\"provider\":\"openai\",\"provider_label\":\"OpenAI\",\"source_label\":\"Synthetic source\",\"usage_source\":\"headless\",\"account_id\":\"synthetic-scope\",\"account_label\":\"Synthetic account\",\"canonical_id\":false,\"principal_id\":\"synthetic-principal\",\"plan\":\"Synthetic plan\",\"windows\":[{\"key\":\"session\",\"pool\":\"all\",\"used\":25.5,\"remaining\":74.5,\"observed_at_ms\":1700000000000,\"resets_at_ms\":1700001000000}]}]}",
+    "accepted": false
+  },
+  {
+    "name": "reading-windows-27",
+    "raw": "{\"version\":3,\"publisher\":\"11111111-1111-4111-8111-111111111111:source\",\"as_of_ms\":1700000000123,\"readings\":[{\"id\":\"synthetic-agent\",\"provider\":\"openai\",\"provider_label\":\"OpenAI\",\"source_label\":\"Synthetic source\",\"usage_source\":\"headless\",\"account_id\":\"synthetic-scope\",\"account_label\":\"Synthetic account\",\"canonical_id\":\"openai:synthetic-principal:synthetic-scope\",\"principal_id\":\"synthetic-principal\",\"plan\":\"Synthetic plan\",\"windows\":null}]}",
+    "accepted": false
+  },
+  {
+    "name": "reading-windows-28",
+    "raw": "{\"version\":3,\"publisher\":\"11111111-1111-4111-8111-111111111111:source\",\"as_of_ms\":1700000000123,\"readings\":[{\"id\":\"synthetic-agent\",\"provider\":\"openai\",\"provider_label\":\"OpenAI\",\"source_label\":\"Synthetic source\",\"usage_source\":\"headless\",\"account_id\":\"synthetic-scope\",\"account_label\":\"Synthetic account\",\"canonical_id\":\"openai:synthetic-principal:synthetic-scope\",\"principal_id\":\"synthetic-principal\",\"plan\":\"Synthetic plan\",\"windows\":[null]}]}",
+    "accepted": false
+  },
+  {
+    "name": "reading-account_aliases-29",
+    "raw": "{\"version\":3,\"publisher\":\"11111111-1111-4111-8111-111111111111:source\",\"as_of_ms\":1700000000123,\"readings\":[{\"id\":\"synthetic-agent\",\"provider\":\"openai\",\"provider_label\":\"OpenAI\",\"source_label\":\"Synthetic source\",\"usage_source\":\"headless\",\"account_id\":\"synthetic-scope\",\"account_label\":\"Synthetic account\",\"canonical_id\":\"openai:synthetic-principal:synthetic-scope\",\"principal_id\":\"synthetic-principal\",\"plan\":\"Synthetic plan\",\"windows\":[{\"key\":\"session\",\"pool\":\"all\",\"used\":25.5,\"remaining\":74.5,\"observed_at_ms\":1700000000000,\"resets_at_ms\":1700001000000}],\"account_aliases\":[\"a\",\"a\",\"a\",\"a\",\"a\",\"a\",\"a\",\"a\",\"a\",\"a\",\"a\",\"a\",\"a\",\"a\",\"a\",\"a\",\"a\",\"a\",\"a\",\"a\",\"a\",\"a\",\"a\",\"a\",\"a\",\"a\",\"a\",\"a\"]}]}",
+    "accepted": false
+  },
+  {
+    "name": "reading-last_reading_at_ms-30",
+    "raw": "{\"version\":3,\"publisher\":\"11111111-1111-4111-8111-111111111111:source\",\"as_of_ms\":1700000000123,\"readings\":[{\"id\":\"synthetic-agent\",\"provider\":\"openai\",\"provider_label\":\"OpenAI\",\"source_label\":\"Synthetic source\",\"usage_source\":\"headless\",\"account_id\":\"synthetic-scope\",\"account_label\":\"Synthetic account\",\"canonical_id\":\"openai:synthetic-principal:synthetic-scope\",\"principal_id\":\"synthetic-principal\",\"plan\":\"Synthetic plan\",\"windows\":[{\"key\":\"session\",\"pool\":\"all\",\"used\":25.5,\"remaining\":74.5,\"observed_at_ms\":1700000000000,\"resets_at_ms\":1700001000000}],\"last_reading_at_ms\":1e+100}]}",
+    "accepted": false
+  },
+  {
+    "name": "reading-agent_label-31",
+    "raw": "{\"version\":3,\"publisher\":\"11111111-1111-4111-8111-111111111111:source\",\"as_of_ms\":1700000000123,\"readings\":[{\"id\":\"synthetic-agent\",\"provider\":\"openai\",\"provider_label\":\"OpenAI\",\"source_label\":\"Synthetic source\",\"usage_source\":\"headless\",\"account_id\":\"synthetic-scope\",\"account_label\":\"Synthetic account\",\"canonical_id\":\"openai:synthetic-principal:synthetic-scope\",\"principal_id\":\"synthetic-principal\",\"plan\":\"Synthetic plan\",\"windows\":[{\"key\":\"session\",\"pool\":\"all\",\"used\":25.5,\"remaining\":74.5,\"observed_at_ms\":1700000000000,\"resets_at_ms\":1700001000000}],\"agent_label\":\"ééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé\"}]}",
+    "accepted": false
+  },
+  {
+    "name": "window-used-32",
+    "raw": "{\"version\":3,\"publisher\":\"11111111-1111-4111-8111-111111111111:source\",\"as_of_ms\":1700000000123,\"readings\":[{\"id\":\"synthetic-agent\",\"provider\":\"openai\",\"provider_label\":\"OpenAI\",\"source_label\":\"Synthetic source\",\"usage_source\":\"headless\",\"account_id\":\"synthetic-scope\",\"account_label\":\"Synthetic account\",\"canonical_id\":\"openai:synthetic-principal:synthetic-scope\",\"principal_id\":\"synthetic-principal\",\"plan\":\"Synthetic plan\",\"windows\":[{\"key\":\"session\",\"pool\":\"all\",\"used\":true,\"remaining\":74.5,\"observed_at_ms\":1700000000000,\"resets_at_ms\":1700001000000}]}]}",
+    "accepted": false
+  },
+  {
+    "name": "window-used-33",
+    "raw": "{\"version\":3,\"publisher\":\"11111111-1111-4111-8111-111111111111:source\",\"as_of_ms\":1700000000123,\"readings\":[{\"id\":\"synthetic-agent\",\"provider\":\"openai\",\"provider_label\":\"OpenAI\",\"source_label\":\"Synthetic source\",\"usage_source\":\"headless\",\"account_id\":\"synthetic-scope\",\"account_label\":\"Synthetic account\",\"canonical_id\":\"openai:synthetic-principal:synthetic-scope\",\"principal_id\":\"synthetic-principal\",\"plan\":\"Synthetic plan\",\"windows\":[{\"key\":\"session\",\"pool\":\"all\",\"used\":-0.1,\"remaining\":74.5,\"observed_at_ms\":1700000000000,\"resets_at_ms\":1700001000000}]}]}",
+    "accepted": false
+  },
+  {
+    "name": "window-used-34",
+    "raw": "{\"version\":3,\"publisher\":\"11111111-1111-4111-8111-111111111111:source\",\"as_of_ms\":1700000000123,\"readings\":[{\"id\":\"synthetic-agent\",\"provider\":\"openai\",\"provider_label\":\"OpenAI\",\"source_label\":\"Synthetic source\",\"usage_source\":\"headless\",\"account_id\":\"synthetic-scope\",\"account_label\":\"Synthetic account\",\"canonical_id\":\"openai:synthetic-principal:synthetic-scope\",\"principal_id\":\"synthetic-principal\",\"plan\":\"Synthetic plan\",\"windows\":[{\"key\":\"session\",\"pool\":\"all\",\"used\":101,\"remaining\":74.5,\"observed_at_ms\":1700000000000,\"resets_at_ms\":1700001000000}]}]}",
+    "accepted": false
+  },
+  {
+    "name": "window-remaining-35",
+    "raw": "{\"version\":3,\"publisher\":\"11111111-1111-4111-8111-111111111111:source\",\"as_of_ms\":1700000000123,\"readings\":[{\"id\":\"synthetic-agent\",\"provider\":\"openai\",\"provider_label\":\"OpenAI\",\"source_label\":\"Synthetic source\",\"usage_source\":\"headless\",\"account_id\":\"synthetic-scope\",\"account_label\":\"Synthetic account\",\"canonical_id\":\"openai:synthetic-principal:synthetic-scope\",\"principal_id\":\"synthetic-principal\",\"plan\":\"Synthetic plan\",\"windows\":[{\"key\":\"session\",\"pool\":\"all\",\"used\":25.5,\"remaining\":0,\"observed_at_ms\":1700000000000,\"resets_at_ms\":1700001000000}]}]}",
+    "accepted": false
+  },
+  {
+    "name": "window-observed_at_ms-36",
+    "raw": "{\"version\":3,\"publisher\":\"11111111-1111-4111-8111-111111111111:source\",\"as_of_ms\":1700000000123,\"readings\":[{\"id\":\"synthetic-agent\",\"provider\":\"openai\",\"provider_label\":\"OpenAI\",\"source_label\":\"Synthetic source\",\"usage_source\":\"headless\",\"account_id\":\"synthetic-scope\",\"account_label\":\"Synthetic account\",\"canonical_id\":\"openai:synthetic-principal:synthetic-scope\",\"principal_id\":\"synthetic-principal\",\"plan\":\"Synthetic plan\",\"windows\":[{\"key\":\"session\",\"pool\":\"all\",\"used\":25.5,\"remaining\":74.5,\"observed_at_ms\":-1,\"resets_at_ms\":1700001000000}]}]}",
+    "accepted": false
+  },
+  {
+    "name": "window-resets_at_ms-37",
+    "raw": "{\"version\":3,\"publisher\":\"11111111-1111-4111-8111-111111111111:source\",\"as_of_ms\":1700000000123,\"readings\":[{\"id\":\"synthetic-agent\",\"provider\":\"openai\",\"provider_label\":\"OpenAI\",\"source_label\":\"Synthetic source\",\"usage_source\":\"headless\",\"account_id\":\"synthetic-scope\",\"account_label\":\"Synthetic account\",\"canonical_id\":\"openai:synthetic-principal:synthetic-scope\",\"principal_id\":\"synthetic-principal\",\"plan\":\"Synthetic plan\",\"windows\":[{\"key\":\"session\",\"pool\":\"all\",\"used\":25.5,\"remaining\":74.5,\"observed_at_ms\":1700000000000,\"resets_at_ms\":\"later\"}]}]}",
+    "accepted": false
+  },
+  {
+    "name": "window-reset_label-38",
+    "raw": "{\"version\":3,\"publisher\":\"11111111-1111-4111-8111-111111111111:source\",\"as_of_ms\":1700000000123,\"readings\":[{\"id\":\"synthetic-agent\",\"provider\":\"openai\",\"provider_label\":\"OpenAI\",\"source_label\":\"Synthetic source\",\"usage_source\":\"headless\",\"account_id\":\"synthetic-scope\",\"account_label\":\"Synthetic account\",\"canonical_id\":\"openai:synthetic-principal:synthetic-scope\",\"principal_id\":\"synthetic-principal\",\"plan\":\"Synthetic plan\",\"windows\":[{\"key\":\"session\",\"pool\":\"all\",\"used\":25.5,\"remaining\":74.5,\"observed_at_ms\":1700000000000,\"resets_at_ms\":1700001000000,\"reset_label\":\"\\tprivate\"}]}]}",
+    "accepted": false
+  },
+  {
+    "name": "window-unavailable_reason-39",
+    "raw": "{\"version\":3,\"publisher\":\"11111111-1111-4111-8111-111111111111:source\",\"as_of_ms\":1700000000123,\"readings\":[{\"id\":\"synthetic-agent\",\"provider\":\"openai\",\"provider_label\":\"OpenAI\",\"source_label\":\"Synthetic source\",\"usage_source\":\"headless\",\"account_id\":\"synthetic-scope\",\"account_label\":\"Synthetic account\",\"canonical_id\":\"openai:synthetic-principal:synthetic-scope\",\"principal_id\":\"synthetic-principal\",\"plan\":\"Synthetic plan\",\"windows\":[{\"key\":\"session\",\"pool\":\"all\",\"used\":25.5,\"remaining\":74.5,\"observed_at_ms\":1700000000000,\"resets_at_ms\":1700001000000,\"unavailable_reason\":\"SECRET_RAW_SENTINEL\"}]}]}",
+    "accepted": false
+  },
+  {
+    "name": "window-unavailable_reason-40",
+    "raw": "{\"version\":3,\"publisher\":\"11111111-1111-4111-8111-111111111111:source\",\"as_of_ms\":1700000000123,\"readings\":[{\"id\":\"synthetic-agent\",\"provider\":\"openai\",\"provider_label\":\"OpenAI\",\"source_label\":\"Synthetic source\",\"usage_source\":\"headless\",\"account_id\":\"synthetic-scope\",\"account_label\":\"Synthetic account\",\"canonical_id\":\"openai:synthetic-principal:synthetic-scope\",\"principal_id\":\"synthetic-principal\",\"plan\":\"Synthetic plan\",\"windows\":[{\"key\":\"session\",\"pool\":\"all\",\"used\":25.5,\"remaining\":74.5,\"observed_at_ms\":1700000000000,\"resets_at_ms\":1700001000000,\"unavailable_reason\":\"stale\"}]}]}",
+    "accepted": false
+  },
+  {
+    "name": "window-reset_calendar-41",
+    "raw": "{\"version\":3,\"publisher\":\"11111111-1111-4111-8111-111111111111:source\",\"as_of_ms\":1700000000123,\"readings\":[{\"id\":\"synthetic-agent\",\"provider\":\"openai\",\"provider_label\":\"OpenAI\",\"source_label\":\"Synthetic source\",\"usage_source\":\"headless\",\"account_id\":\"synthetic-scope\",\"account_label\":\"Synthetic account\",\"canonical_id\":\"openai:synthetic-principal:synthetic-scope\",\"principal_id\":\"synthetic-principal\",\"plan\":\"Synthetic plan\",\"windows\":[{\"key\":\"session\",\"pool\":\"all\",\"used\":25.5,\"remaining\":74.5,\"observed_at_ms\":1700000000000,\"resets_at_ms\":1700001000000,\"reset_calendar\":{\"hour\":24,\"minute\":0}}]}]}",
+    "accepted": false
+  },
+  {
+    "name": "window-reset_calendar-42",
+    "raw": "{\"version\":3,\"publisher\":\"11111111-1111-4111-8111-111111111111:source\",\"as_of_ms\":1700000000123,\"readings\":[{\"id\":\"synthetic-agent\",\"provider\":\"openai\",\"provider_label\":\"OpenAI\",\"source_label\":\"Synthetic source\",\"usage_source\":\"headless\",\"account_id\":\"synthetic-scope\",\"account_label\":\"Synthetic account\",\"canonical_id\":\"openai:synthetic-principal:synthetic-scope\",\"principal_id\":\"synthetic-principal\",\"plan\":\"Synthetic plan\",\"windows\":[{\"key\":\"session\",\"pool\":\"all\",\"used\":25.5,\"remaining\":74.5,\"observed_at_ms\":1700000000000,\"resets_at_ms\":1700001000000,\"reset_calendar\":{\"hour\":12}}]}]}",
+    "accepted": false
+  },
+  {
+    "name": "window-reset_calendar-43",
+    "raw": "{\"version\":3,\"publisher\":\"11111111-1111-4111-8111-111111111111:source\",\"as_of_ms\":1700000000123,\"readings\":[{\"id\":\"synthetic-agent\",\"provider\":\"openai\",\"provider_label\":\"OpenAI\",\"source_label\":\"Synthetic source\",\"usage_source\":\"headless\",\"account_id\":\"synthetic-scope\",\"account_label\":\"Synthetic account\",\"canonical_id\":\"openai:synthetic-principal:synthetic-scope\",\"principal_id\":\"synthetic-principal\",\"plan\":\"Synthetic plan\",\"windows\":[{\"key\":\"session\",\"pool\":\"all\",\"used\":25.5,\"remaining\":74.5,\"observed_at_ms\":1700000000000,\"resets_at_ms\":1700001000000,\"reset_calendar\":{\"hour\":12,\"minute\":0,\"timezone\":\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"}}]}]}",
+    "accepted": false
+  },
+  {
+    "name": "nonfinite",
+    "raw": "{\"version\": 3, \"publisher\": \"11111111-1111-4111-8111-111111111111:source\", \"as_of_ms\": 1700000000123, \"readings\": [{\"id\": \"synthetic-agent\", \"provider\": \"openai\", \"provider_label\": \"OpenAI\", \"source_label\": \"Synthetic source\", \"usage_source\": \"headless\", \"account_id\": \"synthetic-scope\", \"account_label\": \"Synthetic account\", \"canonical_id\": \"openai:synthetic-principal:synthetic-scope\", \"principal_id\": \"synthetic-principal\", \"plan\": \"Synthetic plan\", \"windows\": [{\"key\": \"session\", \"pool\": \"all\", \"used\": NaN, \"remaining\": 74.5, \"observed_at_ms\": 1700000000000, \"resets_at_ms\": 1700001000000}]}]}",
+    "accepted": false
+  },
+  {
+    "name": "malformed",
+    "raw": "{\"version\":3,",
+    "accepted": false
+  }
+]

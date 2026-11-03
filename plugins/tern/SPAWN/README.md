@@ -4,7 +4,7 @@ Define your agent roster once, then start all of it, or one account, with a sing
 
 SPAWN keeps one saved launch record per provider account (Claude, Codex, Kimi, Muse, Agy, Grok, OMP or anything else with a command line). **Spawn all** opens every included account in the current Tern session, each in its own named, coloured tab with its provider's icon. SPAWN then tracks each launch and shows what happened to it: running, waiting for input, exited or failed.
 
-[USAGE](../tern-fleet-usage/README.md) and ORCH+ build on SPAWN's roster.
+[USAGE](../USAGE/README.md) and ORCH+ build on SPAWN's roster.
 
 ## What it does
 
