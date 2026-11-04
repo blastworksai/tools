@@ -4,6 +4,10 @@ Checkpoint visibility for the interactive `/glitch-plan` → `/glitch-execute` w
 
 TODO is adapted from [Felipe Carneiro's session-list](https://github.com/felipevdc1/tern-session-list), MIT.
 
+![TODO’s native checklist beside an interactive agent session](assets/screenshots/todo-blurred.png)
+
+*The TODO checklist stays readable; surrounding panes and connection details are blurred for privacy.*
+
 ## Scope
 
 Interactive sessions only. The writer/executor updates the one canonical plan; the plugin displays its explicit checkpoint block. It never interprets dated prose as task completion, writes the plan, sends an agent prompt, adopts another task or grants release/deployment authority.
