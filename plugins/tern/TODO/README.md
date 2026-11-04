@@ -2,7 +2,7 @@
 
 Checkpoint visibility for the interactive `/glitch-plan` → `/glitch-execute` workflow. The canonical plan contains explicit agreed checkpoints, their current state and a blocked reason. The panel is a read-only native Tern checklist.
 
-TODO is adapted from [Felipe Carneiro's session-list](https://github.com/felipevdc1/tern-session-list), MIT. 
+TODO is adapted from [Felipe Carneiro's session-list](https://github.com/felipevdc1/tern-session-list), MIT.
 
 ## Scope
 
@@ -24,16 +24,24 @@ Use the installed package’s absolute `bin/todo` path (`bin/todo.cmd` on Window
 
 Canonical plan files use UTF-8 with LF or CRLF line endings. The reader never rewrites their bytes. The command prints a fenced JSON block between `<!-- TERN-SESSION:START -->` and `<!-- TERN-SESSION:END -->`; the agent places it in the canonical plan through its normal write path. States are `pending`, `active`, `blocked`, `done`. At most one is active. `current` names the active/blocked checkpoint, or is null; blocked checkpoints require a reason. Stable ids survive description/reordering changes. The view never edits these fields.
 
-The companion is a source integration asset, **not an installed override of managed Glitch skills**. Live customization/upstream integration is not planned.
+The companion is installed separately under `_local/tern-todo`, through Glitch’s supported local customization path. It does not override managed skills or hooks. Its publication instruction must be observed in the planning session; descriptor presence alone does not prove adoption.
 
-## Local or SSH
+## Session discovery and source location
 
-Choose **TODO: attach to this tab** in Tern's palette, select the agent's plan location and enter its absolute path:
+Click **TODO** in the Files pane, choose the live agent session, and TODO resolves its explicitly published plan. It never asks the operator for the plan path or types into the agent. The planning companion publishes after an agreed plan is created or deliberately resumed/revised:
 
-- **Local:** the file is on the machine running this Tern session's daemon, even when a different desktop displays it. The agent can itself be SSH-launched if that host shares the canonical plan filesystem.
-- **SSH:** the plan is on an explicitly reviewed ordinary SSH destination. The read-only reader is sent over SSH stdin to Python 3; no remote package installation or source write occurs. Existing host-key trust and authentication remain required. No key is copied, no host is trusted automatically and no forwarding is enabled. Forced agent-launch aliases (`seat-*`) are refused.
+```sh
+todo publish --agent-pid 12345 --plan /absolute/canonical/PLAN.md
+todo clear --agent-pid 12345
+```
 
-The remote source requires Python 3 and a POSIX shell. Native local reading is portable Python; the Windows command shim uses existing `py` or `python3`. No new package dependency or listening service is added. Authentication errors, unsupported shells, missing Python and invalid checkpoint blocks fail visibly. SSH access never falls back to another source or identity.
+Identify the agent’s actual durable process with its runtime or `todo ancestry` and pass its verified numeric pid on every invocation (12345 in the example is a placeholder); never use a shell/launcher/helper pid. See [the companion](integrations/glitch-plan-session-view/README.md). Publications contain only the existing canonical path/plan id and a verified live process birth/owner chain. The binding validates the explicitly declared publisher process, including its birth and owner; pane/PID reuse is refused. The planning agent must identify its own durable CLI process; no shell-name inference is used. The canonical record remains authoritative; normal edits refresh without republishing. Clear or process exit invalidates old success and stops polling the ended binding. A conversation reset in the same process is not detectable: the agent must clear before reset/end and on fresh-conversation startup; skipping that instruction can leave the previous plan visible until clear or process exit. A changed plan requires deliberate reattachment.
+
+No active publication shows **No active plan is published for this session** and exits the TODO flow, leaving the agent running. Invalid metadata/access produces a detection error instead. This works with ordinary CLI agents: no native agent composer, draft inspection, prompt submission, hook, socket access or copied credential is needed.
+
+Local and native SSH Tern sessions use the same host-side resolver. The viewing client confirms the native split beside the selected session; the execution host resolves that split to its own process metadata, then reads its own published canonical file. Client-side pane handles are never interpreted as host CLI ids. The label shows Local or SSH and the native host. Raw SSH into a machine without native Tern ancestry is unsupported; there is no guessed local path or automatic secondary SSH login.
+
+Linux publications use per-owner runtime directories with the existing `agents` group's read access on the estate; other accounts cannot write them. macOS and Windows use native user caches and permissions. Native process birth and ownership interfaces come with the OS; there is no new package dependency or listening service.
 
 Direct source checks (no Tern environment required):
 
@@ -60,7 +68,7 @@ Plugin ID is `todo`; displayed name is **TODO**. Install on the actual session h
 
 ```sh
 python3 -m unittest discover -s tests -p todo_test.py
-python3 tests/todo_smoke.py --evidence /absolute/private/evidence.json
+python3 tests/todo_smoke.py --published --evidence /absolute/private/evidence.json
 ```
 
 The connected test uses a disposable Tern daemon, private Xvfb window and real loopback SSH server with generated temporary keys and strict host-key checking. It touches no live configuration or provider. Source and restored identity, local/SSH state changes, visible failures and independent views are checked. See [docs/VALIDATION.md](docs/VALIDATION.md) for observed results and unqualified platforms; loopback SSH is not proof of a remote Windows/macOS deployment.
@@ -69,4 +77,8 @@ The package contains only its active implementation and tests. Upstream legacy r
 
 ## Attribution
 
-Original plugin/native-checklist approach: Felipe Carneiro (`felipevdc1/tern-session-list`), MIT, based on f5920de0cc1018fa9814e5f0c6cca83a7ddf34dc. Original LICENSE remains. Explicit checkpoint reader, local/SSH source path and workflow contract: BlastworksAI, MIT. This fork does not claim independent origin of the native checklist design. 
+Original plugin/native-checklist approach: Felipe Carneiro (`felipevdc1/tern-session-list`), MIT, based on f5920de0cc1018fa9814e5f0c6cca83a7ddf34dc. Original LICENSE remains. Explicit checkpoint reader, local/SSH source path and workflow contract: BlastworksAI, MIT. This fork does not claim independent origin of the native checklist design.
+
+### Quick invocation
+
+Click **TODO** in Tern’s Files pane header, choose a live agent session, then let TODO resolve that session’s published canonical plan. The picker lists native agents and terminal panes (including CLI agents), labelled with their host, Tern session, program and pane identity. Selection reveals the chosen panel, uses native process metadata to resolve its published plan on the execution host. Closed, parked or disconnected targets are excluded; a target that changes while the picker is open must be selected again. **TODO: attach to this panel** in the command palette remains the direct route for the focused panel. The existing bindable action remains `plugin.todo.show`.

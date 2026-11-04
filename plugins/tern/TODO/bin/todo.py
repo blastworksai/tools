@@ -118,11 +118,34 @@ def main(argv=None):
         source = commands.add_parser('source', help='read the agent’s canonical checkpoint block')
         source.add_argument('--plan', required=True)
         source.add_argument('--ssh', help='explicitly reviewed ordinary SSH destination; remote host needs Python 3 and a POSIX shell')
+        publish = commands.add_parser('publish', help='publish this agent session’s existing active plan identity')
+        publish.add_argument('--plan', required=True)
+        publish.add_argument('--agent-pid', required=True, type=int)
+        clear = commands.add_parser('clear', help='clear this agent session’s published plan identity')
+        clear.add_argument('--agent-pid', required=True, type=int)
+        commands.add_parser('ancestry', help='show native caller process facts so the agent can identify its own durable process')
+        discover = commands.add_parser('discover', help='resolve a publication on this native execution host')
+        discover.add_argument('--parent-pid', required=True, type=int)
+        published = commands.add_parser('published', help='read only the plan of an already-bound publishing process')
+        published.add_argument('--binding', required=True)
         template = commands.add_parser('template', help='print a block for the agent to place in its approved plan; never writes it')
         template.add_argument('--title', required=True)
         template.add_argument('--step', action='append', required=True)
         args = parser.parse_args(argv)
-        if args.command == 'template':
+        if args.command in {'publish','clear','discover','published','ancestry'}:
+            # Python -I intentionally ignores environment/CWD imports. Only our
+            # installed, adjacent implementation modules are added here.
+            sys.path.insert(0,str(Path(__file__).resolve().parent))
+            import publication
+            if args.command in {'publish','clear'}:
+                result=publication.publish(args.plan if args.command=='publish' else None,read_plan,args.agent_pid)
+            elif args.command=='ancestry':
+                from process_identity import ancestors
+                result={'ok':True,'ancestors':ancestors(os.getppid())}
+            elif args.command=='discover': result=publication.discover(args.parent_pid)
+            else: result=publication.read_binding(json.loads(args.binding),read_plan)
+            print(json.dumps(result,ensure_ascii=True,separators=(',',':')))
+        elif args.command == 'template':
             plan = validate({'schema': 1, 'plan_id': 'plan-' + uuid.uuid4().hex[:12], 'title': args.title,
                              'current': None, 'checkpoints': [{'id': f'cp{i}', 'text': text, 'state': 'pending'} for i, text in enumerate(args.step, 1)]})
             print(START+'\n```json\n'+json.dumps(plan, indent=2, ensure_ascii=False)+'\n```\n'+END)
@@ -130,8 +153,10 @@ def main(argv=None):
             plan = read_ssh(args.ssh, args.plan) if args.ssh else read_plan(Path(args.plan))
             print(json.dumps({'ok': True, 'plan': plan}, ensure_ascii=True, separators=(',', ':')))
         return 0
-    except (ValueError, OSError, subprocess.TimeoutExpired) as error:
-        print(json.dumps({'ok': False, 'error': str(error)}, ensure_ascii=True))
+    except (ValueError, OSError, KeyError, TypeError, subprocess.TimeoutExpired) as error:
+        envelope={'ok':False,'error':str(error)}
+        if getattr(error,'terminal',False): envelope['terminal']=True
+        print(json.dumps(envelope,ensure_ascii=True))
         return 1
 
 

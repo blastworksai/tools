@@ -2,15 +2,17 @@
 -- Identity is the explicitly selected source + immutable plan_id, never another pane number.
 local view = require("./lib/plan_view")
 local polling = require("./lib/polling")
+local selection = require("./lib/host_selection")
 local KIND = tern.plugin.id .. ".list"
 local instances = {}
 
 local function sourceValid(source)
     return type(source) == "table" and type(source.path) == "string" and source.path ~= ""
         and (source.ssh == nil or (type(source.ssh) == "string" and source.ssh ~= ""))
+        and (source.label == nil or (type(source.label) == "string" and #source.label <= 400))
 end
 local function live(state)
-    if instances[state.panel] ~= state then return false end
+    if state.finished or instances[state.panel] ~= state then return false end
     for _, pane in tern.pane.list() do
         if pane.pane == state.panel then return pane.program == KIND end
     end
@@ -21,17 +23,45 @@ local function redraw(state, cx)
     if live(state) then pcall(function() cx:render() end) end
 end
 local function refresh(state, cx)
-    if not live(state) or not state.source or state.reading then return end
+    if not live(state) or (not state.source and not state.discover_pid) or state.reading then return end
     state.reading = true
     local helper = tern.plugin.dir .. "/bin/todo.py"
-    local argv = {"python3", "-I", helper, "source", "--plan", state.source.path}
-    if tern.runtime.os == "windows" then argv = {"py", "-3", "-I", helper, "source", "--plan", state.source.path} end
-    if state.source.ssh then table.insert(argv, "--ssh"); table.insert(argv, state.source.ssh) end
+    local argv = {"python3", "-I", helper, "source", "--plan", if state.source then state.source.path else ""}
+    if tern.runtime.os == "windows" then argv = {"py", "-3", "-I", helper, "source", "--plan", if state.source then state.source.path else ""} end
+    if state.discover_pid then
+        argv={argv[1]}
+        if tern.runtime.os=="windows" then table.insert(argv,"-3") end
+        for _,value in {"-I",helper,"discover","--parent-pid",tostring(state.discover_pid)} do table.insert(argv,value) end
+    elseif state.source.publication then
+        argv={argv[1]}
+        if tern.runtime.os=="windows" then table.insert(argv,"-3") end
+        local binding={path=state.source.path,plan_id=state.plan_id,publication=state.source.publication}
+        for _,value in {"-I",helper,"published","--binding",tern.json.encode(binding)} do table.insert(argv,value) end
+    elseif state.source.ssh then table.insert(argv,"--ssh");table.insert(argv,state.source.ssh) end
     local ok = pcall(function()
         tern.process.run(argv, {timeout_ms = 6000}, function(result)
             if not live(state) then return end
             state.reading = false
             local decoded, envelope = pcall(tern.json.decode, result.stdout or "")
+            if state.discover_pid then
+                if result.status==0 and decoded and type(envelope)=="table" and envelope.ok==true then
+                    if envelope.state=="none" then
+                        state.finished=true;instances[state.panel]=nil
+                        pcall(function() cx:toast("info","No active plan is published for this session.") end)
+                        cx:exit(0);return
+                    end
+                    if envelope.state=="active" and sourceValid(envelope.source) and type(envelope.source.plan_id)=="string" and type(envelope.source.publication)=="table" then
+                        state.source=envelope.source;state.source.label=state.discovery_label
+                        state.plan_id=envelope.source.plan_id;state.discover_pid=nil
+                        refresh(state,cx);return
+                    end
+                end
+                state.error=if decoded and type(envelope)=="table" and type(envelope.error)=="string" then envelope.error else "Could not resolve this session's plan publication."
+                state.finished=true;instances[state.panel]=nil
+                pcall(function() cx:toast("error",state.error) end)
+                cx:exit(1);return
+            end
+            state.terminal = decoded and type(envelope)=="table" and envelope.terminal==true
             local plan = if decoded and type(envelope) == "table" then envelope.plan else nil
             if result.status ~= 0 or not decoded or envelope.ok ~= true or type(plan) ~= "table" then
                 state.plan = nil
@@ -41,16 +71,21 @@ local function refresh(state, cx)
             elseif state.plan_id ~= nil and state.plan_id ~= plan.plan_id then
                 state.plan = nil; state.error = "This file now belongs to a different plan. Close this panel and explicitly attach the intended plan."
             else
-                local firstBinding = state.plan_id == nil
+                local needsSave = not state.bindingSaved
                 state.plan_id = plan.plan_id
                 state.plan = plan
                 state.error = nil
                 state.updated = os.date("!%Y-%m-%d %H:%M:%S UTC")
-                if firstBinding then pcall(function() cx:save() end) end
+                if needsSave then
+                    local saved=pcall(function() cx:save() end)
+                    state.bindingSaved=saved
+                end
             end
             state.failures = if state.error then (state.failures or 0) + 1 else 0
             redraw(state, cx)
-            tern.timer(polling.delay(state.source.ssh ~= nil, state.failures), function() refresh(state, cx) end)
+            if not state.terminal then
+                tern.timer(polling.delay(state.source ~= nil and state.source.ssh ~= nil, state.failures), function() refresh(state, cx) end)
+            end
         end)
     end)
     if not ok then
@@ -58,7 +93,7 @@ local function refresh(state, cx)
         state.error = "Could not start the read-only source reader. Tern 0.9.8+ and Python 3 are required."
         state.failures = (state.failures or 0) + 1
         redraw(state, cx)
-        tern.timer(polling.delay(state.source.ssh ~= nil, state.failures), function() refresh(state, cx) end)
+        tern.timer(polling.delay(state.source ~= nil and state.source.ssh ~= nil, state.failures), function() refresh(state, cx) end)
     end
 end
 
@@ -68,24 +103,56 @@ tern.block.define("list", {
         -- A saved binding can only read the same selected source and stable plan id.
         -- Legacy bare-pane saves/args are deliberately not migrated or followed.
         if type(saved) == "table" and saved.schema == 2 and sourceValid(saved.source) and type(saved.plan_id) == "string" then
-            state.source = saved.source; state.plan_id = saved.plan_id
+            state.source = saved.source; state.plan_id = saved.plan_id; state.bindingSaved=true
         elseif saved == nil and args and type(args[1]) == "string" then
             local ok, source = pcall(tern.json.decode, args[1])
-            if ok and sourceValid(source) then state.source = source end
+            if ok and type(source)=="table" and source.mode=="selected" and type(source.window)=="string" and #source.window<=256 and not source.window:find("%c") and type(source.request)=="string" and #source.request<=128 and type(source.label)=="string" and #source.label<=400 then
+                state.selection=source
+            elseif ok and sourceValid(source) then
+                state.source = source
+                if type(args[2])=="string" and #args[2]<=80 and args[2]:match("^plan%-%x+$") then state.plan_id=args[2] end
+            end
         end
-        if not state.source then state.error = "No plan is attached. Close this panel and use TODO: attach to this tab." end
+        if not state.source and not state.discover_pid and not state.selection then state.error = "No plan is attached. Close this panel and use TODO: attach to this panel." end
         instances[cx.pane] = state
+        if state.selection then
+            tern.timer(3000,function()
+                if live(state) and not state.selectionStarted then
+                    state.finished=true;instances[state.panel]=nil
+                    cx:toast("error","The selected split could not be confirmed. Attach again.");cx:exit(1)
+                end
+            end)
+        end
         tern.timer(1, function() refresh(state, cx) end)
         return state
     end,
     view = function(state)
-        local source = if state.source then (if state.source.ssh then "SSH " .. state.source.ssh .. ": " else "Local: ") .. state.source.path else ""
+        local source = if state.source then (if state.source.label then state.source.label .. ": " elseif state.source.ssh then "SSH " .. state.source.ssh .. ": " else "Local: ") .. state.source.path else ""
         return view.draw(tern.ui, state.plan, source, state.error, state.updated)
     end,
     title = function(state) return if state.plan then state.plan.title else "TODO" end,
     save = function(state)
         if state.source and state.plan_id then return {schema = 2, source = state.source, plan_id = state.plan_id} end
         return {schema = 2}
+    end,
+    event = function(state,event,cx)
+        if not state.selection or state.selectionStarted or not live(state) or event.ev~="action" or event.id~="main" or event.act~="confirm-selection" or event.value~=state.selection.request then return end
+        state.selectionStarted=true
+        local ok,err=pcall(function()
+            selection.resolve(state.panel,state.selection.window,function() return live(state) end,function(pid,why)
+                if not live(state) then return end
+                if not pid then
+                    state.finished=true;instances[state.panel]=nil
+                    cx:toast("error",why or "Could not identify the selected native session.");cx:exit(1);return
+                end
+                state.discover_pid=pid;state.discovery_label=state.selection.label;state.selection=nil
+                refresh(state,cx)
+            end)
+        end)
+        if not ok then
+            state.finished=true;instances[state.panel]=nil
+            cx:toast("error","Could not inspect the selected native session.");cx:exit(1)
+        end
     end,
     -- No checkpoint editing, canonical writes, prompt sending or work adoption.
 })
