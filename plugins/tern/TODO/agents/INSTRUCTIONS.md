@@ -2,7 +2,7 @@
 
 Use TODO for visible interactive `/glitch-plan (Codex: $glitch-plan)` work. Unviewed fleet/BWPM/FORGE work is outside it.
 
-Read the installed planning companion at `<glitch-root>/_local/tern-todo/README.md`, or the packaged `integrations/glitch-plan-session-view/README.md`. Deliberately maintain one agreed checkpoint block in the canonical plan, then run `todo publish --plan <its absolute path>` from this agent's own normal tool session. Clear with `todo clear` when the session stops working on a plan. Never publish another pane's plan or infer a plan from startup notes or the current directory.
+Read the installed planning companion at `<glitch-root>/_local/tern-todo/README.md`, or the packaged `integrations/glitch-plan-session-view/README.md`. Deliberately maintain one agreed checkpoint block in the canonical plan, then run `todo publish --agent-pid <verified agent PID> --plan <its absolute path>` from this agent's own normal tool session. Clear with `todo clear --agent-pid <verified agent PID>` when the session stops working on a plan. Never publish another pane's plan or infer a plan from startup notes or the current directory.
 
 Publication is metadata only: path, existing plan id and OS-verified process identity. It does not copy or modify canonical content. The viewer reads that canonical file; the planning/execution workflow remains authoritative. No model prompt, terminal input, continuation, provider work or hook is sent/installed by TODO.
 

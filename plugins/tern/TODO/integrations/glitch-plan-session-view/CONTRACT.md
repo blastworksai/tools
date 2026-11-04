@@ -23,7 +23,7 @@ Update the dated Progress evidence, checkpoint state and START HERE consistently
 
 ## Publishing and attaching the view
 
-After creating or deliberately resuming/revising an agreed checkpoint plan, the planning agent runs `todo publish --plan <absolute canonical path>` from its own tool session. When that session stops working on a plan, it runs `todo clear`. See README.md beside this contract for the installed companion path. These operations change only metadata, never canonical content or another session's binding.
+After creating or deliberately resuming/revising an agreed checkpoint plan, the planning agent runs `todo publish --agent-pid <verified agent PID> --plan <absolute canonical path>` from its own tool session. When that session stops working on a plan, it runs `todo clear --agent-pid <verified agent PID>`. See README.md beside this contract for the installed companion path. These operations change only metadata, never canonical content or another session's binding.
 
 The Files-pane TODO button first selects the agent session. Native process metadata identifies that session on its Tern execution host; the host resolves its process-owned publication and reads the canonical plan. The operator is not asked for a source or plan path. No publication means a notice and exit from TODO only; the agent stays running. Invalid or unreadable publication metadata fails visibly, without a guessed plan or agent prompt.
 

@@ -210,16 +210,22 @@ def publish(path, read_plan, agent_pid):
             record = _read(old,identity)
             if not _valid(record): old.unlink()
         except (OSError,ValueError,KeyError,TypeError): pass
+    def same_agent(saved):
+        return all(saved[key] == anchors[0][key] for key in ['pid','birth','owner'])
     if os.path.lexists(target):
         existing = _read(target,identity)
-        if _valid(existing) and existing['anchors'][0] != anchors[0]:
+        if _valid(existing) and not same_agent(existing['anchors'][0]):
             raise ValueError('another live publisher already owns this native session')
-    # A failed new publication must never leave yesterday's successful binding.
-    if os.path.lexists(target):
-        _safe(target,identity);target.unlink()
-    if path is None:return {'ok':True,'state':'none'}
-    record = {'schema':1,'owner':identity,'anchors':anchors,'state':'none','published_ns':time.time_ns()}
-    if path is not None:
+    def retract():
+        try: current = _read(target,identity)
+        except FileNotFoundError: return
+        # Never erase a different live publication that arrived meanwhile.
+        if _valid(current) and not same_agent(current['anchors'][0]): return
+        target.unlink()
+    if path is None:
+        retract();return {'ok':True,'state':'none'}
+    try:
+        record = {'schema':1,'owner':identity,'anchors':anchors,'state':'none','published_ns':time.time_ns()}
         selected=Path(path)
         if not selected.is_absolute() or str(selected).startswith(('\\\\','//')):
             raise ValueError('the published plan must be an absolute local path')
@@ -233,16 +239,19 @@ def publish(path, read_plan, agent_pid):
         if str(canonical).startswith(('\\\\','//')): raise ValueError('network plan roots are not accepted')
         plan = read_plan(canonical)
         record.update(state='active',path=str(canonical),plan_id=plan['plan_id'])
-    data=json.dumps(record,ensure_ascii=True,separators=(',',':')).encode()
-    if len(data)>LIMIT: raise ValueError('publication exceeds its size limit')
-    descriptor,temporary=tempfile.mkstemp(prefix='.publish-',dir=folder)
-    try:
-        with os.fdopen(descriptor,'wb') as stream:
-            if os.name!='nt': os.fchown(stream.fileno(),-1,_group());os.fchmod(stream.fileno(),0o640)
-            stream.write(data);stream.flush();os.fsync(stream.fileno())
-        os.replace(temporary,target)
-    finally:
-        if os.path.exists(temporary): os.unlink(temporary)
+        data=json.dumps(record,ensure_ascii=True,separators=(',',':')).encode()
+        if len(data)>LIMIT: raise ValueError('publication exceeds its size limit')
+        descriptor,temporary=tempfile.mkstemp(prefix='.publish-',dir=folder)
+        try:
+            with os.fdopen(descriptor,'wb') as stream:
+                if os.name!='nt': os.fchown(stream.fileno(),-1,_group());os.fchmod(stream.fileno(),0o640)
+                stream.write(data);stream.flush();os.fsync(stream.fileno())
+            os.replace(temporary,target)
+        finally:
+            if os.path.exists(temporary): os.unlink(temporary)
+    except (OSError,ValueError,KeyError,TypeError):
+        retract()
+        raise
     return {'ok':True,'state':record['state'],'publication':{'owner':identity,'pid':anchors[0]['pid'],'birth':anchors[0]['birth'],'parent_pid':anchors[-2]['pid'],'parent_birth':anchors[-2]['birth']}}
 
 
@@ -255,7 +264,7 @@ def discover(parent):
         if not identity or len(identity)>100 or any(c not in '0123456789S-' for c in identity): continue
         path=folder/_key(native)
         try: path.lstat()
-        except FileNotFoundError: continue
+        except (FileNotFoundError,PermissionError): continue
         directory(identity)  # A matching unsafe store is a detection error, never no-plan.
         try: record=_read(path,identity)
         except FileNotFoundError: continue
