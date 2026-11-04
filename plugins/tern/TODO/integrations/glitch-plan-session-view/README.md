@@ -29,3 +29,25 @@ Native Tern remote-host sessions publish on their execution host. Raw SSH into a
 The descriptor registers this companion for the planning model to discover. It is an instruction contract, not proof that every managed planning invocation already follows it; rollout qualification must observe adoption.
 
 Conversation resets are not kernel process exits. If the process stays alive and the clear instruction is skipped, its old publication remains visible. The helper cannot observe conversation identity; this residual must be disclosed before rollout. A fresh planning session must clear an inherited binding before deliberately publishing its own current plan. The registry descriptor alone does not enforce either instruction.
+
+## Actual workflow entry
+
+`capability.json` advertises this companion; it does not invoke it. Install
+`entry_hook.py` as an additive local hook for SessionStart, UserPromptSubmit and
+PreToolUse/Skill. It supplies the companion instruction at the actual invocation
+of both `/glitch-plan` and `/glitch-execute`, including a Skill tool invocation.
+It never edits a plan, publishes metadata, sends input, blocks a command or
+changes managed hooks. The owning agent still adopts and publishes the agreed
+checkpoint block through its normal authorised tools.
+
+When `/glitch-execute` deliberately resumes an existing agreed plan without a
+block, create the summary from its agreed checkpoints before implementation or
+operations, set current state from the executor's verified progress, then publish.
+Do not wait for another `/glitch-plan` run. Do not rename agreed checkpoints or
+reopen settled choices. Respect read-only sessions and another pane's ownership.
+
+Existing agent processes may retain a snapshot of their hooks. Installation is
+qualified only after a fresh ordinary planning/execution session follows the
+entry instruction and the real TODO button displays its plan. A payload probe
+alone proves instruction delivery, not adoption. Do not restart an acting agent
+or alter its plan from the installer.
