@@ -108,8 +108,6 @@ tern.block.define("list", {
             local ok, source = pcall(tern.json.decode, args[1])
             if ok and type(source)=="table" and source.mode=="selected" and type(source.window)=="string" and #source.window<=256 and not source.window:find("%c") and type(source.request)=="string" and #source.request<=128 and type(source.label)=="string" and #source.label<=400 then
                 state.selection=source
-            elseif ok and type(source)=="table" and type(source.discover_pid)=="number" and source.discover_pid>0 and source.discover_pid%1==0 and type(source.label)=="string" and #source.label<=400 then
-                state.discover_pid=source.discover_pid;state.discovery_label=source.label
             elseif ok and sourceValid(source) then
                 state.source = source
                 if type(args[2])=="string" and #args[2]<=80 and args[2]:match("^plan%-%x+$") then state.plan_id=args[2] end

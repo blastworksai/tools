@@ -13,10 +13,6 @@ function attach.new(api)
         end
         return false
     end
-    function controller.openSource(cx, target, source, planId)
-        if existing(cx,target) then cx:toast("info","This tab already has a plan view.");return end
-        cx:new_block(KIND,{api.json.encode(source),planId},"beside",{target=target,dir="right",ratio=0.3,focus=false})
-    end
     local function same(cx, origin)
         local pane = cx.session:pane(origin.target)
         local host = cx.hosts:current()

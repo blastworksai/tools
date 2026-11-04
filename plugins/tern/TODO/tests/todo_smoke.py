@@ -63,7 +63,7 @@ def main():
         with source_file.open('a') as stream:
             for name, source in [('test_local', {'path': str(local)}), ('test_ssh', {'path': str(remote), 'ssh': 'session-plan-test'})]:
                 encoded = json.dumps(json.dumps(source))
-                stream.write('\ntern.command({id="'+name+'", title="Isolated fixture", run=function(cx) controller.openSource(cx,cx.session:focused(),tern.json.decode('+encoded+'),"'+('plan-abcdef123456' if name=='test_ssh' else plan()['plan_id'])+'") end})\n')
+                stream.write('\ntern.command({id="'+name+'", title="Isolated fixture", run=function(cx) cx:new_block("todo-test.list",{'+encoded+',"'+('plan-abcdef123456' if name=='test_ssh' else plan()['plan_id'])+'"},"beside",{target=cx.session:focused(),dir="right",ratio=0.3,focus=false}) end})\n')
         with source_file.open('a') as stream:
             stream.write('\ntern.command({id="test_auto", title="Isolated auto attach", run=function(cx) controller.start(cx,false) end})\n')
         host = base/'plugin/host.luau'
