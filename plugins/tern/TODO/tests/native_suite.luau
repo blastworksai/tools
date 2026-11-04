@@ -1,6 +1,6 @@
 -- Active TODO view contracts in an isolated real Tern Luau VM. CodexBWAI; MIT.
 local tests=require("./plan_view_test")
-for _,name in {"./connection_test","./attach_test","./plan_request_test"} do
+for _,name in {"./attach_test"} do
     for _,test in require(name) do table.insert(tests,test) end
 end
 local passed,failures=0,{}

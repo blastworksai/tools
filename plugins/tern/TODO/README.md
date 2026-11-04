@@ -24,17 +24,24 @@ Use the installed package’s absolute `bin/todo` path (`bin/todo.cmd` on Window
 
 Canonical plan files use UTF-8 with LF or CRLF line endings. The reader never rewrites their bytes. The command prints a fenced JSON block between `<!-- TERN-SESSION:START -->` and `<!-- TERN-SESSION:END -->`; the agent places it in the canonical plan through its normal write path. States are `pending`, `active`, `blocked`, `done`. At most one is active. `current` names the active/blocked checkpoint, or is null; blocked checkpoints require a reason. Stable ids survive description/reordering changes. The view never edits these fields.
 
-The companion is a source integration asset, **not an installed override of managed Glitch skills**. Live customization/upstream integration is not planned.
+The companion is installed separately under `_local/tern-todo`, through Glitch’s supported local customization path. It does not override managed skills or hooks. Its publication instruction must be observed in the planning session; descriptor presence alone does not prove adoption.
 
 ## Session discovery and source location
 
-Click **TODO** in the Files pane and choose the live agent session to follow. TODO uses Tern's native agent communication to request that session's active canonical plan path and existing checkpoint plan id. The operator is not asked for the path. The request is metadata only: it must not start, resume, adopt or modify work. This explicit user-requested query supersedes the earlier no-agent-prompt design.
+Click **TODO** in the Files pane, choose the live agent session, and TODO resolves its explicitly published plan. It never asks the operator for the plan path or types into the agent. The planning companion publishes after an agreed plan is created or deliberately resumed/revised:
 
-An explicit `none` reply shows **This session is not working on a plan** and exits the TODO attachment flow; the agent remains open. An active plan without a TODO checkpoint block is reported as unsupported. Busy agents, missing native communication, timeout, changed sessions or malformed replies end the flow with a detection error, never an invented no-plan result. There is no raw terminal-input fallback, automatic retry or automatic continuation.
+```sh
+todo publish --plan /absolute/canonical/PLAN.md
+todo clear
+```
 
-Native remote Tern sessions use their execution host directly. Local panels use bounded, window-scoped native process metadata to identify their file-reading route. Raw SSH destinations can be detected, but the automatic discovery flow currently requires a native Tern remote connection for remote reads. A detected SSH alias does not prove that its key permits ordinary file commands; TODO will not reuse an unverified agent-launch key. Raw SSH, custom command-line port/key/jump overrides and opaque wrappers end the flow rather than ask the operator or silently change the route. Existing SSH trust/authentication and a POSIX remote shell with Python 3 are required. No credential is copied, host trusted automatically or remote package installed. The accepted reply's stable plan id is pinned before the first read.
+See [the companion](integrations/glitch-plan-session-view/README.md). Publications contain only the existing canonical path/plan id and a verified live process birth/owner chain. A reused pane or process id cannot inherit an older plan. The canonical record remains authoritative; normal edits refresh without republishing. Clear or process exit invalidates old success. A changed plan requires deliberate reattachment.
 
-The protocol and current qualification limits are in [agents/INSTRUCTIONS.md](agents/INSTRUCTIONS.md) and [docs/VALIDATION.md](docs/VALIDATION.md). Native agent-protocol support is required; a generic terminal is not treated as a safe agent input endpoint.
+No active publication shows **No active plan is published for this session** and exits the TODO flow, leaving the agent running. Invalid metadata/access produces a detection error instead. This works with ordinary CLI agents: no native agent composer, draft inspection, prompt submission, hook, socket access or copied credential is needed.
+
+Local and native SSH Tern sessions use the same host-side resolver. The viewing client passes only native process metadata; the execution host resolves its own publication and reads its own canonical file. The label shows Local or SSH and the native host. Raw SSH into a machine without native Tern ancestry is unsupported; there is no guessed local path or automatic secondary SSH login.
+
+Linux publications use per-owner runtime directories with the existing `agents` group's read access on the estate; other accounts cannot write them. macOS and Windows use native user caches and permissions. Native process birth and ownership interfaces come with the OS; there is no new package dependency or listening service.
 
 Direct source checks (no Tern environment required):
 
@@ -61,7 +68,7 @@ Plugin ID is `todo`; displayed name is **TODO**. Install on the actual session h
 
 ```sh
 python3 -m unittest discover -s tests -p todo_test.py
-python3 tests/todo_smoke.py --evidence /absolute/private/evidence.json
+python3 tests/todo_smoke.py --published --evidence /absolute/private/evidence.json
 ```
 
 The connected test uses a disposable Tern daemon, private Xvfb window and real loopback SSH server with generated temporary keys and strict host-key checking. It touches no live configuration or provider. Source and restored identity, local/SSH state changes, visible failures and independent views are checked. See [docs/VALIDATION.md](docs/VALIDATION.md) for observed results and unqualified platforms; loopback SSH is not proof of a remote Windows/macOS deployment.
@@ -74,4 +81,4 @@ Original plugin/native-checklist approach: Felipe Carneiro (`felipevdc1/tern-ses
 
 ### Quick invocation
 
-Click **TODO** in Tern’s Files pane header, choose a live agent session, then let TODO query that session for its active canonical plan. The picker lists native agents and terminal panes (including CLI agents), labelled with their host, Tern session, program and pane identity. Selection reveals the chosen panel, detects its connection and requests its active plan through native Tern agent communication. Closed, parked or disconnected targets are excluded; a target that changes while the picker is open must be selected again. **TODO: attach to this panel** in the command palette remains the direct route for the focused panel. The existing bindable action remains `plugin.todo.show`.
+Click **TODO** in Tern’s Files pane header, choose a live agent session, then let TODO resolve that session’s published canonical plan. The picker lists native agents and terminal panes (including CLI agents), labelled with their host, Tern session, program and pane identity. Selection reveals the chosen panel, uses native process metadata to resolve its published plan on the execution host. Closed, parked or disconnected targets are excluded; a target that changes while the picker is open must be selected again. **TODO: attach to this panel** in the command palette remains the direct route for the focused panel. The existing bindable action remains `plugin.todo.show`.

@@ -21,19 +21,16 @@ The executor that owns the canonical plan owns its checkpoint block. When starti
 
 Update the dated Progress evidence, checkpoint state and START HERE consistently in the same canonical file. Never treat a green test alone as owner acceptance, release permission or a reason to bypass another gate. The view does not write any of these values.
 
-## Attaching the view
+## Publishing and attaching the view
 
-Click **TODO** in the Files pane, choose the agent session, and let the native Tern metadata request identify its active canonical plan. **TODO: attach to this panel** starts the same query for the focused panel. The operator is not asked for a source or plan path. Native local and remote session-host reads pin the reported stable plan id before the first read.
+After creating or deliberately resuming/revising an agreed checkpoint plan, the planning agent runs `todo publish --plan <absolute canonical path>` from its own tool session. When that session stops working on a plan, it runs `todo clear`. See README.md beside this contract for the installed companion path. These operations change only metadata, never canonical content or another session's binding.
 
-An explicit no-plan response ends TODO's attachment flow, never the agent pane. Unsupported checkpoint metadata, unavailable/unsafe communication, timeout or changed session ends with an error. A native empty sendable composer must be observed before submission; terminal-only agents without one are currently unsupported, never typed into. The metadata query is expressly authorized; no source write, work adoption, task continuation or fleet dispatch occurs.
+The Files-pane TODO button first selects the agent session. Native process metadata identifies that session on its Tern execution host; the host resolves its process-owned publication and reads the canonical plan. The operator is not asked for a source or plan path. No publication means a notice and exit from TODO only; the agent stays running. Invalid or unreadable publication metadata fails visibly, without a guessed plan or agent prompt.
 
-The view polls its selected source read-only and displays native active, blocked, pending and done checkpoints. A different plan id at the same source is refused. Raw SSH alone is not an authorized file route; use native Tern remote-host connections. Existing plan gates remain authoritative.
+The publication is bound to OS ownership, the agent process birth and its native Tern ancestry. Persisted view identity includes the canonical source/plan id and that process binding, never a bare pane number. Process exit/reuse, clear or a different publication invalidates prior success. A different plan is not adopted automatically.
 
-## Deployment boundary
+Normal canonical edits refresh read-only. The renderer uses the unframed native checklist family used by OMP ACP todos, with Tern's inherited theme and fonts. Native remote-host SSH routes use their own execution filesystem; raw SSH without native Tern ancestry is unsupported. No credentials are copied, new trust accepted, provider work dispatched or model input sent.
 
-The managed Glitch engine remains read-only. Integrate this companion through a reviewed supported customization or upstream skill change; do not edit a live managed `glitch-plan`/`glitch-execute` file or install hooks automatically. Before claiming end-to-end live adoption, prove an actual new interactive plan receives the block, its executor maintains it and the real local/SSH panel reflects its verified checkpoint changes. Fleet execution uses its own workflow; BWPM/FORGE are not panel sources.
+## Adoption boundary
 
-
-### Owner-authorized discovery update
-
-The TODO Files button selects the agent session, then sends one native Tern metadata request to that agent's communication endpoint. The agent returns its existing canonical plan path and checkpoint plan id using `TODO_PLAN_REPLY v1`, or explicitly reports `none`/`unsupported` as described in agents/INSTRUCTIONS.md. The operator is not asked for the plan. No plan means exit TODO's attachment flow, never close or interrupt the agent pane. This explicit discovery request supersedes older prose forbidding all agent prompts; it authorizes neither work nor automatic continuation. Ordinary canonical checkpoint maintenance remains deliberate. A generic terminal with no native agent communication endpoint is unsupported; never type discovery text into a shell or existing draft.
+This is an explicit agent-side publication contract with a discoverable local companion. Managed engine skills/hooks stay unchanged. Evidence that the helper and viewer work is separate from evidence that every planning session follows the companion. Existing plans gain the agreed block and publication only on deliberate resume/revision. No fleet/BWPM/FORGE state is read or written.

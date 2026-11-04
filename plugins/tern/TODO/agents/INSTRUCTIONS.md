@@ -1,19 +1,11 @@
-# Interactive planning companion — CodexBWAI, COMMANDER-993
+# Interactive plan publication — CodexBWAI
 
-Use this view for interactive `$glitch-plan` work only. Fleet execution and BWPM/FORGE are outside it.
+Use TODO for visible interactive `$glitch-plan` work. Unviewed fleet/BWPM/FORGE work is outside it.
 
-Follow the full companion at `integrations/glitch-plan-session-view/CONTRACT.md`: add one explicitly agreed checkpoint block to the canonical plan, preserve stable plan/checkpoint ids, and keep the executor's current/blocked/done states consistent with its verified Progress evidence and sole START HERE. Deliberately adopt existing plans; never infer completion from prose or rewrite the whole plan to satisfy a parser.
+Read the installed planning companion at `<glitch-root>/_local/tern-todo/README.md`, or the packaged `integrations/glitch-plan-session-view/README.md`. Deliberately maintain one agreed checkpoint block in the canonical plan, then run `todo publish --plan <its absolute path>` from this agent's own normal tool session. Clear with `todo clear` when the session stops working on a plan. Never publish another pane's plan or infer a plan from startup notes or the current directory.
 
-The Files button first selects a live agent session. On an explicit TODO metadata request through native Tern, report only YOUR current canonical interactive plan: do not adopt work, infer a plan from the current directory or another pane, modify files, or continue a task because of this query.
+Publication is metadata only: path, existing plan id and OS-verified process identity. It does not copy or modify canonical content. The viewer reads that canonical file; the planning/execution workflow remains authoritative. No model prompt, terminal input, continuation, provider work or hook is sent/installed by TODO.
 
-Reply in exactly one line:
+The Files button asks the operator which session to follow. The host resolves that session's valid publication. No valid active publication means an informational notice and exit from the TODO flow; the selected agent stays open. Unsupported metadata/access or changed process/source produces a distinct error. An existing view never adopts a different plan automatically.
 
-```text
-TODO_PLAN_REPLY v1 {"request_id":"<the exact request id>","state":"active","path":"<absolute canonical path on your execution host>","plan_id":"<existing plan id in its TODO checkpoint block>"}
-```
-
-If you are not working on a plan, return the same request id with `"state":"none"`, omitting path/id. If you have an active plan without the explicit checkpoint block, return `"state":"unsupported"`; do not create a block just to answer. The query authorizes metadata disclosure only, never work or continuation. TODO exits its own flow on none/unsupported; it never closes your session. Unknown, stale and malformed replies are errors, not no-plan evidence.
-
-The native agent endpoint and a verifiably empty sendable native composer are required. Terminal-only CLI agents without that structured composer are currently unsupported. TODO does not type protocol requests into arbitrary terminal prompts or replace existing drafts. Local means the execution host; ordinary reviewed SSH file transport can read a remote canonical plan. The selected file and reported stable id become the read-only source identity.
-
-No hook is installed or required. The source companion is not automatically wired into managed Glitch skills. Customization/upstream adoption, exact-head review, authenticated real-client qualification and deployment remain explicit gates. Use native Tern for communication; Herdr is retired and Interceptor is unrelated.
+All source identity crosses through the existing native Tern execution host. Do not forward another Unix identity's socket or credentials. Raw SSH without native Tern host ancestry cannot publish. Helpers need only existing Python 3 and native OS interfaces; do not install anything to force a publication.

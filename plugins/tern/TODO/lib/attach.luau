@@ -1,12 +1,9 @@
--- Window controller: detect first, then ask only for the canonical plan path.
+-- Window controller: select a session; native host resolves its explicit publication.
 -- CodexBWAI; MIT.
-local connection = require("./connection")
-local planRequest = require("./plan_request")
 local attach = {}
 function attach.new(api)
     local KIND = api.plugin.id .. ".list"
     local controller = {}
-    local queryPlan=planRequest.new(api)
     local function existing(cx, target)
         local owner = cx.session:pane(target)
         if not owner then return true end
@@ -37,7 +34,7 @@ function attach.new(api)
                 if not same(fresh,origin) then changed(fresh);return end
                 local ok, value = false, nil
                 if type(result.stdout)=="string" and #result.stdout<=65536 then ok, value=pcall(api.json.decode,result.stdout) end
-                if result.status==0 and ok and type(value)=="table" and value.pane==origin.target and connection.fingerprint(value) then
+                if result.status==0 and ok and type(value)=="table" and value.pane==origin.target and type(value.child)=="table" and type(value.child.pid)=="number" and value.child.pid>0 and value.child.pid%1==0 then
                     callback(value,fresh)
                 elseif index<#candidates then run(index+1,fresh)
                 else callback(nil,fresh) end
@@ -60,30 +57,16 @@ function attach.new(api)
         if not pane or pane.exited~=nil or host.state~="connected" then changed(cx);return end
         if existing(cx,target) then cx:toast("info","This tab already has a plan view.");return end
         local origin={target=target,tab=pane.tab,host=host.id,window=cx:window_key()}
-        local function begin(metadata,fresh)
-            local route=connection.detect(fresh.hosts:current(),fresh.session:pane(target),metadata)
-            if route.kind~="host" or route.needs_alias then
-                fresh:toast("error","TODO could not establish a verified file-reading route for this session. Use a native Tern remote connection. "..(route.reason or ""));return
+        process(cx,origin,function(metadata,fresh)
+            if not metadata or not metadata.child or type(metadata.child.pid)~="number" then
+                fresh:toast("error","Could not identify the selected session's native process. The TODO flow has ended.");return
             end
-            local fingerprint=connection.fingerprint(metadata)
-            queryPlan(fresh,target,function(latest) return same(latest,origin) end,function(latest,reply,error)
-                if not latest then return end
-                if error then latest:toast("error",error.." The TODO flow has ended.");return end
-                if reply.state=="unsupported" then latest:toast("error","This session has a plan without an explicit TODO checkpoint block. The TODO flow has ended.");return end
-                if reply.state=="none" then latest:toast("info","This session is not working on a plan. The TODO flow has ended.");return end
-                if not same(latest,origin) then changed(latest);return end
-                local function bind(now)
-                    controller.openSource(now,target,{path=reply.path,ssh=route.ssh,label=route.label},reply.plan_id)
-                end
-                if fingerprint then
-                    process(latest,origin,function(current,last)
-                        if connection.fingerprint(current)~=fingerprint then changed(last);return end
-                        bind(last)
-                    end)
-                else bind(latest) end
-            end)
-        end
-        if host.kind=="remote" then begin(nil,cx) else process(cx,origin,begin) end
+            if not same(fresh,origin) then changed(fresh);return end
+            -- The host half resolves local metadata on the execution host. No path
+            -- is guessed from this client's filesystem or typed into an agent.
+            local label=(if host.kind=="remote" then "SSH · " else "Local · ")..(host.address or host.name)
+            controller.openSource(fresh,target,{discover_pid=metadata.child.pid,label=label},nil)
+        end)
     end
     function controller.chooseSession(cx)
         local hosts, sessions, items = {}, {}, {}
