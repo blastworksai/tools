@@ -39,7 +39,7 @@ Identify the agent’s actual durable process with its runtime or `todo ancestry
 
 No active publication shows **No active plan is published for this session** and exits the TODO flow, leaving the agent running. Invalid metadata/access produces a detection error instead. This works with ordinary CLI agents: no native agent composer, draft inspection, prompt submission, hook, socket access or copied credential is needed.
 
-Local and native SSH Tern sessions use the same host-side resolver. The viewing client passes only native process metadata; the execution host resolves its own publication and reads its own canonical file. The label shows Local or SSH and the native host. Raw SSH into a machine without native Tern ancestry is unsupported; there is no guessed local path or automatic secondary SSH login.
+Local and native SSH Tern sessions use the same host-side resolver. The viewing client confirms the native split beside the selected session; the execution host resolves that split to its own process metadata, then reads its own published canonical file. Client-side pane handles are never interpreted as host CLI ids. The label shows Local or SSH and the native host. Raw SSH into a machine without native Tern ancestry is unsupported; there is no guessed local path or automatic secondary SSH login.
 
 Linux publications use per-owner runtime directories with the existing `agents` group's read access on the estate; other accounts cannot write them. macOS and Windows use native user caches and permissions. Native process birth and ownership interfaces come with the OS; there is no new package dependency or listening service.
 

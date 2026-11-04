@@ -1,5 +1,6 @@
 -- Window controller: select a session; native host resolves its explicit publication.
 -- CodexBWAI; MIT.
+local binding = require("./selected_binding")
 local attach = {}
 function attach.new(api)
     local KIND = api.plugin.id .. ".list"
@@ -24,31 +25,6 @@ function attach.new(api)
     local function changed(cx)
         cx:toast("error","The panel or connection changed. Attach again in the intended panel.")
     end
-    local function process(cx, origin, callback)
-        local candidates = {api.getenv("TERN_EXE") or "tern"}
-        if api.runtime.os == "macos" then table.insert(candidates,"/Applications/Tern.app/Contents/MacOS/tern") end
-        local function run(index, current)
-            if not same(current,origin) then changed(current);return end
-            local function finish(result,fresh)
-                if not fresh then return end
-                if not same(fresh,origin) then changed(fresh);return end
-                local ok, value = false, nil
-                if type(result.stdout)=="string" and #result.stdout<=65536 then ok, value=pcall(api.json.decode,result.stdout) end
-                if result.status==0 and ok and type(value)=="table" and value.pane==origin.target and type(value.child)=="table" and type(value.child.pid)=="number" and value.child.pid>0 and value.child.pid%1==0 then
-                    callback(value,fresh)
-                elseif index<#candidates then run(index+1,fresh)
-                else callback(nil,fresh) end
-            end
-            local ok = pcall(function()
-                api.process.run({candidates[index],"process",string.format("%.0f",origin.target),"--window",origin.window,"--json"},
-                    {timeout_ms=2500},finish)
-            end)
-            if not ok then
-                if index<#candidates then run(index+1,current) else callback(nil,current) end
-            end
-        end
-        run(1,cx)
-    end
     function controller.start(cx, _forceManual, selected)
         local target=selected or cx.session:focused()
         if not target then return end
@@ -57,17 +33,32 @@ function attach.new(api)
         if not pane or pane.exited~=nil or host.state~="connected" then changed(cx);return end
         if existing(cx,target) then cx:toast("info","This tab already has a plan view.");return end
         local origin={target=target,tab=pane.tab,host=host.id,window=cx:window_key()}
-        process(cx,origin,function(metadata,fresh)
-            if not metadata or not metadata.child or type(metadata.child.pid)~="number" then
-                fresh:toast("error","Could not identify the selected session's native process. The TODO flow has ended.");return
+        -- Tern makes the split in the selected host's native namespace. The host
+        -- resolves that split; client-side CLI ids cannot address a remote host.
+        local request=tostring(api.now())..":"..tostring(target)
+        local label=(if host.kind=="remote" then "SSH · " else "Local · ")..(host.address or host.name)
+        local panel=cx:new_block(KIND,{api.json.encode({mode="selected",label=label,window=origin.window,request=request})},"beside",{target=target,dir="right",ratio=0.3,focus=false})
+        if not panel then changed(cx);return end
+        local deadline=api.now()+2500
+        local function confirm(fresh)
+            if not fresh then return end
+            local own=fresh.session:pane(panel)
+            if not same(fresh,origin) or (own and (own.block~=KIND or own.tab~=origin.tab)) then
+                if own and own.block==KIND then fresh.layout:close(panel) end
+                changed(fresh);return
             end
-            if not same(fresh,origin) then changed(fresh);return end
-            -- The host half resolves local metadata on the execution host. No path
-            -- is guessed from this client's filesystem or typed into an agent.
-            local label=(if host.kind=="remote" then "SSH · " else "Local · ")..(host.address or host.name)
-            controller.openSource(fresh,target,{discover_pid=metadata.child.pid,label=label},nil)
-        end)
+            local layout=fresh.session:layout(origin.tab)
+            if own and layout and fresh.session:focused()==target and binding.windowPair(layout.root,target,panel) then
+                fresh.session:event(panel,{ev="action",id="main",act="confirm-selection",value=request})
+            elseif api.now()<deadline then api.timer(100,confirm)
+            else
+                if own and own.block==KIND then fresh.layout:close(panel) end
+                changed(fresh)
+            end
+        end
+        api.timer(100,confirm)
     end
+
     function controller.chooseSession(cx)
         local hosts, sessions, items = {}, {}, {}
         for _, host in cx.hosts:list() do

@@ -2,6 +2,7 @@
 -- Identity is the explicitly selected source + immutable plan_id, never another pane number.
 local view = require("./lib/plan_view")
 local polling = require("./lib/polling")
+local selection = require("./lib/host_selection")
 local KIND = tern.plugin.id .. ".list"
 local instances = {}
 
@@ -105,15 +106,25 @@ tern.block.define("list", {
             state.source = saved.source; state.plan_id = saved.plan_id; state.bindingSaved=true
         elseif saved == nil and args and type(args[1]) == "string" then
             local ok, source = pcall(tern.json.decode, args[1])
-            if ok and type(source)=="table" and type(source.discover_pid)=="number" and source.discover_pid>0 and source.discover_pid%1==0 and type(source.label)=="string" and #source.label<=400 then
+            if ok and type(source)=="table" and source.mode=="selected" and type(source.window)=="string" and #source.window<=256 and not source.window:find("%c") and type(source.request)=="string" and #source.request<=128 and type(source.label)=="string" and #source.label<=400 then
+                state.selection=source
+            elseif ok and type(source)=="table" and type(source.discover_pid)=="number" and source.discover_pid>0 and source.discover_pid%1==0 and type(source.label)=="string" and #source.label<=400 then
                 state.discover_pid=source.discover_pid;state.discovery_label=source.label
             elseif ok and sourceValid(source) then
                 state.source = source
                 if type(args[2])=="string" and #args[2]<=80 and args[2]:match("^plan%-%x+$") then state.plan_id=args[2] end
             end
         end
-        if not state.source and not state.discover_pid then state.error = "No plan is attached. Close this panel and use TODO: attach to this panel." end
+        if not state.source and not state.discover_pid and not state.selection then state.error = "No plan is attached. Close this panel and use TODO: attach to this panel." end
         instances[cx.pane] = state
+        if state.selection then
+            tern.timer(3000,function()
+                if live(state) and not state.selectionStarted then
+                    state.finished=true;instances[state.panel]=nil
+                    cx:toast("error","The selected split could not be confirmed. Attach again.");cx:exit(1)
+                end
+            end)
+        end
         tern.timer(1, function() refresh(state, cx) end)
         return state
     end,
@@ -125,6 +136,25 @@ tern.block.define("list", {
     save = function(state)
         if state.source and state.plan_id then return {schema = 2, source = state.source, plan_id = state.plan_id} end
         return {schema = 2}
+    end,
+    event = function(state,event,cx)
+        if not state.selection or state.selectionStarted or not live(state) or event.ev~="action" or event.id~="main" or event.act~="confirm-selection" or event.value~=state.selection.request then return end
+        state.selectionStarted=true
+        local ok,err=pcall(function()
+            selection.resolve(state.panel,state.selection.window,function() return live(state) end,function(pid,why)
+                if not live(state) then return end
+                if not pid then
+                    state.finished=true;instances[state.panel]=nil
+                    cx:toast("error",why or "Could not identify the selected native session.");cx:exit(1);return
+                end
+                state.discover_pid=pid;state.discovery_label=state.selection.label;state.selection=nil
+                refresh(state,cx)
+            end)
+        end)
+        if not ok then
+            state.finished=true;instances[state.panel]=nil
+            cx:toast("error","Could not inspect the selected native session.");cx:exit(1)
+        end
     end,
     -- No checkpoint editing, canonical writes, prompt sending or work adoption.
 })
