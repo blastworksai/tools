@@ -219,7 +219,7 @@ def publish(path, read_plan, agent_pid):
     def retract():
         try: current = _read(target,identity)
         except FileNotFoundError: return
-        # Never erase a different live publication that arrived meanwhile.
+        # Best effort: do not retract a different live publisher observed meanwhile.
         if _valid(current) and not same_agent(current['anchors'][0]): return
         target.unlink()
     if path is None:
@@ -262,9 +262,17 @@ def discover(parent):
     for folder in base.glob(PREFIX+'*'):
         identity=folder.name[len(PREFIX):]
         if not identity or len(identity)>100 or any(c not in '0123456789S-' for c in identity): continue
+        # Namespace names are untrusted directory entries, not publications.
+        try: info = folder.lstat()
+        except OSError: continue
+        if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode) or getattr(info,'st_file_attributes',0)&0x400:
+            continue
+        if os.name == 'nt':
+            if identity != owner(): continue
+        elif str(info.st_uid) != identity: continue
         path=folder/_key(native)
         try: path.lstat()
-        except (FileNotFoundError,PermissionError): continue
+        except OSError: continue
         directory(identity)  # A matching unsafe store is a detection error, never no-plan.
         try: record=_read(path,identity)
         except FileNotFoundError: continue

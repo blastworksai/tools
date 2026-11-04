@@ -19,7 +19,7 @@ here = Path(__file__).resolve().parent
 helpers = here if (here/'todo.py').exists() else here.parent/'bin'
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--work-dir', required=True, type=Path)
-parser.add_argument('--case', choices=['all', 'namespace', 'atomic', 'rename'], default='all')
+parser.add_argument('--case', choices=['all', 'namespace', 'atomic', 'rename', 'forged'], default='all')
 args = parser.parse_args()
 root = args.work_dir.resolve()
 root.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -83,6 +83,38 @@ try:
             unrelated.chmod(0o700)
             unrelated.rmdir()
         receipt['checks'].append('untraversable unrelated namespace cannot disable valid discovery')
+        # Use the actual owner name, so type validation is tested independently
+        # of the forged-owner guard. Restore the private namespace in finally.
+        holding = root/'namespace-held'
+        folder.rename(holding)
+        try:
+            folder.write_text('not a namespace')
+            _, absent = run('discover', '--parent-pid', str(native['pid']))
+            assert absent['state'] == 'none'
+            folder.unlink()
+            folder.symlink_to(folder)
+            _, absent = run('discover', '--parent-pid', str(native['pid']))
+            assert absent['state'] == 'none'
+        finally:
+            if os.path.lexists(folder): folder.unlink()
+            holding.rename(folder)
+        _, restored = run('discover', '--parent-pid', str(native['pid']))
+        assert restored['state'] == 'active'
+        receipt['checks'].append('plain-file and cyclic-link entries are not publication namespaces')
+
+    if os.name != 'nt' and args.case in {'all', 'forged'}:
+        forged = publication.root()/(publication.PREFIX+'999999999')
+        forged.mkdir(mode=0o711)
+        guessed = forged/publication._key(native)
+        guessed.write_text('not a legitimate record')
+        try:
+            _, valid = run('discover', '--parent-pid', str(native['pid']))
+            assert valid['state'] == 'active' and valid['source']['publication'] == binding['publication']
+        finally:
+            guessed.unlink()
+            forged.rmdir()
+        receipt['checks'].append('forged-owner namespace cannot interfere even with the exact session key')
+
 
     if sys.platform.startswith('linux') and args.case in {'all', 'rename'}:
         previous = process(os.getpid())['name']
