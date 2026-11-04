@@ -129,5 +129,33 @@ class SourceContract(unittest.TestCase):
         self.assertEqual((result.returncode, json.loads(result.stdout).get('plan')), (0, plan()))
 
 
+
+
+class WorkflowEntryContract(unittest.TestCase):
+    """Boundary: actual skill entry receives adoption; unrelated work is untouched."""
+    def hook(self, value):
+        path = ROOT/'integrations/glitch-plan-session-view/entry_hook.py'
+        return subprocess.run([sys.executable, '-I', str(path)], input=json.dumps(value),
+                              text=True, capture_output=True, timeout=3)
+
+    def test_execute_entry_delivers_adoption_for_slash_and_skill_invocations(self):
+        cases = [
+            {'hook_event_name': 'UserPromptSubmit', 'prompt': '/glitch-execute plans/active.md'},
+            {'hook_event_name': 'PreToolUse', 'tool_name': 'Skill',
+             'tool_input': {'skill': 'glitch-execute', 'args': 'plans/active.md'}},
+        ]
+        results = [self.hook(value) for value in cases]
+        messages = [json.loads(r.stdout)['hookSpecificOutput']['additionalContext'] for r in results]
+        self.assertTrue(all(r.returncode == 0 and 'BEFORE implementation/operations' in m
+                            and 'publish this plan' in m for r, m in zip(results, messages)))
+
+    def test_unrelated_prompts_and_tools_never_adopt_or_block(self):
+        cases = [
+            {'hook_event_name': 'UserPromptSubmit', 'prompt': 'Explain /glitch-execute to me'},
+            {'hook_event_name': 'PreToolUse', 'tool_name': 'Read',
+             'tool_input': {'file_path': '/opt/glitch/plans/other-pane.md'}},
+        ]
+        self.assertEqual([(r.returncode, r.stdout) for r in map(self.hook, cases)], [(0, ''), (0, '')])
+
 if __name__ == '__main__':
     unittest.main()

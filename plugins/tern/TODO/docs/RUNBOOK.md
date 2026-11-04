@@ -4,7 +4,7 @@ CodexBWAI · MIT. The owner has authorized merge and deployment to the VM, Odin 
 
 1. Obtain a fresh cross-family review on the exact PR head. Match every runtime hash in evidence to that head. Merge only after the review passes, then verify the merged subtree matches the reviewed package.
 2. Check the actual running Tern daemon/client versions (minimum 0.9.8), installed TODO package and owning account. Do not update or restart Tern. Install only the reviewed immutable TODO release with the normal local-package installer, preserving plugin data. Read back the plugin catalogue and installed file hashes. Compare all three companion helper hashes with the installed plugin helpers; refuse schema/version skew.
-3. Install the planning companion in the actual local Glitch root at `_local/tern-todo`: copy its capability.json, README.md, CONTRACT.md, the package MIT LICENSE and the three bin/*.py helper modules. Use owner-writable code with read access for its intended seats; do not execute a deployed helper from a writable development worktree. Do not edit managed Glitch skills/hooks. Use existing Python 3 (Windows py -3); no dependency installation is needed.
+3. Install the planning companion in the actual local Glitch root at `_local/tern-todo`: copy its capability.json, README.md, CONTRACT.md, the package MIT LICENSE the three bin/*.py helper modules, and integrations/glitch-plan-session-view/entry_hook.py as _local/tern-todo/entry_hook.py. Use owner-writable code with read access for its intended seats; do not execute a deployed helper from a writable development worktree. Do not edit managed Glitch skills/hooks. Use existing Python 3 (Windows py -3); no dependency installation is needed.
 4. In an actual interactive native Tern agent session, deliberately resume an agreed canonical plan, maintain its explicit checkpoint block, and run the companion’s publish command from the agent’s normal tool session. Identify and supply the actual durable agent pid from runtime facts, never a launcher/shell. Clear before conversation reset/end and on fresh startup; disclose and obtain owner acceptance that an in-process reset without clear leaves the old publication visible. Verify the descriptor is visible through Glitch’s supported capability reader and observe a planning session following its instruction. Presence alone is not workflow adoption. Do not bulk-convert plans.
 5. Click TODO in Files, choose that session and verify that the plan appears without asking for a path or sending agent input. Native local/SSH membership chooses the execution host. A raw SSH shell without native Tern ancestry is unsupported. No discovered alias is reused for a secondary SSH login; no credential or authentication state is copied.
 6. Observe pending, active, blocked-with-reason and done in the real client while canonical checkpoints change. Clear the publication and verify old success disappears while the agent stays alive. Reattach the now-unpublished session: show the no-plan notice and exit TODO only. A changed canonical plan id or publication must never be silently adopted. Repeat on the supported Windows/macOS clients; helper and host-state checks are not visual acceptance.
@@ -14,3 +14,29 @@ CodexBWAI · MIT. The owner has authorized merge and deployment to the VM, Odin 
 Thor installation uses ClaudeBWAI’s own existing authorized connection. No borrowed key, SSH access change, service restart, fleet/BWPM operation or FORGE write is part of this rollout.
 
 Removal is a separate authorized action: `tern plugin remove todo`. Never remove a canonical plan, another seat’s data or an unrelated plugin.
+
+## Claude workflow entry (0.5.1)
+
+The descriptor/reflex alone does not invoke adoption. After installing the reviewed
+companion, append these command hooks to the supported machine-local
+`.claude/settings.local.json`; merge each event array, preserving all existing
+hooks, permissions and unrelated settings. Back up the original privately first.
+Do not edit managed `.claude/settings.json` or managed hook files.
+
+Command for each entry: `python3 -I /opt/glitch/_local/tern-todo/entry_hook.py`
+with timeout 5 (use the actual brain root on another machine).
+
+- SessionStart: matcher `startup|resume|clear` (exclude compact).
+- UserPromptSubmit: no matcher.
+- PreToolUse: matcher `Skill`.
+
+Read back all three additions and compare the remaining settings to the original.
+The hook supplies context only. The owning agent adds/maintains the agreed block
+and publishes through its own normal tools; the installer never writes its plan.
+Existing processes may retain hook snapshots: qualify a fresh ordinary
+`/glitch-execute` invocation and real TODO display, not just a payload probe.
+Never restart an acting session or send it input without the operator's go.
+
+This wiring covers Claude sessions opening that brain, not Codex/Kimi/Muse or
+other CLI hook configurations. Their explicit publication interface is unchanged;
+automatic entry adoption is not claimed for unwired harnesses.

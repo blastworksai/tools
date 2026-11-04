@@ -72,3 +72,37 @@ A fresh ClaudeBWAI tab was launched with the exact already-approved live SPAWN i
 On the existing signed-in Odin client, the actual command palette was opened with that ClaudeBWAI pane selected, and its unique “TODO: attach to this panel” action was clicked. Fourteen real canonical checkpoints rendered; no Local/SSH chooser or operator path prompt appeared. The focused agent stayed selected. The candidate differed only in manifest id todo-test; all runtime bytes equal reviewed68dbb54. Screenshot todo-production-route-palette-68dbb54.png was captured and inspected. Receipts: todo-production-route-palette-68dbb54.json and todo-production-route-primary-proof.json; independent planning observations claudebwai-todo-production-route-qualification/OBSERVATIONS.md.
 
 The unnecessary per-seat host pilot was fully rolled back without a client login: its own units/hold/profile and pilot-only plugin installation removed, historical state/host identity/SSH access unchanged, live agents preserved, SPAWN roster unchanged at revision53. The no-question palette behavior is now qualified through the real production launch path; a new service or trust migration is not a release prerequisite.
+
+## 0.5.1 workflow-entry regression and actual execution qualification
+
+User screenshots cbfc7c6e57b1ef0e /60887395a14a1fa4 show an ordinary
+`/glitch-execute plans/nastaq-open-items-after-startup-night.md` followed by
+no-active-plan. Direct readback found no TERN-SESSION block and no session
+publication. The 0.5.0 renderer qualification was valid but did not prove ordinary
+execution adoption; the release claim was too broad. Capability descriptors and
+a general reflex do not invoke the companion at workflow entry.
+
+The additive companion entry hook delivers its instruction on UserPromptSubmit
+slash invocation, PreToolUse/Skill invocation, and startup/clear/resume. It does
+not publish, infer state or edit plans. The existing owning agent must create
+its explicit checkpoint summary and publish through ordinary tools. Two focused
+subprocess checks cover real payload-to-context delivery and silence for unrelated
+work. These are not an adoption or UI pass. No existing acting session or its canonical plan is modified by the installer.
+
+Actual execution qualification at f622626 (same entry-hook/runtime bytes as this
+head): root started a fresh native ClaudeBWAI process after additive local wiring,
+then entered only `/glitch-execute /opt/glitch/_local/claudebwai-entry-qualification/PLAN.md`.
+Before entry, the neutral two-checkpoint plan had no TERN-SESSION block and no
+TODO/plugin/publication/hook instructions (before hash receipt saved). The agent
+read the companion, created the agreed block and published as its own verified
+PID1901921; it completed CP1 and held CP2 blocked for coordinator verification.
+The existing Odin window's actual Files TODO button selected that native session
+and displayed both exact checkpoints, with no source/path question. Receipts:
+`todo-051-clean-fixture-before.json`, `todo-051-ordinary-execute-transcript.txt`,
+`todo-051-ordinary-execute-publication.json`, `todo-051-ordinary-execute-ui.json`,
+`todo-051-ordinary-execute.png` under the estate's TODO evidence root.
+The rendering plugin was 0.5.0; its viewer/publisher bytes are unchanged in0.5.1.
+This run qualifies ordinary Claude execution adoption in that configured brain;
+it does not claim universal agent compliance or entry delivery in other harnesses.
+The actual reported, already-running NASTAQ session remains untouched pending
+permission to send its agent a metadata-adoption request.
