@@ -26,6 +26,8 @@ The prior independent reviews at d7230de, edb246b and12baa7c returned REWORK NEE
 
 Actual red receipts reproduce the old failures: todo-publication-v5-red-namespace.json and -red-atomic.json use edb246b; todo-publication-v6-red-namespace.json and -red-forged.json use12baa7c. Each intentionally records probe.passed:false with expected_failure:true. Current source passes the same boundaries; old receipts are never relabelled with new hashes.
 
+The focused c8d4c8b repair review (https://github.com/blastworksai/tools/pull/2#issuecomment-6621268003) verified N1/N5 and the current fingerprints; code repairs are clear, while the four product/owner gates still hold. Known Low availability limit: a local account can place a broken record in its own correctly owned namespace at a guessed session key, causing a detection error for that session. The key is not secret. This fails closed and produces no wrong plan, prompt or action; no additional descendant-owner filtering is implemented. This documents the limit, not an owner waiver or a release pass.
+
 ## Isolation and remaining gates
 
 The connected smoke uses private config/plugin id, daemon, Xvfb window, disposable real loopback SSH and TODO_PUBLICATION_ROOT. The native publisher receives its fixture path explicitly because Tern drops arbitrary daemon environment variables from program launches. An earlier isolation mismatch wrote one dead own record to the normal root; it was removed by a deliberate real-session publish. Earlier production_touched:false receipts did not mean no pointer metadata was written to that root. Current fixtures stay private; the normal root contains only the real current CodexBWAI publication.
