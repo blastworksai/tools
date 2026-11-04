@@ -2,5 +2,5 @@
   "name": "tern-todo",
   "kind": "local-skill",
   "summary": "Publish an interactive Glitch plan identity for the native Tern TODO view, without prompting or changing an agent's input.",
-  "way_in": "When $glitch-plan creates or deliberately resumes/revises a canonical plan, read this companion's README.md and publish its existing checkpoint identity. Clear the binding when the session stops working on a plan. No managed skill or hook is overridden."
+  "way_in": "When /glitch-plan (Codex: $glitch-plan) creates or deliberately resumes/revises a canonical plan, read this companion's README.md and publish its existing checkpoint identity. Identify the actual durable agent pid; clear on fresh startup and before conversation reset/end or leaving the plan. No managed skill or hook is overridden."
 }

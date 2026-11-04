@@ -34,3 +34,5 @@ Normal canonical edits refresh read-only. The renderer uses the unframed native 
 ## Adoption boundary
 
 This is an explicit agent-side publication contract with a discoverable local companion. Managed engine skills/hooks stay unchanged. Evidence that the helper and viewer work is separate from evidence that every planning session follows the companion. Existing plans gain the agreed block and publication only on deliberate resume/revision. No fleet/BWPM/FORGE state is read or written.
+
+Publisher identity is explicit (--agent-pid), verified against the caller’s live owned ancestry; it is never selected by shell-name filtering. Identify the durable agent from runtime facts or helper ancestry. Clear before conversation reset/end and on fresh startup. A reset retaining the same process cannot be detected automatically; skipped clearing leaves the old pointer active.

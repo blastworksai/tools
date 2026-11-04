@@ -54,7 +54,7 @@ def main():
         write_plan(remote, remote_value)
         path = stack.enter_context(loopback_ssh(base/'ssh'))
         env = dict(os.environ, PATH=str(base/'cli')+os.pathsep+path, TERN_CONFIG_DIR=str(config),
-                   TERN_DAEMON_SOCKET=str(base/'daemon.sock'), STENCIL_GPU='cpu',
+                   TERN_DAEMON_SOCKET=str(base/'daemon.sock'), TODO_PUBLICATION_ROOT=str(base/'publications'), STENCIL_GPU='cpu',
                    STENCIL_LOG_DIR=str(base/'logs'), STENCIL_LOG='warn,stencil=info,tern::plugin=debug')
         (base/'cli').mkdir()
         (base/'cli/tern').symlink_to(TERN)
@@ -75,7 +75,7 @@ local function captureFixtureState()
     for _, state in instances do
         if state.source then
             out[state.source.path] = {plan_id=state.plan_id, plan=state.plan, error=state.error,failures=state.failures,
-                panel=state.panel,saved={schema=2,source=state.source,plan_id=state.plan_id}}
+                panel=state.panel,terminal=state.terminal,saved={schema=2,source=state.source,plan_id=state.plan_id}}
         end
     end
     tern.fs.write(tern.plugin.data .. "/fixture-state.json", tern.json.encode(out))
@@ -120,7 +120,7 @@ tern.timer(100, captureFixtureState)
             evidence['luau_view_tests_passed']=library['passed']
             if not args.contracts_only:
                 if args.published:
-                    first=int(command('new','session','interactive-test','--',sys.executable,base/'plugin/tests/publication_fixture.py',base/'plugin/bin/todo.py',local,base/'publication-command.json',base/'publication-ready.json').strip())
+                    first=int(command('new','session','interactive-test','--',sys.executable,base/'plugin/tests/publication_fixture.py','--wrapper',base/'plugin/bin/todo.py',local,base/'publication-command.json',base/'publication-ready.json',base/'publications').strip())
                     wait_for(lambda:(base/'publication-ready.json').exists(),'agent publishes its plan',8)
                 else:
                     first=int(command('new','session','interactive-test','--','/bin/sh').strip())
@@ -186,6 +186,9 @@ tern.timer(100, captureFixtureState)
                     (base/'publication-command.json').write_text(json.dumps({'command':'clear'}))
                     wait_for(lambda:json.loads((base/'publication-ready.json').read_text()).get('command')=='clear','agent clears publication',8)
                     wait_for(lambda:'not working on a published plan' in observed(local).get('error','') and not observed(local).get('plan'),'publication clear invalidates old success',8)
+                    assert observed(local).get('terminal') is True
+                    failures=observed(local)['failures'];time.sleep(2.2)
+                    assert observed(local)['failures']==failures,'ended publication kept polling'
                     os.kill(json.loads((base/'publication-ready.json').read_text())['pid'],0)
                     evidence['checks'].append('clearing the publication removes old success without closing the agent')
                     old=observed(local)['panel'];command('close',old)
@@ -196,6 +199,23 @@ tern.timer(100, captureFixtureState)
                     time.sleep(.3)
                     os.kill(json.loads((base/'publication-ready.json').read_text())['pid'],0)
                     evidence['checks'].append('no published plan exits the TODO flow and leaves the selected program alive')
+                    (base/'publication-command.json').write_text(json.dumps({'command':'publish'}))
+                    wait_for(lambda:json.loads((base/'publication-ready.json').read_text()).get('command')=='publish','republish for process lifetime check')
+                    def helper(*parts):
+                        result=subprocess.run([sys.executable,'-I',base/'plugin/bin/todo.py',*parts],env=env,capture_output=True,text=True,timeout=8)
+                        return result.returncode,json.loads(result.stdout)
+                    _,found=helper('discover','--parent-pid',str(metadata['child']['pid']))
+                    binding={key:found['source'][key] for key in ['path','plan_id','publication']}
+                    assert binding['publication']['pid']==json.loads((base/'publication-ready.json').read_text())['pid']
+                    assert binding['publication']['pid']!=metadata['child']['pid'],'launcher was incorrectly selected as agent'
+                    (base/'publication-command.json').write_text(json.dumps({'command':'die'}))
+                    replacement=wait_for(lambda:json.loads((base/'publication-ready.wrapper.json').read_text()) if (base/'publication-ready.wrapper.json').exists() else None,'agent replaced inside the same unlisted launcher')
+                    os.kill(replacement['wrapper'],0);os.kill(replacement['replacement'],0)
+                    status,ended=helper('published','--binding',json.dumps(binding))
+                    _,vacant=helper('discover','--parent-pid',str(metadata['child']['pid']))
+                    assert status==1 and ended.get('terminal') is True and vacant['state']=='none'
+                    evidence['checks'].append('replacement agent in the same unlisted live launcher cannot inherit the ended agent publication')
+
                 evidence['visual_qualification']='Initial local pending/done rows observed; later checks use actual host callback state because the closed-beta sign-in overlay hides the client UI. Remote/restored visual qualification remains open.'
             else:
                 evidence['visual_qualification']='Native module/controller contracts only; no window or live agent queried.'
@@ -204,6 +224,8 @@ tern.timer(100, captureFixtureState)
             evidence['passed']=True
         except Exception as error:
             evidence['passed']=False;evidence['error']=str(error)
+            for name,location in [('publication_ready',base/'publication-ready.json'),('fixture_state',config/'plugin-data/todo-test/fixture-state.json')]:
+                if location.exists():evidence[name]=location.read_text(errors='replace')[-5000:]
             log.flush();log.seek(0);evidence['process_log_tail']=log.read()[-3000:]
             evidence['native_logs']={str(p.relative_to(base/'logs')):p.read_text(errors='replace')[-5000:] for p in (base/'logs').rglob('*.log')}
             evidence['process_exit_codes']=[p.poll() for p in processes]

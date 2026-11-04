@@ -117,23 +117,22 @@ def ancestors(pid):
         if pid <= 0 or pid in seen:
             break
         seen.add(pid)
-        item = process(pid); result.append(item); pid = item['ppid']
+        item = process(pid)
+        if result and os.name == 'nt' and int(item['birth'].split(':')[1]) > int(result[-1]['birth'].split(':')[1]):
+            raise ValueError('parent process identity has been reused')
+        result.append(item); pid = item['ppid']
         if item['name'].lower().removesuffix('.exe') == 'tern':
             return result
     raise ValueError('the caller is not inside a verifiable native Tern process tree')
 
 
-def session_process():
-    owner = process(os.getpid())['owner']
+def session_process(agent_pid):
+    """Bind the caller's explicitly identified agent, never infer it from a name."""
+    if type(agent_pid) is not int or agent_pid <= 0:
+        raise ValueError('identify this interactive agent process explicitly')
+    identity = process(os.getpid())['owner']
     chain = ancestors(os.getppid())
-    wrappers = {'sh', 'bash', 'zsh', 'fish', 'dash', 'cmd', 'powershell', 'pwsh', 'sudo', 'su', 'env', 'timeout', 'uv'}
-    chosen = None
-    for index, item in enumerate(chain):
-        name = item['name'].lower()
-        if name.endswith('.exe'): name = name[:-4]
-        if name == 'tern': break
-        if item['owner'] == owner and name not in wrappers:
-            chosen = index
-    if chosen is not None and chosen < len(chain)-1:
-        return chain[chosen:]
-    raise ValueError('no running agent process was found above the publisher')
+    for index, item in enumerate(chain[:-1]):
+        if item['pid'] == agent_pid and item['owner'] == identity:
+            return chain[index:]
+    raise ValueError('the declared agent must be this caller or an ancestor owned by this account')

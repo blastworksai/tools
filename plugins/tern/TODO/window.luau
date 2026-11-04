@@ -6,8 +6,6 @@ local controller = require("./lib/attach").new({
     json={encode=function(value) return tern.json.encode(value) end, decode=function(value) return tern.json.decode(value) end},
     process={run=function(argv,opts,callback) return tern.process.run(argv,opts,callback) end},
 })
--- Kept as a narrow fixture seam for owned native source/view tests.
-local function openSource(cx, target, source) controller.openSource(cx,target,source) end
 tern.command({id="show",title="TODO: attach to this panel",icon="list",run=function(cx) controller.start(cx,false) end})
 
 -- Files-pane entry shares the palette action's panel-aware attach controller.

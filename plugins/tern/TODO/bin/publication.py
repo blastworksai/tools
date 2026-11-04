@@ -18,11 +18,28 @@ LIMIT = 16384
 PREFIX = 'tern-todo-publications-'
 
 
+class PublicationEnded(ValueError):
+    terminal = True
+
+
 def owner():
     return process(os.getpid())['owner']
 
 
 def root():
+    # Explicit fixture configuration; unset in deployments. Both host and publisher
+    # inherit the same private test root; normal native discovery uses OS caches.
+    fixture = os.environ.get('TODO_PUBLICATION_ROOT')
+    if fixture:
+        base = Path(fixture)
+        if not base.is_absolute() or str(base).startswith(('\\\\', '//')):
+            raise ValueError('publication root must be an absolute local path')
+        try:
+            base.mkdir(mode=0o700, parents=True)
+            if os.name == 'nt': _windows_security(base,owner(),True)
+        except FileExistsError: pass
+        _safe(base, owner(), True)
+        return base
     if os.name == 'nt':
         buffer = ctypes.create_unicode_buffer(32768)
         if ctypes.windll.shell32.SHGetFolderPathW(None, 28, None, 0, buffer) != 0:
@@ -184,9 +201,19 @@ def _source(record):
     return {'path':path,'plan_id':plan_id,'publication':{'owner':record['owner'],'pid':agent['pid'],'birth':agent['birth'],'parent_pid':parent['pid'],'parent_birth':parent['birth']}}
 
 
-def publish(path, read_plan):
-    anchors = session_process(); identity = anchors[0]['owner']
+def publish(path, read_plan, agent_pid):
+    anchors = session_process(agent_pid); identity = anchors[0]['owner']
     folder=directory(identity,True);target=folder/_key(anchors[-2])
+    # Prune only this account's bounded, valid records with dead native chains.
+    for old in list(folder.glob('*.json'))[:128]:
+        try:
+            record = _read(old,identity)
+            if not _valid(record): old.unlink()
+        except (OSError,ValueError,KeyError,TypeError): pass
+    if os.path.lexists(target):
+        existing = _read(target,identity)
+        if _valid(existing) and existing['anchors'][0] != anchors[0]:
+            raise ValueError('another live publisher already owns this native session')
     # A failed new publication must never leave yesterday's successful binding.
     if os.path.lexists(target):
         _safe(target,identity);target.unlink()
@@ -226,10 +253,10 @@ def discover(parent):
     for folder in base.glob(PREFIX+'*'):
         identity=folder.name[len(PREFIX):]
         if not identity or len(identity)>100 or any(c not in '0123456789S-' for c in identity): continue
-        try: directory(identity)
-        except FileNotFoundError: continue
-        except ValueError: continue
         path=folder/_key(native)
+        try: path.lstat()
+        except FileNotFoundError: continue
+        directory(identity)  # A matching unsafe store is a detection error, never no-plan.
         try: record=_read(path,identity)
         except FileNotFoundError: continue
         if _valid(record,parent): candidates.append(record)
@@ -253,14 +280,14 @@ def read_binding(source, read_plan):
         if not isinstance(binding[key],str) or not 1<=len(binding[key])<=160: raise ValueError('invalid publication process identity')
     native={'pid':binding['parent_pid'],'birth':binding['parent_birth']}
     try:record=_read(directory(binding['owner'])/_key(native),binding['owner'])
-    except FileNotFoundError:raise ValueError('this session is not working on a published plan') from None
+    except FileNotFoundError:raise PublicationEnded('this session is not working on a published plan') from None
     if not _valid(record) or any(record['anchors'][0][key]!=binding[key] for key in ['pid','birth']):
-        raise ValueError('the publishing agent process has ended or changed')
-    if record['state']!='active': raise ValueError('this session is not working on a published plan')
+        raise PublicationEnded('the publishing agent process has ended or changed')
+    if record['state']!='active': raise PublicationEnded('this session is not working on a published plan')
     current=_source(record)
-    if current['publication']!=binding:raise ValueError('the publishing session identity changed')
+    if current['publication']!=binding:raise PublicationEnded('the publishing session identity changed')
     if current['path']!=source['path'] or current['plan_id']!=source['plan_id']:
-        raise ValueError('this session published a different plan; attach it explicitly')
+        raise PublicationEnded('this session published a different plan; attach it explicitly')
     plan=read_plan(Path(current['path']))
-    if plan['plan_id']!=current['plan_id']:raise ValueError('the published file now belongs to a different plan')
+    if plan['plan_id']!=current['plan_id']:raise PublicationEnded('the published file now belongs to a different plan')
     return {'ok':True,'source':current,'plan':plan}

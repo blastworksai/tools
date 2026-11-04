@@ -60,6 +60,7 @@ local function refresh(state, cx)
                 pcall(function() cx:toast("error",state.error) end)
                 cx:exit(1);return
             end
+            state.terminal = decoded and type(envelope)=="table" and envelope.terminal==true
             local plan = if decoded and type(envelope) == "table" then envelope.plan else nil
             if result.status ~= 0 or not decoded or envelope.ok ~= true or type(plan) ~= "table" then
                 state.plan = nil
@@ -81,7 +82,9 @@ local function refresh(state, cx)
             end
             state.failures = if state.error then (state.failures or 0) + 1 else 0
             redraw(state, cx)
-            tern.timer(polling.delay(state.source ~= nil and state.source.ssh ~= nil, state.failures), function() refresh(state, cx) end)
+            if not state.terminal then
+                tern.timer(polling.delay(state.source ~= nil and state.source.ssh ~= nil, state.failures), function() refresh(state, cx) end)
+            end
         end)
     end)
     if not ok then
