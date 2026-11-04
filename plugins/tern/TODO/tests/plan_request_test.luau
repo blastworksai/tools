@@ -4,6 +4,8 @@ return {
     {"plan replies require the current request and absolute canonical identity",function()
         assert(reply({request_id="old",state="none"},"new")==nil)
         assert(reply({request_id="new",state="active",path="relative.md",plan_id="plan-abcdef"},"new")==nil)
+        assert(reply({request_id="new",state="active",path="\\\\attacker\\share\\plan.md",plan_id="plan-abcdef"},"new")==nil)
+        assert(reply({request_id="new",state="active",path="//attacker/share/plan.md",plan_id="plan-abcdef"},"new")==nil)
         assert(reply({request_id="new",state="active",path="/plan.md"},"new")==nil)
         local value=reply({request_id="new",state="active",path="C:\\Plans\\Current.md",plan_id="plan-abcdef"},"new")
         assert(value and value.path=="C:\\Plans\\Current.md")

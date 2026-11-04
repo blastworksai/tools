@@ -8,6 +8,7 @@ local function fixture()
     function cx.session:focused() return 10 end
     function cx.session:pane(id) for _,p in f.panes do if p.pane==id then return p end end return nil end
     function cx.session:panes() return f.panes end
+    function cx.session:surface() return f.composer or {dock={k="editor",p={text="",sendable=true}}} end
     function cx.session:sessions() return {{name="Interactive",tabs={20,21}}} end
     function cx.hosts:current() return f.host end
     function cx.hosts:list() return {f.host} end
@@ -36,6 +37,11 @@ local function fixture()
     return f
 end
 return {
+    {"nonempty or unavailable native composers receive no query",function()
+        local f=fixture();f.composer={dock={k="editor",p={text="unfinished operator draft",sendable=true}}}
+        f.controller.start(f.cx,false);assert(#f.asks==0 and #f.blocks==0 and #f.toasts==1)
+        local g=fixture();g.composer={};g.controller.start(g.cx,false);assert(#g.asks==0 and #g.blocks==0)
+    end},
     {"raw SSH metadata cannot silently reuse an unverified agent-launch key",function()
         local f=fixture();f.host.kind="local";f.controller.start(f.cx,false)
         assert(#f.calls==1)
@@ -80,6 +86,8 @@ return {
         local chosen=nil
         for _,item in f.picks[1].opts.items do if item.target==11 then chosen=item end end
         assert(chosen and chosen.detail:find("Interactive",1,true))
+        f.panes[2].title="Agent changed its display title"
+        f.panes[2].cwd="/new-working-directory"
         f.picks[1].cb(chosen,nil,f.cx)
         assert(f.focused==11 and #f.asks==1 and f.asks[1].target==11)
         assert(f.asks[1].text:sub(1,1)=="#")

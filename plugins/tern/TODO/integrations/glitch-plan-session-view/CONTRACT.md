@@ -23,11 +23,11 @@ Update the dated Progress evidence, checkpoint state and START HERE consistently
 
 ## Attaching the view
 
-In the Tern tab that displays the interactive session, choose **TODO: attach to this panel**. Select Local if the file is accessible on that Tern session host; select SSH for an explicitly approved ordinary SSH destination and the plan's absolute path there. “Local” is relative to the session host, not necessarily the desktop showing the window.
+Click **TODO** in the Files pane, choose the agent session, and let the native Tern metadata request identify its active canonical plan. **TODO: attach to this panel** starts the same query for the focused panel. The operator is not asked for a source or plan path. Native local and remote session-host reads pin the reported stable plan id before the first read.
 
-The view pins the selected source and its stable plan id. It polls read-only and shows active, blocked, pending and done checkpoints. Different plan ids at the same path are refused. No agent prompt, source write, task takeover or fleet dispatch occurs. Existing gates remain in the plan.
+An explicit no-plan response ends TODO's attachment flow, never the agent pane. Unsupported checkpoint metadata, unavailable/unsafe communication, timeout or changed session ends with an error. A native empty sendable composer must be observed before submission; terminal-only agents without one are currently unsupported, never typed into. The metadata query is expressly authorized; no source write, work adoption, task continuation or fleet dispatch occurs.
 
-For SSH, the destination must support ordinary noninteractive POSIX commands and existing key authentication, trust and Python 3. Forced agent launch aliases (`seat-*`) are refused. If an SSH-launched agent and its Tern session host share the same plan filesystem, use Local; do not forward another Unix identity's socket or credentials.
+The view polls its selected source read-only and displays native active, blocked, pending and done checkpoints. A different plan id at the same source is refused. Raw SSH alone is not an authorized file route; use native Tern remote-host connections. Existing plan gates remain authoritative.
 
 ## Deployment boundary
 

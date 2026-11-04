@@ -60,7 +60,7 @@ def main():
         with source_file.open('a') as stream:
             for name, source in [('test_local', {'path': str(local)}), ('test_ssh', {'path': str(remote), 'ssh': 'session-plan-test'})]:
                 encoded = json.dumps(json.dumps(source))
-                stream.write('\ntern.command({id="'+name+'", title="Isolated fixture", run=function(cx) openSource(cx,cx.session:focused(),tern.json.decode('+encoded+')) end})\n')
+                stream.write('\ntern.command({id="'+name+'", title="Isolated fixture", run=function(cx) controller.openSource(cx,cx.session:focused(),tern.json.decode('+encoded+'),"'+('plan-abcdef123456' if name=='test_ssh' else plan()['plan_id'])+'") end})\n')
         with source_file.open('a') as stream:
             stream.write('\ntern.command({id="test_auto", title="Isolated auto attach", run=function(cx) controller.start(cx,false) end})\n')
         host = base/'plugin/host.luau'
@@ -117,11 +117,15 @@ tern.timer(100, captureFixtureState)
             evidence['luau_view_tests_passed']=library['passed']
             if not args.contracts_only:
                 first=int(command('new','session','interactive-test','--','/bin/sh').strip())
-                processes.append(subprocess.Popen(['xvfb-run','-a',TERN,'--control',str(control)],env=env,cwd=base,stdout=log,stderr=log,start_new_session=True))
+                launch = ['xvfb-run','-a',TERN,'--control',str(control)]
+                processes.append(subprocess.Popen(launch,env=env,cwd=base,stdout=log,stderr=log,start_new_session=True))
                 wait_for(lambda:control.exists(),'private window',40)
                 command('ctl', '--control', control, 'state', timeout=45)
                 command('focus',first)
                 wait_for(lambda: any(p.get('id')==first for p in ctl('state').get('panes',[])), 'native window attached to fixture')
+                metadata=json.loads(command('process',first,'--window','','--json'))
+                assert metadata['pane']==first and metadata['child']['pid']>0, metadata
+                evidence['native_process_window_metadata']=metadata
                 action('test_local')
                 wait_for(lambda:has_row('pending','Prove the outcome'),'local source checklist')
                 evidence['checks'].append('explicit local checkpoint block renders native pending state')

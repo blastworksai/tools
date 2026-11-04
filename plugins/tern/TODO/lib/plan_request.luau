@@ -2,8 +2,8 @@
 local request = {}
 local sequence = 0
 local function pathValid(path)
-    return type(path)=="string" and #path<=4096 and not path:find("%c") and
-        (path:sub(1,1)=="/" or path:match("^%a:[/\\]")~=nil or path:sub(1,2)=="\\\\")
+    return type(path)=="string" and #path<=4096 and not path:find("%c") and path:sub(1,2)~="//" and path:sub(1,2)~="\\\\" and
+        (path:sub(1,1)=="/" or path:match("^%a:[/\\]")~=nil)
 end
 function request.reply(text, id, decode)
     if type(text)~="string" or #text>64000 then return nil end
@@ -21,6 +21,23 @@ function request.reply(text, id, decode)
     end
     return nil
 end
+function request.emptyComposer(surface)
+    if type(surface)~="table" or surface.more or type(surface.dock)~="table" then return false end
+    local count,invalid=0,false
+    local function scan(node)
+        if node.more then invalid=true end
+        if node.k=="editor" or node.k=="input" then
+            local p=node.p or {}
+            if p.hidden~=true then
+                count+=1
+                if p.sendable~=true or p.readonly==true or p.disabled==true or p.text~="" then invalid=true end
+            end
+        end
+        for _,child in node.c or {} do scan(child) end
+    end
+    scan(surface.dock)
+    return count==1 and not invalid
+end
 function request.new(api)
     local pending={}
     return function(cx,target,valid,done)
@@ -33,6 +50,10 @@ function request.new(api)
         end
         if not pane or native.state~="idle" then
             cx:toast("info","TODO could not query this session: the agent is not ready. The TODO flow has ended.");return
+        end
+        local observed,composer=pcall(function() return cx.session:surface(target,{nodes=200,depth=12,max_chars=16000}) end)
+        if not observed or not request.emptyComposer(composer) then
+            cx:toast("error","TODO could not verify an empty, sendable native composer. Your draft is unchanged; the TODO flow has ended.");return
         end
         sequence+=1
         local id="todo-"..tostring(api.now()).."-"..tostring(sequence)

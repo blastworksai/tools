@@ -42,12 +42,15 @@ local function refresh(state, cx)
             elseif state.plan_id ~= nil and state.plan_id ~= plan.plan_id then
                 state.plan = nil; state.error = "This file now belongs to a different plan. Close this panel and explicitly attach the intended plan."
             else
-                local firstBinding = state.plan_id == nil
+                local needsSave = not state.bindingSaved
                 state.plan_id = plan.plan_id
                 state.plan = plan
                 state.error = nil
                 state.updated = os.date("!%Y-%m-%d %H:%M:%S UTC")
-                if firstBinding then pcall(function() cx:save() end) end
+                if needsSave then
+                    local saved=pcall(function() cx:save() end)
+                    state.bindingSaved=saved
+                end
             end
             state.failures = if state.error then (state.failures or 0) + 1 else 0
             redraw(state, cx)
@@ -69,7 +72,7 @@ tern.block.define("list", {
         -- A saved binding can only read the same selected source and stable plan id.
         -- Legacy bare-pane saves/args are deliberately not migrated or followed.
         if type(saved) == "table" and saved.schema == 2 and sourceValid(saved.source) and type(saved.plan_id) == "string" then
-            state.source = saved.source; state.plan_id = saved.plan_id
+            state.source = saved.source; state.plan_id = saved.plan_id; state.bindingSaved=true
         elseif saved == nil and args and type(args[1]) == "string" then
             local ok, source = pcall(tern.json.decode, args[1])
             if ok and sourceValid(source) then

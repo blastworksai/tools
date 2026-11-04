@@ -117,7 +117,7 @@ function attach.new(api)
                     for _, id in candidate.panes do if id==choice.target then host=candidate end end
                 end
             end
-            if not host or not pane or pane.exited~=nil or pane.parked or pane.tab~=choice.tab or pane.program~=choice.program or pane.cwd~=choice.cwd or pane.title~=choice.title then
+            if not host or not pane or pane.exited~=nil or pane.parked or pane.tab~=choice.tab or pane.program~=choice.program then
                 changed(fresh);return
             end
             fresh.hosts:switch(host.id)

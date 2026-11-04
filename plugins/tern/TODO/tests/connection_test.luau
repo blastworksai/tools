@@ -21,6 +21,9 @@ return {
     {"opaque transports and malformed SSH never silently become local",function()
         assert(connection.detect(host,{},process({"powershell.exe","-File","launch.ps1"})).kind=="manual")
         assert(connection.detect(host,{},process({"wsl.exe"})).kind=="manual")
+        for _,program in {"mosh-client","tailscale","autossh","sshpass","et","kubectl","unknown-agent-wrapper"} do
+            assert(connection.detect(host,{},process({program})).kind=="manual",program)
+        end
         assert(connection.ssh({"ssh","-oProxyCommand=do-not-execute","-Ex@host"}).kind=="manual")
     end},
 }

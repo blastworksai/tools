@@ -94,13 +94,17 @@ function connection.detect(host, pane, process)
     local p = process.foreground or process.child
     if type(p) ~= "table" or type(p.argv) ~= "table" or not connection.fingerprint(process) then return manual("Connection metadata is incomplete.") end
     local program = base(p.argv[1])
-    local opaque = {mosh=true, plink=true, wsl=true, docker=true, podman=true}
+    local opaque = {mosh=true,["mosh-client"]=true,plink=true,wsl=true,docker=true,podman=true,tailscale=true,autossh=true,sshpass=true,et=true,kubectl=true}
     if opaque[program] then return manual("This transport needs an explicit plan source.", program) end
+    local localAgent={codex=true,claude=true,gemini=true,agy=true,omp=true,grok=true,kimi=true,muse=true}
+    local shell=false
     if program=="powershell" or program=="pwsh" or program=="cmd" or program=="bash" or program=="sh" or program=="zsh" then
+        shell=true
         for i=2,#p.argv do
             if p.argv[i] ~= "-l" and p.argv[i] ~= "--login" and p.argv[i] ~= "-i" then return manual("A shell wrapper hides the connection; choose the source explicitly.") end
         end
     end
+    if not shell and not localAgent[program] then return manual("The program does not establish a local execution host.",program) end
     return {kind="host", label="Local session host " .. hostLabel(host)}
 end
 return connection
