@@ -164,8 +164,10 @@ same(argv_of(rendered, "omp"), { "sudo", "-u", "account", "-H", "--", "omp", "--
 check(native_record.prompt == "saved greeting" and #native_record.arguments == 2, "setup prompt does not overwrite the record or append persisted argv")
 native_record.user = ""
 same(argv_of(assert(executor.render(native_record, "/bin/bash", "linux")), "omp"), { "omp", "--profile", "work account", "saved greeting" }, "ordinary native launch uses its approved stored prompt")
-local wrapped = record("wrapped", { command = "sudo -u explicit -- ordinary-cli", user = "saved-user", arguments = { "one" } })
+local wrapped = record("wrapped", { command = "sudo -u explicit -- ordinary-cli", user = "explicit", arguments = { "one" } })
 same(argv_of(assert(executor.render(wrapped, "/bin/bash", "linux")), "custom"), { "sudo", "-u", "explicit", "--", "ordinary-cli", "one" }, "explicit sudo wrapper is preserved rather than nested")
+wrapped.user = "saved-user"
+check(executor.render(wrapped, "/bin/bash", "linux") == nil, "explicit sudo wrapper cannot override the exact configured account identity")
 local remote_record = record("remote-render", { backend = "ssh-command", host = "example.test", user = "remote-user", key_path = "/keys/a key", cwd = "~/project 'quoted'", arguments = { "", "two words", "$HOME" } })
 local remote_words = argv_of(assert(executor.render(remote_record, "/bin/bash", "linux")), "custom")
 check(not remote_words[#remote_words]:find("SPAWN_PROVIDER", 1, true), "provider command name stays on the local outer line, never in the remote command")
@@ -280,6 +282,7 @@ local function execution_fixture(saved_job, options)
 	setfenv(chunk, setmetatable({ tern = fake, require = function(name)
 		if name == "./config" then return config end
 		if name == "./native_cli" then return adapter end
+		if name == "./launch_resolution" then return load("launch_resolution") end
 		error("Unexpected executor dependency: " .. name)
 	end }, { __index = environment }))
 	local subject = chunk()

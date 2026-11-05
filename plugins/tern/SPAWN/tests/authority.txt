@@ -70,3 +70,27 @@ carly last "PASS trim_history"
 carly lua "local root = assert(tern.getenv('SPAWN_PACKAGE_DIR'), 'set SPAWN_PACKAGE_DIR'); return assert(loadstring(tern.fs.read(root..'/tests/authority.luau'), 'spawn-authority'))(root, 'auto_forget')"
 carly ok
 carly last "PASS auto_forget"
+carly lua "local root = assert(tern.getenv('SPAWN_PACKAGE_DIR'), 'set SPAWN_PACKAGE_DIR'); return assert(loadstring(tern.fs.read(root..'/tests/run.luau'), 'spawn-managed'))(root, 'authority', 'managed_retirement')"
+carly ok
+carly last "PASS managed_retirement"
+carly lua "local root = assert(tern.getenv('SPAWN_PACKAGE_DIR'), 'set SPAWN_PACKAGE_DIR'); return assert(loadstring(tern.fs.read(root..'/tests/run.luau'), 'spawn-managed'))(root, 'authority', 'managed_coexistence')"
+carly ok
+carly last "PASS managed_coexistence"
+carly lua "local root = assert(tern.getenv('SPAWN_PACKAGE_DIR'), 'set SPAWN_PACKAGE_DIR'); return assert(loadstring(tern.fs.read(root..'/tests/run.luau'), 'spawn-managed'))(root, 'authority', 'managed_rotation')"
+carly ok
+carly last "PASS managed_rotation"
+carly lua "local root = assert(tern.getenv('SPAWN_PACKAGE_DIR'), 'set SPAWN_PACKAGE_DIR'); return assert(loadstring(tern.fs.read(root..'/tests/run.luau'), 'spawn-managed'))(root, 'authority', 'managed_retention')"
+carly ok
+carly last "PASS managed_retention"
+carly lua "local root = assert(tern.getenv('SPAWN_PACKAGE_DIR'), 'set SPAWN_PACKAGE_DIR'); return assert(loadstring(tern.fs.read(root..'/tests/run.luau'), 'spawn-managed'))(root, 'authority', 'managed_import')"
+carly ok
+carly last "PASS managed_import"
+carly lua "local root = assert(tern.getenv('SPAWN_PACKAGE_DIR'), 'set SPAWN_PACKAGE_DIR'); return assert(loadstring(tern.fs.read(root..'/tests/run.luau'), 'spawn-managed'))(root, 'authority', 'managed_maintenance')"
+carly ok
+carly last "PASS managed_maintenance"
+carly lua "local root = assert(tern.getenv('SPAWN_PACKAGE_DIR'), 'set SPAWN_PACKAGE_DIR'); return assert(loadstring(tern.fs.read(root..'/tests/run.luau'), 'spawn-managed'))(root, 'authority', 'managed_migration')"
+carly ok
+carly last "PASS managed_migration"
+carly lua "local root = assert(tern.getenv('SPAWN_PACKAGE_DIR'), 'set SPAWN_PACKAGE_DIR'); return assert(loadstring(tern.fs.read(root..'/tests/run.luau'), 'spawn-managed'))(root, 'authority', 'managed_settlement_replay')"
+carly ok
+carly last "PASS managed_settlement_replay"

@@ -291,6 +291,7 @@ end
 local function validate_snapshot(value: any): (any?, string?)
 	if type(value) ~= "table" or value.version ~= 2 or type(value.ready) ~= "boolean" then return nil, "Unsupported authority snapshot" end
 	if not identity(value.host_key, 2048) or not identity(value.authority_id, 256) or not identity(value.session_key, 2048) then return nil, "Authority identity is invalid" end
+	if value.namespace ~= nil and not identity(value.namespace, 256) then return nil, "Authority namespace is invalid" end
 	if not integer(value.config_revision) or not integer(value.attempt_revision) then return nil, "Authority revision is invalid" end
 	local records, err = Config.validate_records(value.records)
 	if records == nil then return nil, "Invalid authority roster: " .. tostring(err) end
@@ -308,15 +309,19 @@ local function validate_snapshot(value: any): (any?, string?)
 	local state, state_error = Launch.validate({ version = 1, revision = value.attempt_revision, next_attempt = next_attempt, attempts = value.attempts })
 	if state == nil then return nil, "Invalid authority launch history: " .. tostring(state_error) end
 	if type(value.jobs) ~= "table" then return nil, "Authority execution jobs are missing" end
-	local jobs, job_count = {}, 0
+	local jobs, attempt_jobs, job_count, ordinary_count = {}, {}, 0, 0
+	for _, attempt in value.attempts do
+		if attempt.purpose ~= "managed" then ordinary_count += 1 end
+	end
 	for index, job in value.jobs do
 		job_count += 1
 		if job_count > 128 or not integer(index) or index < 1 or index > #value.jobs or Launch.validate_execution_projection(job) == nil then return nil, "Invalid authority execution projection" end
 		local attempt = attempts[job.attempt_id]
-		if jobs[job.id] or attempt == nil or job.session_key ~= value.session_key or job.record_id ~= attempt.record_id or MODES[job.backend] ~= attempt.mode or (job.purpose == "setup") ~= (attempt.purpose == "setup") or job.config_revision > value.config_revision then return nil, "Authority execution association mismatch" end
+		if jobs[job.id] or attempt_jobs[job.attempt_id] or attempt == nil or attempt.purpose == "managed" or job.session_key ~= value.session_key or job.record_id ~= attempt.record_id or MODES[job.backend] ~= attempt.mode or (job.purpose == "setup") ~= (attempt.purpose == "setup") or job.config_revision > value.config_revision then return nil, "Authority execution association mismatch" end
 		jobs[job.id] = job
+		attempt_jobs[job.attempt_id] = job
 	end
-	if job_count ~= #value.jobs or job_count ~= #value.attempts then return nil, "Authority job/attempt history is incomplete" end
+	if job_count ~= #value.jobs or job_count ~= ordinary_count then return nil, "Authority job/attempt history is incomplete" end
 	if type(value.replies) ~= "table" or type(value.request_sequences) ~= "table" then return nil, "Authority transport state is missing" end
 	local count = 0
 	for id, reply in value.replies do
@@ -1166,3 +1171,6 @@ local function tick(cx: any)
 	end
 end
 tern.timer(1000, tick)
+
+-- Module initialization also runs after a VM reload; one executor timer per VM.
+require("./dispatch_window").start()

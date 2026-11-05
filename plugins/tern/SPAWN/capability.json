@@ -1,0 +1,71 @@
+{
+  "name": "spawn",
+  "kind": "local-skill",
+  "summary": "One saved launch record per provider account, ordinary host-ticket execution and a detached managed dispatch bridge, with durable reservations and explicit outcomes.",
+  "way_in": "After explicit installation or linking of the discovered package path, use SPAWN in the status/menu entry, command palette, or Files pane beside WORK. Guided setup, Config, Spawn all, Spawn specific, Running agents, and Review setup result are explicit actions.",
+  "scope": "Launches stay in the captured current Tern host/session. SPAWN does not create or switch sessions, trust or reconnect hosts, create OS accounts, copy credentials, or automatically clean up sessions.",
+  "configuration": {
+    "owner": "Execution-host native spawn.spawner block; the desktop window journal is not a second roster authority.",
+    "storage": "Host tern.kv key authority: version-3 envelope with configuration, config_revision and session-scoped attempts/jobs/replies/request watermarks. Jobs store record ID, config revision and display fields, not a record copy. Legacy record copies and inbox/imports/setup_runs keys are dropped on the next save; a non-empty legacy inbox is refused. Snapshot and request envelopes are version 2, prefixed SPAWN_STATE_V2 on the native surface. Configuration retains outer schema 2 and schema-2 host agent buckets. Managed attempts have purpose managed, preserve their own observer identity, and have no ordinary execution job or ticket. Window v2 projections require exactly one job per ordinary attempt and prohibit jobs for managed attempts. An optional validated namespace identifies the exact saved roster.",
+    "fields": [
+      "id",
+      "provider",
+      "account_label",
+      "backend",
+      "enabled",
+      "include_all",
+      "command",
+      "arguments",
+      "duplicate_policy",
+      "placement",
+      "cwd",
+      "prompt",
+      "host",
+      "user",
+      "key_path",
+      "fresh_executable",
+      "fresh_arguments",
+      "fresh_native_default",
+      "task_argument_index",
+      "host_shell",
+      "target_os",
+      "target_shell",
+      "mailbox",
+      "model",
+      "profile",
+      "variant_id",
+      "capacity_binding",
+      "capacity_limit",
+      "selector_evidence",
+      "argv_contract"
+    ],
+    "review_fields": [
+      "review_required",
+      "review_reason"
+    ],
+    "validation": "An actual reviewed command and string-array arguments are required. Native OMP is OMP-only; prompt is an OMP setting. All saves use optimistic config revisions. Original migration sources are preserved; differing host/client copies, including explicit empty sources, require per-record selection or omission and confirmation. Unknown or corrupt data fails visibly rather than resetting. Full-record JSON editing preserves the stable ID and validates every managed field, then requires separate explicit settings approval; JSON cannot self-approve. Managed declarations and operator attestations are configuration, not machine proof.",
+    "limits": "32 records; 128 attempts per session; 64 pending requests/results and observer watermarks; 120000-byte state/snapshot ceiling. Every saved write keeps only the 26 newest finished attempts per session (clear-history eligibility) with their jobs, and each verified Config inventory automatically forgets sessions absent from it unless they are current or still have an active launch. At transport capacity, retire the generation and refuse the triggering request without executing it; preserve jobs/history. Other capacity errors remain visible. Active and unresolved attempts are never evicted. Managed bridge references are retained across ordinary history trimming and absent-session forgetting; transport reset must also respect managed owners, unresolved execution and import gates."
+  },
+  "setup": "Guided setup requires a reviewed Native OMP command and verifies its setup transcript, not the default agent type. It asks provider/count before suffix, discovers and approves commands on the execution host, reviews existing isolation, cwd, provider login, arguments and inclusion choices. Only the active run's confirmed assistant result is reviewed for whole-result import into the original host/session. Manual Config creation and paste/review/confirm JSON are available without OMP. Import never launches accounts; repeated confirmed runs are idempotent and conflicting IDs require explicit edits.",
+  "backends": {
+    "native-agent": "Ordinary Native OMP uses the same harmless host-ticket allocation and host executor as ordinary terminal records, preserving its configured command/cwd and approved nonempty startup prompt. It requires a reviewed POSIX execution-host shell; unverified Windows ordinary native launch parsing is refused. Managed Native OMP is the documented exception described below.",
+    "local-terminal": "Terminal: the window allocates only a harmless host-issued ticket. The host prepares admitted tickets, captures one matching ticket and its native shell in memory within the spawn filter, then durably claims the pane outside that filter. Scope/readiness and persisted submission intent precede the single provider invocation; output remains after completion.",
+    "ssh-command": "SSH terminal: SSH invoked from the retained execution-host parent shell, optional destination user/key path, POSIX destination command quoting. Forced-command routes retain their own installed entrypoint policy."
+  },
+  "shells": "Rendering uses the execution host's actual SpawnSpec.program, never desktop SDK shell metadata. Supported: non-Windows sh/bash/dash/ksh/zsh or pwsh/powershell including .exe. Windows ProcessStartInfo preserves argv; batch escaping and a short-lived status carrier preserve child status. cmd.exe as parent and unknown shells are refused. Terminal input refuses control bytes other than LF before submission. Existing script-execution policy is respected without bypass. Managed execution instead uses the host-built fresh-launch contract and explicit host/target shell declarations; it does not claim to observe an ordinary ticket pane shell. Shared resolution preserves exact configured OS-user and SSH destination identity.",
+  "startup_prompts": "Approved role prompts are saved record values edited or imported through Config, not a hard-coded policy button or global OMP default. Existing custom prompts require explicit review. Prompts are startup arguments delivered once per new launch, never resent on reload/reconnect; observed delivery is not proof of orchestration readiness.",
+  "transport": "Only the host writes authority. Admission, watermark and keyed reply persist in one atomic write; admission itself executes nothing. Definitive refusals return an in-memory reply to the requesting observer at once. The window allocates a harmless ticket and the host claims it before one persisted-intent provider write. Old identities/sequences, changed request reuse and stale config are rejected. Transport capacity rotates only its generation and refuses the triggering request; explicit refresh/reopen is required, never automatic replay. Manual reset additionally requires no pending/unreviewed results or active/unresolved attempts. Jobs/history and live host completion tracking survive generation rotation.",
+  "runtime": "Config remains saved-record-only. Running agents separates SPAWN launches, Failed/exited history and read-only Other Tern sessions. Host completion outranks wrapper idle state. Unclaimed tickets expire after 30 seconds into blocking Unknown, driven by a host timer. Reload observes without submitting, and no recurring foreground-process polling runs. Window association uses the exact ticket within its original host/session, never converted native IDs. POSIX launch lines start with SPAWN_PROVIDER=<provider> so program_icon gives local and remote tabs Tern's built-in provider icons; custom SVG artwork stays local-only and the host pane_reused flag removes it after unrelated shell use. A successful batch parks only its originating Config view when nothing else is in flight and it is not focused.",
+  "duplicates": "Host-owned reservations are scoped by stable record and intended session. Skip blocks active and unresolved attempts across clients; unverified pane identities become Unknown. Explicit Mark no longer running releases a reservation after inspection but never closes or kills a program. Allow is an explicit record choice.",
+  "codex": "Account-owned executable/package tree, npm prefix/cache and updater environment; separate approved provisioning and owner-approved updates. SSH seat wrappers explicitly invoke the fixed identity-checked seat-agent-entry for their account; forced keys ignore the equivalent supplied command and unforced keys execute that same launcher. Wrappers and entrypoint return true provider/SSH status without nested shell retention or shared executable fallback. Verify each client's alias/account routing. Existing sessions, credentials, unrelated shared installation and approval policies remain unchanged.",
+  "normal_plus": "Ordinary + remains Tern's built-in new-tab behavior. Files SPAWN coexists beside WORK; linking/reloading starts no saved accounts.",
+  "state": "Only non-secret settings, migration originals and observation/transport metadata are stored. Key paths are allowed; passwords, tokens, key contents and passphrases are not. Host authority and client journals may occupy different machines' plugin-data stores.",
+  "delivery": "Discover package/link/config/data paths separately on VM, Odin and Thor. Back up code, links and affected host/client plugin data before explicitly approved deployment. Rollback restores matching code and data only with explicit consent because newer edits/outcomes can be lost. Separate Tern session cleanup is inspect/select/confirm only. No deployment, visual pass or completed platform matrix is asserted by this metadata.",
+  "managed_dispatch": {
+    "surface": "Non-palette spawn.dispatch block with bounded SPAWN_DISPATCH v1 request/response frames and a private SPAWN_EXECUTION v1 projection. Config exposes exact one-use roster-import gates and fenced controller recovery actions; ordinary SPAWN remains the default ticket path.",
+    "window_exception": "Only managed launches and separately claimed native_wake grants use dispatch_window effects. The host builds approved fresh command bytes; the exact granted window executes new_tab or agents:start. Managed panes carry no ordinary ticket and are not intercepted by the host ticket executor. This is a deliberate managed native/window exception, not an alternate ordinary command builder.",
+    "identity": "Native daemon membership is scanned and rechecked for detached bridge blocks without a captured Config native_window. The original controller block, execution host, native session, window-scoped origin and immutable launch/mailbox bindings must still match exactly. Ordinary Config retains its released captured-native-window verification.",
+    "lifecycle": "Catalog, launch, accept, status, roster import, mailbox operations, separately claimed native_wake, attach_worker, exact native stop and settled retirement remain detached managed operations. Unknown effects are never automatically retried. Recovery attestation neither proves effect success nor clears worker reservations.",
+    "transport": "Managed ownership is session/namespace scoped across ordinary transport-generation rotation. Saved block state is only a view cursor, never execution authority; fresh exact claims fence window-side effects."
+  }
+}

@@ -1,5 +1,5 @@
 -- Host-only ticket execution. Authority owns persistence; this module owns effects.
-local Config = require("./config")
+local Resolution = require("./launch_resolution")
 local Native = require("./native_cli")
 local Executor = {}
 local function nonempty(value: any): string?
@@ -61,15 +61,6 @@ local function shell_kind(program: string, host_os: string): (string?, string?)
 	if host_os ~= "windows" and (shell == "bash" or shell == "zsh" or shell == "sh" or shell == "dash" or shell == "ksh") then return "posix", nil end
 	return nil, "The execution host's shell is not verified for safe invocation (" .. program .. "); review its shell settings"
 end
-local function command_words(command: string, shell: string): (any?, string?)
-	-- Windows executable paths are literal, not POSIX backslash-escape syntax.
-	if shell == "powershell" and command:find("\\", 1, true) then
-		local unquoted = command:match('^"(.*)"$') or command:match("^'(.*)'$") or command
-		if unquoted:match("%.[Ee][Xx][Ee]$") or unquoted:match("%.[Cc][Mm][Dd]$") or unquoted:match("%.[Bb][Aa][Tt]$") or unquoted:match("%.[Pp][Ss]1$") then return { unquoted }, nil end
-		return nil, "Use an exact Windows executable path and put its arguments in Arguments"
-	end
-	return Config.parse_arguments(command)
-end
 local RESERVED = {}
 for word in string.gmatch("! { } [[ ]] case do done elif else esac fi for if in then until while time function select coproc", "%S+") do RESERVED[word] = true end
 -- Simple words stay readable; anything else, including a command word that the
@@ -87,39 +78,32 @@ end
 function Executor.render(record: any, program: string, host_os: string, initial_prompt: string?): (string?, string?)
 	local shell, err = shell_kind(program, host_os)
 	if shell == nil then return nil, err end
+	local resolved, resolution_error = Resolution.resolve(record, "ordinary", shell)
+	if resolved == nil then return nil, resolution_error end
+	record = resolved.record
 	-- The host submits one invocation to its retained integrated shell. Native
 	-- OMP launch on a Windows host has not been verified.
 	if record.backend == "native-agent" and shell ~= "posix" then
 		return nil, "Native OMP's execution-host launch shell is not verified. Use a reviewed POSIX host or manual Config recovery; no prompt was sent."
 	end
-	local command = nonempty(record.command)
-	if command == nil then return nil, "Review this account's launch command" end
-	local words, parse_error = command_words(command, if record.backend == "ssh-command" then "posix" else shell)
-	if words == nil or #words == 0 then return nil, parse_error or "Command is empty" end
-	for _, argument in record.arguments do table.insert(words, argument) end
 	if record.backend == "native-agent" then
 		local prompt = if initial_prompt ~= nil then initial_prompt else record.prompt
-		if nonempty(prompt) ~= nil then table.insert(words, prompt) end
+		if nonempty(prompt) ~= nil then table.insert(resolved.arguments, prompt) end
 	end
+	local selected, user_error = Resolution.select_user(resolved, shell)
+	if not selected then return nil, user_error end
+	local words = resolved.arguments
+	table.insert(words, 1, resolved.executable)
 	if record.backend == "ssh-command" then
 		local remote = invocation(words, "posix")
 		local cwd = nonempty(record.cwd)
 		if cwd == "~" then remote = 'cd "$HOME" && ' .. remote
 		elseif cwd ~= nil and cwd:sub(1, 2) == "~/" then remote = 'cd "$HOME/"' .. posix_quote(cwd:sub(3)) .. " && " .. remote
 		elseif cwd ~= nil then remote = "cd " .. posix_quote(cwd) .. " && " .. remote end
-		local destination = record.host
-		if nonempty(record.user) ~= nil then destination = record.user .. "@" .. destination end
-		words = { "ssh", "-t" }
-		if nonempty(record.key_path) ~= nil then table.insert(words, "-i"); table.insert(words, record.key_path) end
-		table.insert(words, "--"); table.insert(words, destination); table.insert(words, remote)
-	elseif nonempty(record.user) ~= nil then
-		if shell ~= "posix" then return nil, "An OS-user launch on this host requires an explicitly approved account-specific command" end
-		local base = words[1]:match("([^/]+)$")
-		if base ~= "sudo" then
-			local wrapped = { "sudo", "-u", record.user, "-H", "--" }
-			for _, word in words do table.insert(wrapped, word) end
-			words = wrapped
-		end
+		local ssh, ssh_error = Resolution.ssh_arguments(record, remote, true)
+		if ssh == nil then return nil, ssh_error end
+		words = ssh
+		table.insert(words, 1, "ssh")
 	end
 	local line = invocation(words, shell)
 	-- Pane input is a terminal, not an argv API. Literal control keys can edit
@@ -471,6 +455,8 @@ function Executor.attach(binding)
 	if jobs == nil then attached[binding.session_key] = nil; notify(binding, err); return end
 	attached[binding.session_key] = true
 	for _, job in ipairs(jobs) do
+		-- Managed reservations have no ticket and cannot enter this executor.
+		if type(job.ticket) ~= "string" then continue end
 		if job.stage == "admitted" and tracks[key(binding, job.id)] == nil then
 			prepared[job.ticket] = { binding = binding, job = job }
 			-- An unclaimed ticket becomes Unknown at its deadline without waiting

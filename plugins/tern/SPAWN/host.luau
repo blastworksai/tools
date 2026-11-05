@@ -4,6 +4,8 @@ local Config = require("./config")
 local Authority = require("./authority")
 local Native = require("./native_cli")
 local Executor = require("./host_executor")
+local Dispatch = require("./dispatch")
+local MAX_WINDOWS = 16
 local live_blocks = {}
 local MAX_TEXT = 120000
 local MAX_INSPECTIONS = 64 -- Active scan plus FIFO waiters, per visible panel.
@@ -264,9 +266,18 @@ local function setup_sections(state)
 		action_row("setup-add-local","Add local record manually",action(state,"add-local"),"Adds a disabled-by-review record; approve its command in Config."),
 		action_row("setup-add-ssh","Add SSH record manually",action(state,"add-ssh"),"Review the SSH destination, command and account before launch."),
 		text_row("manual-json","Paste setup JSON",state.import_text,"Paste the complete schema-2 JSON, including setup_run_id and confirmed when recovering Guided setup. Use its original host and session; nothing starts."),
+		action_row("bridge-import","Allow roster import","bridge-import-open","Paste the complete migration preview JSON above. This opens an exact one-use host gate only; no import or launch."),
+		action_row("bridge-import-cancel","Cancel pending roster import","bridge-import-cancel","Invalidates this Config panel's unconsumed migration gate."),
+		static_row("bridge-import-gate","Migration gate",state.bridge_import_gate or "Closed","Only an explicit owner action opens this gate. Runtime reload invalidates an unused gate."),
 		action_row("manual-review","Review pasted JSON",action(state,"manual-review"),"Validate every record, argument and existing ID before confirmation."),
 		action_row("setup-reset",if state.armed=="reset-roster" then "Confirm delete saved roster" else "Delete saved roster",action(state,"reset-roster"),"Two deliberate clicks; installations, logins and launch history are unchanged."),
 	}
+	local preview,records=Dispatch.import_decode(state.import_text,true)
+	if preview then
+		table.insert(rows,static_row("bridge-import-source","Migration source",preview.source_client,"Source revision "..tostring(preview.source_revision).." · SHA256 "..preview.source_sha256))
+		table.insert(rows,static_row("bridge-import-target","Migration target",preview.target_host,"Must match this Config host before the one-use gate can open."))
+		for index,record in ipairs(records) do table.insert(rows,static_row("bridge-import-record-"..tostring(index),record.id,tern.json.encode(record),"Non-secret configuration snapshot; divergent existing IDs remain a conflict.")) end
+	end
 	if state.import_review then
 		for _,record in ipairs(state.import_review.records) do table.insert(rows,static_row("import-"..record.id,record.id,tern.json.encode(record),"Review the exact settings; conflicting IDs are never renamed or overwritten.")) end
 		table.insert(rows,action_row("manual-confirm","Confirm import", "manual-confirm@"..tostring(state.import_review.revision),"Uses the same validator and import operation as Guided setup."))
@@ -298,6 +309,7 @@ local function record_sections(state)
 			switch_row(prefix("enabled"),"Enabled",record.enabled,"Disabled records cannot launch."),
 			switch_row(prefix("include_all"),"Include in all",record.include_all,"Include this record in Spawn all."),
 			text_row(prefix("user"),"Unix user",text(record.user),"Non-secret account routing; labels do not create users."),
+			text_row(prefix("json"),"Full record JSON","","Activate to load this one record, including mailbox, fresh-launch and model/profile fields. Keep its stable ID. Saving changed JSON requires explicit settings approval before launch."),
 		}
 		if record.backend=="native-agent" or record.backend=="ssh-command" or record.host then table.insert(rows,text_row(prefix("host"),"Host",text(record.host),"Native host identity or explicit SSH destination.")) end
 		if record.backend=="ssh-command" then table.insert(rows,text_row(prefix("key_path"),"Key path",text(record.key_path),"Path only; never paste private key contents.")) end
@@ -345,6 +357,15 @@ local function runtime_sections(state)
 		table.insert(transport,action_row("review-reply-"..id,if state.armed=="review-reply:"..id then "Confirm reviewed result" else "Mark result reviewed",action(state,"review-reply:"..id),"The observer may no longer receive this result; inspect its exact outcome before confirmation."))
 	end
 	table.insert(transport,action_row("reset-transport",if state.armed=="reset-transport" then "Confirm transport identity reset" else "Reset reviewed transport",action(state,"reset-transport"),"Requires no pending requests and every result acknowledged or reviewed. Preserves roster and attempts; old clients must reopen Config."))
+	if state.binding then
+		local owners,why=Dispatch.recovery_view(state.binding)
+		if not owners then table.insert(transport,static_row("bridge-recovery-error","Managed dispatch",tostring(why),"Preserve the transport registry; no automatic reset."))
+		else for _,owner in ipairs(owners) do
+			local id=owner.logical_session_id
+			table.insert(transport,static_row("bridge-owner-"..id,"Managed controller "..id,tern.json.encode(owner),"Inspect original controller and every launch executor, including unavailable/parked windows. Alias numbers are window-scoped."))
+			table.insert(transport,action_row("bridge-recover-"..id,if owner.fenced then "I verified previous controller and pending launch executors stopped or retired" else "Fence managed controller for recovery","bridge-recover:"..id..":"..tostring(owner.revision)..":"..(if owner.fenced then "confirm" else "fence"),"Confirmation records operator attestation, not machine proof. Stop known-active executors first. It never starts a replacement or clears worker reservations."))
+		end end
+	end
 	return {{id="running",page="runtime",title="SPAWN launches",rows=live},{id="history",page="runtime",title="Failed/exited history",rows=history},{id="other",page="runtime",title="Other Tern sessions",rows=other},{id="transport",page="runtime",title="Transport review",rows=transport}}
 end
 local function view(state)
@@ -377,6 +398,19 @@ local function view(state)
 end
 local function update_record(state,cx,id,field,value,revision)
 	local record,index=record_by_id(state,id);if not record then return end
+	if field=="json" then
+		if not state.snapshot or revision~=state.snapshot.config_revision then reload(state);state.notice="stale-config: review the refreshed settings and repeat your edit";return end
+		local candidate,err=decode(value)
+		if not candidate then state.notice=err or "Expected one complete record object";return end
+		local canonical,why=Config.validate_record(candidate)
+		if not canonical then state.notice=why;return end
+		if canonical.id~=id then state.notice="Stable ids are immutable; full-record JSON must keep this record's ID";return end
+		if Dispatch.protocol.equal(canonical,record) then state.notice="Record unchanged. No agents were launched.";return end
+		canonical.review_required=true
+		canonical.review_reason=record.review_reason or "Review all launch, mailbox and selector settings after editing this record's JSON"
+		local next_records=Authority.clone(state.config.agents);next_records[index]=canonical
+		mutate(state,cx,revision,"replace-records",{records=next_records});return
+	end
 	local allowed={provider=true,account_label=true,host=true,user=true,key_path=true,command=true,arguments=true,cwd=true,prompt=true,placement=true,backend=true,duplicate_policy=true,enabled=true,include_all=true}
 	if not allowed[field] then return end
 	local candidate=Authority.clone(record)
@@ -486,12 +520,38 @@ local definition={
 			elseif item=="manual-json" then draft=state.import_text
 			else
 				local id,field,rev=parse_record_row(item);revision=rev
-				if id then local record=record_by_id(state,id);if record and type(record[field])~="boolean" then draft=if field=="arguments" then Config.render_arguments(record.arguments) else text(record[field]) end end
+				if id then
+					local record=record_by_id(state,id)
+					if record and field=="json" then
+						if not state.snapshot or rev~=state.snapshot.config_revision then reload(state);state.notice="stale-config: activate the refreshed record editor";return end
+						draft=tern.json.encode(record)
+					elseif record and type(record[field])~="boolean" then draft=if field=="arguments" then Config.render_arguments(record.arguments) else text(record[field]) end
+				end
 			end
 			if draft then state.focus=item;state.editing={row=item,draft=draft,cursor=utf16_length(draft),revision=revision} end
 		elseif event.ev=="action" then
 			if event.act=="page" and (event.value=="setup" or event.value=="agents" or event.value=="runtime") then state.page=event.value;state.focus=nil;state.editing=nil;state.armed=nil;open(state,cx);return end
 			if event.act=="refresh" then open(state,cx);return end
+			local recovery_id,recovery_revision,recovery_mode=event.act:match("^bridge%-recover:([A-Za-z0-9_-]+):(%d+):(%a+)$")
+			if recovery_id then
+				verify(state,cx,function(session,why)
+					if not session or not state.binding then state.notice=why or "Open original Config session";return end
+					local ok,err=Dispatch.recover_owner(state.binding,recovery_id,tonumber(recovery_revision),recovery_mode=="confirm")
+					state.notice=if ok then "Recovery recorded. No replacement launched; old worker reservations remain for separate inspection." else err
+				end);return
+			end
+			if event.act=="bridge-import-open" then
+				verify(state,cx,function(session,why)
+					if not session or not state.binding then state.notice=why or "Open Config first";return end
+					local gate,err=Dispatch.open_import(state.binding,state.import_text)
+					state.bridge_import_gate=gate;state.notice=if gate then "Roster import gate opened: "..gate..". Nothing imported or launched." else err
+				end);return
+			end
+			if event.act=="bridge-import-cancel" then
+				local ok,why=Dispatch.cancel_import(state.bridge_import_gate)
+				if ok then state.bridge_import_gate=nil end
+				state.notice=if ok then "Import gate cancelled" else why;return
+			end
 			if event.act=="setup" then cx:action("plugin.spawn.spawn_setup");return end
 			if event.act=="close" then if event.value==nil then state.closed=true;state.inspect_queue={};live_blocks[cx.pane]=nil;cx:exit(0) else state.editing=nil;state.focus=nil end;return end
 			local op,rev=event.act:match("^(.*)@(%d+)$");local expected=tonumber(rev)
@@ -576,3 +636,234 @@ local definition={
 	save=function(state)return {page=state.page,host_key=state.host_key,origin_session=state.origin_session,origin_scope=state.origin_scope} end,
 }
 tern.block.define("spawner",definition)
+
+-- Enumerate the owning daemon's native client keys. Window aliases and names are
+-- never used as native session identity. A final membership read fences scan drift.
+local function bridge_membership(state,cx,callback,deadline)
+	deadline=deadline or (tern.now()+INSPECTION_DEADLINE_MS)
+	state.inspect_queue=state.inspect_queue or {}
+	if state.inspect_busy then
+		if #state.inspect_queue>=MAX_INSPECTIONS-1 then
+			local err="Host membership inspection queue is full; this action was not accepted. Refresh and review before submitting it again."
+			state.queue_error=err;state.notice=err
+			local ok,why=pcall(callback,nil,err)
+			if not ok then state.transport_error="Host authority callback failed: "..tostring(why) end
+			cx:render()
+		else
+			table.insert(state.inspect_queue,{cx=cx,callback=callback,deadline=deadline})
+			cx:render() -- Keep the bridge lease busy for the queued verification too.
+		end
+		return
+	end
+	state.inspect_busy=true
+	-- Render before the asynchronous inspection so the bridge lease reads busy for the whole
+	-- in-flight window (up to INSPECTION_DEADLINE_MS); ORCH+ never closes or adopts a busy bridge.
+	cx:render()
+	local function finish(session,err,inventory)
+		if session and tern.now()>deadline then session=nil;err="Host membership inspection deadline elapsed; this action was not processed" end
+		if session and state.origin_session~=nil and session~=state.origin_session then session=nil;err="Authority moved from its original session. Reopen Config in the intended session; no state was rebound." end
+		state.scope_error=err
+		if session then state.inventory=inventory end
+		local ok,why=pcall(callback,session,err)
+		if not ok then state.transport_error="Host authority callback failed: "..tostring(why);state.notice=state.transport_error end
+		cx:save();cx:render()
+		state.inspect_busy=false
+		local queued=table.remove(state.inspect_queue,1)
+		-- The bridge lease reports busy while inspecting; render once more so it reads idle again.
+		if queued then bridge_membership(state,queued.cx,queued.callback,queued.deadline) else cx:render() end
+	end
+	local function inspect_step(window,done)
+		local remaining=deadline-tern.now()
+		if remaining<=0 then done(nil,"Host membership inspection deadline elapsed; this action was not processed");return end
+		inspect(window,done,math.min(3000,remaining))
+	end
+	inspect_step(nil,function(initial,err)
+		if not initial then finish(nil,err);return end
+		if type(initial.clients)~="table" then finish(nil,"Host client inventory is unavailable");return end
+		local keys={};local seen={}
+		-- Window halves attached through `tern remote serve` list as kind "remote"; their
+		-- sessions live on this host daemon exactly like local desktop windows.
+		for _,client in ipairs(initial.clients) do
+			if (client.kind=="window" or client.kind=="remote") and type(client.window)=="string" and not seen[client.window] then
+				if #client.window>256 then finish(nil,"Invalid native window identity");return end
+				seen[client.window]=true;table.insert(keys,client.window)
+			end
+		end
+		if #keys==0 or #keys>MAX_WINDOWS then finish(nil,"Visible host membership is missing or exceeds the 16-window inspection limit");return end
+		local index=0;local memberships={};local owner=nil
+		local function scan()
+			index+=1
+			if index>#keys then
+				local total=0;local native=nil
+				for _,id in pairs(memberships) do total+=1;native=id end
+				if total~=1 then finish(nil,"Authority membership is missing or ambiguous. Keep this panel visible in its original session; parked membership is unknown.");return end
+				inspect_step(owner,function(final,why)
+					if not final then finish(nil,why);return end
+					local current=pane_sessions(final,cx.pane)
+					local n=0;if current then for _ in pairs(current) do n+=1 end end
+					if not current or n~=1 or current[tostring(native)]~=native then finish(nil,"Host membership changed during inspection; review and refresh");return end
+					finish(native,nil,final)
+				end)
+				return
+			end
+			inspect_step(keys[index],function(inventory,why)
+				if not inventory then finish(nil,why);return end
+				local found=pane_sessions(inventory,cx.pane)
+				if not found then finish(nil,"Corrupt native session identity");return end
+				for k,id in pairs(found) do memberships[k]=id;owner=keys[index] end
+				scan()
+			end)
+		end
+		scan()
+	end)
+end
+
+-- The non-palette bridge is deliberately separate from normal Config rendering.
+local Protocol=Dispatch.protocol
+local Codec=require("./codec")
+local function dispatch_verify(state,cx,r,callback)
+	bridge_membership(state,cx,function(session,why)
+		if not session then callback(nil,why);return end
+		local controller=tonumber(r.origin_binding.host_pane_id)
+		local memberships=if controller then pane_sessions(state.inventory,controller) else nil
+		local n=0;if memberships then for _ in pairs(memberships) do n+=1 end end
+		if not memberships or n~=1 or memberships[tostring(session)]~=session then callback(nil,"Controller source is not on this bridge's host/session");return end
+		local found=false
+		for _,pane in ipairs(tern.pane.list()) do
+			if pane.pane==controller and pane.program=="orchplus.orchestrator" then found=true end
+		end
+		if not found then callback(nil,"Controller source is not the admitted ORCH+ controller block");return end
+		local binding,err=Authority.binding(session)
+		if not binding then callback(nil,err);return end
+		state.origin_session=session;state.binding=binding
+		callback(binding,nil,session)
+	end)
+end
+-- Bridge lease (SPAWN_BRIDGE v1): lifecycle evidence the ORCH+ window reads before it reuses or
+-- closes this pane, never authority. held: the registry names this pane in a requested window
+-- authorization (or is unreadable); live: an execution projection is current; busy: a membership
+-- verification is in flight; owner: the controller/window of the current request, else creator.
+local LEASE_PREFIX="SPAWN_BRIDGE v1 "
+local function bridge_creator(value)
+	local text=function(v)return Protocol.text(v,256,false)end
+	if not Protocol.fields(value,{schema=function(v)return v==1 end,controller_pane=function(v)return type(v)=="string" and #v<=32 and v:match("^%d+$")~=nil end,
+		alias_nonce=text,window_key=function(v)return Protocol.text(v,256,true)end,window_epoch=Protocol.id}) then return nil end
+	return {controller_pane=value.controller_pane,alias_nonce=value.alias_nonce,window_key=value.window_key,window_epoch=value.window_epoch}
+end
+local function lease_owner(state)
+	local r=state.request
+	if r then
+		local b=r.origin_binding
+		return {controller_pane=r.controller_pane,alias_nonce=b.alias_nonce,window_key=b.window_key,window_epoch=b.window_epoch}
+	end
+	return state.creator
+end
+-- The one human-visible line; machine nodes are hidden by dispatch.css but stay in the surface.
+local function bridge_line(state,held,live)
+	local body=state.body
+	local what=if body then tostring(body.op or "request").." "..tostring(body.status or "answered") elseif state.error then "last request refused" else "idle"
+	local note=if live then "executing an authorized ORCH+ effect"
+		elseif held then "holding a requested window authorization"
+		elseif state.restored then "restored view; reconcile through ORCH+, grants nothing"
+		elseif body and type(body.error)=="table" and Protocol.id(body.error.code) then body.error.code
+		elseif not body and not state.error then "awaiting ORCH+ requests"
+		else nil
+	return ("SPAWN bridge - "..what..(if note then " - "..note else "")):sub(1,160)
+end
+local function response_view(state,cx)
+	local body=state.body
+	local line=if body then Protocol.encode(body) else nil
+	if not line and body and body.origin_binding then
+		line=Protocol.encode(Protocol.reject(body,"oversize","Encoded bridge response exceeds 8192 bytes; no truncated response is valid"))
+	end
+	local node=ui.text(line or state.error or "SPAWN dispatch is awaiting a bounded request.")
+	node.p=node.p or {};node.p.key=Protocol.NODE;node.p.role=Protocol.ROLE
+	local execution,held=Dispatch.bridge_lease(state.request,cx.pane)
+	local children={ui.text(ui.span(bridge_line(state,held,execution~=nil),"muted")),node}
+	if execution then
+		local bytes="SPAWN_EXECUTION v1 "..tern.json.encode(execution)
+		if #bytes<=65536 then
+			local private=ui.text(bytes);private.p=private.p or {};private.p.key="spawn-dispatch-execution";private.p.role="spawn.dispatch.execution"
+			table.insert(children,private)
+		end
+	end
+	local lease=tern.json.encode({schema=1,held=held,live=execution~=nil,busy=state.inspect_busy==true,owner=lease_owner(state)})
+	if #lease>2048 then lease=tern.json.encode({schema=1,held=true,live=true,busy=true}) end
+	local marker=ui.text(LEASE_PREFIX..lease);marker.p=marker.p or {};marker.p.key="spawn-dispatch-lease";marker.p.role="spawn.dispatch.lease"
+	table.insert(children,marker)
+	return {main=ui.col(children)}
+end
+tern.block.define("dispatch",{
+	font="sans",
+	init=function(_cx,args,saved)
+		local state={}
+		if type(saved)=="table" then
+			if type(saved.request_json)=="string" then state.request=Protocol.decode(saved.request_json) end
+			if type(saved.origin_session)=="number" then state.origin_session=saved.origin_session end
+			state.creator=bridge_creator(saved.creator)
+		end
+		-- The creating ORCH+ window names itself (lease display only, never identity or authority).
+		if not state.creator and type(args)=="table" and type(args[1])=="string" and #args[1]<=2048 then
+			local ok,value=pcall(tern.json.decode,args[1])
+			if ok then state.creator=bridge_creator(value) end
+		end
+		if state.request then
+			-- A saved block is a view cursor, never execution authority.
+			state.restored=true
+			state.body=Protocol.body(state.request,"uncertain",nil,{code="target_unavailable",message="Reconcile this request through status; saved block state grants no execution"})
+		end
+		return state
+	end,
+	view=function(state,cx)return response_view(state,cx)end,
+	event=function(state,event,cx)
+		if event.ev~="action" then return end
+		if event.act=="import_config" then
+			local migration,why=Dispatch.import_decode(event.value,false)
+			if not migration then state.error=why;return end
+			bridge_membership(state,cx,function(session,err)
+				if not session then state.error=err;return end
+				local binding,bind_error=Authority.binding(session)
+				if not binding or binding.host_key~=migration.target_host then state.error=bind_error or "Migration target host differs";return end
+				state.body=Dispatch.import_config(migration);cx:render()
+			end);return
+		end
+		if event.act=="spawn.authorize" then
+			local value=Codec.strict_decode(event.value,65536)
+			if not Protocol.fields(value,{request_json=true,nonce=Protocol.id,executor_id=Protocol.id,orch_claim=true}) or type(value.request_json)~="string" then return end
+			local r=Protocol.decode(value.request_json);if not r then return end
+			-- Membership was verified before issuing this challenge. The SPAWN
+			-- window inspected the exact live grant after that async boundary.
+			-- Do not add another asynchronous gap before consuming the nonce.
+			state.request=r;state.restored=nil
+			state.body=Dispatch.authorize(r,value.nonce,cx.pane,function(body)
+				if state.request and Protocol.equal(state.request,r) then state.body=body;cx:render() end
+			end,value.orch_claim,value.executor_id)
+			cx:save();cx:render();return
+		end
+		if event.act=="spawn.claim" or event.act=="spawn.begin" or event.act=="spawn.result" or event.act=="spawn.wakeclaim" or event.act=="spawn.wakebegin" or event.act=="spawn.wakeresult" or event.act=="spawn.wakedefer" then
+			local value=Codec.strict_decode(event.value,65536)
+			if not Protocol.fields(value,{request_json=true,executor_id=Protocol.id},{result=true,orch_claim=true}) or type(value.request_json)~="string" then return end
+			local r=Protocol.decode(value.request_json)
+			if not r or (r.op~="launch" and r.op~="adopt" and r.op~="stop" and r.op~="native_wake") then return end
+			dispatch_verify(state,cx,r,function(binding,why)
+				if not binding then state.body=Protocol.reject(r,"binding_mismatch",why);return end
+				state.request=r;state.restored=nil
+				state.body=if r.op=="launch" or r.op=="adopt" then Dispatch.claim(r,value.executor_id,event.act:sub(7),value.result) elseif r.op=="stop" then Dispatch.stop_claim(r,value.executor_id,event.act:sub(7),value.result) else Dispatch.wake_claim(r,value.executor_id,event.act:sub(7),value.result,value.orch_claim)
+				cx:save();cx:render()
+			end);return
+		end
+		local r,why=Protocol.decode(event.value)
+		if not r or event.act~=r.op then state.error=if why then why.message else "Operation differs from request";return end
+		dispatch_verify(state,cx,r,function(binding,err,session)
+			if not binding then state.body=Protocol.reject(r,"binding_mismatch",err);return end
+			state.request=r;state.restored=nil
+			if r.op=="catalog" or r.op=="status" or r.op=="owner_status" then
+				state.body=Dispatch.request(r,binding,session,function()end)
+			else
+				state.body=Dispatch.stage(r,binding,session,cx.pane)
+			end
+			cx:save();cx:render()
+		end)
+	end,
+	save=function(state)return {request_json=if state.request then tern.json.encode(state.request) else nil,origin_session=state.origin_session,creator=state.creator}end,
+})

@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 560" role="img" aria-label="ORCH+ controller mockup">
+  <style>
+    text { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; fill: currentColor; }
+    .muted { fill: var(--muted); }
+    .surface { fill: var(--surface); stroke: var(--border); }
+    .button { fill: var(--surface); stroke: var(--accent); }
+    .accent { fill: var(--accent); }
+    .success { fill: var(--success); }
+    .warning { fill: var(--warning); }
+    .error { fill: var(--error); }
+  </style>
+  <rect class="surface" x="18" y="18" width="964" height="524" rx="12"/>
+  <text x="42" y="52" font-size="20">ORCH+</text>
+  <text class="muted" x="130" y="52" font-size="13">session: plugin factory</text>
+  <text class="accent" x="740" y="52" font-size="13">● ACTIVE CONTROLLER</text>
+  <rect class="surface" x="42" y="76" width="180" height="66" rx="8"/>
+  <text class="muted" x="58" y="101" font-size="11">WORKERS</text><text x="58" y="127" font-size="23">4</text>
+  <rect class="surface" x="236" y="76" width="180" height="66" rx="8"/>
+  <text class="muted" x="252" y="101" font-size="11">HEALTH</text><text class="success" x="252" y="127" font-size="18">2 OK</text><text class="warning" x="330" y="127" font-size="14">1 stale</text>
+  <rect class="surface" x="430" y="76" width="180" height="66" rx="8"/>
+  <text class="muted" x="446" y="101" font-size="11">EFFECTS IN FLIGHT</text><text x="446" y="127" font-size="23">1</text>
+  <rect class="surface" x="624" y="76" width="180" height="66" rx="8"/>
+  <text class="muted" x="640" y="101" font-size="11">OWNER GATES</text><text class="warning" x="640" y="127" font-size="23">1</text>
+  <text class="muted" x="42" y="175" font-size="11">WORKER</text><text class="muted" x="250" y="175" font-size="11">HEALTH</text><text class="muted" x="370" y="175" font-size="11">LAST REPORT</text><text class="muted" x="700" y="175" font-size="11">ACTION</text>
+  <rect class="surface" x="42" y="188" width="900" height="48" rx="6"/><circle class="success" cx="62" cy="212" r="6"/><text x="80" y="216" font-size="13">builder-01</text><text class="success" x="250" y="216" font-size="12">working</text><text x="370" y="216" font-size="12">HEARTBEAT · context 41%</text><rect class="button" x="700" y="197" width="226" height="30" rx="6"/><text x="714" y="217" font-size="12">Inspect native facts</text>
+  <rect class="surface" x="42" y="244" width="900" height="48" rx="6"/><circle class="warning" cx="62" cy="268" r="6"/><text x="80" y="272" font-size="13">reviewer-02</text><text class="warning" x="250" y="272" font-size="12">stale</text><text x="370" y="272" font-size="12">last report · 4m 10s ago</text><rect class="button" x="700" y="253" width="226" height="30" rx="6"/><text x="714" y="273" font-size="12">Queue progress request</text>
+  <rect class="surface" x="42" y="300" width="900" height="48" rx="6"/><circle class="error" cx="62" cy="324" r="6"/><text x="80" y="328" font-size="13">builder-03</text><text class="error" x="250" y="328" font-size="12">asking</text><text x="370" y="328" font-size="12">ASK · which migration path?</text><rect class="button" x="700" y="309" width="226" height="30" rx="6"/><text x="714" y="329" font-size="12">Answer exact question…</text>
+  <rect class="surface" x="42" y="356" width="900" height="48" rx="6"/><circle class="success" cx="62" cy="380" r="6"/><text x="80" y="384" font-size="13">coordinator</text><text class="success" x="250" y="384" font-size="12">idle</text><text x="370" y="384" font-size="12">READY · context 83%</text><rect class="button" x="700" y="365" width="226" height="30" rx="6"/><text x="714" y="385" font-size="12">Roll over coordinator…</text>
+  <text class="muted" x="42" y="446" font-size="11">PENDING</text><text x="42" y="470" font-size="12">• landing approval for builder-01</text><text x="42" y="493" font-size="12">• mailbox read for reviewer-02 (claimed)</text>
+  <text class="muted" x="570" y="446" font-size="11">TRANSPORT</text><text x="570" y="470" font-size="12">report-files-v1 mailboxes via SPAWN</text><text class="muted" x="570" y="493" font-size="12">committed revision 184 · no transcripts read</text>
+</svg>
