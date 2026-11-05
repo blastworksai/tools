@@ -124,9 +124,17 @@ local function url_encode(value: string): string
 	end))
 end
 
-function M.work_on_url(workspace_id: string, cwd: string?): string
+-- `launch` (a chosen SPAWN agent) carries its rendered command line, label and
+-- prompt delivery; without it the window starts Tern's default agent.
+function M.work_on_url(workspace_id: string, cwd: string?, launch: any?): string
 	local url = string.format("tern://work?workspace=%s", url_encode(workspace_id))
 	if cwd ~= nil then url = url .. "&cwd=" .. url_encode(cwd) end
+	if launch ~= nil then
+		url = url .. "&agent=" .. url_encode(launch.agent)
+			.. "&label=" .. url_encode(launch.label)
+			.. "&delivery=" .. url_encode(launch.delivery)
+			.. "&command=" .. url_encode(launch.command)
+	end
 	return url
 end
 

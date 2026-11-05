@@ -1,0 +1,4 @@
+# tern shot tests/run.txt — set WORK_PACKAGE_DIR to this package.
+carly lua "local root=assert(tern.getenv('WORK_PACKAGE_DIR'), 'Set WORK_PACKAGE_DIR'); assert(loadstring(tern.fs.read(root..'/tests/projects.luau'), 'work-projects'))(root); assert(loadstring(tern.fs.read(root..'/tests/spawn.luau'), 'work-spawn'))(root); return 'PASS'"
+carly ok
+carly last "PASS"

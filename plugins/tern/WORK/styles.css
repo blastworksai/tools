@@ -54,3 +54,24 @@
 [data-surface='plugin.tern-work.panel'] .glitch-plan-info [href] {
   color: #ffab01 !important;
 }
+
+/* With SPAWN agents saved, Work On is a menu trigger in the same amber. */
+[data-surface='plugin.tern-work.panel'] [data-role='glitch.work-on'] {
+  flex: 0 0 auto;
+}
+
+[data-surface='plugin.tern-work.panel'] [data-role='glitch.work-on'] .sf-menu-trigger {
+  background: #ffab01 !important;
+  border-color: #ffab01 !important;
+  box-shadow: 0 2px 8px rgba(255, 171, 1, 0.28) !important;
+  color: #232323 !important;
+}
+
+[data-surface='plugin.tern-work.panel'] [data-role='glitch.work-on'] .sf-menu-trigger:hover {
+  background: #ffc040 !important;
+  border-color: #ffc040 !important;
+}
+
+[data-surface='plugin.tern-work.panel'] [data-role='glitch.work-on'] .sf-menu-trigger * {
+  color: #232323 !important;
+}
