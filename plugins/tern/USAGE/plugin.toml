@@ -25,3 +25,9 @@ id = "config"
 title = "USAGE Configuration"
 icon = "gauge"
 palette = false
+
+[[blocks]]
+id = "capacity"
+title = "USAGE Capacity"
+icon = "gauge"
+palette = false

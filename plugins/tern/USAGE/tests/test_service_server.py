@@ -64,7 +64,8 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_every_owner_operation_requires_private_authority(self):
         operations=("register_client","diagnostics","configure","pair_offer","pair_accept","unpair","shutdown",
-                    "display","setup_state","usage_refresh","usage_status","usage_preferences","usage_results","usage_publish")
+                    "display","setup_state","usage_refresh","usage_status","usage_preferences","usage_results","usage_publish",
+                    "capacity","binding_candidates")
         for operation in operations:
             with self.subTest(operation=operation):
                 status,body=await self.rpc(operation,headers={})

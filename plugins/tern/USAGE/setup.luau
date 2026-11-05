@@ -1,7 +1,10 @@
 --!strict
 -- Owner-local administration. Every mutation follows an explicit confirmation;
 -- invitations exist only in the prompt/RPC/explicit clipboard action, never KV.
+-- When the window's current Tern host is remote, that host is USAGE's source: its runtime,
+-- permissions and bindings are configured through its own config block (host_setup.luau).
 local companion = require("./companion")
+local host_setup = require("./host_setup")
 local setup = {}
 local function array(values: any): any
 	local result = tern.json.array()
@@ -11,9 +14,62 @@ end
 local function text(value: any, maximum: number): boolean
 	return type(value) == "string" and #value > 0 and #value <= maximum and not value:find("%c")
 end
+-- How long a window waits for its attached host's answer: the host companion's own
+-- deadlines (ensure 390 s, requests 30 s) plus transport margin.
+local HOST_WAIT_MS: { [string]: number } = { ensure = 400000, setup_state = 400000 }
+local HOST_REQUEST_MS = 40000
+local HOST_POLL_MS = 250
+-- The attached machine's name when the current Tern host is remote, else nil (this machine).
+-- Also used by the window's Refresh command: the remote host is then the source.
+local function attached(cx: any): string?
+	local ok, host = pcall(function() return cx.hosts:current() end)
+	if ok and type(host) == "table" and host.kind == "remote" and text(host.name, 256) then return host.name end
+	return nil
+end
+setup.attached = attached
+local function response_node(node: any, depth: number): any?
+	if type(node) ~= "table" or depth > 4 then return nil end
+	if type(node.p) == "table" and node.p.role == host_setup.NODE then return node end
+	for _, child in (if type(node.c) == "table" then node.c else {}) do
+		local found = response_node(child, depth + 1)
+		if found ~= nil then return found end
+	end
+	return nil
+end
+-- The host config block's latest answer, read from its native surface: the keyed node, else the
+-- whole (small) configuration view.
+local function host_response(cx: any, pane: number): any?
+	local limit = host_setup.MAX + #host_setup.PREFIX
+	local function find(options: any): any?
+		local ok, tree = pcall(function() return cx.session:surface(pane, options) end)
+		return if ok and type(tree) == "table" then response_node(tree.main, 0) else nil
+	end
+	local node = find({ root = "main." .. host_setup.NODE, nodes = 4, depth = 2, max_chars = limit })
+		or find({ nodes = 500, max_chars = limit * 2 })
+	if node == nil then return nil end
+	-- Spans arrive as one string, one span or a one-element list of either.
+	local spans = node.p.spans
+	local span = if type(spans) == "table" and #spans == 1 then spans[1] else spans
+	return host_setup.parse(if type(span) == "table" then span.t else span)
+end
+-- The current host's config pane: the one already used, else any, else (when `open`) a new one
+-- beside focus. The second result says a pane was just opened; a just-opened pane that is not
+-- listed yet is kept rather than opened again.
+local function config_pane(cx: any, known: number?, open: boolean): (number?, boolean)
+	local found = nil
+	for _, item in cx.session:panes() do
+		if item.block == "usage.config" then
+			if item.pane == known then return known, false end
+			found = found or item.pane
+		end
+	end
+	if found ~= nil then return found, false end
+	if not open then return known, false end
+	return cx:new_block("usage.config", {}, "beside", { focus = false }), true
+end
 
 function setup.new(changed: (any) -> ()): any
-	local self: any = { generation = 0 }
+	local self: any = { generation = 0, requests = 0 }
 	local function fail(cx: any, err: any?)
 		cx:toast("error", "USAGE setup did not complete", if err ~= nil then err.message else "The local operation is unavailable. Retry USAGE Setup.")
 	end
@@ -72,8 +128,62 @@ function setup.new(changed: (any) -> ()): any
 		fresh:toast("info", "USAGE configuration saved")
 		changed(fresh)
 	end
-	local function configure(own: number, payload: any)
-		rpc(own, "configure", payload, saved)
+	-- Where Setup's companion operations run: `here` is this window's machine (wording unchanged),
+	-- `remote(name)` the attached host through its config block.
+	local here = { rpc = rpc, where = "this installation", prefix = "", saved = saved }
+	local host_request: any
+	local function remote(name: string): any
+		local target: any = { host = name, where = "host " .. name, prefix = "Host " .. name .. " · " }
+		target.rpc = function(own: number, operation: string, payload: any, done: (any, any) -> ())
+			host_request(target, own, operation, payload, done, nil)
+		end
+		target.saved = function(_value: any, fresh: any) fresh:toast("info", "USAGE configuration saved on host " .. name) end
+		return target
+	end
+	-- One request through the attached host's config block, polled on this window's timer.
+	-- `failed(err, cx)` replaces the default failure toast.
+	host_request = function(target: any, own: number, operation: string, payload: any, done: (any, any) -> (), failed: ((any, any) -> ())?)
+		self.requests += 1
+		local opened = false
+		local id = "setup-" .. tostring(os.time()) .. "-" .. tostring(math.random(1, 2147483647)) .. "-" .. tostring(self.requests)
+		local bytes = tern.json.encode({ version = 1, request_id = id, op = operation, payload = payload })
+		local deadline = tern.now() + (HOST_WAIT_MS[operation] or HOST_REQUEST_MS)
+		local function failure(cx: any, err: any)
+			if failed ~= nil then failed(err, cx) else fail(cx, err) end
+		end
+		local step: any
+		step = function(cx: any?)
+			if own ~= self.generation then return end
+			if cx == nil then tern.timer(HOST_POLL_MS, step); return end
+			local pane, created = config_pane(cx, target.pane, not opened)
+			target.pane, opened = pane, opened or created
+			if target.pane == nil then
+				failure(cx, { code = "host_unavailable", message = "USAGE is not ready on host " .. target.host .. ". Install or reload USAGE there, then retry." })
+				return
+			end
+			local response = host_response(cx, target.pane)
+			if response ~= nil and response.request_id == id and response.status ~= "pending" then
+				if response.ok then done(response.value, cx)
+				else failure(cx, { code = if type(response.code) == "string" then response.code else "internal_error",
+					message = if text(response.message, 512) then response.message else "Host " .. target.host .. " could not complete the USAGE operation." }) end
+				return
+			end
+			if tern.now() >= deadline then
+				failure(cx, { code = "timeout", message = "Host " .. target.host .. " did not answer USAGE Setup in time." })
+				return
+			end
+			-- An idle block showing another answer has not taken this request yet: (re)send it.
+			-- The block never runs a request it has already answered.
+			if response ~= nil and response.status ~= "pending" then
+				cx.session:event(target.pane, { ev = "action", act = host_setup.ACTION, value = bytes })
+			end
+			tern.timer(HOST_POLL_MS, step)
+		end
+		tern.timer(0, step)
+	end
+	local function configure(own: number, payload: any, target: any?)
+		local via = target or here
+		via.rpc(own, "configure", payload, via.saved)
 	end
 	function self:show_summary(cx: any)
 		-- Only this explicit action writes the setting. Poll/reload never restores
@@ -90,14 +200,14 @@ function setup.new(changed: (any) -> ()): any
 			{ label = "Retry runtime check", action = "retry" },
 		}, function(item, fresh)
 			if item.action == "python" then fresh:open("https://www.python.org/downloads/")
-			elseif item.action == "retry" then self:open(fresh)
+			elseif item.action == "retry" then self:open(fresh, "local")
 			elseif item.action == "interpreter" then
 				prompt(fresh, own, "Existing Python 3.11+ executable path (no arguments)", nil, 4096, function(path, next_cx)
 					if path:sub(1, 1) == "-" then next_cx:toast("error", "An executable path is required"); return end
 					confirm(next_cx, own, "Use this local interpreter?", path, function(current)
 						tern.kv.set("usage_python", path)
 						companion.invalidate()
-						self:open(current)
+						self:open(current, "local")
 					end)
 				end)
 			elseif item.action == "install" then
@@ -107,7 +217,7 @@ function setup.new(changed: (any) -> ()): any
 						if own ~= self.generation or latest == nil then return end
 						if value == nil then runtime(latest, own, failure or {}); return end
 						changed(latest)
-						self:open(latest)
+						self:open(latest, "local")
 					end, { install_dependencies = true })
 				end)
 			end
@@ -191,25 +301,148 @@ function setup.new(changed: (any) -> ()): any
 		end)
 	end
 	-- Setting key `metadata_enabled` is the stored name of this permission.
-	local function metadata(cx: any, own: number, state: any)
+	local function metadata(cx: any, own: number, state: any, target: any)
 		local enabled = not state.settings.metadata_enabled
-		confirm(cx, own, if enabled then "Allow headless usage reads on this installation?" else "Stop headless usage reads on this installation?",
+		confirm(cx, own, if enabled then "Allow headless usage reads on " .. target.where .. "?" else "Stop headless usage reads on " .. target.where .. "?",
 			if enabled then "Read the signed-in provider identity and usage for accounts defined in SPAWN, without opening an agent session. Required for Refresh. No login, model turn, owner-pane input, credential export or new user privileges. Sharing consent remains separate."
-			else "Stop manual and scheduled usage reads on this installation. Existing received data cannot be recalled.", function()
-				configure(own, { changes = { metadata_enabled = enabled }, consent = { metadata = enabled } })
+			else "Stop manual and scheduled usage reads on " .. target.where .. ". Existing received data cannot be recalled.", function()
+				configure(own, { changes = { metadata_enabled = enabled }, consent = { metadata = enabled } }, target)
 			end)
 	end
-	function self:open(cx: any)
+	local function capacity(cx: any, own: number, state: any, target: any)
+		local enabled = not state.settings.capacity_enabled
+		confirm(cx, own, target.prefix .. (if enabled then "Enable read-only capacity export?" else "Revoke capacity export?"),
+			if enabled then "Allow same-user Tern plugins such as ORCH+ to read account, source and SPAWN binding evidence, and the quota of accounts you bound. No credentials or source selectors. Tern block events do not authenticate plugins or humans. No refresh, configuration or launch authority is granted."
+			else "Invalidate capacity snapshots immediately. Already received data cannot be recalled.", function()
+				configure(own, { changes = { capacity_enabled = enabled }, consent = { capacity = enabled } }, target)
+			end)
+	end
+	local function bindings(cx: any, own: number, target: any)
+		target.rpc(own, "binding_candidates", {}, function(candidates, fresh)
+			local items = {}
+			for _, account in candidates.accounts do
+				table.insert(items, { label = account.provider_label .. " · " .. account.account_label .. " → " .. (account.principal or "no current reading"),
+					detail = if account.bound then "Bound. Choose to revoke." elseif account.canonical_id ~= nil then "Choose to bind this login."
+						else "Refresh first; only a current headless reading can be bound.", account = account })
+			end
+			if #items == 0 then fresh:toast("info", "SPAWN defines no accounts on " .. target.where); return end
+			pick(fresh, own, target.prefix .. "Bind SPAWN accounts — capacity export carries quota only for bound accounts", items, function(item, next_cx)
+				local account = item.account
+				if account.bound then
+					confirm(next_cx, own, target.prefix .. "Revoke this account binding?", "SPAWN record: " .. account.id .. ". Capacity export stops carrying its quota and any OMP association with it. Already received data cannot be recalled.", function()
+						configure(own, { binding_action = { operation = "revoke", scope_id = account.scope_id, id = account.id } }, target)
+					end)
+				elseif account.canonical_id == nil then
+					next_cx:toast("info", "No current reading to bind", "Run USAGE Refresh for this account, then bind it.")
+				else
+					confirm(next_cx, own, target.prefix .. "Bind this SPAWN account to its signed-in login?", "Provider: " .. account.provider_label .. ". SPAWN record: " .. account.id .. " (" .. account.account_label .. "). Principal: " .. account.principal .. ". Identity and scope: " .. account.canonical_id .. ". SPAWN scope: " .. account.scope_id .. ". Capacity export may then carry this account's quota. Editing the SPAWN record or a reading of another login drops the binding.", function()
+						configure(own, { binding_action = { operation = "bind", scope_id = account.scope_id, id = account.id,
+							definition_revision = account.definition_revision, canonical_id = account.canonical_id }, consent = { binding = true } }, target)
+					end)
+				end
+			end)
+		end)
+	end
+	local function associations(cx: any, own: number, target: any)
+		target.rpc(own, "binding_candidates", {}, function(candidates, fresh)
+			local items = {}
+			for _, consumer in candidates.consumers do
+				local current = consumer.account_ids[1]
+				table.insert(items, { label = consumer.label .. (if current ~= nil then " → " .. current else ""),
+					detail = if current ~= nil then "Associated. Choose to remove." else "Choose the bound account whose quota it uses.", consumer = consumer })
+			end
+			if #items == 0 then fresh:toast("info", "SPAWN defines no OMP records on " .. target.where); return end
+			pick(fresh, own, target.prefix .. "Associate OMP records with a bound account", items, function(item, next_cx)
+				local consumer = item.consumer
+				if consumer.account_ids[1] ~= nil then
+					confirm(next_cx, own, target.prefix .. "Remove this OMP association?", "OMP record: " .. consumer.id .. ". Capacity export stops naming an account for it.", function()
+						configure(own, { binding_action = { operation = "dissociate", scope_id = consumer.scope_id, id = consumer.id } }, target)
+					end)
+					return
+				end
+				local accounts = {}
+				for _, account in candidates.accounts do
+					if account.bound and account.scope_id == consumer.scope_id then
+						table.insert(accounts, { label = account.provider_label .. " · " .. account.account_label, detail = account.principal or account.id, account = account })
+					end
+				end
+				if #accounts == 0 then next_cx:toast("info", "Bind a SPAWN account first", "Use Bind SPAWN accounts, then associate this OMP record."); return end
+				pick(next_cx, own, target.prefix .. "Which bound account's quota does " .. consumer.id .. " use?", accounts, function(choice, latest)
+					local account = choice.account
+					confirm(latest, own, target.prefix .. "Associate this OMP record?", "OMP record: " .. consumer.id .. ". Uses the quota of SPAWN account " .. account.id .. " (" .. account.provider_label .. ", " .. (account.principal or "bound") .. "). Owner-declared: USAGE cannot read OMP's own login. Editing either record or revoking the account's binding removes it.", function()
+						configure(own, { binding_action = { operation = "associate", scope_id = consumer.scope_id, id = consumer.id,
+							definition_revision = consumer.definition_revision, account_id = account.id }, consent = { association = true } }, target)
+					end)
+				end)
+			end)
+		end)
+	end
+	-- The attached host's Setup: only what configures its own acquisition source. Pairing,
+	-- summary and interpreter choice stay with this window's machine ("instead" row).
+	local host_menu: any
+	local function host_runtime(cx: any, own: number, target: any, err: any)
+		local name = target.host
+		pick(cx, own, target.prefix .. "USAGE runtime — " .. (err.message or "Setup required"), {
+			{ label = "Install private dependencies on " .. name, action = "install", detail = "Runs on " .. name .. ": its Python 3.11+ installs hash-locked packages into USAGE's private environment there. No system packages or privileges change." },
+			{ label = "Retry runtime check on " .. name, action = "retry" },
+			{ label = "Configure this window's machine instead", action = "local", detail = "Runtime, pairing, summary and permissions of the machine running this window." },
+		}, function(item, fresh)
+			if item.action == "retry" then host_menu(own, target)
+			elseif item.action == "local" then self:open(fresh, "local")
+			elseif item.action == "install" then
+				confirm(fresh, own, "Install USAGE's private runtime on host " .. name .. "?", "On " .. name .. ", download and verify the package's hash-locked dependencies. No provider login, sharing, headless-read permission, or status-bar change.", function(current)
+					current:toast("info", "Installing USAGE private runtime on host " .. name)
+					host_request(target, own, "ensure", { install_dependencies = true }, function(_value, _latest) host_menu(own, target) end,
+						function(failure, latest) host_runtime(latest, own, target, failure) end)
+				end)
+			end
+		end)
+	end
+	host_menu = function(own: number, target: any)
+		local name = target.host
+		local function failed(failure: any, latest: any) host_runtime(latest, own, target, failure) end
+		host_request(target, own, "setup_state", {}, function(state, latest)
+			if type(state) ~= "table" or type(state.settings) ~= "table" or type(state.source) ~= "table" or type(state.source.device_id) ~= "string" then
+				failed({ code = "decode_failed", message = "Host " .. name .. " returned an invalid USAGE Setup state." }, latest); return
+			end
+			local items = {
+				{ label = (if state.settings.metadata_enabled then "Stop headless usage reads on " else "Allow headless usage reads on ") .. name, action = "metadata",
+					detail = "Lets Refresh on " .. name .. " read usage for its SPAWN accounts without typing into agent sessions." },
+				{ label = (if state.settings.capacity_enabled then "Revoke capacity export on " else "Enable capacity export on ") .. name, action = "capacity",
+					detail = "Read-only evidence for ORCH+ quota routing in windows attached to " .. name .. "." },
+			}
+			if state.settings.metadata_enabled then
+				table.insert(items, { label = "Bind SPAWN accounts on " .. name .. "…", action = "bind", detail = "Confirm which signed-in login each of its SPAWN accounts uses." })
+				table.insert(items, { label = "Associate OMP records on " .. name .. "…", action = "associate", detail = "Declare which bound account's quota an OMP record uses." })
+			end
+			table.insert(items, { label = "Configure this window's machine instead", action = "local", detail = "Runtime, pairing, summary and permissions of the machine running this window." })
+			pick(latest, own, "USAGE Setup — host " .. name .. " (attached source) · " .. state.settings.role .. " · " .. state.source.device_id, items, function(item, selected_cx)
+				if item.action == "metadata" then metadata(selected_cx, own, state, target)
+				elseif item.action == "capacity" then capacity(selected_cx, own, state, target)
+				elseif item.action == "bind" then bindings(selected_cx, own, target)
+				elseif item.action == "associate" then associations(selected_cx, own, target)
+				elseif item.action == "local" then self:open(selected_cx, "local") end
+			end)
+		end, failed)
+	end
+	-- `scope = "local"` keeps Setup on this window's machine even while a remote host is current.
+	function self:open(cx: any, scope: string?)
 		if cx == nil then return end
 		self.generation += 1
 		local own = self.generation
+		local host = if scope == "local" then nil else attached(cx)
+		if host ~= nil then
+			cx:toast("info", "USAGE Setup configures host " .. host, "It is the source of this window's readings. Its USAGE Configuration pane carries the changes you confirm here.")
+			host_menu(own, remote(host))
+			return
+		end
 		companion.set_client("window:" .. cx:window_key(), "window")
 		companion.ensure(function(value, err, fresh)
 			if own ~= self.generation or fresh == nil then return end
 			if value == nil then runtime(fresh, own, err or {}); return end
 			rpc(own, "setup_state", {}, function(state, _state_cx)
 				rpc(own, "diagnostics", {}, function(diagnostics, latest)
-					pick(latest, own, "USAGE Setup — " .. state.settings.role .. " · " .. state.source.device_id, {
+					local items = {
 						{ label = "Enable summary / Show Summary", action = "summary", detail = "Explicitly enable Tern's status bar once; later hides are respected." },
 						{ label = "Copy installation UUID", action = "copy_identity", detail = state.source.device_id },
 						{ label = "Standalone / stop sharing", action = "standalone" }, { label = "Share from this installation", action = "share" },
@@ -217,7 +450,14 @@ function setup.new(changed: (any) -> ()): any
 						{ label = "Revoke peer / unpair", action = "revoke" },
 						{ label = if state.settings.metadata_enabled then "Stop headless usage reads" else "Allow headless usage reads", action = "metadata",
 							detail = "Lets Refresh read usage for SPAWN accounts without typing into agent sessions." },
-					}, function(item, selected_cx)
+						{ label = if state.settings.capacity_enabled then "Revoke capacity export" else "Enable capacity export", action = "capacity",
+							detail = "Read-only evidence for same-user plugins such as ORCH+ quota routing." },
+					}
+					if state.settings.metadata_enabled then
+						table.insert(items, { label = "Bind SPAWN accounts…", action = "bind", detail = "Confirm which signed-in login each SPAWN account uses." })
+						table.insert(items, { label = "Associate OMP records…", action = "associate", detail = "Declare which bound account's quota an OMP record uses." })
+					end
+					pick(latest, own, "USAGE Setup — " .. state.settings.role .. " · " .. state.source.device_id, items, function(item, selected_cx)
 						if item.action == "summary" then self:show_summary(selected_cx)
 						elseif item.action == "copy_identity" then selected_cx:copy(state.source.device_id); selected_cx:toast("info", "USAGE installation UUID copied")
 						elseif item.action == "standalone" then standalone(selected_cx, own, state)
@@ -225,7 +465,10 @@ function setup.new(changed: (any) -> ()): any
 						elseif item.action == "invitation" then invitation(selected_cx, own, state, diagnostics)
 						elseif item.action == "join" then join(selected_cx, own, diagnostics, state)
 						elseif item.action == "revoke" then revoke(selected_cx, own, state)
-						elseif item.action == "metadata" then metadata(selected_cx, own, state) end
+						elseif item.action == "metadata" then metadata(selected_cx, own, state, here)
+						elseif item.action == "capacity" then capacity(selected_cx, own, state, here)
+						elseif item.action == "bind" then bindings(selected_cx, own, here)
+						elseif item.action == "associate" then associations(selected_cx, own, here) end
 					end)
 				end)
 			end)

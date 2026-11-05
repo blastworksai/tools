@@ -112,7 +112,31 @@ function collector.project(result: any): any?
 		end
 		account.reading_ids = { reading.id }
 		account.canonical_ids = if reading.canonical_id ~= nil then { reading.canonical_id } else tern.json.array()
+		-- A binding stands only while this reading is current and proves one of its logins.
+		if account.profile_binding ~= nil then
+			local matched = false
+			for _, canonical in account.profile_binding.canonical_ids do
+				if canonical == reading.canonical_id then matched = true end
+				for _, alias in reading.account_aliases or {} do if alias == canonical then matched = true end end
+			end
+			local current = reason == nil and reading.canonical_id ~= nil
+			for _, window in reading.windows do
+				if window.unavailable_reason ~= nil or window.last_known_reason ~= nil then current = false end
+			end
+			if not matched or not current then account.profile_binding = nil end
+		end
 		table.insert(readings, reading)
+	end
+	-- Unmeasured accounts prove nothing; an OMP association follows its account's binding.
+	for _, scope in roster.scopes or {} do
+		local bound = {}
+		for _, account in scope.accounts or {} do
+			if account.profile_binding ~= nil and #account.reading_ids > 0 then bound[account.id] = true
+			else account.profile_binding = nil end
+		end
+		for _, consumer in scope.consumers or {} do
+			if consumer.account_ids ~= nil and not bound[consumer.account_ids[1]] then consumer.account_ids = nil end
+		end
 	end
 	return snapshots.decode({ version = 3, publisher = publisher, as_of_ms = os.time() * 1000, readings = readings, roster = roster })
 end

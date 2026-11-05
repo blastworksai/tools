@@ -201,7 +201,7 @@ class ProtocolTests(unittest.TestCase):
                                             "selectors": {}})
                 self.assertEqual(result["error"], "local_login_unavailable")
                 self.assertNotIn("usage", result)
-                command.assert_not_called()
+                command.assert_called()
                 request.assert_not_called()
 
     def test_claude_malformed_credentials_are_not_missing_login(self):
@@ -221,7 +221,6 @@ class ProtocolTests(unittest.TestCase):
                                             "selectors": {}})
                 self.assertEqual(result["error"], code)
                 self.assertNotIn("SECRET", json.dumps(result))
-                command.assert_not_called()
                 request.assert_not_called()
 
     def test_claude_permission_command_and_network_failures_are_not_missing_login(self):
@@ -241,6 +240,53 @@ class ProtocolTests(unittest.TestCase):
             self.assertEqual(result["error"], "source_usage_unavailable")
             self.assertNotIn("SECRET", json.dumps(result))
 
+
+    def test_claude_token_renewed_by_auth_status_is_the_one_sent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            (home / ".claude").mkdir()
+            path = home / ".claude" / ".credentials.json"
+            path.write_text(json.dumps({"claudeAiOauth": {"accessToken": "STALE", "expiresAt": 1}}))
+
+            def renew(*args, **kwargs):
+                # The CLI refreshes its own login while reporting status.
+                path.write_text(json.dumps({"claudeAiOauth": {"accessToken": "FRESH",
+                                "expiresAt": int(time.time() * 1000) + 3600000}}))
+                return {"principal": "a@example.test", "principal_kind": "email", "label": "a@example.test"}
+            with patch.object(helper, "source_identity", return_value={"source_uid": "1000"}), \
+                 patch.object(helper, "current_home", return_value=home), \
+                 patch.object(helper, "profile_environment", return_value={"HOME": directory}), \
+                 patch("metadata_providers.collect", side_effect=renew), \
+                 patch.object(readers, "http_json", return_value={"five_hour": {"utilization": 3}}) as request:
+                result = readers.handle({"request": {"version": 1, "provider": "claude", "kind": "claude"},
+                                         "selectors": {}})
+        self.assertNotIn("error", result)
+        self.assertEqual(request.call_args.args[1]["Authorization"], "Bearer FRESH")
+
+    def test_claude_rejected_and_forbidden_tokens_are_distinct_but_kimi_is_unchanged(self):
+        import urllib.error
+
+        def refuse(code):
+            def open_(request, timeout=None):
+                raise urllib.error.HTTPError(request.full_url, code, "SECRET", {}, None)
+            return open_
+        credentials = {"claudeAiOauth": {"accessToken": "SECRET", "expiresAt": int(time.time() * 1000) + 3600000}}
+        for code, claude in ((401, "web_login_expired"), (403, "web_login_forbidden")):
+            with self.subTest(code=code), \
+                 patch.object(helper, "source_identity", return_value={"source_uid": "1000"}), \
+                 patch.object(helper, "current_home", return_value=Path("/source")), \
+                 patch.object(helper, "profile_environment", return_value={}), \
+                 patch.object(helper.SourceIO, "read_json", return_value=credentials), \
+                 patch("metadata_providers.collect", return_value={"principal": "a@example.test",
+                       "principal_kind": "email", "label": "a@example.test"}), \
+                 patch("urllib.request.OpenerDirector.open", side_effect=refuse(code)):
+                result = readers.handle({"request": {"version": 1, "provider": "claude", "kind": "claude"},
+                                         "selectors": {}})
+                self.assertEqual(result["error"], claude)
+                self.assertNotIn("SECRET", json.dumps(result))
+                with self.assertRaises(readers.Unavailable) as kimi:
+                    readers.http_json("http://127.0.0.1:1/api/v1/oauth/usage", {})
+                self.assertEqual(kimi.exception.args[0], "local_login_unavailable")
 
     def test_rpc_initialization_notification_id_matching_and_reaping(self):
         script = """
@@ -365,7 +411,7 @@ for line in sys.stdin:
                                              "selectors": {}})
                 if expired:
                     self.assertEqual(result["error"], "web_login_expired")
-                    status.assert_not_called()
+                    status.assert_called_once()
                     request.assert_not_called()
                 else:
                     self.assertNotIn("error", result)

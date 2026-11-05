@@ -71,6 +71,30 @@ credit_failed.previous[credited.readings[1].id] = credited.readings[1]
 local credit_after_failure = snapshot.project({ headless = assert(source.project(credit_failed)) }, 1800000000200).accounts[1]
 check(credit_after_failure.credit_balance == nil and credit_after_failure.windows[1].last_known_reason == "local_login_unavailable",
 	"failed acquisition cannot present an old credit balance as current while quota remains explicitly last-known")
+-- Owner bindings: kept only while the current reading proves one of the bound logins.
+local proven = assert(source.project(result())).readings[1].canonical_id
+local function bound(canonical, measured)
+	local value = result("claude", measured)
+	local account = value.roster.scopes[1].accounts[1]
+	account.definition_revision = string.rep("a", 64)
+	account.profile_binding = { handle = "handle", generation = 3, canonical_ids = { canonical } }
+	local consumer = value.roster.scopes[1].consumers[1]
+	consumer.definition_revision = string.rep("b", 64)
+	consumer.account_ids = { "account" }
+	return value
+end
+local kept = assert(source.project(bound(proven))).roster.scopes[1]
+check(kept.accounts[1].profile_binding ~= nil and kept.accounts[1].profile_binding.generation == 3
+	and kept.accounts[1].definition_revision == string.rep("a", 64), "a current reading of the bound login keeps its binding")
+check(kept.consumers[1].account_ids[1] == "account", "an OMP association follows its bound account")
+local mismatched = assert(source.project(bound("claude:email:someone-else"))).roster.scopes[1]
+check(mismatched.accounts[1].profile_binding == nil and mismatched.consumers[1].account_ids == nil,
+	"a reading of another login drops the binding and its association")
+local unmeasured = assert(source.project(bound(proven, false))).roster.scopes[1]
+check(unmeasured.accounts[1].profile_binding == nil, "an unavailable reading cannot prove a binding")
+local unread = bound(proven)
+unread.items = {}
+check(assert(source.project(unread)).roster.scopes[1].accounts[1].profile_binding == nil, "an account without a reading proves nothing")
 local original = assert(source.project(result()))
 local old = original.readings[1]
 local failed = result("claude", false)

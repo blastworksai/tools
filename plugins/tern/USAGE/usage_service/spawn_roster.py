@@ -101,14 +101,34 @@ def _digest(value):
                                      ensure_ascii=False).encode()).hexdigest()
 
 
-def read_roster(path, installation_id):
+def binding_key(scope_id, identifier):
+    return scope_id + ":" + identifier
+
+
+def _join(authority):
+    """SPAWN's catalog join, or None when this authority does not carry one."""
+    revision = authority.get("config_revision")
+    if type(revision) is not int or not 0 <= revision <= 9007199254740991:
+        return None
+    try:
+        return {"namespace": _text(authority.get("namespace"), 512),
+                "host_key": _text(authority.get("host_key"), 512), "config_revision": revision}
+    except ServiceError:
+        return None
+
+
+def read_roster(path, installation_id, bindings=None):
     """Read SPAWN on every pass; return ``(wire roster, local definitions)``.
 
     ``path`` is SPAWN's sibling kv.json, never a USAGE setting. The roster has
     one scope: this machine's SPAWN bucket. Local definitions carry the
     source-local fields refresh needs and never leave this machine.
+    ``bindings`` holds the owner's confirmed account bindings and OMP
+    associations; each applies only while its definition revision is current.
     """
     installation_id = _text(installation_id)
+    bindings = bindings or {}
+    bound, associations = bindings.get("accounts", {}), bindings.get("consumers", {})
     try:
         with Path(path).open("rb") as stream:
             raw = stream.read(1048577)
@@ -146,6 +166,9 @@ def read_roster(path, installation_id):
         current_identity = {}
     scope_id = _text(installation_id + ":" + host_key if host_key.lower() in LOCAL_SCOPES else host_key, 512)
     scope = {"id": scope_id, "updated_at_ms": updated_at_ms, "accounts": [], "consumers": []}
+    join = _join(authority)
+    if join is not None:
+        scope["spawn_join"] = join
     seen, definitions, local = set(), [], []
     for record in records:
         if not isinstance(record, dict):
@@ -157,22 +180,39 @@ def read_roster(path, installation_id):
         label = _text(record.get("provider"))
         normalized = _text(provider(label), 256)
         account_label = _text(record.get("account_label") or label)
-        if normalized == "omp":
-            scope["consumers"].append({"id": identifier, "label": _text(label + " · " + account_label),
-                                       "reading_ids": []})
-        else:
-            scope["accounts"].append({"id": identifier, "provider": normalized, "provider_label": label,
-                                      "account_label": account_label, "canonical_ids": [], "reading_ids": []})
         # Account edits change the revision; launch layout and timestamps do not.
         definition = _definition(record, account_label)
         definitions.append(definition)
-        if normalized != "omp":
-            # An SSH record's user is a login on another machine, never a local account.
-            remote = record.get("backend") == "ssh-command"
-            local.append({"scope_id": scope_id, "id": identifier, "provider": normalized,
-                          "label": account_label, "definition": definition,
-                          "source_uid": None if remote else _local_uid(record, current_identity),
-                          "revision": _digest(definition)})
+        revision = _digest(definition)
+        key = binding_key(scope_id, identifier)
+        # An SSH record's user is a login on another machine, never a local account.
+        remote = record.get("backend") == "ssh-command"
+        if normalized == "omp":
+            entry = {"id": identifier, "label": _text(label + " · " + account_label),
+                     "reading_ids": [], "definition_revision": revision}
+            association = associations.get(key)
+            if isinstance(association, dict) and association.get("definition_revision") == revision:
+                entry["account_ids"] = [association["account_id"]]
+            scope["consumers"].append(entry)
+            continue
+        entry = {"id": identifier, "provider": normalized, "provider_label": label,
+                 "account_label": account_label, "canonical_ids": [], "reading_ids": [],
+                 "definition_revision": revision}
+        binding = bound.get(key)
+        # A binding names one definition revision; any account edit drops it.
+        if not remote and isinstance(binding, dict) and binding.get("definition_revision") == revision:
+            entry["profile_binding"] = {"handle": _digest(key), "generation": binding["generation"],
+                                        "canonical_ids": sorted(binding["canonical_ids"])}
+        scope["accounts"].append(entry)
+        local.append({"scope_id": scope_id, "id": identifier, "provider": normalized,
+                      "label": account_label, "definition": definition,
+                      "source_uid": None if remote else _local_uid(record, current_identity),
+                      "revision": revision})
+    # An OMP association only stands while its account's binding does.
+    bound_ids = {entry["id"] for entry in scope["accounts"] if "profile_binding" in entry}
+    for entry in scope["consumers"]:
+        if entry.get("account_ids", [None])[0] not in bound_ids:
+            entry.pop("account_ids", None)
     scope["revision"] = _digest(sorted(definitions, key=lambda item: item["id"]))
     scope["accounts"].sort(key=lambda item: item["id"])
     scope["consumers"].sort(key=lambda item: item["id"])

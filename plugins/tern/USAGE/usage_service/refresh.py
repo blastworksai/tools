@@ -15,12 +15,19 @@ import time
 
 import provider_metadata as helper
 from . import profiles
-from .protocol import ServiceError, encode, validate_snapshot
-from .spawn_roster import read_roster
+from .protocol import ServiceError, encode, text, validate_snapshot
+from .spawn_roster import binding_key, read_roster
 
 PREFERENCES = "usage_preferences"
 RESULTS = "usage_results"
 PUBLICATION = "usage_publication"
+# Owner-confirmed SPAWN account bindings and OMP associations (companion-local).
+BINDINGS = "account_bindings"
+BINDING_ACTIONS = {"bind": {"operation", "scope_id", "id", "definition_revision", "canonical_id"},
+                   "revoke": {"operation", "scope_id", "id"},
+                   "associate": {"operation", "scope_id", "id", "definition_revision", "account_id"},
+                   "dissociate": {"operation", "scope_id", "id"}}
+BINDING_CONSENT = {"bind": "binding", "associate": "association"}
 # Launch flags that select another config/profile/credential than the default
 # context. Only the explicit directory flags below map to a supported selector.
 CONTEXT_FLAGS = {"--config-dir": "CLAUDE_CONFIG_DIR", "--codex-home": "CODEX_HOME",
@@ -66,13 +73,137 @@ class Refresh:
 
     def configuration(self):
         source = self.store.identity()
-        roster, definitions = read_roster(self.path, source["device_id"])
         settings = self.store.settings()
+        saved = self.store.local_state(BINDINGS) or {}
+        # Bindings rest on headless readings; without that permission none is emitted.
+        roster, definitions = read_roster(self.path, source["device_id"],
+                                          saved if settings["metadata_enabled"] else None)
+        self._prune(saved, roster)
         # No metadata, source UID, paths or definition commands leave this module.
         manifest = {"source": source, "enabled": settings["metadata_enabled"], "role": settings["role"],
                     "scopes": [(scope["id"], scope["revision"]) for scope in roster["scopes"]]}
         revision = hashlib.sha256(encode(manifest)).hexdigest()
         return revision, source, roster, definitions
+
+    def _prune(self, saved, roster):
+        """Fail closed: a binding or association outlives no edit of its SPAWN record."""
+        current = {binding_key(scope["id"], entry["id"]): entry["definition_revision"]
+                   for scope in roster["scopes"] for entry in scope["accounts"] + scope["consumers"]}
+        kept = {group: {key: value for key, value in saved.get(group, {}).items()
+                        if current.get(key) == value["definition_revision"]}
+                for group in ("accounts", "consumers")}
+        if any(kept[group] != saved.get(group, {}) for group in kept):
+            self.store.set_local_state(BINDINGS, {**saved, **kept})
+
+    @staticmethod
+    def _evidence(scope_id, account, publication):
+        """The identity of this definition's latest published reading, only while it is current."""
+        published = next((entry for scope in publication.get("roster", {}).get("scopes", [])
+                          if scope["id"] == scope_id for entry in scope["accounts"]
+                          if entry["id"] == account["id"]), None)
+        if (published is None or published.get("definition_revision") != account["definition_revision"]
+                or len(published["reading_ids"]) != 1):
+            return None
+        reading = publication.get("readings", {}).get(published["reading_ids"][0])
+        if (reading is None or reading.get("canonical_id") is None or reading.get("usage_source") != "headless"
+                or not reading["windows"] or any(window.get("unavailable_reason") is not None
+                                                 or window.get("last_known_reason") is not None
+                                                 for window in reading["windows"])):
+            return None
+        canonical_ids = sorted({reading["canonical_id"], *reading.get("account_aliases", [])} - {""})
+        if len(canonical_ids) > 32:
+            return None
+        return {"principal": reading.get("account_label") or reading["canonical_id"],
+                "canonical_id": reading["canonical_id"], "canonical_ids": canonical_ids}
+
+    def binding_candidates(self):
+        """Each SPAWN account with the identity its current headless reading proved."""
+        settings = self.store.settings()
+        if settings["role"] == "member":
+            raise ServiceError("forbidden", 403)
+        if not settings["metadata_enabled"]:
+            raise ServiceError("source_metadata_disabled", 403)
+        roster = self.configuration()[2]
+        publication = self.store.local_state(PUBLICATION) or {}
+        accounts, consumers = [], []
+        for scope in roster["scopes"]:
+            for account in scope["accounts"]:
+                item = {"scope_id": scope["id"], "bound": "profile_binding" in account,
+                        **{key: account[key] for key in
+                           ("id", "provider", "provider_label", "account_label", "definition_revision")}}
+                item.update(self._evidence(scope["id"], account, publication) or {})
+                accounts.append(item)
+            for consumer in scope["consumers"]:
+                consumers.append({"scope_id": scope["id"], "account_ids": consumer.get("account_ids", []),
+                                  **{key: consumer[key] for key in ("id", "label", "definition_revision")}})
+        return {"accounts": accounts, "consumers": consumers}
+
+    def binding_action(self, action, consent):
+        """Owner-confirmed bind/associate; revoke/dissociate need no consent."""
+        if (not isinstance(action, dict) or not isinstance(action.get("operation"), str)
+                or set(action) != BINDING_ACTIONS.get(action["operation"], set())):
+            raise ServiceError("invalid_request")
+        operation = action["operation"]
+        if operation in BINDING_CONSENT and consent != {BINDING_CONSENT[operation]: True}:
+            raise ServiceError("forbidden", 403)
+        key = binding_key(text(action["scope_id"], 512), text(action["id"], 4096))
+        with self.store.transaction():
+            # Candidates first: reading the roster prunes stale bindings before this write.
+            candidates = self.binding_candidates() if operation in BINDING_CONSENT else None
+            saved = self.store.local_state(BINDINGS) or {}
+            accounts, consumers = dict(saved.get("accounts", {})), dict(saved.get("consumers", {}))
+            generation = saved.get("next_generation", 1)
+            if operation == "revoke":
+                accounts.pop(key, None)
+                consumers = {name: value for name, value in consumers.items()
+                             if (value["scope_id"], value["account_id"]) != (action["scope_id"], action["id"])}
+            elif operation == "dissociate":
+                consumers.pop(key, None)
+            else:
+                group = candidates["accounts" if operation == "bind" else "consumers"]
+                match = next((item for item in group
+                              if (item["scope_id"], item["id"]) == (action["scope_id"], action["id"])), None)
+                if match is None:
+                    raise ServiceError("not_found", 404)
+                if match["definition_revision"] != action["definition_revision"]:
+                    raise ServiceError("binding_changed", 409)
+                if operation == "bind":
+                    if "canonical_id" not in match:
+                        raise ServiceError("binding_unavailable", 409)
+                    if match["canonical_id"] != action["canonical_id"]:
+                        raise ServiceError("binding_changed", 409)
+                    accounts[key] = {"scope_id": action["scope_id"], "id": action["id"],
+                                     "definition_revision": match["definition_revision"],
+                                     "canonical_ids": match["canonical_ids"], "generation": generation}
+                    generation += 1
+                else:
+                    target = (action["scope_id"], action["account_id"])
+                    if not any(item["bound"] and (item["scope_id"], item["id"]) == target
+                               for item in candidates["accounts"]):
+                        raise ServiceError("binding_unavailable", 409)
+                    consumers[key] = {"scope_id": action["scope_id"], "id": action["id"],
+                                      "definition_revision": match["definition_revision"],
+                                      "account_id": action["account_id"]}
+            self.store.set_local_state(BINDINGS, {"next_generation": generation,
+                                                  "accounts": accounts, "consumers": consumers})
+        return {"binding_action": operation}
+
+    def _drop_mismatched(self, snapshot, readings):
+        """A published reading that proves another login ends that account's binding."""
+        saved = self.store.local_state(BINDINGS) or {}
+        accounts = dict(saved.get("accounts", {}))
+        for scope in snapshot.get("roster", {}).get("scopes", []):
+            for entry in scope["accounts"]:
+                key = binding_key(scope["id"], entry["id"])
+                binding = accounts.get(key)
+                for reading_id in entry["reading_ids"] if binding is not None else ():
+                    reading = readings.get(reading_id)
+                    if (reading is not None and reading.get("canonical_id") is not None
+                            and not {reading["canonical_id"], *reading.get("account_aliases", [])} & set(binding["canonical_ids"])):
+                        del accounts[key]
+                        break
+        if accounts != saved.get("accounts", {}):
+            self.store.set_local_state(BINDINGS, {**saved, "accounts": accounts})
 
     def _spec(self, item):
         provider = item["provider"]
@@ -273,10 +404,21 @@ class Refresh:
         actual = {(scope["id"], scope["revision"]) for scope in snapshot.get("roster", {}).get("scopes", [])}
         if actual != expected:
             raise ServiceError("source_configuration_changed", 409)
+        # The collector may only drop binding evidence the roster emitted, never add or alter it.
+        emitted = {(scope["id"], entry["id"]): entry for scope in result["roster"]["scopes"]
+                   for entry in scope["accounts"] + scope["consumers"]}
+        for scope in snapshot.get("roster", {}).get("scopes", []):
+            for entry in scope["accounts"] + scope["consumers"]:
+                source = emitted.get((scope["id"], entry["id"]), {})
+                if any(key in entry and entry[key] != source.get(key)
+                       for key in ("definition_revision", "profile_binding", "account_ids")):
+                    raise ServiceError("source_configuration_changed", 409)
         readings = {reading["id"]: reading for reading in snapshot["readings"]}
         with self.store.transaction():
             self.store.local_publish("host", snapshot, replace_inventory=True)
-            self.store.set_local_state(PUBLICATION, {"token": result["token"], "readings": readings})
+            self.store.set_local_state(PUBLICATION, {"token": result["token"], "readings": readings,
+                                                     "roster": snapshot.get("roster", {"version": 1, "scopes": []})})
+            self._drop_mismatched(snapshot, readings)
         return {"accepted": True}
 
     async def start(self):

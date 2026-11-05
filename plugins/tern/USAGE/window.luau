@@ -125,7 +125,23 @@ local function diagnostics(cx: any?)
 	end)
 end
 tern.chrome.status(function(_pane: StatusPaneInfo) return status_segments end)
-tern.command({ id = "refresh", title = "USAGE Refresh", icon = "gauge", group = "USAGE", run = function(_cx)
+-- In a window attached to a remote host, that host is the source: its own USAGE block runs the
+-- refresh (host.luau `refresh` action). Refresh never opens a pane for this.
+local HOST_BLOCKS = { ["usage.accounts"] = true, ["usage.account"] = true, ["usage.config"] = true }
+local function host_refresh(cx: any, host: string)
+	local title = "USAGE refresh on host " .. host
+	for _, pane in cx.session:panes() do
+		if HOST_BLOCKS[pane.block] then
+			cx.session:event(pane.pane, { ev = "action", act = "refresh" })
+			cx:toast("info", title, "Requested through the host's USAGE pane; its progress shows there.")
+			return
+		end
+	end
+	cx:toast("error", title, "No USAGE pane is open in this session. Open USAGE Details, then Refresh; the host refreshes through it.")
+end
+tern.command({ id = "refresh", title = "USAGE Refresh", icon = "gauge", group = "USAGE", run = function(cx)
+	local host = if cx ~= nil then setup_module.attached(cx) else nil
+	if host ~= nil then host_refresh(cx, host); return end
 	refresh:refresh(function(problem, fresh)
 		if problem ~= nil and fresh ~= nil then fresh:toast("error", "USAGE refresh failed", problem) end
 	end)
