@@ -29,6 +29,7 @@ M.REASONS = table.freeze({
 	evidence_expired = "The USAGE evidence lease expired; a fresh snapshot is required.",
 	not_in_evidence = "This record was not part of the normalized USAGE evidence set.",
 	unbound = "USAGE declares no exact SPAWN binding (namespace, host, config revision, record ID) for this record.",
+	consumer_unassociated = "USAGE lists this OMP record but it is not associated with a bound account; Associate OMP records with an account in USAGE Setup.",
 	ambiguous = "More than one distinct USAGE binding or source matches this record.",
 	binding_unverified = "The USAGE account has no verified profile binding (failed, last-known or unproven readings carry no routing proof).",
 	source_missing = "The publishing USAGE source is not in the evidence set.",
@@ -222,21 +223,27 @@ end
 local function same_join(j: any, join: any): boolean
 	return type(j) == "table" and j.namespace == join.namespace and j.host_key == join.host_key and j.config_revision == join.config_revision
 end
-local function current_account(document: any, join: any, account_id: string): any
+-- The unique entry with `id` in `kind` ("accounts" or "consumers") of USAGE's current local roster.
+local function current_entry(document: any, join: any, kind: string, id: string): any
 	local roster = document.current_roster
 	if type(roster) ~= "table" then return nil end
 	local found = nil
 	for _, scope in list(roster.scopes) do
 		if type(scope) == "table" and same_join(scope.spawn_join, join) then
-			for _, account in list(scope.accounts) do
-				if type(account) == "table" and account.id == account_id then
+			for _, entry in list(scope[kind]) do
+				if type(entry) == "table" and entry.id == id then
 					if found then return nil end
-					found = account
+					found = entry
 				end
 			end
 		end
 	end
 	return found
+end
+-- An OMP consumer's single associated account ID, or nil while unassociated/malformed.
+local function consumer_account(consumer: any): string?
+	local ids = sorted_ids(consumer.account_ids)
+	return if ids and #ids == 1 and str(ids[1], 256) then ids[1] else nil
 end
 local function window_key(w: any): string
 	return (if w.key == "weekly" then "seven_day" else tostring(w.key)) .. "|" .. tostring(w.pool)
@@ -255,11 +262,19 @@ local function evaluate(document: any, sources: any, join: any, m: any, now_ms: 
 	if source.generation ~= pub.generation or source.profile_generation ~= pub.profile_generation then return nil, "source_generation_changed" end
 	if source.clock_skew == true then return nil, "clock_skew" end
 	if pub.subject_source_id == document.current_source_id then
-		local current = current_account(document, join, account.id)
+		local current = current_entry(document, join, "accounts", account.id)
 		local proof = if type(current) == "table" then current.profile_binding else nil
 		if type(proof) ~= "table" or current.definition_revision ~= account.definition_revision or proof.handle ~= binding.handle
 			or proof.generation ~= binding.generation or not same_list(sorted_ids(proof.canonical_ids), canonical_ids) then
 			return nil, "local_roster_changed"
+		end
+		local consumer = m.consumer
+		if consumer then
+			local now = current_entry(document, join, "consumers", consumer.id)
+			if type(now) ~= "table" or now.definition_revision ~= consumer.definition_revision
+				or not same_list(sorted_ids(now.account_ids), sorted_ids(consumer.account_ids)) then
+				return nil, "local_roster_changed"
+			end
 		end
 	end
 	local snapshot = pub.snapshot
@@ -308,7 +323,7 @@ function M.normalize(document: any, meta: any, index: any, now_ms: number): any
 			sources[s.source_id] = if sources[s.source_id] == nil then s else false
 		end
 	end
-	local wanted, matches = {}, {}
+	local wanted, matches, unassociated = {}, {}, {}
 	for _, r in index.records do wanted[r.id] = true; matches[r.id] = {} end
 	for _, pub in list(document.records) do
 		local snapshot = if type(pub) == "table" then pub.snapshot else nil
@@ -321,6 +336,19 @@ function M.normalize(document: any, meta: any, index: any, now_ms: number): any
 					table.insert(matches[account.id], { publication = pub, scope = scope, account = account })
 				end
 			end
+			-- An OMP consumer associated with exactly one account in this scope routes on that account.
+			for _, consumer in list(scope.consumers) do
+				if type(consumer) ~= "table" or type(consumer.id) ~= "string" or not wanted[consumer.id] then continue end
+				local account_id = consumer_account(consumer)
+				local target = nil
+				if account_id then
+					for _, account in list(scope.accounts) do
+						if type(account) == "table" and account.id == account_id then target = account end
+					end
+				end
+				if target then table.insert(matches[consumer.id], { publication = pub, scope = scope, account = target, consumer = consumer })
+				else unassociated[consumer.id] = true end
+			end
 		end
 	end
 	local unit_known = document.quota_unit == "percent"
@@ -328,7 +356,7 @@ function M.normalize(document: any, meta: any, index: any, now_ms: number): any
 		local entry: any = { id = r.id, revision = r.revision, state = "unknown" }
 		local found = matches[r.id]
 		if not unit_known then entry.reason = "unit_unknown"
-		elseif #found == 0 then entry.reason = "unbound"
+		elseif #found == 0 then entry.reason = if unassociated[r.id] then "consumer_unassociated" else "unbound"
 		else
 			local valid, first_reason = {}, nil
 			for _, m in found do

@@ -311,11 +311,14 @@ local function enrolment_brief(root,r,snapshot)
  local expected={logical_session_id=r.origin_binding.logical_session_id,worker_id=r.enrolment.worker_id,worker_generation=r.enrolment.worker_generation,launch_request_id=r.request_id,work_id=r.work_id,enrolment_token=r.enrolment.enrolment_token}
  if not P.equal(box.binding,expected) then return nil,'binding_mismatch','Mailbox enrolment differs from immutable launch' end
  if not P.equal(box.capabilities,caps) then return nil,'binding_mismatch','Provisioned capabilities differ from the configured launch contract' end
+ local e=r.enrolment
+ local handover=if e.handover_id then {handover_id=e.handover_id,handover_sha256=Codec.sha256(e.handover_id..':'..e.handover_token)} else nil
+ if not P.equal(box.handover,handover) then return nil,'binding_mismatch','Provisioned handover digest differs from the immutable launch handover pair' end
  if r.enrolment.coordinator_owner_id and not table.find(caps,'coordinator-control-v1') then return nil,'unsupported_capability','Coordinator launch requires explicitly configured and provisioned coordinator-control-v1' end
  local location=Mailbox.location(root.mailboxes,r.mailbox_handle)
  local brief='Literal assignment follows: SHA-256 covers ONLY its exact '..tostring(#r.prompt)..' UTF-8 bytes, excluding this transport preface.\n'
   ..'report-files-v1: '..tern.json.encode({mailbox_handle=r.mailbox_handle,binding=expected,root=location.root,producer_helper=location.producer_helper,assignment_sha256=r.enrolment.assignment_sha256,handover_id=r.enrolment.handover_id,handover_token=r.enrolment.handover_token,capabilities=caps})..'\n'
-  ..'Helper argv: POSIX sh,producer_helper,root,mailbox_handle,enrolment_token,mode; Windows powershell.exe -NoProfile -File producer_helper -Root: root -Handle: mailbox_handle -Owner: enrolment_token -Mode: mode. Each colon-ended name and its literal value are separate argv elements. init only new journals; replay restores. report reads {kind,payload,action_id?,action_revision?,handover_id?,handover_token?} stdin; supplies BE/seq/event_id. Emit ACCEPTED {assignment_sha256}, with paired handover only if supplied. Check receipts/consume at checkpoints. With native-ask-v1, end the initial turn immediately after ACCEPTED and return idle before awaiting ACK/control; native notifications require idle. On notifications drain available receipts/replies, then return idle when awaiting more control; never keep the turn open polling or calling wait for another notification. Only worker-poll-v1 uses bounded wait while awaiting control. reply_ack precedes effects; claim/resolve retain uncertainty. Never reset or retry uncertain effects.\n'
+  ..'Helper argv: POSIX sh,producer_helper,root,mailbox_handle,enrolment_token,mode; Windows powershell.exe -NoProfile -File producer_helper -Root: root -Handle: mailbox_handle -Owner: enrolment_token -Mode: mode. Each colon-ended name and its literal value are separate argv elements. init only new journals; replay restores. report reads {kind,payload,action_id?,action_revision?,handover_id?,handover_token?} stdin; supplies BE/seq/event_id. Emit ACCEPTED {assignment_sha256}, with paired handover only if supplied. Copy handover_id and handover_token verbatim from the report-files-v1 JSON above; never retype them. The helper verifies them against the provisioned handover digest and refuses a mismatch before publishing, naming the field; then report ACCEPTED again with the exact values. Check receipts/consume at checkpoints. With native-ask-v1, end the initial turn immediately after ACCEPTED and return idle before awaiting ACK/control; native notifications require idle. On notifications drain available receipts/replies, then return idle when awaiting more control; never keep the turn open polling or calling wait for another notification. Only worker-poll-v1 uses bounded wait while awaiting control. reply_ack precedes effects; claim/resolve retain uncertainty. Never reset or retry uncertain effects.\n'
  if r.enrolment.coordinator_owner_id then
   brief..='COORDINATOR TRANSPORT ROLE: '..tern.json.encode({owner_id=r.enrolment.coordinator_owner_id,owner_generation=r.enrolment.coordinator_generation})..'\n'
    ..'Acknowledge the exact assignment bytes with ACCEPTED first, but do not perform coordinator work yet. Await control using the enrolled transport rule above, then drain receipts and consume the typed coordinator_activation reply for this exact owner/generation. The consumer durably records reply_ack before returning it; claim that exact reply before coordinator work. Retain its action ID/revision and activation token. Never independently orchestrate Tern. When the assigned task finishes or typed retirement requests stop, quiesce and report COORDINATOR_RELEASE with that owner/generation/token, quiescent:true and the activation (or issued retirement) action ID/revision. Idle alone is not task completion. Continue draining committed replies and receipts, including a delayed coordinator_retirement, without starting fresh work; native stop and mailbox retirement belong to ORCH+/SPAWN. The role and token are protocol fencing, not OS/account isolation.\n'
@@ -496,11 +499,19 @@ local function prepare_wake(root,entry)
  w.request_id=r.request_id;w.pane_binding=P.clone(select(3,route(launch)))
  return finish(root,entry,P.body(r,'resolved',{wake_status='awaiting_window',wake_effect_started=false}),true)
 end
+-- A launch-family request SPAWN rejected never reached native execution: every stored launch or
+-- adoption rejection precedes the native call (an adoption `refused` result precedes its ask). No
+-- pane was bound and no producer ran, so its never-used mailbox may retire without a native stop.
+local function unexecuted_launch(entry)
+ return launched(entry) and entry.body.status=='rejected' and entry.pane_binding==nil and entry.attachment==nil and entry.stop_request_id==nil and entry.acceptance==nil
+end
 local function mailbox(root,entry,snapshot,changed)
  local r=entry.request;local record=nil
  if entry.retirement_result then return settle_reservation(root,entry) end
  local launched=root.requests[r.origin_binding.logical_session_id..'/'..tostring(r.launch_request_id)]
- if launched and (launched.request.op=='launch' or launched.request.op=='adopt') and not routed(launched,r) then return finish(root,entry,P.reject(r,'binding_mismatch','Worker requires explicit attachment to this controller window'),true) end
+ -- Retiring the unused mailbox of a rejected launch binds to no pane, so it needs no attachment.
+ local unused=r.op=='mailbox_retire' and r.mode=='retire' and unexecuted_launch(launched)
+ if launched and (launched.request.op=='launch' or launched.request.op=='adopt') and not routed(launched,r) and not unused then return finish(root,entry,P.reject(r,'binding_mismatch','Worker requires explicit attachment to this controller window'),true) end
  for _,other in pairs(root.requests) do
   if other~=entry and r.handle and other.request.handle==r.handle and other.body.status=='uncertain' and retired_executor(root,other.request.origin_binding) then return finish(root,entry,P.reject(r,'target_unavailable','Stopped executor outcome remains unknown for this generation; inspect its original immutable request'),true) end
  end
@@ -523,7 +534,7 @@ local function mailbox(root,entry,snapshot,changed)
  end
  if r.op=='mailbox_retire' and r.mode=='retire' then
   local issued=root.requests[r.origin_binding.logical_session_id..'/'..r.launch_request_id]
-  if issued then
+  if issued and not unused then
    local target,why=retire_launch(root,entry)
    if not target then return finish(root,entry,P.reject(r,'binding_mismatch',why),true) end
   end
@@ -628,13 +639,19 @@ local function mailbox(root,entry,snapshot,changed)
  end)
  return entry.body
 end
+-- A requested challenge is consumable only on this host VM before its deadline: M.authorize
+-- refuses an expired or earlier-VM nonce. Expiry is registry time alone; it never depends on the
+-- requesting window or bridge still existing.
+local function live_challenge(a)
+ return a~=nil and a.phase=='requested' and a.boot==boot and a.deadline>=tern.now()
+end
 -- An unconsumed challenge whose deadline passed or whose host VM restarted can
--- never be consumed (M.authorize refuses both), so no effect started for it.
+-- never be consumed, so no effect started for it.
 -- Status reads project that definitive pre-effect evidence read-only; stage
 -- still re-nonces an identical request, and a live challenge stays pending.
 local function staged_outcome(entry)
  local a=entry.authorization
- if not a or a.phase~='requested' or (a.boot==boot and a.deadline>=tern.now()) then return entry.body end
+ if not a or a.phase~='requested' or live_challenge(a) then return entry.body end
  if a.base_body then return P.clone(a.base_body) end
  return P.body(entry.request,'full',{resource='window_authorization',current=1,limit=1,retryable=true,effect_started=false})
 end
@@ -795,15 +812,18 @@ function M.execution(r,bridge)
 end
 -- Bridge lifecycle evidence for the ORCH+ window (reuse/close), never execution authority: the
 -- live execution projection of the bridge's current request, and whether the registry still
--- names this bridge pane in a requested window authorization (any boot or deadline). An
--- unreadable registry or invalid pane reports held, so the bridge is never closed or reused.
+-- names this bridge pane in a still-consumable window challenge. An expired or earlier-VM
+-- challenge pins nothing, so it no longer holds the pane once its deadline passes, whether or not
+-- its window survives. A granted launch, adoption, stop or wake stays live through its execution
+-- projection until its native outcome is recorded. An unreadable registry or invalid pane reports
+-- held, so the bridge is never closed or reused.
 function M.bridge_lease(r,bridge)
  if not P.integer(bridge,1) then return nil,true end
  local root=load();if not root then return nil,true end
  local held=false
  for _,entry in pairs(root.requests) do
   local a=entry.authorization
-  if a and a.phase=='requested' and a.bridge==bridge then held=true;break end
+  if live_challenge(a) and a.bridge==bridge then held=true;break end
  end
  return (if r then execution_in(root,r,bridge) else nil),held
 end

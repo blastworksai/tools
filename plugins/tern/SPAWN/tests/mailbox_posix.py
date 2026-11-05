@@ -42,7 +42,7 @@ def until(predicate, timeout=10):
 
 
 class Mailbox:
-    def __init__(self, root, handle="box", enrolment_token="enrolment_aaaaaaaa"):
+    def __init__(self, root, handle="box", enrolment_token="enrolment_aaaaaaaa", handover=None):
         self.root, self.handle = root, handle
         self.box = root / handle
         self.operation = 0
@@ -52,6 +52,11 @@ class Mailbox:
                             mailbox_handle=handle)
         provision = dict(version=1, handle=handle, binding_digest=digest(encode(self.binding)),
                          binding=self.binding)
+        if handover is not None:
+            # A rollover successor: the issued ID and sha256(id:token), never the token.
+            handover_id, token = handover
+            provision["handover"] = dict(handover_id=handover_id,
+                                         handover_sha256=digest(f"{handover_id}:{token}".encode()))
         assert self.target("provision", "provision.json", encode(provision)).stdout == b"provisioned\n"
         self.worker("init", check=True)
 
@@ -329,6 +334,21 @@ sys.exit(result.returncode)
         self.assertFalse((mailbox.box / "capacity.lock").exists())
         self.assertFalse((mailbox.box / ("staging/worker-" + OWNER)).exists())
 
+    def assert_retirement_unsettled(self, mailbox, report_floor, reply_floor, chain):
+        # A journal that is not settled at the authorized floors is a definite pre-effect
+        # refusal: exit 0 with exactly producer_unsettled, nothing removed, gates released.
+        before = mailbox.journal_path.read_bytes()
+        unknown = mailbox.box / "consumer/unknown"
+        unknown.write_bytes(b"retain unknown bytes")
+        result = mailbox.retire_authorized(report_floor, reply_floor, chain)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, b"producer_unsettled\n")
+        self.assertEqual(mailbox.journal_path.read_bytes(), before)
+        self.assertEqual(unknown.read_bytes(), b"retain unknown bytes")
+        self.assertFalse((mailbox.box / "producer/lock").exists())
+        self.assertFalse((mailbox.box / "capacity.lock").exists())
+        self.assertFalse((mailbox.box / ("staging/worker-" + OWNER)).exists())
+
     def test_authorized_retirement_requires_exact_arguments_and_binding(self):
         mailbox = self.authorized_mailbox()
         chain = mailbox.journal()["receipt_chain"]
@@ -339,9 +359,10 @@ sys.exit(result.returncode)
                     self.assert_retirement_refused(mailbox, floor if slot == "report" else 0,
                                                    floor if slot == "reply" else 0, chain)
         for report, reply in ((1, 0), (0, 1), (9007199254740991, 0)):
-            self.assert_retirement_refused(mailbox, report, reply, chain)
-        for wrong in ("", "a" * 63, "A" * 64, "g" * 64, chain + "\n", "0" * 64):
+            self.assert_retirement_unsettled(mailbox, report, reply, chain)
+        for wrong in ("", "a" * 63, "A" * 64, "g" * 64, chain + "\n"):
             self.assert_retirement_refused(mailbox, 0, 0, wrong)
+        self.assert_retirement_unsettled(mailbox, 0, 0, "0" * 64)
         for field, value in (("worker_generation", 2), ("work_id", "other"),
                              ("enrolment_token", "other_token_123456")):
             self.assert_retirement_refused(mailbox, 0, 0, chain,
@@ -357,23 +378,23 @@ sys.exit(result.returncode)
     def test_authorized_retirement_preserves_pending_and_unresolved_execution(self):
         mailbox = self.authorized_mailbox()
         mailbox.worker("report", dict(kind="READY", payload=dict(state="idle")), check=True)
-        self.assert_retirement_refused(mailbox, 0, 0, mailbox.journal()["receipt_chain"])
+        self.assert_retirement_unsettled(mailbox, 0, 0, mailbox.journal()["receipt_chain"])
         mailbox.acknowledge_pending()
         mailbox.reply(1)
         mailbox.worker("consume", check=True)
         mailbox.acknowledge_pending()
         chain = mailbox.journal()["receipt_chain"]
-        self.assert_retirement_refused(mailbox, 2, 1, chain)
+        self.assert_retirement_unsettled(mailbox, 2, 1, chain)
         mailbox.worker("claim", message="message_1", check=True)
-        self.assert_retirement_refused(mailbox, 2, 1, chain)
+        self.assert_retirement_unsettled(mailbox, 2, 1, chain)
         retained = mailbox.journal()
         retained["consumed"][0]["execution"] = "uncertain"
         mailbox.journal_path.write_bytes(encode(retained))
-        self.assert_retirement_refused(mailbox, 2, 1, chain)
+        self.assert_retirement_unsettled(mailbox, 2, 1, chain)
         retained["consumed"][0]["execution"] = "resolved"
         retained["consumed"][0]["acknowledged"] = False
         mailbox.journal_path.write_bytes(encode(retained))
-        self.assert_retirement_refused(mailbox, 2, 1, chain)
+        self.assert_retirement_unsettled(mailbox, 2, 1, chain)
         retained["consumed"][0]["acknowledged"] = True
         mailbox.journal_path.write_bytes(encode(retained))
         result = mailbox.retire_authorized(2, 1, chain)
@@ -391,12 +412,16 @@ sys.exit(result.returncode)
         mailbox.worker("resolve", message="message_1", check=True)
         settled = mailbox.journal()
         self.assertEqual(settled["consumed"], [])
-        for field, value in (("receipt_seq", 0), ("next_seq", 3),
-                             ("consumed_reply_floor", 0), ("reply_next", 3),
-                             ("receipt_chain", "0" * 64)):
+        # Inconsistent cursors make the journal itself invalid: a non-zero refusal.
+        for field, value in (("receipt_seq", 0), ("next_seq", 3)):
             with self.subTest(field=field):
                 mailbox.journal_path.write_bytes(encode(dict(settled, **{field: value})))
                 self.assert_retirement_refused(mailbox, 1, 1, settled["receipt_chain"])
+        # A valid journal that differs from the authorized floors is a definite pre-effect refusal.
+        for field, value in (("consumed_reply_floor", 0), ("reply_next", 3), ("receipt_chain", "0" * 64)):
+            with self.subTest(field=field):
+                mailbox.journal_path.write_bytes(encode(dict(settled, **{field: value})))
+                self.assert_retirement_unsettled(mailbox, 1, 1, settled["receipt_chain"])
         mailbox.journal_path.write_bytes(encode(settled))
         # Unknown files are never swept by the private helper.
         (mailbox.box / "consumer/unknown").unlink()
@@ -549,7 +574,6 @@ sys.exit(result.returncode)
         valid = [
             dict(kind="REGISTER", payload=dict(capabilities=["report-files-v1", "worker-poll-v1", "argv-v1"])),
             dict(kind="READY", payload=dict(state="idle", summary="ready")), accepted,
-            dict(accepted, handover_id="handover", handover_token="x" * 16),
             dict(kind="HEARTBEAT", payload=dict(state="working", request_id="request")),
             dict(kind="WAITING", action_id="a", action_revision=1, payload=dict(reason="wait", request_id="request")),
             dict(kind="BLOCKED", payload=dict(reason="blocked", evidence=[])),
@@ -583,6 +607,58 @@ sys.exit(result.returncode)
                 report = json.loads(base64.b64decode(mailbox.journal()["pending"][0]["bytes"]))
                 self.assertEqual(report["payload"], value["payload"])
                 self.assertEqual(mailbox.journal()["next_seq"], 2)
+
+    def test_handover_pair_verified_before_sequence_allocation(self):
+        # A coordinator successor typed the last token digit wrong. The producer
+        # refuses it by field before allocating a sequence, without echoing either value.
+        issued = "29f79cde" * 7 + "b5851668"
+        mistyped = "29f79cde" * 7 + "b585166a"
+        accepted = dict(kind="ACCEPTED", payload=dict(assignment_sha256="a" * 64))
+        mailbox = Mailbox(self.root, "successor", handover=("handover-540", issued))
+        original = mailbox.journal_path.read_bytes()
+        refusals = [
+            (dict(accepted, handover_id="handover-540", handover_token=mistyped), b"binding_mismatch: handover_token differs"),
+            (dict(accepted, handover_id="handover-541", handover_token=issued), b"binding_mismatch: handover_id differs"),
+            (accepted, b"binding_mismatch: handover_id and handover_token are required"),
+        ]
+        for value, message in refusals:
+            with self.subTest(value=value):
+                result = mailbox.worker("report", value)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertTrue(result.stderr.startswith(message), result.stderr)
+                self.assertNotIn(issued.encode(), result.stderr)
+                self.assertNotIn(mistyped.encode(), result.stderr)
+                self.assertEqual(mailbox.journal_path.read_bytes(), original)
+                self.assertEqual(list((mailbox.box / "reports").iterdir()), [])
+        exact = dict(accepted, handover_id="handover-540", handover_token=issued)
+        mailbox.worker("report", exact, check=True)
+        report = json.loads(base64.b64decode(mailbox.journal()["pending"][0]["bytes"]))
+        self.assertEqual((report["seq"], report["handover_id"], report["handover_token"]), (1, "handover-540", issued))
+        self.assertTrue((mailbox.box / "reports/1/manifest.json").is_file())
+        # An ordinary generation was issued no pair, so a supplied one is refused too.
+        result = self.mailbox.worker("report", exact)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue(result.stderr.startswith(b"binding_mismatch: handover_id was not issued"), result.stderr)
+
+    def test_malformed_provisioned_handover_only_affects_acceptance(self):
+        # Parity with the PowerShell helper: only ACCEPTED reads the provisioned handover, so a
+        # malformed one leaves authorized retirement and other reports unchanged.
+        def malformed(mailbox):
+            provision = json.loads((mailbox.box / "provision.json").read_bytes())
+            provision["handover"] = dict(handover_id="bad id", handover_sha256="x")
+            (mailbox.box / "provision.json").write_bytes(encode(provision))
+        retiring = self.authorized_mailbox()
+        malformed(retiring)
+        result = retiring.retire_authorized(0, 0, retiring.journal()["receipt_chain"])
+        self.assertEqual((result.returncode, result.stdout, result.stderr), (0, b"producer_retired\n", b""))
+        reporting = Mailbox(self.root, "malformed_handover")
+        malformed(reporting)
+        original = reporting.journal_path.read_bytes()
+        result = reporting.worker("report", dict(kind="ACCEPTED", payload=dict(assignment_sha256="a" * 64)))
+        self.assertEqual((result.returncode, result.stderr), (1, b"binding_mismatch\n"))
+        self.assertEqual(reporting.journal_path.read_bytes(), original)
+        self.assertEqual(list((reporting.box / "reports").iterdir()), [])
+        reporting.worker("report", dict(kind="READY", payload=dict(state="idle")), check=True)
 
     def test_coordinator_release_entrypoint_schema_and_replay(self):
         payload = dict(owner_id="owner", owner_generation=1, activation_token="a" * 64, quiescent=True)

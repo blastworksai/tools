@@ -190,6 +190,28 @@ corruptCaps=clone(reg);table.remove(corruptCaps.generations.handle.writes.provis
 check(M.validate(corruptCaps)==nil,'retained provision capabilities must match generation identity')
 corruptCaps=clone(reg);corruptCaps.generations.handle.capabilities={'argv-v1','report-files-v1','worker-poll-v1'}
 check(M.validate(corruptCaps)==nil,'persisted exact capability list is digest-bound')
+-- Rollover successor: the issued handover ID and pair digest (never the token) are provisioned,
+-- bound into the binding digest and written into provision.json for the producer to verify.
+do
+ local token=string.rep('29f79cde',7)..'b5851668'
+ local successor=clone(provision); successor.handover_id='handover-540'; successor.handover_sha256=C.sha256('handover-540:'..token)
+ local handoverOp,handoverIntent=M.prepare(empty,successor,record,context)
+ check(handoverOp and handoverIntent and M.validate(handoverIntent)~=nil,'paired handover digest provisions a valid intent')
+ local g=handoverIntent.generations.handle
+ check(g.handover.handover_id=='handover-540' and g.handover.handover_sha256==successor.handover_sha256 and g.binding_digest~=intent.generations.handle.binding_digest,'handover digest is retained and bound into the binding digest')
+ local written=runtime.json.decode(handoverOp.bytes)
+ check(written.handover.handover_id=='handover-540' and written.handover.handover_sha256==successor.handover_sha256 and not handoverOp.bytes:find(token,1,true),'provision.json carries the ID and digest, never the raw token')
+ check(runtime.json.decode(op.bytes).handover==nil,'an ordinary provision.json carries no handover')
+ local settled=assert(M.settle(handoverIntent,handoverOp,{status='provisioned'}))
+ check(M.get(settled,'handle').handover.handover_sha256==successor.handover_sha256,'launch inspection exposes the provisioned handover digest')
+ check(M.validate(runtime.json.decode(runtime.json.encode(settled)))~=nil,'provisioned handover survives serialization')
+ local altered=clone(settled); altered.generations.handle.handover.handover_sha256=string.rep('0',64)
+ check(M.validate(altered)==nil,'a changed persisted handover digest fails closed')
+ local changedPair=clone(successor); changedPair.handover_sha256=C.sha256('handover-540:'..token..'x')
+ check(select(3,M.prepare(settled,changedPair,record,context)).error.code=='content_conflict','a different handover digest cannot replay the provision')
+ local unpaired=clone(successor); unpaired.handover_sha256=nil
+ check(select(3,M.prepare(empty,unpaired,record,context)).error.code=='invalid_schema','handover ID and digest are paired')
+end
 local zeroRevision=clone(provision); zeroRevision.record_revision=0
 local _,zeroIntent=M.prepare(empty,zeroRevision,record,context)
 check(zeroIntent and M.validate(zeroIntent)~=nil,'canonical initial record revision zero retained')
@@ -334,6 +356,30 @@ check(C.decode_page(runtime.json.encode(page.payload),discovery.selector)~=nil,'
 watermark.through_seq=2; files['watermarks/1.json']=runtime.json.encode(watermark)
 M.execute(discoveryOp,function(value) page=value end)
 check(page.error.code=='binding_mismatch','discovered filename and watermark contents must agree')
+-- Coordinator rollover successor: dispatch binds every report read to the
+-- issued launch contract (assignment, handover pair, capabilities). The exact ACCEPTED reads
+-- back; one mistyped handover-token digit is refused with its precise codec diagnostic.
+do
+ local issued=clone(readOp.binding)
+ issued.assignment_sha256=string.rep('9',64); issued.handover_id='handover-540'
+ issued.handover_token=string.rep('29f79cde',7)..'b5851668'; issued.capabilities={'report-files-v1','native-ask-v1','coordinator-control-v1'}
+ local function acceptance(token)
+  local report={version=3,event_id=C.sha256('handle:report:1'),seq=1,kind='ACCEPTED',payload={assignment_sha256=issued.assignment_sha256},handover_id=issued.handover_id,handover_token=token}
+  for _,k in ipairs({'logical_session_id','worker_id','worker_generation','launch_request_id','work_id','enrolment_token'}) do report[k]=binding[k] end
+  local written=clone(issued); written.handover_token=token
+  local framed=assert(C.frame(runtime.json.encode(report),'report',written))
+  files['reports/1/manifest.json']=framed.manifest; files['reports/1/chunk-1.json']=framed.chunks[1]
+  local successor=clone(readOp); successor.binding=clone(issued)
+  local outcome; M.execute(successor,function(value) outcome=value end)
+  files['reports/1/manifest.json']=nil; files['reports/1/chunk-1.json']=nil
+  return outcome
+ end
+ local exact=acceptance(issued.handover_token)
+ check(exact.status=='read' and exact.payload.selector.part=='manifest','coordinator successor ACCEPTED with the issued handover pair reads back')
+ local typo=acceptance(string.rep('29f79cde',7)..'b585166a')
+ check(typo.status=='rejected' and typo.error.code=='binding_mismatch' and typo.error.message=='Acceptance differs from the issued assignment or handover.',
+  'a mistyped successor handover token is refused with its exact diagnostic, not a bare code: '..runtime.json.encode(typo))
+end
 -- Deadlines measure awake progress between watchdog ticks, not wall time across a suspension.
 local function watchdog(ms) clock+=ms; timers[#timers].fn() end
 pending={}

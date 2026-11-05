@@ -9,7 +9,7 @@ ORCH+ adds orchestration on top of native Tern and [SPAWN](../SPAWN/README.md). 
 - it asks you whenever a decision is needed;
 - it records every effect so that a launch, stop or message happens at most once, even across reloads.
 
-Optionally, [USAGE](../USAGE/README.md) will supply remaining-quota evidence so new work goes to an account with capacity left. This needs a USAGE release that is not published yet (see [Quota routing via USAGE](#quota-routing-via-usage)); without it, ORCH+ works fully and routing stays off.
+Optionally, [USAGE](../USAGE/README.md) 2.1.0 or later supplies remaining-quota evidence so new work goes to an account with capacity left (see [Quota routing via USAGE](#quota-routing-via-usage)); without it, ORCH+ works fully and routing stays off.
 
 ![The ORCH+ controller: managed dispatch, worker health, owner gates and the landing queue](assets/screenshots/controller.png)
 
@@ -27,8 +27,8 @@ Optionally, [USAGE](../USAGE/README.md) will supply remaining-quota evidence so 
 ## Requirements
 
 - Tern 0.9.10 or later.
-- [SPAWN](../SPAWN/README.md) 0.2.0 or later, installed on the same Tern host, with at least one record that declares the `report-files-v1` mailbox capability. A coordinator additionally needs a record provisioned with `coordinator-control-v1`.
-- Optional, for quota routing only: a [USAGE](../USAGE/README.md) release with the read-only `usage.capacity` interface and owner-confirmed account bindings. The current published USAGE (2.0.0) has neither, so leave quota routing off for now.
+- [SPAWN](../SPAWN/README.md) 0.3.0 or later, installed on the same Tern host, with at least one record that declares the `report-files-v1` mailbox capability. A coordinator additionally needs a record provisioned with `coordinator-control-v1`.
+- Optional, for quota routing only: [USAGE](../USAGE/README.md) 2.1.0 or later, with its read-only capacity export enabled and each SPAWN account bound in USAGE Setup (**Bind SPAWN accounts…**; OMP records through **Associate OMP records…**).
 
 ## Install
 
@@ -53,7 +53,7 @@ Both entry points reveal an existing ORCH+ view in the current session rather th
 
 ## Use
 
-All ORCH+ controls are native buttons. Buttons that change something ask for confirmation, or open a picker or prompt, before they act. A button from an outdated view is refused as stale and never replayed. If the host gets no confirmation from an ORCH+ window within 30 s, the press expires with a notice that it will not run later. A window may still have run it, so check the current state before pressing again.
+All ORCH+ controls are native buttons, except the two reload recovery commands described in [Recover after a reload](#recover-after-a-reload), which you run from the command palette. Buttons that change something ask for confirmation, or open a picker or prompt, before they act. Once the controller has run its first command, a dispatch or assistance button runs only in the window that owns the controller; every other window showing the same controller ignores it. (Assistance on a controller restored after a host reload stays open to any window, so you can still inspect or stop its recorded owner.) A button from an outdated view is refused as stale and never replayed. If the host gets no confirmation from an ORCH+ window within 30 s, the press expires with a notice that it will not run later. A window may still have run it, so check the current state before pressing again.
 
 ### Claim the controller
 
@@ -128,6 +128,8 @@ With **Include orchestrator (coordinator) in rollover** on, or through **Roll ov
 
 If the stop is uncertain, the handover waits for the owner recovery steps.
 
+If the successor fails to start or to accept the handover, no coordinator is active, because the predecessor is already retired. The hold says so and shows SPAWN's reason. To continue, stop the successor pane, then run fenced recovery on the successor's orchestrator owner card. That closes the rollover, and you can start a new coordinator from the retained checkpoint.
+
 ### Landing queue
 
 A worker that wants to merge sends a landing request for an exact checkpointed commit and target branch. Each request opens a **landing approval** gate. Only the head of the target's queue can be granted, and only when:
@@ -148,21 +150,27 @@ Nothing is adopted automatically, and shell panes are never typed into. Coordina
 
 ### Recover after a reload
 
-After a plugin or host reload, the controller becomes uncertain and nothing new runs. Choose **Guided reload recovery — next step…**. The same list appears in the controller as the **Reload recovery checklist**, and it walks you through:
+After a plugin or host reload, the controller becomes uncertain and nothing new runs. In the window you are working in, run **ORCH+ Reload recovery guide** from the command palette. The same list appears in the controller as the **Reload recovery checklist**, and it walks you through:
 
-1. **Continue controller after reload…**, after you confirm the old executors stopped;
+1. continuing the controller in this window, after you confirm the old executors stopped. You can also run **ORCH+ Continue controller in this window** from the palette directly;
 2. recovering the previous SPAWN owner in **SPAWN: Running agents**;
 3. **Continue after reload / reattach explicitly…** for each worker, with its recorded pane.
 
+Use the palette commands, not the **Continue controller after reload…** and **Guided reload recovery — next step…** buttons, after a reload. A button press does not tell ORCH+ which window it came from. When two windows show the same session (for example a desktop window attached to a remote host and a window on that host), a press could otherwise open the picker in the other window and make that window the controller's origin. The buttons therefore only work in the window that already owns the controller. A palette command always runs in the window you typed it in. If several controllers are open in the session, focus the one to recover first.
+
 ORCH+ reads uncertain effects back from SPAWN automatically, with read-only status reads only. **Read retained SPAWN outcome (never relaunch)** does the same read on demand.
+
+Work that was queued but had not launched yet moves to the continued window. Its launch then runs there, even when its mailbox provision finished only after you continued. A launch that had already started in the old window is never re-run; it stays uncertain until its outcome is read back.
+
+Some never-launched work cannot move: SPAWN already received its launch or provision (for example a launch whose window authorization expired and was rechecked), or it is an adoption whose ask was never sent. Continuation marks that request as never executed, and the worker shows **Cancel never-launched work…**. If SPAWN received the request, ORCH+ first reads SPAWN's retained status of it and cancels only when that request can never run: SPAWN has no record of it, rejected it, or reports that it was refused before any effect (an expired challenge counts). While SPAWN still holds a live challenge, wait 30 seconds and try again. Cancelling removes the worker and frees its reservations, including a coordinator start's slot. Nothing is stopped or re-sent, and a provisioned mailbox stays unused. Then queue the assignment again; it gets a new launch request.
 
 ### Quota routing via USAGE
 
-> **Not usable with the published USAGE yet.** Quota routing needs USAGE's read-only `usage.capacity` block and an owner-confirmed binding between each SPAWN account and its USAGE reading. USAGE 2.0.0 ships neither. With routing on and no bound evidence, ORCH+ holds the task and says why ("no allowed record has sufficient fresh quota"). It never guesses. Routing is off by default.
+> **Needs USAGE 2.1.0 or later.** Quota routing reads USAGE's read-only `usage.capacity` block and needs an owner-confirmed binding between each SPAWN account and its USAGE reading (USAGE Setup: enable capacity export, **Bind SPAWN accounts…**, and **Associate OMP records…** for OMP records). With routing on and no bound evidence, ORCH+ holds the task and says why ("no allowed record has sufficient fresh quota"). It never guesses. Routing is off by default.
 
 Turn on **Use remaining quota / weekly reset in task routing** and enable USAGE's read-only capacity export (ORCH+ opens USAGE's capacity block in the background **SPAWN bridges** tab and reuses it after reloads). For each new task or coordinator start, the record you chose launches unchanged as long as its fresh, identity-bound USAGE evidence shows more remaining quota than the reserve. Otherwise ORCH+ picks the allowed alternative with the earliest weekly reset, but only if its provider, account and model changes are permitted in Config. If no permitted alternative qualifies, ORCH+ opens a quota-fallback gate for you to decide.
 
-Missing, stale or unbound evidence never counts as "plenty". USAGE confirms the evidence again right before each launch. **Refresh quota evidence from USAGE** and **Re-check capacity now** fetch fresh evidence. Rollover successors use their own allowlists.
+Missing, stale or unbound evidence never counts as "plenty". An OMP record uses its account's quota only after you associate it with that account in USAGE Setup (**Associate OMP records…**); until then it is unbound. USAGE confirms the evidence again right before each launch. **Refresh quota evidence from USAGE** and **Re-check capacity now** fetch fresh evidence. Rollover successors use their own allowlists.
 
 ## Where ORCH+ runs
 
@@ -216,7 +224,7 @@ Run each group in its own callback; long sections can also run one at a time. SP
 ## Files
 
 - `plugin.toml`: package manifest and the `orchestrator` block
-- `window.luau`: palette command, Files button, button routing, scheduling, SPAWN and USAGE bridges
+- `window.luau`: palette commands (open, continue controller, recovery guide), Files button, button routing, scheduling, SPAWN and USAGE bridges
 - `host.luau`: controller and Config block, and the only writer of ORCH+ state
 - `views.luau`: controller and Config rendering
 - `state.luau`: ownership registry and persistence rules

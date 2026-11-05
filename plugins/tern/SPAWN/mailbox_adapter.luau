@@ -7,7 +7,8 @@ local M = {}
 local active = {}
 local running = 0
 local assembly_reserved = 0
-local function rejected(code) return {status='rejected',error={code=code}} end
+-- Codec diagnostics keep their bounded message so the owner sees why bytes were refused.
+local function rejected(code,message) return {status='rejected',error={code=code,message=message}} end
 local function absolute(path,windows)
  if type(path)~='string' or #path==0 or #path>4096 or path:find('[%z\r\n]') then return false end
  if path:find('..',1,true) then return false end
@@ -167,7 +168,11 @@ function M.execute(op,callback)
      receive({status='object',bytes=raw,selector=selector}); return
     end
     if mode=='retire_producer' then
-     if status=='producer_retired' and payload=='' then receive({status=status}) else done({status='uncertain'}) end
+     -- The reviewed helper prints producer_unsettled (exit 0) only from its journal-settlement
+     -- check, before it removes anything; it is the first child, so no target effect ran either.
+     if status=='producer_retired' and payload=='' then receive({status=status})
+     elseif status=='producer_unsettled' and payload=='' then done(rejected('producer_unsettled','The stopped producer journal is not settled at the authorized floors (pending reports, unacknowledged or unresolved control messages); nothing was retired'))
+     else done({status='uncertain'}) end
      return
     end
     if payload~='' or (status~='published' and status~='already_published' and status~='provisioned' and status~='compacted' and status~='retired') then done({status='uncertain'}); return end
@@ -184,13 +189,13 @@ function M.execute(op,callback)
   assembly_reserved+=reservation
   local pool=Codec.new_reassembler()
   local begin,why=Codec.begin_assembly(pool,manifest_bytes,op.binding,Codec.sha256(manifest_bytes))
-  if not begin then done(rejected(why.code)); return end
+  if not begin then done(rejected(why.code,why.message)); return end
   local index=1
   local function step()
    invoke('read',(if manifest.direction=='reply' then 'replies/' else 'reports/')..string.format('%.0f',manifest.slot)..'/chunk-'..index..'.json',nil,function(result)
     if result.status~='object' then done(if result.admission_refused or result.status=='uncertain' then result else {status='incomplete'}); return end
     local value,problem=Codec.push_chunk(pool,result.bytes,op.binding,Codec.sha256(result.bytes))
-    if not value then done(rejected(problem.code)); return end
+    if not value then done(rejected(problem.code,problem.message)); return end
     if value.complete then
      if op.kind=='mailbox_publish_reply' and (value.envelope.action_revision~=op.request.action_revision or value.envelope.message_id~=op.request.message_id) then done(rejected('binding_mismatch')); return end
      after(); return
@@ -205,7 +210,7 @@ function M.execute(op,callback)
    if result.status~='object' then done(result); return end
    local selected=op.request.selector
    local object,why=Codec.decode_object(result.bytes)
-   if not object then done(rejected(why.code)); return end
+   if not object then done(rejected(why.code,why.message)); return end
    local page=Codec.project_page(result.bytes,selected)
    if not page then done(rejected('binding_mismatch')); return end
    if selected.stream=='watermark' then

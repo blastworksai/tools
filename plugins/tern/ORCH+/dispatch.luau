@@ -62,6 +62,14 @@ M.READ_ONLY_OPS = READ_ONLY_OPS
 local function control_origin(w: any): any return w.control_origin or w.origin_binding end
 local function control_pane(w: any): string return w.control_pane or w.controller_pane end
 local function control_binding(w: any): any return w.control_pane_binding or w.pane_binding end
+-- The claim windows and SPAWN inspect is exactly SPAWN_DISPATCH's `{executor,epoch,grant_id}`.
+-- A routed launch's bound USAGE validation (`claim.capacity`) is host-only evidence: SPAWN's window
+-- refuses a projected claim with any other field, so exposing it left every quota-routed launch's
+-- window authorization unconsumed until it expired (`full`, resource window_authorization).
+local function public_claim(c: any): any
+	return if c == nil then nil else { executor = c.executor, epoch = c.epoch, grant_id = c.grant_id }
+end
+M.public_claim = public_claim
 -- A sequenced window observation (observe with observation_seq) keeps no command outcome.
 -- Replay safety comes from the durable command_seq barrier instead: its commit advances the
 -- session cursor to its command_seq, so any replay of it (same request ID, same or older
@@ -182,6 +190,11 @@ local B = { "logical_session_id", "worker_id", "worker_generation", "launch_requ
 local function be(w: any, request: any)
 	for _, k in B do request[k] = w[k] end; request.enrolment_token = w.enrolment_token
 end
+-- A rollover successor's mailbox is provisioned with its handover ID and this pair digest (never
+-- the token), so SPAWN's producer refuses a mistyped pair before publishing ACCEPTED.
+local function handover_sha256(w: any): string?
+	return if w.handover_id then codec.sha256(w.handover_id .. ":" .. w.handover_token) else nil
+end
 local function report_binding(w: any): any
 	local out = {}; be(w, out)
 	out.mailbox_handle = w.mailbox_handle; out.assignment_sha256 = w.assignment_sha256; out.capabilities = clone(w.capabilities)
@@ -289,12 +302,22 @@ local request_fields = {
 	accept = "target_request_id target_action_id pane_binding worker_id worker_generation enrolment_token work_id event_id seq event_sha256 handover_id handover_token",
 	attach_worker = "target_request_id target_action_id previous_origin_binding previous_pane_binding pane_binding worker_id worker_generation enrolment_token work_id attestation",
 	native_wake = "target_request_id target_action_id",
-	mailbox_provision = "logical_session_id worker_id worker_generation launch_request_id work_id enrolment_token record_id record_revision capability",
+	mailbox_provision = "logical_session_id worker_id worker_generation launch_request_id work_id enrolment_token record_id record_revision capability handover_id handover_sha256",
 	mailbox_read = "logical_session_id worker_id worker_generation launch_request_id work_id enrolment_token handle expected_generation selector",
 	mailbox_publish_ack = "logical_session_id worker_id worker_generation launch_request_id work_id enrolment_token handle expected_generation receipt_revision ack_b64 ack_sha256",
 	mailbox_publish_reply = "logical_session_id worker_id worker_generation launch_request_id work_id enrolment_token handle expected_generation message_id reply_seq action_revision reply_sha256 part index object_b64 object_sha256",
 	mailbox_retire = "logical_session_id worker_id worker_generation launch_request_id work_id enrolment_token handle expected_generation mode settlement_revision report_floor report_chain_sha256 reply_floor grant_id",
 }
+-- Held, never-launched work whose launch or adoption ask SPAWN definitively rejected after its
+-- mailbox was provisioned. SPAWN stores a launch/adopt rejection only before any native call (an
+-- adoption `refused` result is reported before the ask), so no pane exists and no producer ever
+-- ran: its mailbox retires without a native stop when the owner cancels the work (cancel_work).
+local function launch_rejected(d: any, w: any): boolean
+	local launch = d.actions[w.launch_action_id]
+	return w.phase == "held" and w.mailbox_handle ~= nil and w.pane_binding == nil and w.control_origin == nil and w.accepted_event == nil
+		and w.handover_id == nil and w.stopped == nil and launch ~= nil and launch.phase == "complete" and launch.response ~= nil
+		and launch.response.status == "rejected" and (launch.request.op == "launch" or launch.request.op == "adopt")
+end
 local function valid_request(r: any, w: any, d: any): boolean
 	local extra = request_fields[r.op]
 	if extra == nil or not closed(r, "schema origin op request_id action_id origin_binding controller_pane controller_generation " .. extra)
@@ -323,6 +346,17 @@ local function valid_request(r: any, w: any, d: any): boolean
 				and equal(response.payload.previous_pane_binding, w.pane_binding) then route_known = true; break end
 		end
 	end
+	-- A provision that is no longer ready keeps its exact request after explicit continuation
+	-- moved its never-launched worker to the continued route (rebind_unlaunched). Its SPAWN
+	-- mailbox binding carries no window route; owner incarnation and alias are checked above.
+	if not route_known and r.op == "mailbox_provision" then
+		local a = d.actions[r.action_id]; route_known = a ~= nil and a.phase ~= "ready"
+	end
+	-- A withdrawn rejected launch retires its unused mailbox on the route the owner cancelled from
+	-- (earlier refused or revoked attempts keep their own exact route).
+	if not route_known and r.op == "mailbox_retire" and r.mode == "retire" and launch_rejected(d, w) then
+		route_known = true
+	end
 	if not route_known then return false end
 	if r.op == "native_wake" then
 		local target = d.actions[r.target_action_id]
@@ -345,7 +379,11 @@ local function valid_request(r: any, w: any, d: any): boolean
 	end
 	for _, k in B do if r[k] ~= w[k] then return false end end
 	if r.enrolment_token ~= w.enrolment_token then return false end
-	if r.op == "mailbox_provision" then return r.record_id == w.record_id and r.record_revision == w.record_revision and r.capability == "report-files-v1" end
+	if r.op == "mailbox_provision" then
+		-- Provisions retained from builds before the handover digest carry neither field.
+		return r.record_id == w.record_id and r.record_revision == w.record_revision and r.capability == "report-files-v1"
+			and (r.handover_id == nil and r.handover_sha256 == nil or r.handover_id == w.handover_id and r.handover_sha256 == handover_sha256(w))
+	end
 	if r.handle ~= w.mailbox_handle or r.expected_generation ~= w.worker_generation then return false end
 	if r.op == "mailbox_publish_ack" then
 		if type(r.ack_b64) ~= "string" then return false end
@@ -1306,7 +1344,7 @@ function M.valid(d: any, registry: any, legacy_catalog_cache: boolean?): boolean
 		end
 		if w.mailbox_retire_action_id ~= nil then
 			local action = d.actions[w.mailbox_retire_action_id]
-			if not w.stopped or not action or action.worker_id ~= key or action.request.op ~= "mailbox_retire" or action.request.mode ~= "retire" then return false end
+			if not (w.stopped or launch_rejected(d, w)) or not action or action.worker_id ~= key or action.request.op ~= "mailbox_retire" or action.request.mode ~= "retire" then return false end
 		end
 		if w.mailbox_retired ~= nil and (w.mailbox_retired ~= true or not w.mailbox_retire_action_id
 			or d.actions[w.mailbox_retire_action_id].phase ~= "complete" or not d.actions[w.mailbox_retire_action_id].response
@@ -1698,6 +1736,14 @@ local function compact_request(d: any, w: any): any
 	request.report_chain_sha256 = w.compacted_chain; request.reply_floor = w.reply_floor; request.grant_id = next_id(d, "compact-")
 	return request
 end
+-- SPAWN's exact pre-effect refusal of a stopped generation's retirement: its producer journal was
+-- not settled at the authorized floors, so the helper removed nothing. Only this definite code
+-- counts; an uncertain or otherwise failed retirement is never treated as refused.
+local function retirement_refused(d: any, w: any): boolean
+	local a = if w.mailbox_retire_action_id then d.actions[w.mailbox_retire_action_id] else nil
+	return a ~= nil and a.phase == "complete" and a.response ~= nil and a.response.status == "rejected"
+		and a.response.error ~= nil and a.response.error.code == "producer_unsettled"
+end
 -- Deterministic sweep rule. Retire only a provably stopped, settled, unreferenced generation
 -- through its current control route; compact a live one with pending compaction; keep the rest
 -- with a reason. It never stops a worker or infers a stop.
@@ -1705,7 +1751,7 @@ local function sweep_decision(n: any, d: any, w: any, origin: any): (string, str
 	if w.mailbox_retired then return "none", "retired" end
 	if w.continuation_required or not equal(control_origin(w), origin) then return "keep", "continuation_required" end
 	for _, a in d.actions do if a.worker_id == w.worker_id and a.phase == "uncertain" then return "keep", "uncertain" end end
-	if w.mailbox_retire_action_id then return "keep", "retirement_pending" end
+	if w.mailbox_retire_action_id and not retirement_refused(d, w) then return "keep", "retirement_pending" end
 	if pending(d, w) then return "keep", "effect_pending" end
 	if w.coordinator_owner_id and not coordinator(n, w) then return "keep", "owner_unresolved" end
 	if w.rejected_report then return "keep", "report_held" end
@@ -1826,7 +1872,7 @@ local function request_checkpoint(n: any, r: any, w: any, clock: any): boolean
 	if not thread_room(w) then return rollover_hold(r, "full", "The predecessor's durable thread is full of unresolved items; nothing was evicted.") end
 	local request_id = next_id(d, "report-request-")
 	local delivery, err = issue_reply(d, w, "report_request", { request_id = request_id, requested_kind = "CHECKPOINT",
-		reason = "Rollover " .. r.id .. ": publish one CHECKPOINT echoing request_id with fresh checks for the current artifact revision, then start no new work, send no further progress and stay idle. ORCH+ stops this pane only after a fresh successor accepts." })
+		reason = "Rollover " .. r.id .. ": claim this request, publish one CHECKPOINT echoing request_id with fresh passed checks for the current artifact revision (a failed check blocks the rollover), then resolve this claim in the helper journal and drain receipts. Start no new work, send no further progress and stay idle. ORCH+ stops this pane only after a fresh successor accepts; an unresolved claim keeps your stopped mailbox unretired." })
 	if err then return rollover_hold(r, err.code, err.message) end
 	delivery.request_id = request_id; delivery.published = false; delivery.response_received = false; f.report_request = delivery
 	append(d, w, "report_request", "Rollover " .. r.id .. " requested a verified checkpoint; delivery ACK is not a checkpoint.", clock,
@@ -1964,6 +2010,7 @@ local function grant_successor(n: any, r: any, pred: any, event: any, clock: any
 	end
 	local request = common(d, event.origin, event.controller_pane, "mailbox_provision"); be(w, request)
 	request.record_id = w.record_id; request.record_revision = w.record_revision; request.capability = "report-files-v1"
+	request.handover_id = w.handover_id; request.handover_sha256 = handover_sha256(w)
 	if not add(d, request, worker_id) then return rollover_hold(r, "oversize", "Successor provision request exceeds the bridge bound; nothing was granted.") end
 	d.workers[worker_id] = w
 	append(d, w, "assignment", prompt, clock)
@@ -2007,6 +2054,15 @@ local function rollover_step(n: any, r: any, event: any, clock: any, reserve: an
 		rollover_edge(r, "cancelled", n.revision, clock)
 		return rollover_hold(r, "predecessor_self_released", "Coordinator " .. pred.worker_id .. " published its own COORDINATOR_RELEASE before a verified rollover checkpoint. "
 			.. "The rollover closed with no successor; the normal release, exact stop and mailbox retirement continue. Start a new coordinator explicitly if more work remains.")
+	end
+	-- From owner_retired on, a coordinator rollover has no running predecessor and cannot be
+	-- cancelled. A successor that cannot accept leaves no active coordinator: say so and name the
+	-- one explicit way forward (fenced recovery of the successor's owner, which closes the rollover).
+	local function no_coordinator(code: string, what: string): boolean
+		return rollover_hold(r, code, what .. " Predecessor coordinator " .. pred.worker_id .. " is already stopped and retired, so no coordinator is active."
+			.. " Nothing is retried, relaunched or skipped, and this rollover cannot be cancelled. To continue: stop successor " .. succ.worker_id
+			.. " if its pane exists and reconcile any retained effect, then run fenced recovery for orchestrator owner " .. tostring(r.successor_owner_id)
+			.. " on its owner card (Stop assistance…, Recheck, Begin fenced recovery, verify it stopped). That closes this rollover and frees the slot to start a new coordinator from the retained verified checkpoint.")
 	end
 	if r.phase == "requested" then
 		if coordinator_kind and pred.release then return self_released() end
@@ -2071,20 +2127,30 @@ local function rollover_step(n: any, r: any, event: any, clock: any, reserve: an
 		if retired then rollover_edge(r, "owner_retired", n.revision, clock); return true end
 		return false -- Exact mailbox retirement and normal generation-bound release still settle.
 	elseif r.phase == "owner_retired" then return grant_successor(n, r, pred, event, clock, reserve)
+	elseif coordinator_kind and (r.phase == "successor_granted" or r.phase == "successor_created") and n.retired[r.successor_owner_id] ~= nil
+		and n.retired[r.successor_owner_id].generation == r.successor_generation then
+		-- Explicit fenced recovery retired the unaccepted successor's owner: that generation can never
+		-- activate. The handover closes visibly with no successor and the orchestrator slot is free.
+		rollover_edge(r, "cancelled", n.revision, clock)
+		return rollover_hold(r, "successor_owner_recovered", "Fenced recovery retired successor coordinator owner " .. r.successor_owner_id
+			.. " before " .. succ.worker_id .. " accepted this handover. The rollover closed without a successor; nothing was relaunched. Start a new coordinator explicitly from the retained verified checkpoint if work remains.")
 	elseif r.phase == "successor_granted" then
 		if succ.pane_binding then
 			r.successor_pane_binding = clone(succ.pane_binding); rollover_edge(r, "successor_created", n.revision, clock)
 			return true
 		end
 		if succ.phase == "held" then
+			if coordinator_kind then return no_coordinator("successor_launch_failed", "Successor launch did not start (" .. reason_text(succ) .. ").") end
 			return rollover_hold(r, "successor_launch_failed", "Successor launch did not start (" .. reason_text(succ) .. "). The predecessor is untouched; cancel this rollover before requesting another.")
 		end
 		for _, a in d.actions do
 			if a.worker_id == succ.worker_id and a.phase == "uncertain" then
+				if coordinator_kind then return no_coordinator("successor_launch_uncertain", "The successor's exact " .. a.request.op .. " may have executed; it is never retried.") end
 				return rollover_hold(r, "successor_launch_uncertain", "The successor's exact " .. a.request.op .. " may have executed. Reconcile that retained effect; it is never retried and the predecessor keeps running.")
 			end
 		end
 		if not pending(d, succ) then
+			if coordinator_kind then return no_coordinator("successor_launch_fenced", "The successor's launch intent was fenced before execution.") end
 			return rollover_hold(r, "successor_launch_fenced", "The successor's launch intent was fenced before execution. Cancel this rollover and request a new one; the predecessor keeps running.")
 		end
 		return false
@@ -2094,7 +2160,13 @@ local function rollover_step(n: any, r: any, event: any, clock: any, reserve: an
 			return true
 		end
 		if succ.phase == "held" or succ.stopped or flow(succ).exit then
+			if coordinator_kind then
+				return no_coordinator("successor_unaccepted", "Successor coordinator " .. succ.worker_id .. " exited or was held before accepting this handover (" .. reason_text(succ) .. ").")
+			end
 			return rollover_hold(r, "successor_unaccepted", "The successor exited or was held before accepting this handover (" .. reason_text(succ) .. "). The predecessor keeps running; nothing is stopped.")
+		end
+		if coordinator_kind and succ.rejected_report then
+			return no_coordinator("successor_report_held", "Successor coordinator " .. succ.worker_id .. "'s report is held (" .. reason_text(succ) .. "); Re-check held report re-validates the same retained bytes.")
 		end
 		return false
 	elseif r.phase == "handover_accepted" and coordinator_kind then
@@ -2833,6 +2905,16 @@ local function complete(n: any, a: any, body: any, clock: any): (any?, any?)
 			note_reason(w, { code = "authorization_reissue", message = message })
 			return { ok = true, code = "authorization_reissue", message = message }, nil
 		end
+		-- SPAWN's exact pre-effect refusal of a stopped generation's retirement: nothing was removed, so
+		-- the effect slot is released and the mailbox stays provisioned. The refused action stays the
+		-- retirement marker, so the poll driver never loops; the sweep or the owner re-arms one attempt.
+		if request.op == "mailbox_retire" and request.mode == "retire" and body.status == "rejected" and w and w.stopped
+			and w.mailbox_retire_action_id == request.action_id and problem.code == "producer_unsettled" then
+			a.phase = "complete"
+			local message = "SPAWN refused this stopped generation's mailbox retirement before any effect: its helper journal still holds pending reports or unacknowledged/unresolved control messages. Nothing was retired or retried; the mailbox stays provisioned. The nightly sweep or Retry mailbox retirement once… issues one fresh attempt."
+			note_reason(w, { code = "retirement_refused", message = message })
+			return { ok = true, code = "retirement_refused", message = message }, nil
+		end
 		if w then w.phase = "held"; w.reason = problem end
 		a.phase = "complete"
 		return { ok = true, code = "bridge_rejected", message = "SPAWN prerequisite/outcome: " .. tostring(problem.code or body.status)
@@ -2954,7 +3036,11 @@ local function complete(n: any, a: any, body: any, clock: any): (any?, any?)
 		local exited = stamp(clock); exited.state = "exited"; flow(w).exit = exited
 	elseif request.op == "mailbox_retire" then
 		if request.mode == "retire" then
-			if body.status ~= "retired" or not w.stopped or not settled(w) or (w.coordinator_owner_id and not coordinator(n, w)) then return fail("transport_pending", "Exact stopped mailbox retirement is not confirmed.") end
+			-- A withdrawn rejected launch never had a producer: its unused mailbox retires without a stop.
+			local withdrawn = launch_rejected(d, w) and w.mailbox_retire_action_id == request.action_id
+			if body.status ~= "retired" or not (withdrawn or (w.stopped and settled(w))) or (w.coordinator_owner_id and not withdrawn and not coordinator(n, w)) then
+				return fail("transport_pending", "Exact stopped mailbox retirement is not confirmed.")
+			end
 			w.mailbox_retired = true; w.reason = nil
 		elseif body.status ~= "compacted" and body.status ~= "already_compacted" then return fail("transport_pending", "Mailbox compaction is not confirmed.") end
 		if request.report_floor == w.compacted_floor and request.reply_floor == w.reply_floor then w.compaction_pending = nil end
@@ -3092,11 +3178,52 @@ function M.tick(registry: any, event: any, clock: any): (any?, any)
 	if registry.revision == MAX then return fail("full", "Authority revision exhausted.") end
 	return n, result("workflow_updated")
 end
+-- Explicit continuation moves never-launched work onto the continued route: its launch is absent
+-- or ready and never claimed, so no native effect of it can have started. Its never-claimed
+-- provision/launch requests were never sent (a host claim precedes every send) and are rewritten
+-- in place under the same request and action IDs. A claimed provision keeps its exact request and
+-- settles through the continued route (execution_origin); the launch it releases is then built on
+-- that route. A claimed launch keeps its original route and stays strict. Adoption (a pane
+-- attested in the original window) and rollover successors (their own fenced hold) stay fenced.
+local function rebind_unlaunched(d: any, event: any)
+	local function unsent(a: any): boolean return a.phase == "ready" and a.claim == nil and a.response == nil end
+	for _, w in d.workers do
+		local o, launch = w.origin_binding, d.actions[w.launch_action_id]
+		if w.logical_session_id ~= event.orch_session_id or w.pane_binding or w.adopt_pane_binding or w.handover_id
+			or (w.phase ~= "queued" and w.phase ~= "provisioned") or (launch and not unsent(launch))
+			or o.owner_id ~= event.origin.owner_id or o.owner_generation ~= event.origin.owner_generation
+			or o.host_pane_id ~= event.origin.host_pane_id or o.alias_nonce ~= event.origin.alias_nonce
+			or (equal(o, event.origin) and w.controller_pane == event.controller_pane) then continue end
+		local rebound = table.clone(w); rebound.origin_binding = clone(event.origin); rebound.controller_pane = event.controller_pane
+		local rewrites, movable = {}, true
+		for key, a in d.actions do
+			if a.worker_id ~= w.worker_id then continue end
+			if a.request.op ~= "mailbox_provision" and a.request.op ~= "launch" then movable = false; break end
+			if unsent(a) then
+				local request
+				if a.request.op == "launch" then request = launch_request(rebound, w.mailbox_handle)
+				else request = clone(a.request); request.origin_binding = clone(event.origin); request.controller_pane = event.controller_pane end
+				local bytes = tern.json.encode(request)
+				if #bytes > 8192 then movable = false; break end
+				rewrites[key] = { request = request, bytes = bytes }
+			end
+		end
+		if movable then
+			w.origin_binding = rebound.origin_binding; w.controller_pane = rebound.controller_pane
+			for key, rewrite in rewrites do d.actions[key].request = rewrite.request; d.actions[key].request_bytes = rewrite.bytes end
+		end
+	end
+end
 local function fence_unexecuted(d: any, event: any, revision: number, worker_id: string?)
 	for _, action in d.actions do
-		if (not worker_id or action.worker_id == worker_id) and action.request.origin_binding.logical_session_id == event.orch_session_id
+		local old_route = (not worker_id or action.worker_id == worker_id) and action.request.origin_binding.logical_session_id == event.orch_session_id
 			and action.request.origin_binding.owner_id == event.origin.owner_id and not equal(action.request.origin_binding, event.origin)
-			and ((action.phase == "ready" and action.claim == nil) or (action.phase == "backpressure" and action.response and retryable_full(action.response.payload))) then
+		-- A window-only restart keeps the host alive, so restore never marked the superseded
+		-- executor's claims uncertain. The operator attested that executor stopped: its claim is
+		-- exactly as uncertain as after a host restart, never resolved or repeated.
+		if old_route and action.phase == "claimed" and action.claim and action.claim.executor ~= event.origin.window_epoch then
+			action.phase = "uncertain"
+		elseif old_route and ((action.phase == "ready" and action.claim == nil) or (action.phase == "backpressure" and action.response and retryable_full(action.response.payload))) then
 			local evidence = if action.phase == "ready" then "never_claimed" else "pre_effect_refusal"
 			action.phase = "resolved"; action.resolution = { revision = revision, evidence = evidence, executor = event.origin.window_epoch,
 				reason = "Explicit continuation fenced a conclusively unexecuted old-route intent." }
@@ -3108,6 +3235,78 @@ local function fence_unexecuted(d: any, event: any, revision: number, worker_id:
 			end
 		end
 	end
+end
+-- Never-launched work with no lane left, returning its one unexecuted provision/launch/adoption
+-- action; the owner may withdraw the work (cancel_work):
+-- - queued/provisioned work whose action explicit continuation fenced as conclusively unexecuted
+--   (never claimed, or SPAWN's retryable pre-effect `full`): rebind_unlaunched moves only never-sent
+--   requests, and SPAWN never accepts a request ID reused with a changed route;
+-- - held work whose provision SPAWN definitively rejected before any effect (no mailbox exists, no
+--   launch was built). A rejected request is terminal in SPAWN, and nothing re-issues it here.
+local FENCED_EVIDENCE: any = { never_claimed = true, pre_effect_refusal = true }
+local function fenced_unlaunched(d: any, w: any): (string?, any?)
+	if w.pane_binding or w.control_origin or w.accepted_event or w.handover_id or w.stopped or w.mailbox_retired
+		or (w.phase ~= "queued" and w.phase ~= "provisioned" and w.phase ~= "held") or (w.phase == "held" and w.mailbox_handle) then return nil, nil end
+	local key: string?, fenced: any = nil, nil
+	for k, a in d.actions do
+		if a.worker_id ~= w.worker_id or (w.phase == "provisioned" and a.request.op == "mailbox_provision" and a.phase == "complete") then continue end
+		local unexecuted = if w.phase == "held"
+			then a.request.op == "mailbox_provision" and a.phase == "complete" and a.response ~= nil and a.response.status == "rejected"
+			else (if w.phase == "queued" then a.request.op == "mailbox_provision" else k == w.launch_action_id)
+				and a.phase == "resolved" and a.resolution ~= nil and FENCED_EVIDENCE[a.resolution.evidence] == true
+		if fenced or not unexecuted then return nil, nil end
+		key, fenced = k, a
+	end
+	return key, fenced
+end
+-- SPAWN can retain a fenced request only if a claim ever sent it: the host claim precedes every
+-- send, and `retry` (the only path that clears a claim) keeps the SPAWN response it answered. A
+-- retained rejection is itself SPAWN's terminal outcome, so it needs no further status read.
+local function status_required(a: any): boolean return a.phase == "resolved" and (a.response ~= nil or a.retry_count ~= nil) end
+local function withdrawal_view(d: any, w: any): any?
+	local key, a = fenced_unlaunched(d, w)
+	local retire: string? = nil
+	if not a and launch_rejected(d, w) and not w.mailbox_retired then
+		key, a = w.launch_action_id, d.actions[w.launch_action_id]
+		local prior = if w.mailbox_retire_action_id then d.actions[w.mailbox_retire_action_id] else nil
+		-- `retiring` blocks another cancel; a definitely refused retirement may be cancelled again.
+		retire = if not prior then "not_requested" elseif prior.phase == "complete" and prior.response and prior.response.status == "rejected" then "refused" else "retiring"
+	end
+	if not a then return nil end
+	return { action_id = key, op = a.request.op, evidence = if a.resolution then a.resolution.evidence else "spawn_rejected", status_required = status_required(a),
+		request_id = a.request.request_id, origin_binding = clone(a.request.origin_binding), controller_generation = a.request.controller_generation,
+		mailbox_retire = retire }
+end
+-- SPAWN's read-only `status` of a fenced request, read by the window just before withdrawal. Only a
+-- definitively unexecutable retained outcome qualifies: no record (`missing`), a terminal
+-- `rejected`, or a retryable pre-effect `full` (also how SPAWN reports an unconsumed challenge past
+-- its deadline or from an earlier host VM, which M.authorize refuses). A still-live challenge, an
+-- operation in progress or any other outcome refuses. A later exact re-stage of the old request is
+-- never authorized: SPAWN's window authorizes only an ORCH+ action it observes claimed on its exact
+-- current route, and withdrawal removes the action.
+local function unexecutable_in_spawn(a: any, event: any): any?
+	local function refuse(code: string, message: string): any local _, problem = fail(code, message); return problem end
+	local query = if str(event.query_bytes, 4096) then codec.strict_decode(event.query_bytes, 4096) else nil
+	if not closed(query, "schema origin op request_id action_id origin_binding controller_pane controller_generation target_request_id")
+		or query.schema ~= 1 or query.origin ~= "orchplus" or query.op ~= "status" or not id(query.request_id) or not id(query.action_id)
+		or query.target_request_id ~= a.request.request_id or query.controller_generation ~= a.request.controller_generation
+		or not equal(query.origin_binding, a.request.origin_binding) then
+		return refuse("binding_mismatch", "SPAWN status evidence must name this exact fenced request; nothing was cancelled.")
+	end
+	local body, err = M.decode_response(event.response_bytes, query); if err then return err end
+	if body.status == "missing" then return nil end
+	local outcome = if body.status == "found" and closed(body.payload, "outcome") then body.payload.outcome else nil
+	if not closed(outcome, "schema op request_id action_id origin_binding controller_generation status payload error") or outcome.schema ~= 1
+		or outcome.op ~= a.request.op or outcome.request_id ~= a.request.request_id or outcome.action_id ~= a.request.action_id
+		or outcome.controller_generation ~= a.request.controller_generation or not equal(outcome.origin_binding, a.request.origin_binding) then
+		return refuse("status_unavailable", "SPAWN did not report this exact request's retained outcome; nothing was cancelled. Read its status again.")
+	end
+	if outcome.status == "rejected" or (outcome.status == "full" and retryable_full(outcome.payload)) then return nil end
+	if outcome.status == "pending" and closed(outcome.payload, "authorization_required") and outcome.payload.authorization_required == true then
+		return refuse("authorization_live", "SPAWN still holds a live window challenge for this request. It expires within 30 s; cancel again after that. Nothing was cancelled.")
+	end
+	return refuse("spawn_outcome_open", "SPAWN's retained outcome for this request is " .. tostring(outcome.status):sub(1, 96)
+		.. ", not definitively unexecuted; nothing was cancelled. Inspect it in SPAWN: Running agents.")
 end
 local function continuation_proof(registry: any, w: any): string
 	-- Fixed field order and length framing avoid JSON map-order or delimiter ambiguity.
@@ -3229,7 +3428,7 @@ function M.apply(registry: any, event: any, clock: any, reserve: any): (any?, an
 		adopt = "record_id record_revision catalog_revision prompt pane_binding attestation",
 		claim = "action_id executor capacity_validation", result = "action_id executor grant_id response_bytes", lost = "action_id executor grant_id",
 		read_missing = "action_id executor grant_id query_bytes response_bytes",
-		capacity = "capacity", cancel_work = "worker_id",
+		capacity = "capacity", cancel_work = "worker_id query_bytes response_bytes",
 		poll = "worker_id bytes", reply = "worker_id", retire = "worker_id", finish = "worker_id", intake = "worker_id bytes", retry = "action_id", readback_publication = "action_id",
 		policy = "policy expected_policy", pause = "", resume = "", observe = "worker_id pane_binding native_state delivery_error observation_seq",
 		answer = "gate_id gate_revision choice_id answer", cancel_gate = "gate_id gate_revision", recheck_gate = "gate_id gate_revision",
@@ -3325,6 +3524,7 @@ function M.apply(registry: any, event: any, clock: any, reserve: any): (any?, an
 		owner.phase = "active"; owner.owner_active = true
 		d.command_cursors = d.command_cursors or {}
 		d.command_cursors[event.orch_session_id] = { origin = clone(event.origin), controller_pane = event.controller_pane, seq = event.command_seq, continued_epoch = registry.execution_epoch }
+		rebind_unlaunched(d, event)
 		fence_unexecuted(d, event, n.revision)
 		answer = result("controller_continued")
 	elseif event.command == "continue_worker" then
@@ -3547,19 +3747,72 @@ function M.apply(registry: any, event: any, clock: any, reserve: any): (any?, an
 		local err = reroute(registry, n, event, clock, reserve); if err then return nil, err end
 		answer = result("capacity_recorded", { revision = e.revision })
 	elseif event.command == "cancel_work" then
-		-- Only never-provisioned routed work (held or gated) can be withdrawn; nothing was launched.
+		-- Owner withdrawal of work that never launched: held or gated routed work that was never
+		-- provisioned, work whose provision, launch or adoption explicit continuation fenced as
+		-- unexecuted, or work whose provision SPAWN definitively rejected before any effect
+		-- (fenced_unlaunched). Nothing native ran; nothing is stopped, retried or re-sent.
 		local w = d.workers[event.worker_id]
-		if not w or w.logical_session_id ~= event.orch_session_id or not w.routing or w.routing.bound or w.routing.phase == "selected"
+		if not w or w.logical_session_id ~= event.orch_session_id
 			or w.origin_binding.owner_id ~= event.origin.owner_id or w.origin_binding.owner_generation ~= event.origin.owner_generation then
-			return fail("worker_unbound", "Only held or gated routed work that was never provisioned can be cancelled by its controller owner.")
+			return fail("worker_unbound", "Only this controller owner's never-launched work can be cancelled: held or gated routed work, work whose provision, launch or adoption continuation fenced as unexecuted, or work whose provision SPAWN rejected.")
 		end
-		for _, a in d.actions do if a.worker_id == w.worker_id then return fail("settlement_pending", "This work has retained effects; it cannot be cancelled here.") end end
-		for key, g in d.gates or {} do if g.worker_id == w.worker_id then d.gates[key] = nil end end
-		for _, p in d.policies or {} do
-			for i = #p.excluded_workers, 1, -1 do if p.excluded_workers[i] == w.worker_id then table.remove(p.excluded_workers, i) end end
+		local _, fenced = fenced_unlaunched(d, w)
+		local evidence = event.query_bytes ~= nil or event.response_bytes ~= nil
+		if not fenced and launch_rejected(d, w) then
+			-- SPAWN definitively rejected the launch/adoption ask after provisioning: the unused mailbox is
+			-- retired through the exact retirement path on this route. The worker stays visible until SPAWN
+			-- confirms `retired` (then it is reclaimed like any retired generation); a refused retirement
+			-- keeps its outcome and may be cancelled again, an uncertain or pending one never re-issues.
+			if evidence then return fail("invalid_command", "SPAWN's retained launch rejection is terminal; withdrawal needs no status evidence.") end
+			if w.mailbox_retired then return finish_command(n, event, result("worker_retired", { worker_id = w.worker_id })) end
+			local prior = if w.mailbox_retire_action_id then d.actions[w.mailbox_retire_action_id] else nil
+			if prior and not (prior.phase == "complete" and prior.response and prior.response.status == "rejected") then
+				return fail("retirement_unresolved", "This work's mailbox retirement is " .. prior.phase .. "; inspect its exact retained outcome. No second retirement is issued.")
+			end
+			local owner = if w.coordinator_owner_id then n.sessions[event.orch_session_id].orchestrator else nil
+			if owner and owner.owner_id == w.coordinator_owner_id and owner.generation == w.coordinator_generation and (owner.phase ~= "reserved" or owner.pending_executors ~= 0) then
+				return fail("coordinator_unresolved", "This work's coordinator reservation is " .. owner.phase .. "; recover that orchestrator owner first. Nothing was cancelled.")
+			end
+			local request = common(d, event.origin, event.controller_pane, "mailbox_retire"); be(w, request)
+			request.handle = w.mailbox_handle; request.expected_generation = w.worker_generation
+			request.mode = "retire"; request.settlement_revision = n.revision; request.report_floor = w.compacted_floor
+			request.report_chain_sha256 = w.compacted_chain; request.reply_floor = w.reply_floor; request.grant_id = next_id(d, "withdraw-")
+			if not add(d, request, w.worker_id) then return fail("oversize", "Mailbox retirement request exceeds the bridge bound; nothing was cancelled.") end
+			w.mailbox_retire_action_id = request.action_id
+			w.reason = { code = "withdrawal_retiring", message = "Owner cancelled this never-launched work. Its unused mailbox is being retired; the worker is removed once SPAWN confirms retirement." }
+			answer = result("withdrawal_retiring", { worker_id = w.worker_id, work_id = w.work_id, action_id = request.action_id })
+		else
+			if fenced then
+				if status_required(fenced) or evidence then
+					if not evidence then return fail("status_required", "SPAWN received this fenced " .. fenced.request.op .. " request; its retained SPAWN status must be read first. Nothing was cancelled.") end
+					local problem = unexecutable_in_spawn(fenced, event); if problem then return nil, problem end
+				end
+				-- A fenced coordinator start releases its never-bound orchestrator reservation in this commit.
+				local owner = if w.coordinator_owner_id then n.sessions[event.orch_session_id].orchestrator else nil
+				if owner and owner.owner_id == w.coordinator_owner_id and owner.generation == w.coordinator_generation then
+					if owner.phase ~= "reserved" or owner.pending_executors ~= 0 then
+						return fail("coordinator_unresolved", "This work's coordinator reservation is " .. owner.phase .. "; recover that orchestrator owner first. Nothing was cancelled.")
+					end
+					owner.managed_worker_id = nil
+					local released, response = reserve(n, { kind = "release_coordinator", request_id = "withdraw-release-" .. w.worker_id, orch_session_id = w.logical_session_id,
+						expected_owner_id = w.coordinator_owner_id, expected_generation = w.coordinator_generation, quiescent = true }, clock)
+					if not released then return nil, response end
+					n = released; d = n.dispatch
+				end
+				for key, a in d.actions do if a.worker_id == w.worker_id then d.actions[key] = nil end end
+			else
+				if not w.routing or w.routing.bound or w.routing.phase == "selected" or evidence then
+					return fail("worker_unbound", "Only held or gated routed work that was never provisioned, or work whose provision, launch or adoption continuation fenced as unexecuted, can be cancelled.")
+				end
+				for _, a in d.actions do if a.worker_id == w.worker_id then return fail("settlement_pending", "This work has retained effects; it cannot be cancelled here.") end end
+			end
+			for key, g in d.gates or {} do if g.worker_id == w.worker_id then d.gates[key] = nil end end
+			for _, p in d.policies or {} do
+				for i = #p.excluded_workers, 1, -1 do if p.excluded_workers[i] == w.worker_id then table.remove(p.excluded_workers, i) end end
+			end
+			d.workers[w.worker_id] = nil
+			answer = result("work_cancelled", { worker_id = event.worker_id, work_id = w.work_id })
 		end
-		d.workers[w.worker_id] = nil
-		answer = result("work_cancelled", { worker_id = event.worker_id, work_id = w.work_id })
 	elseif event.command == "catalog" then
 		local request = common(d, event.origin, event.controller_pane, "catalog")
 		if event.bytes ~= nil then request.cursor = event.bytes end
@@ -3740,6 +3993,8 @@ function M.apply(registry: any, event: any, clock: any, reserve: any): (any?, an
 				if w and owner and owner.owner_id == w.coordinator_owner_id then owner.pending_executors = math.max(0, owner.pending_executors - 1) end
 				if w and w.mailbox_retired and owner and owner.owner_id == w.coordinator_owner_id then
 					owner.owner_active = false
+					-- A withdrawn never-launched coordinator start was never bound: its retired mailbox ends the reservation.
+					if launch_rejected(d, w) and owner.phase == "reserved" and owner.managed_worker_id == w.worker_id then owner.managed_worker_id = nil end
 					local released, response = reserve(n, { kind = "release_coordinator", request_id = "normal-release-" .. w.worker_id,
 						orch_session_id = w.logical_session_id, expected_owner_id = w.coordinator_owner_id, expected_generation = w.coordinator_generation, quiescent = true }, clock)
 					if released then n = released; d = n.dispatch; answer = result("coordinator_retired", { worker_id = w.worker_id })
@@ -3791,9 +4046,9 @@ function M.apply(registry: any, event: any, clock: any, reserve: any): (any?, an
 		if not a or a.phase ~= "uncertain" or (a.request.op ~= "mailbox_publish_ack" and a.request.op ~= "mailbox_publish_reply") or not w then
 			return fail("readback_refused", "Only an uncertain ACK or reply publication may be read back and re-published; native and other effects are never repeated.")
 		end
-		if not equal(control_origin(w), event.origin) or control_pane(w) ~= event.controller_pane or w.continuation_required then
-			return fail("worker_unbound", "Readback re-publication uses this worker's explicitly continued current route.")
-		end
+		-- Readback only resolves the attempt; the outbox re-issue still needs the worker's bound
+		-- route (poll). On the continued controller route it is therefore the individual
+		-- settlement reattachment waits for, so an unrecorded publication never deadlocks reload.
 		if w.frozen or w.mailbox_retired then return fail("readback_refused", "A frozen or retired generation keeps its retained publication uncertainty.") end
 		if a.response and type(a.response.payload) == "table" and a.response.payload.wake_status ~= nil then
 			return fail("readback_refused", "SPAWN already confirmed this publication; only its native wake is uncertain, and a native ask is never repeated.")
@@ -3863,6 +4118,9 @@ function M.apply(registry: any, event: any, clock: any, reserve: any): (any?, an
 				for _, key in { "worker_id", "worker_generation", "enrolment_token", "work_id" } do request[key] = w[key] end
 				w.stop_action_id = request.action_id
 			else
+				if retirement_refused(d, w) then
+					return fail("retirement_refused", "SPAWN refused this stopped generation's retirement before any effect (producer journal unsettled); the mailbox stays provisioned. The nightly sweep or Retry mailbox retirement once… re-arms one attempt.")
+				end
 				if w.mailbox_retire_action_id then return fail("retirement_unresolved", "Inspect the retained mailbox retirement; no replacement grant is issued.") end
 				request = retire_request(n, d, w)
 			end
@@ -3924,13 +4182,20 @@ function M.apply(registry: any, event: any, clock: any, reserve: any): (any?, an
 		if not w or not equal(control_origin(w), event.origin) or w.coordinator_owner_id or w.phase ~= "accepted" or w.continuation_required then
 			return fail("worker_unbound", "Finish requires an accepted ordinary worker in this exact control binding; coordinators use retirement.")
 		end
-		if w.finish then return finish_command(n, event, result("finish_already_requested", { worker_id = w.worker_id })) end
-		if pending(d, w) or w.accept_pending or w.assembly or w.rejected_report or next(w.replies) or next(w.wakes or {}) or flow(w).report_request or work_referenced(d, w) then
-			return fail("workflow_unsettled", "Finish cannot discard unresolved effects, decisions, deliveries, rejected reports or referenced review/rollover/landing evidence.")
+		if w.finish and w.stopped and retirement_refused(d, w) then
+			-- Explicit owner retry after SPAWN's exact pre-effect refusal: release the refused marker so the
+			-- next poll issues exactly one fresh retirement grant; a second refusal re-arms the marker.
+			w.mailbox_retire_action_id = nil
+			answer = result("retirement_rearmed", { worker_id = w.worker_id })
+		elseif w.finish then return finish_command(n, event, result("finish_already_requested", { worker_id = w.worker_id }))
+		else
+			if pending(d, w) or w.accept_pending or w.assembly or w.rejected_report or next(w.replies) or next(w.wakes or {}) or flow(w).report_request or work_referenced(d, w) then
+				return fail("workflow_unsettled", "Finish cannot discard unresolved effects, decisions, deliveries, rejected reports or referenced review/rollover/landing evidence.")
+			end
+			w.finish = { request_id = event.request_id, seq = w.accepted_seq, revision = n.revision, source = clone(event.origin) }
+			for _, entry in flow(w).thread do entry.state = "settled" end
+			answer = result("finish_requested", { worker_id = w.worker_id })
 		end
-		w.finish = { request_id = event.request_id, seq = w.accepted_seq, revision = n.revision, source = clone(event.origin) }
-		for _, entry in flow(w).thread do entry.state = "settled" end
-		answer = result("finish_requested", { worker_id = w.worker_id })
 	elseif event.command == "retire" then
 		local w = d.workers[event.worker_id]
 		local owner = if w then coordinator(n, w) else nil
@@ -4179,7 +4444,7 @@ function M.project(registry: any, session_id: string, origin_nonce: string, curr
 			local wake_status = if a.response and type(a.response.payload) == "table" then a.response.payload.wake_status else nil
 			local route = execution_origin(d, a)
 			local cursor = (d.command_cursors or {})[session_id]
-			actions[key] = { request = clone(a.request), request_bytes = a.request_bytes, phase = a.phase, claim = clone(a.claim), worker_id = a.worker_id,
+			actions[key] = { request = clone(a.request), request_bytes = a.request_bytes, phase = a.phase, claim = public_claim(a.claim), worker_id = a.worker_id,
 				retry_count = a.retry_count, wake_status = wake_status, wake_pending = a.phase == "claimed" and wake_status ~= nil,
 				execution_origin = clone(route), execution_controller_pane = if cursor and cursor.continued_epoch and equal(cursor.origin, route) then cursor.controller_pane else a.request.controller_pane,
 				reconciliation_only = not equal(route, a.request.origin_binding) or (a.claim ~= nil and a.claim.epoch ~= registry.execution_epoch) }
@@ -4193,10 +4458,11 @@ function M.project(registry: any, session_id: string, origin_nonce: string, curr
 		activation_received = w.activation ~= nil and w.activation.acknowledged, activation_issued = w.activation ~= nil,
 		retirement_requested = w.retirement ~= nil, finish_requested = w.finish ~= nil, release_seq = if w.release then w.release.seq else nil,
 		stop_status = if w.stopped then w.stopped.observation elseif w.stop_action_id then d.actions[w.stop_action_id].phase else "not_requested",
-		mailbox_status = if w.mailbox_retired then "retired" elseif w.mailbox_retire_action_id then d.actions[w.mailbox_retire_action_id].phase else "not_requested",
+		mailbox_status = if w.mailbox_retired then "retired" elseif retirement_refused(d, w) then "refused"
+			elseif w.mailbox_retire_action_id then d.actions[w.mailbox_retire_action_id].phase else "not_requested",
 		reply_seq = w.reply_seq, owner_released = w.coordinator_owner_id ~= nil and registry.retired[w.coordinator_owner_id] ~= nil,
 		effective_identity = clone(w.effective_identity), capabilities = clone(w.capabilities), handover_id = w.handover_id, routing = clone(w.routing),
-		continuation_required = w.continuation_required == true, adopt_pane_binding = clone(w.adopt_pane_binding) } end end
+		continuation_required = w.continuation_required == true, adopt_pane_binding = clone(w.adopt_pane_binding), withdrawal = withdrawal_view(d, w) } end end
 	-- Stored USAGE evidence is projected only while it matches the current catalog join.
 	local workflow = { policy = clone(policy(d, session_id)), workers = {}, threads = {}, gates = {}, rollovers = {}, landing = {},
 		capacity = clone(current_evidence(d, session_id)), sweep = clone((d.sweeps or {})[session_id]) }
@@ -4297,7 +4563,8 @@ function M.project(registry: any, session_id: string, origin_nonce: string, curr
 				orchestration_excluded = table.find(workflow.policy.excluded_workers, w.worker_id) ~= nil,
 				context_used_pct = if f.context then f.context.used_pct else nil, context_seq = if f.context then f.context.seq else nil,
 				restored = clone(w.restored), routing = clone(w.routing), launch_action_id = w.launch_action_id, adopt_pane_binding = clone(w.adopt_pane_binding),
-				rejected_report = if w.rejected_report then { code = w.rejected_report.code, message = w.rejected_report.message } else nil })
+				rejected_report = if w.rejected_report then { code = w.rejected_report.code, message = w.rejected_report.message } else nil,
+				withdrawal = withdrawal_view(d, w) })
 			table.insert(workflow.threads, { work_id = w.work_id, entries = clone(f.thread) })
 		end
 	end

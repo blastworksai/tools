@@ -442,15 +442,18 @@ for _, kind in { "dispatch", "report", "review", "rollover", "landing" } do
 	p.command = nil; p.activation_token = "wrong"
 	check(transport.decode_report(encode(report("COORDINATOR_PROPOSAL", p)), controlled) == nil, "proposal requires exact token shape")
 end
--- Rollover checkpoint verification is worker-attested completeness/freshness, never execution.
+-- Rollover checkpoint verification is worker-attested completeness/freshness/outcome, never execution.
 do
 	local function checkpoint(checks)
 		return { kind = "CHECKPOINT", payload = { checkpoint_id = "cp", task_ref = "task", project_id = "project", worktree_ref = "tree", artifact_revision = "rev-2",
 			completed = { "done" }, remaining = { "next" }, holds = {}, checks = checks, request_id = "rollover-request" } }
 	end
-	local verified = transport.verify_checkpoint(checkpoint({ { check_id = "unit", artifact_revision = "rev-2", outcome = "failed", evidence_ref = "unit" } }), "rollover-request")
-	check(verified ~= nil and verified.attestation == "worker-attested" and verified.artifact_revision == "rev-2", "fresh reported outcome verifies as worker-attested")
-	local value, diagnostic = transport.verify_checkpoint(checkpoint({ { check_id = "unit", artifact_revision = "rev-1", outcome = "passed", evidence_ref = "unit" } }), "rollover-request")
+	local verified = transport.verify_checkpoint(checkpoint({ { check_id = "unit", artifact_revision = "rev-2", outcome = "passed", evidence_ref = "unit" } }), "rollover-request")
+	check(verified ~= nil and verified.attestation == "worker-attested" and verified.artifact_revision == "rev-2", "fresh passed outcome verifies as worker-attested")
+	local value, diagnostic = transport.verify_checkpoint(checkpoint({ { check_id = "unit", artifact_revision = "rev-2", outcome = "passed", evidence_ref = "unit" },
+		{ check_id = "project-artifact", artifact_revision = "rev-2", outcome = "failed", evidence_ref = "artifact" } }), "rollover-request")
+	rejected(value, diagnostic, "verification_failed", "a failed required check blocks rollover even beside passed checks")
+	value, diagnostic = transport.verify_checkpoint(checkpoint({ { check_id = "unit", artifact_revision = "rev-1", outcome = "passed", evidence_ref = "unit" } }), "rollover-request")
 	rejected(value, diagnostic, "verification_stale", "check for another artifact revision blocks rollover")
 	value, diagnostic = transport.verify_checkpoint(checkpoint({ { check_id = "unit", artifact_revision = "rev-2", outcome = "not_run", evidence_ref = "unit" } }), "rollover-request")
 	rejected(value, diagnostic, "verification_missing", "not_run is absent evidence")

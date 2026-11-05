@@ -14,10 +14,10 @@ local function fixture(seed,actual_mailbox)
  record.mailbox.producer_helper_path='/tools/worker-helper'
  local snapshot={ready=true,namespace='host',host_key='host:test',config_revision=0,records={record},host_os='linux',host_shell='/bin/sh'}
  local binding={authority_id='host:1',managed_authority_id='host:1',session_key='host/session/1',host_key='host:test',native_session=1}
- local mailbox_binding=nil
+ local mailbox_binding,mailbox_handover=nil,nil
  local authority={snapshot=function()return copy(snapshot)end,managed_reserve=function(_,_,id,observer)effects.reserves+=1;return {id='attempt-1',record_id=id,observer_id=observer}end,managed_observe=function()effects.observations+=1;return true end,managed_retire=function(...)effects.retire_args={...};effects.retirements=(effects.retirements or 0)+1;return not effects.fail_retire,'injected retirement storage failure' end,managed_import=function()effects.imports+=1;return {imported=1}end}
  authority.managed_snapshot=authority.snapshot
- local mailbox={empty=function()return {version=1,generations={}}end,validate=function(r)if type(r)~='table' or r.version~=1 then return nil,{status='rejected',error={code='journal_corrupt'}} end return r end,recover=copy,get=function()return {binding=copy(mailbox_binding),record_id='worker',record_revision=0,phase='provisioned',capabilities=copy(record.mailbox.capabilities)}end,location=function()return {root='/mail/private',helper='/tools/helper',producer_helper='/tools/worker-helper',wake=effects.wake_route or 'native-ask-v1'}end}
+ local mailbox={empty=function()return {version=1,generations={}}end,validate=function(r)if type(r)~='table' or r.version~=1 then return nil,{status='rejected',error={code='journal_corrupt'}} end return r end,recover=copy,get=function()return {binding=copy(mailbox_binding),record_id='worker',record_revision=0,phase='provisioned',capabilities=copy(record.mailbox.capabilities),handover=copy(mailbox_handover)}end,location=function()return {root='/mail/private',helper='/tools/helper',producer_helper='/tools/worker-helper',wake=effects.wake_route or 'native-ask-v1'}end}
  mailbox.prepare=function(registry,_,_,context)
   effects.prepares=(effects.prepares or 0)+1
   if not effects.allow_mailbox then return nil,nil,{status='full',resource='fixture',current=1,limit=1} end
@@ -87,6 +87,8 @@ local function fixture(seed,actual_mailbox)
   local e={worker_id='worker-id',worker_generation=1,enrolment_token='aaaaaaaaaaaaaaaa',assignment_sha256=c.sha256(text)}
   for k,v in pairs(extra or {})do e[k]=v end
   mailbox_binding={logical_session_id='session',worker_id=e.worker_id,worker_generation=1,launch_request_id=id,work_id='work',enrolment_token=e.enrolment_token}
+  -- A rollover successor's mailbox is provisioned with the issued ID and the pair digest.
+  mailbox_handover=if e.handover_id then {handover_id=e.handover_id,handover_sha256=c.sha256(e.handover_id..':'..e.handover_token)} else nil
   return req('launch',id,{record_id='worker',record_revision=0,work_id='work',prompt=text,cwd='/work',placement='tab',fresh=true,mailbox_handle='mailbox',enrolment=e})
  end
  local host_definition
@@ -684,6 +686,21 @@ sections.retirement_producer=function()
  f.effects.outcome={status='retired'};f.d.request(authorized,f.binding,1,function()end)
  check(f.effects.operation.retire_producer==true and f.effects.retirements==1,'committed exact stop grants producer cleanup before reservation settlement')
 end
+-- A launch SPAWN definitively rejected never reached native execution, so ORCH+'s withdrawal can
+-- retire its never-used mailbox without a native stop; an executed launch still needs its stop.
+sections.unused_retirement=function()
+ local f=fixture();f.effects.allow_mailbox=true
+ local rejected=f.launch('rejected-launch',{coordinator_owner_id='coordinator-owner',coordinator_generation=2})
+ check(f.d.request(rejected,f.binding,1,function()end).error.code=='unsupported_capability' and f.effects.reserves==0,'fixture launch is rejected before any native call')
+ local retire=f.req('mailbox_retire','retire-unused',{logical_session_id='session',worker_id='worker-id',worker_generation=1,launch_request_id='rejected-launch',work_id='work',enrolment_token='aaaaaaaaaaaaaaaa',handle='mailbox',expected_generation=1,mode='retire',settlement_revision=5,report_floor=0,report_chain_sha256=f.c.sha256('unused'),reply_floor=0,grant_id='withdraw-grant'})
+ f.effects.outcome={status='retired'}
+ f.d.request(retire,f.binding,1,function()end)
+ check(f.effects.operation~=nil and f.effects.operation.retire_producer==nil and f.saved['dispatch-v1'].requests['session/retire-unused'].body.status=='retired'
+  and f.effects.retirements==nil,'the rejected launch\'s unused mailbox retires without a stop, producer cleanup or launch reservation settlement')
+ local g,stop=retirement_fixture(false);g.effects.allow_mailbox=true;g.effects.outcome={status='retired'}
+ local accepted=g.req('mailbox_retire','retire-accepted',{logical_session_id='session',worker_id='worker-id',worker_generation=1,launch_request_id='launch',work_id='work',enrolment_token='aaaaaaaaaaaaaaaa',handle='mailbox',expected_generation=1,mode='retire',settlement_revision=5,report_floor=0,report_chain_sha256=g.c.sha256('unused'),reply_floor=0,grant_id='accepted-grant'})
+ check(g.d.request(accepted,g.binding,1,function()end).status=='rejected' and g.effects.operation==nil and stop~=nil,'an executed launch\'s mailbox still needs its exact native stop')
+end
 sections.coordinator_launch=function()
  local f=fixture()
  local launch=f.launch('coordinator',{coordinator_owner_id='coordinator-owner',coordinator_generation=2})
@@ -932,6 +949,8 @@ check(f.d.request(l,f.binding,1,function()end).status=='resolved','rollover succ
 local projection=f.d.execution(l,77)
 check(projection.launch.prompt:find('handover-1',1,true)~=nil and projection.launch.prompt:find(token,1,true)~=nil,'successor preface carries the issued handover pair')
 check(projection.launch.prompt:sub(-#l.prompt)==l.prompt,'checkpoint assignment bytes stay unchanged after the preface')
+check(projection.launch.prompt:find('Copy handover_id and handover_token verbatim',1,true)~=nil and projection.launch.prompt:find('refuses a mismatch before publishing',1,true)~=nil,
+ 'the preface tells the successor to copy the pair verbatim and that the helper verifies it')
 check(f.d.claim(l,'executor-a','claim').status=='claimed','successor launch claimed once')
 check(f.d.claim(l,'executor-a','begin').status=='launching','successor launch intent durable before native effect')
 check(f.d.claim(l,'executor-a','result',{status='submitted',pane_binding=pane}).status=='awaiting_acceptance','successor pane is not handover acceptance')
@@ -942,6 +961,13 @@ check(f.d.request(f.req('accept','accept-wrong',wrong),f.binding,1,function()end
 local exact=copy(base);exact.handover_id='handover-1';exact.handover_token=token
 check(f.d.request(f.req('accept','accept-exact',exact),f.binding,1,function()end).status=='accepted','exact handover pair records semantic acceptance')
 check(f.d.request(f.req('accept','accept-exact',exact),f.binding,1,function()end).status=='accepted','exact rollover acceptance replays')
+-- The launch must present the exact pair whose digest the mailbox was provisioned with.
+local g=fixture()
+local mistyped=g.launch('successor-mistyped',{handover_id='handover-2',handover_token=token})
+mistyped.enrolment.handover_token='handover-token-1235'
+local refused=g.d.request(mistyped,g.binding,1,function()end)
+check(refused.status=='rejected' and refused.error.code=='binding_mismatch' and refused.error.message:find('handover digest',1,true)~=nil and g.effects.reserves==0,
+ 'a launch whose handover pair differs from the provisioned digest is refused before any reservation: '..runtime.json.encode(refused))
 end
 -- ORCH+ explicit verified attach: the shared preface delivered once by native ask to an exact
 -- owner-attested existing agent pane; same claim/at-most-once/uncertainty rules as launch.
@@ -1078,9 +1104,22 @@ check(response:sub(1,18)=='SPAWN_DISPATCH v1 ' and #response<=8192 and f.p.unfra
 check(span(staged_view.main.c[1]):find('executing an authorized ORCH+ effect',1,true)~=nil,'the human line names a live execution projection')
 local other={pane=78,save=function()end,render=function()end}
 check(not lease(definition.view(definition.init(other,{},nil),other)).held,'SPAWN names only the exact challenged bridge, not its neighbours')
+-- A requested challenge whose window disappeared frees its bridge after the deadline: registry time
+-- alone ends it (M.authorize refuses an expired or earlier-VM nonce), so it pins nothing. Live
+-- defect: expired challenges reported held forever, so their bridges were never reused or closed.
 f.effects.now=1700030001.25
 local expired=lease(definition.view(restored,cx))
-check(expired.held and not expired.live,'an expired unconsumed challenge still names its bridge: held, so never closed or reused')
+check(not expired.held and not expired.live,'an expired unconsumed challenge no longer holds its bridge, whether or not its window survives')
+local v=fixture();v.raw.stage(provision,v.binding,1,77)
+local rebooted=fixture(v.image()) -- A new host VM boot with the same registry, still before the deadline.
+local rdef=rebooted.host()
+check(not lease(rdef.view(rdef.init(cx,{},{request_json=runtime.json.encode(provision),creator=creator}),cx)).held,'a challenge from an earlier host VM holds no bridge')
+local x=fixture();local granted=x.launch('granted-launch')
+check(x.d.request(granted,x.binding,1,function()end).status=='resolved','fixture grants a launch that awaits its native executor')
+x.effects.now=1700030001.25
+local xdef=x.host()
+local executing=lease(xdef.view(xdef.init(cx,{},{request_json=runtime.json.encode(granted),creator=creator}),cx))
+check(executing.live and not executing.held,'a granted launch stays live past any challenge deadline, so its bridge is never reused or closed')
 local g=fixture();g.effects.allow_mailbox=true;g.raw.stage(provision,g.binding,1,77)
 g.raw.authorize(provision,g.raw.execution(provision,77).nonce,77,function()end,sourceclaim,'observer')
 local gdef=g.host()
@@ -1107,6 +1146,6 @@ if section then
  assert(sections[section],'unknown dispatch section '..section)
  sections[section]()
 else
- for _,name in ipairs({'launch','migration','publication','ack_lifecycle','wake_binding','authorization','expired_authorization','recovery','duplex','retirement_binding','retirement_settlement','retirement_producer','coordinator_launch','wake_capacity','wake_retention','attachment','attachment_recovery','authority_rotation','host_local','rollover_accept','adopt','accept_recovery','remote_membership','bridge_view'})do sections[name]()end
+ for _,name in ipairs({'launch','migration','publication','ack_lifecycle','wake_binding','authorization','expired_authorization','recovery','duplex','retirement_binding','retirement_settlement','retirement_producer','unused_retirement','coordinator_launch','wake_capacity','wake_retention','attachment','attachment_recovery','authority_rotation','host_local','rollover_accept','adopt','accept_recovery','remote_membership','bridge_view'})do sections[name]()end
 end
 return 'PASS dispatch'..(if section then '/'..section else '')..' '..tostring(checks)

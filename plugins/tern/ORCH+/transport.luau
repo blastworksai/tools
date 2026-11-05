@@ -399,10 +399,10 @@ function M.decode_report(bytes: any, expected: any): (any?, any?)
 	return raw, nil
 end
 
--- Required checks must exist for the exact artifact revision and none may be not_run. Checks are
--- worker-attested: completeness and freshness are checked, nothing is executed, no default
--- project verifier is invented, and absent required evidence blocks.
-local function checks_problem(p: any, subject: string, action: string, failed_blocks: boolean): any?
+-- Required checks must exist for the exact artifact revision and all must have passed: not_run is
+-- absent evidence and failed evidence blocks too. Checks are worker-attested: completeness,
+-- freshness and outcome are checked, nothing is executed and no default project verifier is invented.
+local function checks_problem(p: any, subject: string, action: string): any?
 	if type(p.checks) ~= "table" or #p.checks == 0 then
 		return failure("verification_missing", "At least one required verification outcome is needed for the " .. subject .. " artifact revision.")
 	end
@@ -413,7 +413,7 @@ local function checks_problem(p: any, subject: string, action: string, failed_bl
 		if check.outcome == "not_run" then
 			return failure("verification_missing", "Check " .. check.check_id .. " was not run; absent required evidence blocks " .. action .. ".")
 		end
-		if failed_blocks and check.outcome == "failed" then
+		if check.outcome == "failed" then
 			return failure("verification_failed", "Check " .. check.check_id .. " failed for this artifact revision; failed evidence blocks " .. action .. ".")
 		end
 	end
@@ -432,7 +432,7 @@ function M.verify_checkpoint(report: any, request_id: any): (any?, any?)
 	if type(p.completed) ~= "table" or type(p.remaining) ~= "table" or #p.completed + #p.remaining == 0 then
 		return nil, failure("checkpoint_incomplete", "The checkpoint must state completed and/or remaining work.")
 	end
-	local problem = checks_problem(p, "handed-over", "rollover", false)
+	local problem = checks_problem(p, "handed-over", "rollover")
 	if problem then return nil, problem end
 	return { attestation = "worker-attested", checkpoint_id = p.checkpoint_id, artifact_revision = p.artifact_revision }, nil
 end
@@ -447,7 +447,7 @@ function M.verify_landing(report: any, source_revision: any): (any?, any?)
 	if p.artifact_revision ~= source_revision then
 		return nil, failure("verification_stale", "The worker's latest checkpoint is for another artifact revision; publish a fresh CHECKPOINT for the requested source revision.")
 	end
-	local problem = checks_problem(p, "landing", "landing", true)
+	local problem = checks_problem(p, "landing", "landing")
 	if problem then return nil, problem end
 	if type(p.holds) ~= "table" or #p.holds > 0 then
 		return nil, failure("hold_present", "The latest checkpoint lists holds/blockers; landing waits for a fresh checkpoint without them.")
