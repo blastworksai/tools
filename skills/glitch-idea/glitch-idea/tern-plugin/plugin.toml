@@ -1,0 +1,6 @@
+schema = 1
+id = "glitch-idea"
+name = "Glitch Idea"
+version = "0.1.3"
+description = "Opens the local idea page as a browser split beside the focused pane."
+window = "window.luau"
