@@ -1,14 +1,21 @@
 schema = 1
 id = "spawn"
 name = "SPAWN"
-version = "0.1.0"
-description = "SPAWN agent spawner with a plugin-owned roster and active-session spawn actions."
+version = "0.2.0"
+description = "SPAWN canonical roster, ordinary launches, and durable managed dispatch bridge."
 icon = "sparkle"
 host = "host.luau"
 window = "window.luau"
+styles = ["dispatch.css"]
 
 [[blocks]]
 id = "spawner"
 title = "SPAWN"
+icon = "sparkle"
+palette = false
+
+[[blocks]]
+id = "dispatch"
+title = "SPAWN dispatch"
 icon = "sparkle"
 palette = false

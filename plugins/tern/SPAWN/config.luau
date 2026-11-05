@@ -12,6 +12,11 @@ local FIELDS = {
 	enabled = true, include_all = true, duplicate_policy = true, placement = true,
 	command = true, arguments = true, cwd = true, prompt = true,
 	host = true, user = true, key_path = true, review_required = true, review_reason = true,
+	fresh_executable = true, fresh_arguments = true, fresh_native_default = true, task_argument_index = true,
+	host_shell = true, target_os = true, target_shell = true, mailbox = true,
+	model = true, profile = true, variant_id = true, capacity_binding = true, capacity_limit = true,
+	selector_evidence = true,
+	argv_contract = true,
 }
 local LEGACY_FIELDS = {
 	acp_capable = true, acp_enabled = true, acp_available = true,
@@ -184,6 +189,95 @@ local function mark_review(record: any, reason: string)
 	if record.review_reason == nil then record.review_reason = reason end
 end
 
+-- Managed declarations are configuration, not evidence collected by SPAWN.
+-- Absence stays absent: neither migration nor normalization grants a capability.
+local function managed_fields(source: any, record: any): string?
+	for _, field in ipairs({ "fresh_executable", "host_shell", "target_shell", "model", "profile", "variant_id", "capacity_binding", "selector_evidence" }) do
+		local value = source[field]
+		if value ~= nil then
+			if not text(value, 4096) or not nonblank(value) then return field .. " must be nonempty bounded text" end
+			record[field] = value
+		end
+	end
+	if source.target_os ~= nil then
+		if source.target_os ~= "linux" and source.target_os ~= "macos" and source.target_os ~= "windows" then return "Unsupported target OS" end
+		record.target_os = source.target_os
+	end
+	if source.argv_contract ~= nil then
+		if source.argv_contract ~= "windows-crt" then return "Unsupported argv contract" end
+		record.argv_contract = source.argv_contract
+	end
+	if source.fresh_native_default ~= nil then
+		if type(source.fresh_native_default) ~= "boolean" then return "fresh_native_default must be true or false" end
+		if source.fresh_native_default and (record.backend ~= "native-agent" or string.lower(record.provider) ~= "omp") then return "Native fresh default requires Native OMP" end
+		record.fresh_native_default = source.fresh_native_default
+	end
+	if (source.fresh_executable == nil) ~= (source.fresh_arguments == nil) then return "Fresh executable and arguments must be configured together" end
+	if source.fresh_arguments ~= nil then
+		local argv, err = arguments(source.fresh_arguments, false)
+		if argv == nil then return err end
+		if source.fresh_native_default then return "Choose one explicit fresh launch contract" end
+		record.fresh_arguments = argv
+	end
+	for _, field in ipairs({ "task_argument_index", "capacity_limit" }) do
+		local value = source[field]
+		local maximum = if field == "task_argument_index" then MAX_ARGUMENTS + 1 else 9007199254740991
+		if value ~= nil then
+			if type(value) ~= "number" or value < 1 or value > maximum or value % 1 ~= 0 then return field .. " must be a positive bounded integer" end
+			record[field] = value
+		end
+	end
+	if source.mailbox ~= nil then
+		local value = source.mailbox
+		if type(value) ~= "table" then return "Mailbox must be an object" end
+		local fields = { permitted_root = true, helper_path = true, producer_helper_path = true, worker_identity = true, producer = true, capabilities = true, evidence_ref = true, verified = true, wake = true }
+		for field in pairs(value) do if not fields[field] then return "Unsupported mailbox field" end end
+		local mailbox = {}
+		for _, field in ipairs({ "permitted_root", "helper_path", "producer_helper_path", "worker_identity", "evidence_ref" }) do
+			if value[field] ~= nil then
+				if not text(value[field], 4096) or not nonblank(value[field]) then return "Mailbox " .. field .. " must be nonempty bounded text" end
+				mailbox[field] = value[field]
+			end
+		end
+		for _, field in ipairs({ "permitted_root", "helper_path", "producer_helper_path" }) do
+			local path = mailbox[field]
+			if path ~= nil and string.sub(path, 1, 1) ~= "/" and string.match(path, "^[A-Za-z]:[\\/]") == nil and string.sub(path, 1, 2) ~= "\\\\" then return "Mailbox paths must be absolute" end
+		end
+		if value.verified ~= nil then
+			if type(value.verified) ~= "boolean" then return "Mailbox verified must be true or false" end
+			mailbox.verified = value.verified
+		end
+		if value.wake ~= nil then
+			if value.wake ~= "native-ask-v1" and value.wake ~= "worker-poll-v1" then return "Unsupported mailbox wake route" end
+			mailbox.wake = value.wake
+		end
+		if value.producer ~= nil then
+			if type(value.producer) ~= "table" then return "Mailbox producer must be an object" end
+			mailbox.producer = {}
+			local allowed = { read = true, write = true, hash = true, journal = true, poll = true }
+			for field, claim in pairs(value.producer) do
+				if not allowed[field] or type(claim) ~= "boolean" then return "Unsupported producer capability" end
+				mailbox.producer[field] = claim
+			end
+		end
+		if value.capabilities ~= nil then
+			local length, err = array_length(value.capabilities, 5)
+			if length == nil then return err end
+			local allowed = { ["report-files-v1"] = true, ["native-ask-v1"] = true, ["worker-poll-v1"] = true, ["argv-v1"] = true, ["coordinator-control-v1"] = true }
+			local seen = {}
+			mailbox.capabilities = {}
+			for index = 1, length do
+				local capability = value.capabilities[index]
+				if not allowed[capability] or seen[capability] then return "Unsupported or duplicate mailbox capability" end
+				seen[capability] = true
+				mailbox.capabilities[index] = capability
+			end
+		end
+		record.mailbox = mailbox
+	end
+	return nil
+end
+
 local function normalize(source: any, legacy: boolean): (any?, string?)
 	if type(source) ~= "table" then return nil, "Record must be an object" end
 	for field in pairs(source) do
@@ -229,6 +323,8 @@ local function normalize(source: any, legacy: boolean): (any?, string?)
 	local argv, err = arguments(source.arguments, legacy)
 	if argv == nil then return nil, err end
 	record.arguments = argv
+	local managed_error = managed_fields(source, record)
+	if managed_error ~= nil then return nil, managed_error end
 
 	local native_omp = backend == "native-agent" and string.lower(source.provider) == "omp"
 	if legacy then

@@ -8,7 +8,7 @@ SPAWN keeps one saved launch record per provider account (Claude, Codex, Kimi, M
 
 *After **Spawn all**: one tab per account, named `ProviderSuffix`, coloured per provider. Account suffixes are blurred.*
 
-[USAGE](../USAGE/README.md) and ORCH+ build on SPAWN's roster.
+[USAGE](../USAGE/README.md) and [ORCH+](../ORCH+/README.md) build on SPAWN's roster.
 
 ## What it does
 
@@ -134,9 +134,21 @@ The saved state has a 120,000-byte ceiling (about 1.6 KB per launch). SPAWN keep
 - Native OMP needs a non-empty startup prompt; Tern's start API rejects blank ones ([tern-sdk#213](https://github.com/stencil-hq/tern-sdk/issues/213)).
 - `Running` means the process is alive. It does not prove the provider is signed in or its model is ready.
 
+## Managed dispatch bridge (for ORCH+)
+
+SPAWN also provides `spawn.dispatch`, a non-palette bridge block that [ORCH+](../ORCH+/README.md) opens to launch, wake, stop and retire managed workers from SPAWN's roster. Ordinary SPAWN use never needs it, and it changes nothing about normal launches.
+
+- **Fresh managed launch.** The host builds an immutable fresh command for the record; the exact authorised ORCH+ window starts it through native `agents:start` (OMP) or terminal layout APIs. Managed panes carry no ordinary ticket. A managed attempt needs an explicitly reviewed fresh launch on its record (**Config → Configured agents → Full record JSON**, then **Approve reviewed command and settings**).
+- **Explicit authorisation.** Each mutation is staged `pending`, then authorised by a one-shot, time-bound nonce checked against the live ORCH+ owner and window. A public request alone never causes an effect, and uncertain effects are never retried.
+- **Report-files mailboxes.** Workers report through bounded, opaque mailbox handles served by reviewed helpers (`mailbox_target.*`, `mailbox_worker.*`); no bridge operation accepts paths, commands or credentials.
+- **Recovery.** Config → Running agents shows managed bindings and outcomes, and offers **Fence managed controller for recovery**. Owner-gated roster import (**Allow roster import**) imports and launches nothing on its own.
+- **No policy or accounts.** SPAWN does not collect credentials, quotas or account inventory and does not enforce model policy; USAGE collects evidence and ORCH+ owns policy.
+
+The full protocol, request and result fields, mailbox limits, retention, rollback and recovery rules, and runtime evidence required before enabling a managed capability are in [BRIDGE.md](BRIDGE.md).
+
 ## Tests
 
-The tests run inside Tern's Lua runtime with `tern shot`:
+The ordinary launch scenarios run inside Tern's Lua runtime with `tern shot`:
 
 ```sh
 env SPAWN_PACKAGE_DIR="/path/to/SPAWN" tern shot /path/to/SPAWN/tests/behavior.txt --out /tmp/spawn-behavior
@@ -145,19 +157,40 @@ env SPAWN_PACKAGE_DIR="/path/to/SPAWN" tern shot /path/to/SPAWN/tests/authority.
 
 Both exit 0 when every scenario prints its `PASS` line.
 
+All Luau groups run through the native runner `tests/run.luau`:
+
+```lua
+return assert(loadstring(tern.fs.read(root .. "/tests/run.luau")))(root,
+  "behavior,authority,backend,dispatch,window_dispatch,mailbox,host_editor,retirement_adapter")
+```
+
+Mailbox helper regressions run outside Tern: `python3 tests/mailbox_posix.py` on POSIX and `powershell -NoProfile -File tests/mailbox_helpers.ps1` on Windows. Group sections and coverage are listed in [BRIDGE.md](BRIDGE.md#verification-entrypoints).
+
 ## Files
 
-- `plugin.toml`: package and Config block declaration
+- `plugin.toml`: package, Config block and `spawn.dispatch` block declaration
 - `window.luau`: menus, Files button, request transport, pane allocation, outcome display, tab names, colours and icons
 - `host.luau`: Config, setup and Running agents block on the execution host
 - `authority.luau`: saved configuration, reservations and request handling (the only writer of SPAWN's state)
 - `host_executor.luau`: tickets, shell detection, command rendering and submission, outcome observation
 - `launch_state.luau`: launch phases, duplicate decisions and history trimming
+- `launch_resolution.luau`: shared record validation, ordinary/fresh argv selection, OS-user and SSH identity resolution
 - `config.luau`: record validation, migration and the guided-setup prompt
 - `native_cli.luau`: bounded calls to Tern's own CLI for session inspection
+- `backend.luau`: managed fresh-launch construction and serializers
+- `bridge_protocol.luau`: `spawn.dispatch` framing and parsing
+- `codec.luau`: report-files-v1 codecs
+- `dispatch.luau`: host-side managed dispatcher
+- `dispatch_window.luau`: window-side managed executor
+- `dispatch.css`: bridge view styling (hides machine nodes)
+- `mailbox.luau`, `mailbox_adapter.luau`, `mailbox_capabilities.luau`: mailbox planning, fixed helper protocol and configured mailbox contract
+- `mailbox_target.sh`, `mailbox_target.ps1`, `mailbox_worker.sh`, `mailbox_worker.ps1`, `mailbox_json.awk`, `mailbox_reply.jq`: reviewed POSIX and Windows mailbox helpers
+- `capability.json`: package capability descriptor
+- `tern.d.luau`: Tern type definitions for luau-lsp
+- `BRIDGE.md`: managed dispatch bridge reference
 - `assets/icons/`: provider artwork from [lobe-icons](https://github.com/lobehub/lobe-icons) (MIT, see `assets/icons/LICENSE.lobe-icons.txt`)
 - `assets/screenshots/`: the screenshots in this README (account labels and paths blurred)
-- `tests/`: behaviour and storage regression suites
+- `tests/`: `run.luau` runner, `behavior.txt`/`authority.txt` shot scenarios, Luau suites (`behavior`, `authority`, `backend`, `dispatch`, `window_dispatch`, `mailbox`, `host_editor`, `retirement_adapter`) and mailbox helper regressions (`mailbox_posix.py`, `mailbox_helpers.ps1`)
 
 ## License
 

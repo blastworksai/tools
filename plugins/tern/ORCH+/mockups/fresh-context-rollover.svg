@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 570" role="img" aria-label="Verified worker rollover mockup">
+  <style>
+    text { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; fill: currentColor; }
+    .muted { fill: var(--muted); }
+    .surface { fill: var(--surface); stroke: var(--border); }
+    .button { fill: var(--surface); stroke: var(--accent); }
+    .accent { fill: var(--accent); }
+    .success { fill: var(--success); }
+    .warning { fill: var(--warning); }
+  </style>
+  <rect class="surface" x="28" y="24" width="944" height="522" rx="12"/>
+  <text x="58" y="62" font-size="20">Rollover · builder-01</text><text class="muted" x="58" y="88" font-size="12">fresh context only · verified checkpoint · no transcript transfer</text>
+  <text class="muted" x="70" y="136" font-size="11">DURABLE PHASES</text><line x1="102" y1="160" x2="102" y2="440" stroke="var(--border)" stroke-width="2"/>
+  <circle class="success" cx="102" cy="174" r="8"/><text x="130" y="179" font-size="13">checkpoint verified</text><text class="muted" x="130" y="198" font-size="11">worker-attested state with fresh check results</text>
+  <circle class="success" cx="102" cy="244" r="8"/><text x="130" y="249" font-size="13">successor created</text><text class="muted" x="130" y="268" font-size="11">same SPAWN record · fresh launch · handover token</text>
+  <circle class="success" cx="102" cy="314" r="8"/><text x="130" y="319" font-size="13">handover accepted</text><text class="muted" x="130" y="338" font-size="11">exact handover pair · observed running</text>
+  <circle class="accent" cx="102" cy="384" r="8"/><text x="130" y="389" font-size="13">predecessor stop requested</text><text class="muted" x="130" y="408" font-size="11">after receipts and replies settle</text>
+  <circle class="muted" cx="102" cy="454" r="8"/><text x="130" y="459" font-size="13">complete</text><text class="muted" x="130" y="478" font-size="11">exact native stop observed exited/absent</text>
+  <rect class="surface" x="540" y="132" width="370" height="300" rx="8"/><text class="muted" x="566" y="160" font-size="11">CHECKPOINT</text><text x="566" y="190" font-size="13">Work: builder-01</text><text x="566" y="216" font-size="13">Done: unit tests written</text><text x="566" y="242" font-size="13">Remaining: integration suite</text><text x="566" y="268" font-size="13">Checks: 3 passed @ a1b2c3d</text><line x1="566" y1="290" x2="884" y2="290" stroke="var(--border)"/><text class="warning" x="566" y="320" font-size="12">Transcript: not copied</text><text class="success" x="566" y="346" font-size="12">Fresh context: yes</text><text class="success" x="566" y="372" font-size="12">Predecessor alive until accepted</text><text class="muted" x="566" y="398" font-size="12">Uncertain effects: never retried</text>
+  <rect class="button" x="540" y="452" width="180" height="40" rx="6"/><text x="560" y="477" font-size="12">Cancel rollover…</text>
+</svg>

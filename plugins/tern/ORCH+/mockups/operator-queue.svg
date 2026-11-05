@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 520" role="img" aria-label="Owner gate and landing queue mockup">
+  <style>
+    text { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; fill: currentColor; }
+    .muted { fill: var(--muted); }
+    .surface { fill: var(--surface); stroke: var(--border); }
+    .button { fill: var(--surface); stroke: var(--accent); }
+    .warning { fill: var(--warning); }
+    .success { fill: var(--success); }
+    .accent { fill: var(--accent); }
+  </style>
+  <rect class="surface" x="28" y="24" width="944" height="472" rx="12"/><text x="58" y="62" font-size="20">Owner gates and landing</text><text class="muted" x="58" y="88" font-size="12">explicit decisions only · no inferred approval</text>
+  <rect class="surface" x="58" y="122" width="418" height="310" rx="8"/><text class="warning" x="82" y="154" font-size="14">OWNER GATE · landing approval</text><text x="82" y="190" font-size="13">builder-01 → main</text><text class="muted" x="82" y="218" font-size="12">Evidence:</text><text x="82" y="240" font-size="12">• source a1b2c3d from checkpoint 7</text><text x="82" y="262" font-size="12">• 3 fresh checks passed</text><text x="82" y="284" font-size="12">• expects main at 9f8e7d6</text><line x1="82" y1="306" x2="450" y2="306" stroke="var(--border)"/><text class="muted" x="82" y="334" font-size="12">Decision:</text><rect class="button" x="82" y="348" width="196" height="42" rx="6"/><text x="98" y="374" font-size="12">Answer exact question…</text><rect class="button" x="292" y="348" width="160" height="42" rx="6"/><text x="308" y="374" font-size="12">Cancel this gate…</text>
+  <rect class="surface" x="514" y="122" width="418" height="310" rx="8"/><text class="accent" x="538" y="154" font-size="14">LANDING QUEUE · main</text><text class="muted" x="538" y="180" font-size="11">one granted slot per target · head 9f8e7d6</text>
+  <rect class="surface" x="538" y="204" width="370" height="52" rx="6"/><text x="556" y="226" font-size="12">1 · builder-01</text><text class="warning" x="744" y="226" font-size="11">verifying</text><text class="muted" x="556" y="244" font-size="11">waiting for owner approval</text>
+  <rect class="surface" x="538" y="268" width="370" height="52" rx="6"/><text x="556" y="290" font-size="12">2 · reviewer-02</text><text class="muted" x="744" y="290" font-size="11">queued</text><text class="muted" x="556" y="308" font-size="11">behind item 1</text>
+  <rect class="button" x="538" y="334" width="110" height="32" rx="6"/><text x="556" y="355" font-size="12">Move up</text><rect class="button" x="658" y="334" width="120" height="32" rx="6"/><text x="676" y="355" font-size="12">Move down</text><rect class="button" x="788" y="334" width="120" height="32" rx="6"/><text x="806" y="355" font-size="12">Cancel…</text>
+  <text class="muted" x="538" y="392" font-size="12">The worker runs its own approved merge.</text><text class="muted" x="538" y="414" font-size="12">ORCH+ never runs git or invents approval.</text>
+</svg>

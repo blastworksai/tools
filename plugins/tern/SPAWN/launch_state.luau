@@ -172,7 +172,7 @@ function M.validate(value: any): (State?, string?)
 		if attempt.mode ~= "Native OMP" and attempt.mode ~= "Terminal" and attempt.mode ~= "SSH terminal" then
 			return nil, "invalid-mode"
 		end
-		if attempt.purpose ~= nil and (attempt.purpose ~= "setup" or attempt.mode ~= "Native OMP") then return nil, "invalid-purpose" end
+		if attempt.purpose ~= nil and attempt.purpose ~= "managed" and (attempt.purpose ~= "setup" or attempt.mode ~= "Native OMP") then return nil, "invalid-purpose" end
 		if type(attempt.phase) ~= "string" or PHASES[attempt.phase] ~= true then return nil, "invalid-phase" end
 		if type(attempt.unresolved) ~= "boolean" then return nil, "invalid-reservation" end
 		if (ACTIVE[attempt.phase] == true and not attempt.unresolved) or (terminal(attempt.phase) and attempt.unresolved) then
@@ -203,7 +203,7 @@ end
 -- skip; an explicit setup helper is independent of roster enabled/duplicate policy.
 -- Helpers retain the real record ID but never block ordinary roster admission.
 function M.reserve(state: State, record: any, scope: string, observer_id: string, purpose: string?): (Attempt?, string?)
-	if purpose ~= nil and purpose ~= "launch" and purpose ~= "setup" then return nil, "invalid-purpose" end
+	if purpose ~= nil and purpose ~= "launch" and purpose ~= "setup" and purpose ~= "managed" then return nil, "invalid-purpose" end
 	local setup = purpose == "setup"
 	if record.review_required == true or (setup and record.backend ~= "native-agent") then return nil, "review" end
 	if not setup and record.enabled == false then return nil, "skip" end
@@ -230,7 +230,7 @@ function M.reserve(state: State, record: any, scope: string, observer_id: string
 		mode = mode,
 		phase = "Starting",
 		unresolved = true,
-		purpose = if setup then "setup" else nil,
+		purpose = if setup then "setup" elseif purpose == "managed" then "managed" else nil,
 	}
 	table.insert(state.attempts, attempt)
 	state.next_attempt += 1
@@ -327,13 +327,16 @@ function M.resolve(state: State, attempt_id: string): (boolean, string?)
 	return true, nil
 end
 
--- Explicit reviewed-history cleanup, never called by reserve. Retains every live
--- or unresolved reservation in original order. Counter/ID continuity survives it.
--- Returns removed count, or nil + capacity if revision can no longer advance.
-function M.clear_history(state: State): (number?, string?)
+-- Only the authority can establish that a managed Exited attempt is no longer
+-- needed by an unsettled bridge reference. Missing evidence keeps it protected.
+local function removable(attempt: Attempt, settled: {[string]: boolean}?): boolean
+	return not blocking(attempt) and (attempt.purpose ~= "managed"
+		or attempt.phase == "Exited" and settled ~= nil and settled[attempt.id] == true)
+end
+function M.clear_history(state: State, settled: {[string]: boolean}?): (number?, string?)
 	local removed = 0
 	for _, attempt in state.attempts do
-		if not blocking(attempt) then removed += 1 end
+		if removable(attempt, settled) then removed += 1 end
 	end
 	if removed == 0 then return 0, nil end
 	if state.revision >= MAX_INTEGER then return nil, "capacity" end
@@ -341,7 +344,7 @@ function M.clear_history(state: State): (number?, string?)
 	local old_length = #state.attempts
 	for source = 1, old_length do
 		local attempt = state.attempts[source]
-		if blocking(attempt) then
+		if not removable(attempt, settled) then
 			state.attempts[destination] = attempt
 			destination += 1
 		end
@@ -353,10 +356,10 @@ end
 
 -- Keeps the newest `keep` attempts that clear_history would remove (by admission
 -- order) and removes older ones. Blocking attempts never count and never go.
-function M.trim_history(state: State, keep: number): (number?, string?)
+function M.trim_history(state: State, keep: number, settled: {[string]: boolean}?): (number?, string?)
 	local excess = -keep
 	for _, attempt in state.attempts do
-		if not blocking(attempt) then excess += 1 end
+		if removable(attempt, settled) then excess += 1 end
 	end
 	if excess <= 0 then return 0, nil end
 	if state.revision >= MAX_INTEGER then return nil, "capacity" end
@@ -364,7 +367,7 @@ function M.trim_history(state: State, keep: number): (number?, string?)
 	local old_length = #state.attempts
 	for source = 1, old_length do
 		local attempt = state.attempts[source]
-		if not blocking(attempt) and excess > 0 then
+		if removable(attempt, settled) and excess > 0 then
 			excess -= 1
 		else
 			state.attempts[destination] = attempt

@@ -1,0 +1,7 @@
+/* SPAWN dispatch bridge: one compact human line. The machine contract nodes stay in the native
+   surface (ORCH+ and the SPAWN window read them by key), they are just not drawn. */
+[data-surface='plugin.spawn.dispatch'] [data-role='spawn.dispatch.response'],
+[data-surface='plugin.spawn.dispatch'] [data-role='spawn.dispatch.execution'],
+[data-surface='plugin.spawn.dispatch'] [data-role='spawn.dispatch.lease'] {
+	display: none;
+}

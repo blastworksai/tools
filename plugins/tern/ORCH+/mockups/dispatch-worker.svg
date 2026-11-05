@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 560" role="img" aria-label="Assign task mockup">
+  <style>
+    text { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; fill: currentColor; }
+    .muted { fill: var(--muted); }
+    .surface { fill: var(--surface); stroke: var(--border); }
+    .button { fill: var(--surface); stroke: var(--accent); }
+    .accent { fill: var(--accent); }
+    .success { fill: var(--success); }
+  </style>
+  <rect class="surface" x="100" y="28" width="800" height="500" rx="12"/>
+  <text x="132" y="68" font-size="20">Managed dispatch</text><text class="muted" x="132" y="94" font-size="12">ORCH+ → configured SPAWN catalog · revision 12 · this page only</text>
+  <text class="muted" x="132" y="132" font-size="11">ASSIGNMENT</text>
+  <rect class="surface" x="132" y="144" width="736" height="62" rx="6"/>
+  <text x="150" y="170" font-size="13">Implement the account identity regression tests</text><text class="muted" x="150" y="190" font-size="11">exact bytes and digest delivered once · no raw command input</text>
+  <text class="muted" x="132" y="242" font-size="11">CONFIGURED RECORD</text>
+  <rect class="surface" x="132" y="254" width="350" height="88" rx="8"/><circle class="success" cx="157" cy="281" r="6"/><text x="175" y="285" font-size="14">CodexWork</text><text class="muted" x="175" y="306" font-size="11">backend: native-agent</text><text class="muted" x="175" y="324" font-size="11">host: this Tern host</text>
+  <rect class="surface" x="500" y="254" width="368" height="88" rx="8"/><text class="muted" x="520" y="280" font-size="11">CAPABILITIES</text><text x="520" y="303" font-size="12">✓ report-files-v1</text><text x="700" y="303" font-size="12">✓ native wake</text><text x="520" y="325" font-size="12">✓ coordinator-control-v1</text>
+  <text class="muted" x="132" y="380" font-size="11">PLACEMENT</text><rect class="surface" x="132" y="392" width="220" height="46" rx="6"/><text x="150" y="421" font-size="13">current session · tab</text>
+  <text class="muted" x="380" y="380" font-size="11">WORKING DIRECTORY</text><rect class="surface" x="380" y="392" width="488" height="46" rx="6"/><text x="398" y="421" font-size="13">from the SPAWN record</text>
+  <text class="muted" x="132" y="474" font-size="11">ACCOUNT IDENTITY</text><text x="280" y="474" font-size="12">resolved by SPAWN, not ORCH+</text>
+  <rect class="button" x="500" y="458" width="368" height="42" rx="6"/><text x="520" y="484" font-size="13">Assign explicit task to CodexWork</text>
+</svg>
