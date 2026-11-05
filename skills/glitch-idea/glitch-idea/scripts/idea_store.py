@@ -1,0 +1,2715 @@
+"""Locked recoverable Markdown authority.
+
+Legacy JSON reads stay unchanged; first successful commit migrates recoverably.
+External edits and bounded request receipts share the same store lock/journal.
+"""
+from contextlib import contextmanager
+import copy
+import getpass
+import hashlib
+import json
+import math
+import uuid
+import os
+from pathlib import Path
+import re
+import stat
+import threading
+
+from idea_platform import store_lock, initialize_marker, sync_directory, is_shared_root, share_directory, make_directory
+from idea_platform import atomic_write as platform_write
+import idea_chain as chain
+import idea_transactions as transactions
+
+from idea_domain import (IdeaError, MAX_INPUT, MAX_STATE, ASSESS_KEYS, assessment,
+    check_id, decode, digest, encoded, integer, receipt, require, shape, text, snapshot, now)
+
+
+def read_bytes(path, limit=MAX_INPUT):
+    path=Path(path)
+    try:
+        info = path.lstat()
+    except FileNotFoundError as exc:
+        raise IdeaError('missing_artifact', 'Not a regular file: '+str(path)) from exc
+    require(stat.S_ISREG(info.st_mode),'Not a regular nonsymlink file: '+str(path),'missing_artifact')
+    with path.open('rb') as stream:
+        raw=stream.read(limit+1)
+    require(len(raw)<=limit,'File exceeds size limit: '+str(path),'too_large')
+    return raw
+
+
+def fsync_dir(path):
+    return sync_directory(path)
+
+
+def atomic_write(path,raw,immutable=False):
+    return platform_write(Path(path),raw,immutable=immutable).raise_for_error()
+
+
+def empty_state():
+    return dict(schema_version=1,transaction_revision=0,backlog_revision=0,order=[],ideas={},placements=[],archives={})
+
+
+def validate(state):
+    try:
+        require(isinstance(state,dict),'State must be an object')
+        require(set(state)==set(empty_state()),'Unexpected state schema')
+        require(type(state['schema_version']) is int and state['schema_version']==1,'Unsupported schema version')
+        integer(state['transaction_revision'],'transaction_revision')
+        integer(state['backlog_revision'],'backlog_revision')
+        require(isinstance(state['ideas'],dict) and isinstance(state['order'],list),'Invalid ideas/order')
+        require(len(state['order'])==len(set(state['order'])) and set(state['order'])==set(state['ideas']),'Backlog order is not a permutation of ideas')
+        require(isinstance(state['placements'],list) and isinstance(state['archives'],dict),'Invalid placements/archives')
+        all_plans=set()
+        all_attempts=set()
+        expected_archives=set()
+        for key,idea in state['ideas'].items():
+            check_id(key)
+            require(isinstance(idea,dict) and idea['idea_id']==key,'Idea identity mismatch')
+            integer(idea['revision'],'idea revision',1)
+            require(idea['status'] in ('active','archived'),'Invalid idea status')
+            text(idea['origin']['text'],'origin',MAX_INPUT)
+            text(idea['origin']['actor'],'origin actor',200)
+            require(digest(idea['origin']['text'].encode('utf-8'))==idea['origin']['sha256'],'Origin hash mismatch')
+            require(isinstance(idea['revisions'],list) and len(idea['revisions'])==idea['revision'],'Missing revision history')
+            for index,rev in enumerate(idea['revisions'],1):
+                from idea_workflow import validate_snapshot
+                validate_snapshot(rev, historical=index < len(idea['revisions']))  # earlier releases' evidence stays readable
+                require(rev['revision']==index,'Nonsequential revision history')
+                if rev['shape'] is not None:
+                    shape(rev['shape'])
+                if rev['ratings'] is not None:
+                    integer(rev['ratings']['urgency'],'urgency',1,10)
+                    integer(rev['ratings']['importance'],'importance',1,10)
+                    text(rev['ratings']['actor'],'rating actor',200)
+                require(isinstance(rev['assessments'],list),'Invalid assessment history')
+                for a in rev['assessments']:
+                    computed=assessment({k:a[k] for k in ASSESS_KEYS})
+                    require(computed['score']==a['score'],'Assessment score mismatch')
+            for field in ('shape','ratings','assessments'):
+                require(idea[field]==idea['revisions'][-1][field],'Current '+field+' differs from revision history')
+            _validate_workflow_history(idea)
+            require(isinstance(idea['proposals'],list) and isinstance(idea['plans'],list) and isinstance(idea['executions'],list),'Invalid idea histories')
+            for plan in idea['plans']:
+                check_id(plan['plan_id'],'plan')
+                require(plan['plan_id'] not in all_plans,'Duplicate plan ID')
+                all_plans.add(plan['plan_id'])
+                require(plan['idea_id']==key,'Plan idea mismatch')
+                integer(plan['idea_revision'],'linked revision',1,idea['revision'])
+                require(Path(plan['path']).is_absolute(),'Plan path must be absolute')
+                require(Path(plan['source_path']).is_absolute(),'Working plan path must be absolute')
+                require(isinstance(plan['sha256'],str) and re.fullmatch(r'[0-9a-f]{64}',plan['sha256']),'Invalid plan SHA256')
+                text(plan['content'],'accepted plan content',MAX_INPUT)
+                require(digest(plan['content'].encode('utf-8'))==plan['sha256'],'Committed plan content hash mismatch')
+                text(plan['actor'],'plan actor',200)
+                require(isinstance(plan['validation'],dict) and plan['validation']['builtin']=='idea-trace-and-sections-v1','Missing validation receipt')
+                archive_key=key+'/r'+str(plan['idea_revision'])+'.json'
+                expected_archives.add(archive_key)
+                expected=dict(idea_id=key,origin=idea['origin'],revision=idea['revisions'][plan['idea_revision']-1])
+                require(state['archives'].get(archive_key)==expected,'Missing or changed committed archive snapshot')
+            linked={p['plan_id'] for p in idea['plans']}
+            for proposal in idea['proposals']:
+                require(proposal['idea_id']==key,'Proposal idea mismatch')
+                integer(proposal['idea_revision'],'proposal revision',1,idea['revision'])
+                integer(proposal['source_backlog_revision'],'proposal backlog revision',0,state['backlog_revision'])
+                integer(proposal['position'],'proposal position',1)
+                text(proposal['actor'],'proposal actor',200)
+                text(proposal['reason'],'proposal reason')
+                prior=idea['revisions'][proposal['idea_revision']-1]
+                require(proposal['snapshot']==dict(ratings=prior['ratings'],assessments=prior['assessments']),'Proposal assessment snapshot mismatch')
+                require(isinstance(proposal['neighbors'],dict) and set(proposal['neighbors'])=={'before','after'},'Invalid proposal neighbors')
+            for execution in idea['executions']:
+                require(execution['idea_id']==key,'Execution idea mismatch')
+                require(execution['plan_id'] in linked,'Execution links unknown plan')
+                receipt(execution['receipt'],key,execution['plan_id'])
+                require(execution['attempt_id']==execution['receipt']['attempt_id'],'Attempt identity mismatch')
+                require(execution['attempt_id'] not in all_attempts,'Duplicate attempt ID')
+                all_attempts.add(execution['attempt_id'])
+                require(Path(execution['path']).is_absolute(),'Receipt path must be absolute')
+                require(isinstance(execution['sha256'],str) and re.fullmatch(r'[0-9a-f]{64}',execution['sha256']),'Invalid receipt SHA256')
+                require(execution['status']==execution['receipt']['status'],'Execution status mismatch')
+            archived=any(p['idea_revision']==idea['revision'] for p in idea['plans'])
+            require((idea['status']=='archived')==archived,'Archive status mismatch')
+        require(set(state['archives'])==expected_archives,'Orphaned archive snapshot')
+    except (IdeaError,KeyError,TypeError,ValueError,IndexError,OverflowError) as exc:
+        raise IdeaError('corrupt_store','Invalid idea authority: '+str(exc)) from exc
+
+
+def _validate_workflow_history(idea):
+    """Accepted records are immutable evidence; drafts/navigation are current."""
+    from idea_workflow import validate_workflow
+    latest = idea['revisions'][-1]
+    if 'workflow' not in idea:
+        require('workflow' not in latest, 'Current workflow is missing')
+        return
+    workflow = validate_workflow(idea['workflow'])
+    historical = latest.get('workflow')
+    if historical is None:
+        require(all(record['acceptance'] is None for record in workflow['steps'].values()),
+                'Legacy history cannot establish current workflow acceptance')
+    else:
+        require(workflow['steps'] == historical['steps'], 'Current accepted workflow differs from history')
+        require(workflow['draft_version'] >= historical['draft_version'], 'Draft version predates accepted history')
+
+
+MAX_STORE_FILES = 4096
+MAX_STORE_BYTES = 256 * MAX_INPUT
+_IDEA_FILE = re.compile(r'idea_[0-9a-f]{32}\.md')
+_ASSET_BLOB = re.compile(r'(asset_[0-9a-f]{32})\.bin')
+_ASSET_STAGE = re.compile(r'upload_([0-9a-f]{32})\.([0-9a-f]{32})\.part')
+MAX_ORPHAN_IDS = 128
+
+
+MAX_SESSION_RECEIPTS = 128
+MAX_RECEIPT_BYTES = MAX_INPUT
+MAX_REQUEST_DEPTH = 32
+MAX_REQUEST_NODES = 100000
+_SESSION_ID = re.compile(r'session_[0-9a-f]{32}')
+_REQUEST_ID = re.compile(r'[A-Za-z0-9_.:-]{1,128}')
+_CREDENTIAL_FIELDS = frozenset(('token','accesstoken','refreshtoken','agenttoken','browsertoken',
+                              'csrftoken','authorization','cookie','password','secret',
+                              'credential','credentials','apikey','pairingcode'))
+
+
+_UNSET_REQUEST_ID = object()
+AGENT_RESPONSE_PREFIX = 'agent-response:'
+_AGENT_CORRELATION = frozenset(('request_id','session_id','idea_id','accepted_revision',
+                               'draft_version','operation','source_digest'))
+
+
+def _agent_receipt_id(evidence):
+    key = {name:evidence[name] for name in ('binding_id','generation')}
+    key['request_id'] = evidence['correlation']['request_id']
+    return AGENT_RESPONSE_PREFIX + digest(_request_json(key))
+
+
+def _agent_record(evidence, actor, proposal_id, timestamp):
+    return dict(schema_version=1,kind='agent-proposal',proposal_id=proposal_id,
+        binding_id=evidence['binding_id'],generation=evidence['generation'],actor=actor,timestamp=timestamp,
+        **evidence['correlation'],data=evidence['source']['data'],proposal=evidence['proposal'])
+
+
+def _agent_payload(evidence, actor):
+    """Validate private reply without generating publication IDs or timestamps."""
+    from idea_proposal_evidence import validate_record
+    _request_json(evidence)
+    require(type(evidence) is dict and set(evidence) == {'binding_id','generation','correlation','source','proposal'},
+            'Unexpected private agent evidence fields')
+    correlation, source = evidence['correlation'], evidence['source']
+    require(type(correlation) is dict and set(correlation) == _AGENT_CORRELATION, 'Unexpected agent correlation fields')
+    require(type(source) is dict and set(source) == {'accepted_revision','draft_version','data'}, 'Unexpected agent source fields')
+    for name in ('accepted_revision','draft_version'):
+        require(type(source[name]) is int and source[name] == correlation[name], 'Agent source/correlation mismatch')
+    validate_record(_agent_record(evidence,actor,'proposal_'+'0'*32,'validation-only'))
+    return dict(operation='agent-response',evidence=copy.deepcopy(evidence),actor=actor)
+
+
+def _agent_evidence(record):
+    return dict(binding_id=record['binding_id'],generation=record['generation'],
+        correlation={name:record[name] for name in _AGENT_CORRELATION},
+        source={name:record[name] for name in ('accepted_revision','draft_version','data')},
+        proposal=record['proposal'])
+
+def _request_ids(session_id, request_id=_UNSET_REQUEST_ID):
+    require(type(session_id) is str and _SESSION_ID.fullmatch(session_id) is not None, 'Invalid receipt session ID')
+    if request_id is not _UNSET_REQUEST_ID:
+        require(type(request_id) is str and _REQUEST_ID.fullmatch(request_id) is not None, 'Invalid request ID')
+    return 'session-recovery/'+session_id+'.json'
+
+
+def _request_json(value, *, object_required=True):
+    """Bound canonical JSON at the trusted service/Store seam; no credentials.
+
+    Service validates operation schemas and binds actors. This routine validates
+    representation/size only and excludes reserved top-level auth fields. Nested
+    domain data/text is not a transport credential; arbitrary text cannot be
+    secret-scanned. Service must keep authentication out of its business result.
+    """
+    require(not object_required or type(value) is dict, 'Request/result must be a JSON object')
+    pending = [(value,1)]
+    nodes = 0
+    while pending:
+        item, depth = pending.pop()
+        nodes += 1
+        require(nodes <= MAX_REQUEST_NODES and depth <= MAX_REQUEST_DEPTH, 'Request JSON exceeds depth/count limits', 'too_large')
+        require(type(item) in (dict,list,str,int,float,bool,type(None)), 'Request contains unsupported JSON type')
+        if type(item) is dict:
+            for key,child in item.items():
+                require(type(key) is str, 'Request JSON keys must be strings')
+                name = re.sub(r'[-_]', '', key).lower()
+                if depth == 1:
+                    require(name not in _CREDENTIAL_FIELDS, 'Transport credential fields do not belong in durable requests')
+                pending.extend(((key,depth+1),(child,depth+1)))
+        elif type(item) is list:
+            pending.extend((child,depth+1) for child in item)
+        elif type(item) is str:
+            require(not any(0xD800 <= ord(c) <= 0xDFFF for c in item), 'Request contains invalid Unicode')
+        elif type(item) is float:
+            require(math.isfinite(item), 'Request numbers must be finite')
+    try:
+        raw = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':'), allow_nan=False).encode('utf-8')
+    except (ValueError, UnicodeError, RecursionError) as exc:
+        raise IdeaError('invalid_input', 'Cannot encode bounded request JSON') from exc
+    require(len(raw) <= MAX_INPUT, 'Request/result exceeds 1 MiB', 'too_large')
+    return raw
+
+
+def _result_counters(result):
+    if 'idea_id' in result:
+        check_id(result['idea_id'])
+    for key in ('revision','draft_version','backlog_revision'):
+        if key in result:
+            integer(result[key], key, 1 if key == 'revision' and 'idea_id' in result else 0)
+    if 'committed' in result:
+        require(type(result['committed']) is bool, 'committed must be a boolean')
+
+
+def _receipt_record(value, session_id):
+    require(type(value) is dict and set(value) == {'schema_version','session_id','receipts'}, 'Unexpected receipt session schema')
+    require(type(value['schema_version']) is int and value['schema_version'] == 1 and value['session_id'] == session_id, 'Receipt session identity/version mismatch')
+    records = value['receipts']
+    require(type(records) is dict and len(records) <= MAX_SESSION_RECEIPTS, 'Receipt session exceeds entry capacity')
+    for request_id, record in records.items():
+        _request_ids(session_id,request_id)
+        require(type(record) is dict and set(record) == {'payload_sha256','result'}, 'Unexpected request receipt schema')
+        require(type(record['payload_sha256']) is str and re.fullmatch(r'[0-9a-f]{64}',record['payload_sha256']) is not None, 'Invalid request payload digest')
+        result = record['result']
+        _request_json(result)
+        _result_counters(result)
+        require(result.get('ok') is True and type(result.get('code')) is str and bool(result['code']) and len(result['code']) <= 100,
+                'Receipt result requires successful typed metadata')
+        require(result.get('request_id') == request_id and result.get('write_state') in ('applied','no_op'), 'Receipt result identity/write-state mismatch')
+    return value
+
+
+def _markdown():
+    # Legacy reads do not require the new runtime dependency.
+    import idea_markdown
+    return idea_markdown
+
+
+def _body_workflow(document):
+    """Transient witness for persisted draft/control state, not new authority."""
+    prefix = document.body.split(_markdown().NOTES_START,1)[0]
+    found = re.findall(r'^### Workflow\n\n```yaml\n(.*?)\n```\n', prefix, re.M | re.S)
+    require(len(found) == 1, 'Generated workflow summary missing or duplicated', 'generated_body_conflict')
+    from idea_workflow import validate_workflow
+    return validate_workflow(_markdown().parse_document(('---\n'+found[0]+'\n---\n').encode()).metadata)
+
+
+def _external_idea(original, baseline, observer):
+    """Classify editable sources, reconcile mirrors, invalidate without acceptance."""
+    from idea_workflow import STEP_FIELDS, validate_step_fields, invalidate_external, adapt_snapshot
+    result = copy.deepcopy(baseline)
+    causes = set()
+    mirrors = {}
+    def changed(step, fields):
+        causes.add(step)
+        mirrors.setdefault(step, {}).update(copy.deepcopy(fields))
+    require(original['shape'] == baseline['shape'], 'The retired shape record cannot be edited; use the workflow steps', 'external_edit_conflict')
+    for field in ('ratings',):
+        old, new = baseline[field], original[field]
+        if old == new:
+            continue
+        require(type(new) is dict, 'Current '+field+' must contain valid inputs', 'external_edit_conflict')
+        old = old or {}
+        if old:
+            require({k:v for k,v in new.items() if k not in ('urgency','importance')} ==
+                    {k:v for k,v in old.items() if k not in ('urgency','importance')}, 'Rating attribution is protected', 'external_edit_conflict')
+        else:
+            new = dict(new,actor=observer,timestamp=now())
+        changed('priorities', {k:new[k] for k in ('urgency','importance') if new[k] != old.get(k)})
+        result[field] = copy.deepcopy(new)
+    require(len(original['assessments']) == len(baseline['assessments']), 'Assessment list membership is protected', 'external_edit_conflict')
+    for n, (old,new) in enumerate(zip(baseline['assessments'],original['assessments'])):
+        old_core, new_core = ({k:item[k] for k in ASSESS_KEYS} for item in (old,new))
+        require({k:v for k,v in old.items() if k not in ASSESS_KEYS | {'score'}} ==
+                {k:v for k,v in new.items() if k not in ASSESS_KEYS | {'score'}}, 'Assessment identity/attribution is protected', 'external_edit_conflict')
+        computed = assessment(new_core)
+        require(new['score'] == old['score'] or (new_core != old_core and new['score'] == computed['score']),
+                'Derived assessment score cannot be edited', 'external_edit_conflict')
+        if new_core != old_core:
+            result['assessments'][n] = dict(new, score=computed['score'])
+            changed('assess', {'assessment':new_core} if n == len(original['assessments'])-1 else {})
+    if 'workflow' in baseline:
+        current, prior = original['workflow'], baseline['workflow']
+        require({k:v for k,v in current.items() if k != 'steps'} == {k:v for k,v in prior.items() if k != 'steps'},
+                'Workflow draft/navigation controls are protected', 'external_edit_conflict')
+        require(set(current['steps']) == set(prior['steps']), 'Workflow step identity is protected', 'external_edit_conflict')
+        for step, old in prior['steps'].items():
+            new = current['steps'][step]
+            require(set(new) == set(old) and new['acceptance'] == old['acceptance'] and new['invalidated_by'] == old['invalidated_by'],
+                    'Workflow acceptance/invalidation evidence is protected', 'external_edit_conflict')
+            if new['fields'] == old['fields']: continue
+            require(old['acceptance'] is not None and step != 'review', 'File edits cannot create acceptance or handoff', 'external_edit_conflict')
+            fields = validate_step_fields(step,new['fields'],partial=True)
+            if step == 'visualize':
+                require(fields.get('design_set_id') == old['fields'].get('design_set_id') and fields.get('brief_evidence_id') == old['fields'].get('brief_evidence_id'),
+                        'Visual evidence references require their normal validation', 'external_edit_conflict')
+            if step == 'assess':
+                require(fields.get('position') == old['fields'].get('position'), 'Placement references require normal acceptance', 'external_edit_conflict')
+            edited = {k:fields.get(k) for k in set(fields)|set(old['fields']) if fields.get(k) != old['fields'].get(k)}
+            for key,value in mirrors.get(step,{}).items():
+                require(key not in edited or edited[key] == value, 'Conflicting legacy/workflow mirrors: '+step+':'+key, 'external_edit_conflict')
+            merged = copy.deepcopy(old['fields'])
+            merged.update(mirrors.get(step,{})); merged.update(edited)
+            changed(step, edited)
+            mirrors[step] = merged
+        for step, updates in mirrors.items():
+            old = prior['steps'][step]['fields']
+            draft = copy.deepcopy(prior['drafts'].get(step, old or {}))
+            draft.update(updates)
+            validate_step_fields(step,draft,partial=True)
+            result['workflow']['drafts'][step] = draft
+            if step == 'priorities' and result['ratings'] is not None:
+                for key in ('urgency','importance'):
+                    if key in updates and updates[key] is not None: result['ratings'][key] = updates[key]
+            # Discovery, Exploration and Method have no legacy mirror: the workflow is their only source.
+            elif step == 'assess' and result['assessments'] and 'assessment' in updates:
+                try: computed = assessment(updates['assessment'])
+                except IdeaError: continue  # partial source stays a review draft
+                result['assessments'][-1].update(computed)
+        if causes:
+            result['workflow']['draft_version'] += 1
+    else:
+        require('workflow' not in original, 'Workflow cannot be inserted by file editing', 'external_edit_conflict')
+    if not causes: return baseline
+    result = invalidate_external(result, tuple(causes))['idea']
+    result['revision'] += 1
+    result['status'] = 'active'
+    result['revisions'].append(adapt_snapshot(snapshot(result,observer,'external-file-observed'), result.get('workflow')))
+    return result
+
+
+def _decode_pointer(decode, raw):
+    """Decode a stored lifecycle pointer; a tampered one is a corrupt store, with its own message kept."""
+    try:
+        return decode(raw)
+    except IdeaError as exc:
+        if exc.code != 'invalid_input':
+            raise
+        raise IdeaError('corrupt_store', str(exc)) from exc
+
+
+_IMPORT_PREFIX = 'imported from '
+_TOMBSTONE = re.compile(r'history/removed/(idea_[0-9a-f]{32})(?:\.([2-9]|[1-9][0-9]+))?\.md')
+_REMOVED_KEYS = {'schema_version', 'kind', 'idea_id', 'actor', 'timestamp', 'first_words', 'manifest', 'backlog_revision'}
+
+
+REMOVAL_EXTENSION = 'glitch_idea_removals'  # IDEAS.md extension: one {idea_id, path, sha256} pin per tombstone
+# An id that came back through import-idea and is removed again gets the next tombstone: <id>.md, then <id>.2.md, <id>.3.md ...
+
+
+def removal_links(extensions):
+    """The index's pins of its removal tombstones, shape-checked; the reader that predates them keeps them as plain extension data."""
+    require(type(extensions) is dict, 'extensions must be a mapping')
+    links = extensions.get(REMOVAL_EXTENSION, [])
+    require(type(links) is list and len(links) <= MAX_STORE_FILES, 'Removal pins must be a bounded list', 'corrupt_store')
+    for link in links:
+        require(type(link) is dict and set(link) == {'idea_id', 'path', 'sha256'} and type(link['idea_id']) is str
+                and type(link['sha256']) is str and re.fullmatch(r'[0-9a-f]{64}', link['sha256']) is not None,
+                'Invalid removal pin', 'corrupt_store')
+        check_id(link['idea_id'])
+        found = _TOMBSTONE.fullmatch(link['path'])
+        require(found is not None and found.group(1) == link['idea_id'], 'Removal pin path differs from its idea', 'corrupt_store')
+        require(link['path'] == removed_path(link['idea_id'], int(found.group(2) or 1)), 'Removal pin path differs from its idea', 'corrupt_store')
+    require(len({link['path'] for link in links}) == len(links), 'Duplicate removal pin', 'corrupt_store')
+    return copy.deepcopy(links)
+
+
+def removed_path(idea_id, number=1):
+    """The tombstone of an idea's number-th removal: the first keeps the plain name."""
+    check_id(idea_id)
+    require(type(number) is int and number >= 1, 'A removal number is a positive integer')
+    return 'history/removed/'+idea_id+('.md' if number == 1 else '.'+str(number)+'.md')
+
+
+def _encode_removed(idea_id, actor, timestamp, first_words, manifest, backlog_revision):
+    return _markdown().encode_document(dict(schema_version=2, kind='removed', idea_id=idea_id, actor=actor, timestamp=timestamp,
+                                            first_words=first_words, manifest=manifest, backlog_revision=backlog_revision),
+                                       '# Immutable removal evidence\n\nThis idea was removed on purpose. Its files are gone; this record names what went.\n')
+
+
+def _decode_removed(raw, relative):
+    """Strict reader of a removal tombstone; its file name must name the idea it records."""
+    try:
+        meta = _markdown().parse_document(raw).metadata
+        ok = (type(meta) is dict and set(meta) == _REMOVED_KEYS and meta['schema_version'] == 2 and meta['kind'] == 'removed'
+              and removed_path(meta['idea_id'], int(_TOMBSTONE.fullmatch(relative).group(2) or 1)) == relative and type(meta['actor']) is str and type(meta['timestamp']) is str
+              and type(meta['first_words']) is str and type(meta['manifest']) is list
+              and type(meta['backlog_revision']) is int and meta['backlog_revision'] >= 0
+              and all(type(m) is dict and set(m) == {'path', 'sha256'} and type(m['path']) is str
+                      and re.fullmatch(r'[0-9a-f]{64}', str(m['sha256'])) for m in meta['manifest']))
+    except (IdeaError, KeyError, TypeError, ValueError, AttributeError):
+        ok = False
+    require(ok, 'Invalid removal tombstone: '+relative, 'corrupt_store')
+    return meta
+
+
+def _first_words(origin):
+    return ' '.join(origin.split()[:8])[:120]
+_SESSION_FILE = re.compile(r'session_[0-9a-f]{32}\.json')
+
+
+def _import_bytes(root, relative, limit=MAX_STATE):
+    """Read one regular, nonsymlink file under a source store: bytes only, no lock, no side effect."""
+    path = root
+    for part in relative.split('/'):
+        path = path/part
+        try:
+            info = path.lstat()
+        except FileNotFoundError as exc:
+            raise IdeaError('missing_artifact', 'The source is missing '+relative, path=relative) from exc
+        require(not stat.S_ISLNK(info.st_mode), 'The source holds a symlink at '+relative, 'import_unsupported')
+    return read_bytes(path, limit)
+
+
+def _import_read_source(root, idea_id):
+    """Everything one idea needs, read from a source store and verified; nothing is written anywhere."""
+    md = _markdown()
+    from idea_asset_evidence import decode_record as decode_asset, MAX_FILE
+    from idea_handoff_evidence import decode_record as decode_handoff
+    from idea_proposal_evidence import decode_proposal
+    import idea_workflow
+    try:
+        info = root.lstat()
+    except FileNotFoundError as exc:
+        raise IdeaError('not_found', 'The source store does not exist: '+str(root)) from exc
+    require(stat.S_ISDIR(info.st_mode) and not stat.S_ISLNK(info.st_mode), 'The source must be a real directory', 'import_unsupported')
+    if not (root/'IDEAS.md').exists():
+        raise IdeaError('import_unsupported', 'The source holds no Markdown store; bring it forward in its own store first')
+    index = md.decode_index(_import_bytes(root, 'IDEAS.md'))
+    require(idea_id in index.metadata['order'], 'The source does not hold that idea', 'not_found')
+    for links, what in ((md.move_links(index.metadata['extensions']), 'moved'),
+                        (md.delivered_links(index.metadata['extensions']), 'delivered')):
+        if any(link['idea_id'] == idea_id for link in links):
+            raise IdeaError('import_unsupported', 'That idea is '+what+' in the source; only a living idea is brought in')
+    detail_raw = _import_bytes(root, idea_id+'.md')
+    raw_idea = md.parse_document(detail_raw).metadata.get('idea')
+    if type(raw_idea) is dict and 'workflow' in raw_idea:
+        version = (raw_idea['workflow'] or {}).get('schema_version') if type(raw_idea['workflow']) is dict else None
+        if version != idea_workflow.WORKFLOW_VERSION:
+            raise IdeaError('import_unsupported', 'That idea is on workflow version '+str(version)
+                            +'; bring it forward in its own store first')
+    document = md.decode_detail(detail_raw)
+    meta = document.metadata
+    idea = meta['idea']
+    files, listing = {idea_id+'.md': detail_raw}, [(idea_id+'.md', detail_raw, 'detail')]
+    def pinned(relative, sha, role, limit=MAX_STATE):
+        if relative in files:
+            return files[relative]
+        raw = _import_bytes(root, relative, limit)
+        if digest(raw) != sha:
+            raise IdeaError('import_hash_mismatch', 'The source file differs from its pin: '+relative, path=relative)
+        files[relative] = raw
+        listing.append((relative, raw, role))
+        return raw
+    for link in meta['history']:
+        pinned(link['path'], link['sha256'], 'history')
+    for field in sorted(meta['metadata_evidence']):
+        for link in meta['metadata_evidence'][field]:
+            pinned(link['path'], link['sha256'], 'metadata')
+    for link in Store._migration_links(meta['extensions'], idea_id):
+        pinned(link['path'], link['sha256'], 'migration')
+    for plan in idea['plans']:
+        pinned('plan-evidence/'+plan['plan_id']+'.md', plan['sha256'], 'plan')
+    required, blobs = set(), {}
+    for link in md.agent_proposal_links(meta['extensions'], idea_id):
+        raw = pinned(link['path'], link['sha256'], 'proposal')
+        required.add(decode_proposal(raw, path=link['path'], expected_idea_id=idea_id, link=link)['session_id'])
+    for link in md.asset_links(meta['extensions'], idea_id):
+        raw = pinned(link['path'], link['sha256'], 'asset-evidence', MAX_INPUT)
+        record = decode_asset(raw, path=link['path'], expected_idea_id=idea_id, link=link)
+        required.add(record['session_id'])
+        if record['kind'] == 'asset':
+            blob = _import_bytes(root, record['blob_path'], MAX_FILE)
+            if len(blob) != record['size'] or digest(blob) != record['sha256']:
+                raise IdeaError('import_hash_mismatch', 'The source blob differs from its record: '+record['blob_path'],
+                                path=record['blob_path'])
+            blobs[record['blob_path']] = blob
+            listing.append((record['blob_path'], blob, 'asset-blob'))
+    for link in md.handoff_links(meta['extensions'], idea_id):
+        raw = pinned(link['path'], link['sha256'], 'handoff')
+        required.add(decode_handoff(raw, path=link['path'], expected_idea_id=idea_id, link=link)['session_id'])
+    # Session-recovery files whose receipts name this idea come along.
+    sessions, skipped, need = {}, [], 0
+    folder = root/'session-recovery'
+    names = []
+    if folder.exists() and not folder.is_symlink():
+        names = sorted(entry.name for entry in folder.iterdir() if _SESSION_FILE.fullmatch(entry.name))
+    for sid in sorted(required):
+        if sid+'.json' not in names:
+            raise IdeaError('missing_artifact', 'The source is missing the session file its evidence needs: session-recovery/'+sid+'.json',
+                            path='session-recovery/'+sid+'.json')
+    for name in names:
+        relative = 'session-recovery/'+name
+        raw = _import_bytes(root, relative, MAX_RECEIPT_BYTES)
+        try:
+            record = _receipt_record(decode(raw), name[:-5])
+        except IdeaError:
+            if name[:-5] in required:
+                raise
+            continue
+        named = {entry['result']['idea_id'] for entry in record['receipts'].values() if 'idea_id' in entry['result']}
+        if idea_id not in named and name[:-5] not in required:
+            continue
+        others = named-{idea_id}
+        if others and name[:-5] in required:
+            raise IdeaError('import_session_shared', 'The evidence needs '+relative+', which also names '
+                            +str(len(others))+' other idea(s); it cannot be copied whole', path=relative)
+        if others:
+            skipped.append(dict(path=relative, reason='also names '+str(len(others))+' other idea(s)'))
+            continue
+        sessions[relative] = raw
+        listing.append((relative, raw, 'session'))
+        for entry in record['receipts'].values():
+            if entry['result'].get('idea_id') == idea_id:
+                need = max(need, entry['result'].get('backlog_revision', 0))
+    manifest = sorted(relative+' '+digest(raw) for relative, raw, role in listing if role != 'session')
+    return dict(idea_id=idea_id, source=str(root), files=files, blobs=blobs, sessions=sessions, skipped=skipped,
+                backlog_need=need, listing=listing, extensions=meta['extensions'],
+                manifest_sha256=digest(('\n'.join(manifest)+'\n').encode('utf-8')))
+
+
+class Store:
+    def __init__(self, path, *, observer=None):
+        # Preserve spelling until safety checks: resolve() would hide symlinks.
+        self.path = Path(path).expanduser().absolute()
+        self.state_path = self.path / 'state.json'
+        self._contexts = threading.local()
+        # Last clean markdown load (J6e). In memory only; read and written solely
+        # inside transaction() while holding store_lock (in-process mutex + flock),
+        # so threads on this Store are serialized and never share a half-written entry.
+        self._load_cache = None
+        # Migration chain (J12d): the report of the last chain run, and the ideas
+        # it could not bring forward. Held ideas live only here, never in state.
+        self.migration_report = chain.Report()
+        self.held = {}  # idea_id -> the member's sentence (D3)
+        self.finished_removals = []  # blob/stage paths an interrupted removal left, finished by a later open (for doctor)
+        self._held_raw = {}  # idea_id -> the chain's reason, for doctor/logs only
+        self._held_prints = {}  # idea_id -> detail bytes, so an edit to a held idea misses the cache
+        if observer is None:
+            if os.name == 'posix':
+                import pwd
+                observer = pwd.getpwuid(os.getuid()).pw_name
+            else:
+                observer = getpass.getuser()
+        text(observer, 'observing account', 200)
+        self.observer = observer  # observed account/session, never inferred editor
+
+    def _safe_root(self, create=False):
+        missing = []
+        for component in reversed((self.path, *self.path.parents)):
+            try:
+                mode = component.lstat().st_mode
+            except FileNotFoundError:
+                missing.append(component)
+                continue
+            require(stat.S_ISDIR(mode) and not stat.S_ISLNK(mode),
+                    'Store root/ancestor must be a real directory: '+str(component), 'corrupt_store')
+        if create and missing:
+            self.path.mkdir(parents=True, exist_ok=True)
+            for component in reversed(missing):
+                sync_directory(component.parent)
+
+    def _safe(self, relative, directory=False):
+        require(type(relative) is str and relative and not relative.startswith('/')
+                and ':' not in relative and '\\' not in relative
+                and all(part not in ('', '.', '..') for part in relative.split('/')),
+                'Unsafe store path', 'corrupt_store')
+        path = self.path
+        device = self.path.stat().st_dev
+        parts = relative.split('/')
+        for index, part in enumerate(parts):
+            path = path / part
+            try:
+                info = path.lstat()
+            except FileNotFoundError:
+                continue
+            is_dir = index < len(parts)-1 or directory
+            require(not stat.S_ISLNK(info.st_mode) and info.st_dev == device,
+                    'Store symlink or cross-filesystem path refused: '+relative, 'corrupt_store')
+            require(stat.S_ISDIR(info.st_mode) if is_dir else stat.S_ISREG(info.st_mode),
+                    'Unexpected store filesystem object: '+relative, 'corrupt_store')
+        return path
+
+    def _entries(self, relative=''):
+        path = self.path if not relative else self._safe(relative, directory=True)
+        if not path.exists():
+            return []
+        entries = []
+        for child in path.iterdir():
+            entries.append(child.name)
+            require(len(entries) <= MAX_STORE_FILES, 'Store directory exceeds entry limit', 'too_large')
+        return entries
+
+    def _asset_files(self):
+        """Confined metadata authority and retained stream/blob diagnostics."""
+        result = {name:set() for name in ('evidence', 'blobs', 'staging')}
+        count = 0
+        for folder in self._entries('assets'):
+            require(folder in result, 'Unknown reserved asset directory', 'corrupt_store')
+            relative = 'assets/'+folder
+            self._safe(relative, directory=True)
+            for name in self._entries(relative):
+                count += 1
+                require(count <= MAX_STORE_FILES, 'Asset inventory exceeds file limit', 'too_large')
+                path = relative+'/'+name
+                self._safe(path)
+                valid = (transactions._allowed(path) if folder == 'evidence' else
+                         _ASSET_BLOB.fullmatch(name) if folder == 'blobs' else _ASSET_STAGE.fullmatch(name))
+                require(valid, 'Unknown reserved asset filename: '+path, 'corrupt_store')
+                result[folder].add(path)
+        return result
+
+    def _asset_entries(self, state, files, docs):
+        """Pure reconstruction from verified canonical bytes and protected links."""
+        from idea_asset_evidence import decode_record
+        result = {}
+        md = _markdown()
+        for key in state['ideas']:
+            document = docs.get(key+'.md')
+            result[key] = []
+            if document is None:
+                continue
+            for link in md.asset_links(document.metadata['extensions'], key):
+                require(link['path'] in files, 'Missing asset evidence bytes', 'corrupt_store')
+                record = decode_record(files[link['path']], path=link['path'], expected_idea_id=key, link=link)
+                result[key].append(dict(record=record, evidence=copy.deepcopy(link), blob=None))
+        self._asset_graph(state, result)
+        return result
+
+    def _asset_graph(self, state, entries):
+        """Pure cross-record identity and immutable membership consistency."""
+        from idea_asset_evidence import record_id
+        ids, reserved_assets, intents, completed = set(), set(), {}, {}
+        for key, records in entries.items():
+            require(key in state['ideas'], 'Asset links an unknown idea', 'corrupt_store')
+            require(len(records) <= _markdown().MAX_ASSET_LINKS, 'Asset link capacity exhausted', 'too_large')
+            for entry in records:
+                record = entry['record']; rid = record_id(record)
+                require(rid not in ids, 'Asset record identity is duplicated', 'corrupt_store')
+                ids.add(rid)
+                require(record['idea_id'] == key and record['source_revision'] <= state['ideas'][key]['revision'],
+                        'Asset idea/source revision mismatch', 'corrupt_store')
+                if record['kind'] == 'upload-intent':
+                    require(record['asset_id'] not in reserved_assets, 'Asset ID belongs to another intent', 'corrupt_store')
+                    reserved_assets.add(record['asset_id'])
+                    intents[record['upload_id']] = record
+                elif record['kind'] == 'asset':
+                    intent = intents.get(record['upload_id'])
+                    require(intent is not None and all(record[name] == intent[name] for name in
+                            ('upload_id','asset_id','idea_id','session_id','source_revision','name','declared_type','size')),
+                            'Complete asset differs from its earlier upload intent', 'corrupt_store')
+                    completed[record['asset_id']] = record
+                else:
+                    for member in record['members']:
+                        asset = completed.get(member['asset_id'])
+                        require(asset is not None and asset['idea_id'] == key and member ==
+                                {name:asset[alias] for name,alias in (('asset_id','asset_id'),('name','name'),
+                                  ('type','validated_type'),('size','size'),('sha256','sha256'))},
+                                'Design set differs from its earlier complete assets', 'corrupt_store')
+
+    def _asset_blob(self, record):
+        """Bounded local verification, never callable network work or publication."""
+        from idea_asset_evidence import MAX_FILE
+        path = self._safe(record['blob_path'])
+        try:
+            before = path.lstat()
+            descriptor = os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_BINARY', 0))
+            with os.fdopen(descriptor, 'rb') as stream:
+                observed = os.fstat(stream.fileno())
+                require(stat.S_ISREG(observed.st_mode) and observed.st_dev == self.path.stat().st_dev
+                        and (observed.st_dev, observed.st_ino) == (before.st_dev, before.st_ino)
+                        and observed.st_size == record['size'] <= MAX_FILE,
+                        'Linked asset blob size/object differs', 'corrupt_store')
+                hashed, size = hashlib.sha256(), 0
+                while True:
+                    chunk = stream.read(min(65536, record['size']-size+1))
+                    if not chunk:
+                        break
+                    size += len(chunk)
+                    require(size <= record['size'], 'Linked asset blob grew during verification', 'corrupt_store')
+                    hashed.update(chunk)
+            after = self._safe(record['blob_path']).lstat()
+            require((after.st_dev,after.st_ino,after.st_size) == (before.st_dev,before.st_ino,record['size'])
+                    and size == record['size'] and hashed.hexdigest() == record['sha256'],
+                    'Linked asset blob hash/object differs', 'corrupt_store')
+        except OSError as exc:
+            raise IdeaError('corrupt_store', 'Linked asset blob is missing or unreadable') from exc
+        return dict(path=record['blob_path'], size=size, sha256=hashed.hexdigest())
+
+    def _verify_asset_blobs(self, entries):
+        for records in entries.values():
+            for entry in records:
+                if entry['record']['kind'] == 'asset':
+                    entry['blob'] = self._asset_blob(entry['record'])
+
+    def _retained_asset_stages(self, paths, entries):
+        """Classify successes at the filesystem boundary only.
+
+        The completed blob was hashed. Its sealed same-inode upload stage is
+        that verified object. Physical capacity still counts both file names.
+        Inventory consumes this separate detached transaction-context set.
+        """
+        completed = {entry['record']['upload_id']:entry for records in entries.values()
+                     for entry in records if entry['record']['kind'] == 'asset' and entry['blob'] is not None}
+        retained = set()
+        for relative in paths['staging']:
+            match = _ASSET_STAGE.fullmatch(relative.rsplit('/',1)[1])
+            entry = completed.get('upload_'+match.group(1))
+            if entry is None:
+                continue
+            try:
+                stage = self._safe(relative).lstat()
+                blob = self._safe(entry['record']['blob_path']).lstat()
+            except OSError as exc:
+                raise IdeaError('corrupt_store', 'Asset stage/blob changed during inspection') from exc
+            if (stat.S_ISREG(stage.st_mode) and not stage.st_mode & 0o222
+                    and not blob.st_mode & 0o222
+                    and (stage.st_dev,stage.st_ino,stage.st_size) == (blob.st_dev,blob.st_ino,entry['blob']['size'])
+                    and entry['blob']['sha256'] == entry['record']['sha256']):
+                retained.add(relative)
+        return retained
+
+    def _asset_orphans(self, paths, entries, retained_staging=()):
+        linked = {entry['record']['blob_path'] for records in entries.values() for entry in records
+                  if entry['record']['kind'] == 'asset'}
+        ids = []
+        for path in sorted(paths['blobs']-linked):
+            ids.append(_ASSET_BLOB.fullmatch(path.rsplit('/',1)[1]).group(1))
+        for path in sorted(paths['staging']-set(retained_staging)):
+            match = _ASSET_STAGE.fullmatch(path.rsplit('/',1)[1])
+            ids.append('stage_'+match.group(1)+'_'+match.group(2))
+        return dict(count=len(ids), ids=ids[:MAX_ORPHAN_IDS])
+
+    def _inventory(self):
+        """Enumerate all reserved authority/evidence, not arbitrary user folders."""
+        owned = set()
+        count = 0
+        for name in self._entries():
+            if _IDEA_FILE.fullmatch(name) or name == 'IDEAS.md':
+                self._safe(name)
+                owned.add(name)
+            elif name.startswith('idea_') and name.endswith('.md'):
+                raise IdeaError('corrupt_store', 'Unrecognized idea detail filename: '+name)
+        for directory in ('history', 'plan-evidence'):
+            if not self._safe(directory, directory=True).exists():
+                continue
+            pending = [directory]
+            while pending:
+                folder = pending.pop()
+                for name in self._entries(folder):
+                    count += 1
+                    require(count <= MAX_STORE_FILES, 'Store evidence exceeds entry limit', 'too_large')
+                    relative = folder+'/'+name
+                    path = self.path/relative
+                    info = path.lstat()
+                    require(not stat.S_ISLNK(info.st_mode), 'Symlink evidence refused: '+relative, 'corrupt_store')
+                    if stat.S_ISDIR(info.st_mode):
+                        self._safe(relative, directory=True)
+                        # Only these shallow reserved directories are owned.
+                        permitted = (folder == 'history' and (name in ('backlog', 'removed') or re.fullmatch(r'idea_[0-9a-f]{32}',name))) or (re.fullmatch(r'history/idea_[0-9a-f]{32}',folder) and name in ('metadata','migrations'))
+                        require(permitted, 'Unknown evidence directory: '+relative, 'corrupt_store')
+                        pending.append(relative)
+                    else:
+                        self._safe(relative)
+                        require(transactions._allowed(relative), 'Unknown evidence file: '+relative, 'corrupt_store')
+                        owned.add(relative)
+        owned.update(self._asset_files()['evidence'])
+        require(len(owned) <= MAX_STORE_FILES, 'Store exceeds file count limit', 'too_large')
+        return owned
+
+    def _held_owned(self, inventory):
+        """Files that belong to held ideas: their detail, their history and the evidence they link."""
+        owned = set()
+        for key, raw in self._held_prints.items():
+            owned.add(key+'.md')
+            prefix = 'history/'+key+'/'
+            owned.update(path for path in inventory if path.startswith(prefix))
+            try:
+                metadata = _markdown().parse_document(raw).metadata if raw is not None else {}
+            except (IdeaError, KeyError, TypeError, ValueError, AttributeError):
+                continue
+            pending = [metadata.get('extensions'), metadata.get('metadata_evidence'), metadata.get('history')]
+            while pending:
+                item = pending.pop()
+                if type(item) is dict:
+                    if type(item.get('path')) is str:
+                        owned.add(item['path'])
+                    pending.extend(item.values())
+                elif type(item) is list:
+                    pending.extend(item)
+            try:
+                for plan in metadata['idea']['plans']:
+                    owned.add('plan-evidence/'+plan['plan_id']+'.md')
+            except (KeyError, TypeError):
+                pass
+        return owned & set(inventory) if inventory is not None else owned
+
+    def _quarantine(self, held):
+        """Read each held idea's bytes once and name it for the member (D3); nothing is written."""
+        from idea_workflow import unsupported_version_message
+        self._held_raw, self.held, self._held_prints = dict(held), {}, {}
+        for key in held:
+            path = self._safe(key+'.md')
+            raw = read_bytes(path, MAX_STATE) if path.exists() else None
+            self._held_prints[key] = raw
+            origin = None
+            try:
+                origin = _markdown().parse_document(raw).metadata['idea']['origin']['text'] if raw is not None else None
+            except (IdeaError, KeyError, TypeError, ValueError, AttributeError):
+                pass
+            self.held[key] = unsupported_version_message(origin)
+
+    def refuse_held(self, idea_id=None):
+        """Raise the D3 sentence for a held idea; with no id, for the first held idea."""
+        from idea_workflow import UNSUPPORTED_VERSION_CODE
+        if idea_id is None and self.held:
+            idea_id = next(iter(self.held))
+        if idea_id in self.held:
+            raise IdeaError(UNSUPPORTED_VERSION_CODE, self.held[idea_id])
+
+    def _refuse_held_target(self, state, baseline, proposal_append, asset_append, handoff_append):
+        """A write that names a held idea refuses with its D3 sentence; a write to any other idea goes through (D4)."""
+        if not self.held:
+            return
+        named = set(state['ideas']) | set(state['order'])
+        named.update(placement['idea_id'] for placement in state['placements'][len(baseline['placements']):])
+        named.update(asset_append or ())
+        for append in (proposal_append, handoff_append):
+            if append is not None:
+                named.add(append[0])
+        for key in self.held:
+            if key in named:
+                self.refuse_held(key)
+
+    def _index_without_held(self, document, baseline):
+        """The index document as the in-memory state sees it: held ideas left out of the order and of the generated table."""
+        md = _markdown()
+        metadata = copy.deepcopy(document.metadata)
+        metadata['order'] = [key for key in metadata['order'] if key not in self.held]
+        return md.parse_document(md.encode_document(metadata, md._index_body(baseline)))
+
+    def _splice_held_rows(self, original, encoded):
+        """Put every held idea back into a freshly encoded index: its id in the order and its table row.
+
+        The row is copied from the original bytes and never re-encoded; only its rank cell follows
+        its position, which moves when an idea above it is removed. The other rows are renumbered
+        around it the same way.
+        """
+        md = _markdown()
+        document = md.parse_document(encoded)
+        old_order = original.metadata['order']
+        order = list(document.metadata['order'])
+        for key in sorted(self.held, key=old_order.index):
+            # Right after its nearest predecessor that is still in the order (or first): removing an idea
+            # above a held one must not swap it with the idea that followed it.
+            before = [k for k in old_order[:old_order.index(key)] if k in order]
+            order.insert(order.index(before[-1])+1 if before else 0, key)
+        old_rows = original.body.split('\n')
+        start = next(n for n, line in enumerate(old_rows) if line.startswith('| --- '))+1
+        held_rows = {key: old_rows[start+old_order.index(key)] for key in self.held}
+        for key, line in held_rows.items():
+            require(key+'.md' in line, 'Index row of a held idea not found', 'corrupt_store')
+        new_lines = document.body.split('\n')
+        first = next(n for n, line in enumerate(new_lines) if line.startswith('| --- '))+1
+        rows = iter(new_lines[first:first+len(document.metadata['order'])])
+        out = []
+        for rank, key in enumerate(order, 1):
+            line = held_rows[key] if key in self.held else next(rows)
+            out.append('| '+str(rank)+' | '+line.split(' | ', 1)[1])
+        body = '\n'.join(new_lines[:first]+out+new_lines[first+len(document.metadata['order']):])
+        metadata = copy.deepcopy(document.metadata)
+        metadata['order'] = order
+        return md.encode_document(metadata, body)
+
+    def _load_markdown(self, held=None):
+        try:
+            return self._inspect_markdown(held or {})
+        except (KeyError, TypeError, AttributeError, IndexError, ValueError) as exc:
+            raise IdeaError('invalid_markdown', 'Malformed editable Markdown schema: '+str(exc)) from exc
+
+    def _remember_load(self, loaded):
+        """Cache a load only when it needed no normalizing write (imported == state)."""
+        state, files, docs, imported, receipts, entries, paths = loaded
+        self._load_cache = copy.deepcopy(loaded) if imported == state else None
+
+    def _reuse_load(self):
+        """Return a private deep copy of the cached load iff every byte it read is unchanged.
+
+        Fingerprint: the exact bytes (stronger than their sha256) of every file in
+        the inventory (IDEAS.md, idea/history/metadata/plan/placement/evidence and
+        asset evidence files), and of every receipt file the load read. The inventory
+        key set must also match, so an added or removed file misses. Any difference
+        or any error returns None and the caller runs the full parse path, which
+        replaces the cache. Linked asset blobs are re-verified in full every time.
+        """
+        cached = self._load_cache
+        if cached is None:
+            return None
+        _, files, _, _, receipts, _, _ = cached
+        try:
+            inventory = self._inventory()
+            if inventory - self._held_owned(inventory) != set(files):
+                return None
+            for key, raw in self._held_prints.items():
+                path = self._safe(key+'.md')
+                if (read_bytes(path, MAX_STATE) if path.exists() else None) != raw:
+                    return None
+            for relative, raw in files.items():
+                if read_bytes(self._safe(relative), MAX_STATE) != raw:
+                    return None
+            for relative, raw in receipts.items():
+                if read_bytes(self._safe(relative), MAX_RECEIPT_BYTES) != raw:
+                    return None
+            paths = self._asset_files()
+        except (IdeaError, OSError):
+            self._load_cache = None
+            return None
+        state, files, docs, imported, receipts, entries, _ = copy.deepcopy(cached)
+        self._verify_asset_blobs(entries)
+        return state, files, docs, imported, receipts, entries, paths
+
+    def _migration_evidence(self, index_raw):
+        import idea_migration as migration
+        index = _markdown().decode_index(index_raw)
+        marker = index.metadata['extensions'].get(migration.MARKER)
+        present = set(self._entries('migration-recovery'))
+        if marker is None:
+            require(not present, 'Unmarked migration recovery evidence', 'corrupt_store')
+            return {}
+        require(present == {'v1-state.json', 'receipt.json'}, 'Missing/unknown migration evidence', 'corrupt_store')
+        evidence = {path:read_bytes(self._safe(path), MAX_INPUT if path == transactions.RECEIPT else MAX_STATE)
+                    for path in (transactions.FROZEN, transactions.RECEIPT)}
+        receipt = migration.verify(evidence[transactions.RECEIPT], evidence[transactions.FROZEN])
+        migration.verify_pointer(marker, receipt)
+        require(index.metadata['transaction_revision'] >= receipt['target_transaction_revision'],
+                'Index predates migration receipt', 'corrupt_store')
+        return evidence
+
+    def _legacy_views(self, context):
+        baseline = context['baseline']
+        expected_plans = {'plan-evidence/'+plan['plan_id']+'.md'
+                          for idea in baseline['ideas'].values() for plan in idea['plans']}
+        require(self._inventory() <= expected_plans, 'Partial/orphan Markdown authority in legacy store', 'ambiguous_store')
+        files = {'state.json': context['legacy_raw']}
+        for relative in sorted(expected_plans | {'archive/'+key for key in baseline['archives']}):
+            path = self._safe(relative)
+            require(path.exists(), 'Missing legacy view; repair before migration: '+relative, 'migration_view_required')
+            files[relative] = read_bytes(path, MAX_STATE)
+        require(not self._entries('migration-recovery'), 'Legacy store has unmatched migration evidence', 'ambiguous_store')
+        return files
+
+    def _inspect_markdown(self, held=None):
+        held = held or {}
+        md = _markdown()
+        files, docs, normalized, originals = {}, {}, {}, {}
+        total = 0
+        proposal_receipts = {}
+        handoff_entries = {}
+        receipt_cache = {}
+        def receipt_session(sid):
+            nonlocal total
+            if sid not in receipt_cache:
+                require(len(files)+len(receipt_cache) < MAX_STORE_FILES,
+                        'Store and linked receipts exceed file limit', 'too_large')
+                receipt_cache[sid] = self._read_receipts(sid)
+                total += len(receipt_cache[sid][1])
+                require(total <= MAX_STORE_BYTES, 'Store and linked receipts exceed byte limit', 'too_large')
+            return receipt_cache[sid]
+        def asset_witness(session, link, key):
+            return any(witness['result'].get('idea_id') == key
+                       and type(witness['result'].get('asset_records')) is list
+                       and link in witness['result']['asset_records']
+                       for witness in session['receipts'].values())
+        def read(relative):
+            nonlocal total
+            if relative not in files:
+                require(len(files) < MAX_STORE_FILES, 'Store exceeds file count limit', 'too_large')
+                raw = read_bytes(self._safe(relative), MAX_STATE)
+                total += len(raw)
+                require(total <= MAX_STORE_BYTES, 'Store exceeds aggregate byte limit', 'too_large')
+                files[relative] = raw
+            return files[relative]
+        index = md.decode_index(read('IDEAS.md'))
+        docs['IDEAS.md'] = index
+        expected = {'IDEAS.md'}
+        moves = {link['idea_id']:link for link in md.move_links(index.metadata['extensions'])}
+        delivered = {link['idea_id']:link for link in md.delivered_links(index.metadata['extensions'])}
+        require(set(moves) | set(delivered) <= set(index.metadata['order']), 'Lifecycle pointer names an unknown idea', 'corrupt_store')
+        for key, link in delivered.items():
+            expected.add(link['path'])
+            require(digest(read(link['path'])) == link['sha256'], 'Delivered pointer hash differs from its index link', 'corrupt_store')
+            require(_decode_pointer(md.decode_delivered, files[link['path']])['idea_id'] == key, 'Delivered pointer names another idea', 'corrupt_store')
+        for key in index.metadata['order']:
+            relative = key+'.md'
+            if key in held:
+                continue  # quarantined in memory: never parsed, never expected, never rewritten
+            if key in moves:
+                # The living detail file left the store: rebuild it from the
+                # immutable pointer. The result is a view, never stored in files.
+                require(not self._safe(relative).exists(), 'Moved idea still has a detail file in the store: '+key, 'corrupt_store')
+                expected.add(moves[key]['path'])
+                document = md.parse_document(self._moved_detail(key, moves[key], read, index.metadata['transaction_revision'])[1])
+            else:
+                document = md.parse_document(read(relative))
+            originals[key] = copy.deepcopy(document.metadata['idea'])
+            inspected = copy.deepcopy(document.metadata)
+            for entry in inspected['idea']['assessments']:
+                entry['score'] = assessment({k:entry[k] for k in ASSESS_KEYS})['score']
+            if 'workflow' in inspected['idea']:
+                inspected['idea']['workflow'] = _body_workflow(document)
+            normalized[relative] = md.encode_document(inspected,document.body)
+            md.decode_detail(normalized[relative], check_body=False)
+            docs[relative] = document
+            if key not in moves:
+                expected.add(relative)
+            links = list(document.metadata['history'])
+            for items in document.metadata['metadata_evidence'].values():
+                links.extend(items)
+            for link in links:
+                expected.add(link['path'])
+                read(link['path'])
+            from idea_proposal_evidence import decode_proposal
+            for ordinal, link in enumerate(md.agent_proposal_links(document.metadata['extensions'], key), 1):
+                expected.add(link['path'])
+                record = decode_proposal(read(link['path']), path=link['path'], expected_idea_id=key, link=link)
+                sid = record['session_id']
+                if sid not in receipt_cache:
+                    receipt_cache[sid] = self._read_receipts(sid)
+                    total += len(receipt_cache[sid][1])
+                    require(total <= MAX_STORE_BYTES, 'Store and linked receipts exceed aggregate byte limit', 'too_large')
+                receipt_path, receipt_raw, session = receipt_cache[sid]
+                proposal_receipts[receipt_path] = receipt_raw
+                evidence = _agent_evidence(record)
+                rid = _agent_receipt_id(evidence)
+                require(rid in session['receipts'], 'Missing linked proposal response receipt', 'corrupt_store')
+                witness = session['receipts'][rid]
+                require(witness['payload_sha256'] == digest(_request_json(_agent_payload(evidence, record['actor']))),
+                        'Proposal differs from response receipt input', 'corrupt_store')
+                result = witness['result']
+                expected_result = dict(ok=True,code='ok',request_id=rid,write_state='applied',
+                    idea_id=key,revision=record['accepted_revision'],draft_version=record['draft_version'],
+                    proposal_index=ordinal,**link)
+                require(set(result) == set(expected_result) | {'backlog_revision'}
+                        and all(type(result[name]) is type(value) and result[name] == value
+                                for name,value in expected_result.items()),
+                        'Proposal identity/order differs from response receipt', 'corrupt_store')
+                require(result['backlog_revision'] <= index.metadata['backlog_revision'],
+                        'Proposal receipt backlog is newer than authority', 'corrupt_store')
+            for link in md.asset_links(document.metadata['extensions'], key):
+                expected.add(link['path'])
+                from idea_asset_evidence import decode_record
+                asset_record = decode_record(read(link['path']), path=link['path'], expected_idea_id=key, link=link)
+                sid = asset_record['session_id']
+                receipt_path, receipt_raw, session = receipt_session(sid)
+                proposal_receipts[receipt_path] = receipt_raw
+                require(asset_witness(session,link,key),
+                        'Asset lacks its atomic publication receipt', 'corrupt_store')
+            from idea_handoff_evidence import decode_record as decode_handoff
+            handoff_entries[key] = []
+            for ordinal, link in enumerate(md.handoff_links(document.metadata['extensions'], key), 1):
+                expected.add(link['path'])
+                packet = decode_handoff(read(link['path']), path=link['path'], expected_idea_id=key, link=link)
+                receipt_path, receipt_raw, session = receipt_session(packet['session_id'])
+                proposal_receipts[receipt_path] = receipt_raw
+                rid = packet['request_id']
+                require(rid in session['receipts'], 'Missing publishing handoff receipt', 'corrupt_store')
+                witness = session['receipts'][rid]; result = witness['result']
+                exact = dict(ok=True,code='ok',request_id=rid,write_state='applied',idea_id=key,
+                             revision=packet['source_revision'],handoff_index=ordinal,**link)
+                require(set(result) == set(exact) | {'draft_version','backlog_revision'}
+                        and all(type(result[name]) is type(value) and result[name] == value
+                                for name,value in exact.items()),
+                        'Handoff identity/order differs from publishing receipt', 'corrupt_store')
+                payload = dict(operation='handoff',payload=dict(request_id=rid,idea_id=key,
+                    expected_revision=result['revision'],expected_draft_version=result['draft_version'],
+                    expected_backlog_revision=result['backlog_revision']))
+                require(witness['payload_sha256'] == digest(_request_json(payload)),
+                        'Handoff differs from publishing request payload', 'corrupt_store')
+                require(result['backlog_revision'] <= index.metadata['backlog_revision'],
+                        'Handoff publishing receipt backlog is newer than authority', 'corrupt_store')
+                handoff_entries[key].append(dict(record=packet,evidence=copy.deepcopy(link),
+                                                receipt=copy.deepcopy(result)))
+            for link in self._migration_links(document.metadata['extensions'], key):
+                expected.add(link['path'])
+                copy_raw = read(link['path'])
+                named = link['path'].rsplit('-', 1)[1][:-3]
+                require(digest(copy_raw) == link['sha256'] == named,
+                        'Migration copy differs from its link: '+link['path'], 'corrupt_store')
+            for plan in document.metadata['idea']['plans']:
+                relative = 'plan-evidence/'+plan['plan_id']+'.md'
+                expected.add(relative)
+                read(relative)
+        for link in index.metadata['placements']:
+            expected.add(link['path'])
+            read(link['path'])
+        if any(handoff_entries.values()):
+            require(len(files)+len(receipt_cache) <= MAX_STORE_FILES,
+                    'Store and linked receipts exceed file limit', 'too_large')
+        inventory = self._inventory()
+        pinned = {link['path']: link['sha256'] for link in removal_links(index.metadata['extensions'])}
+        removed_ideas = []
+        for relative in sorted(pinned):
+            require(relative in inventory, 'A pinned removal record is missing: '+relative, 'corrupt_store')
+        for relative in sorted(inventory):
+            if _TOMBSTONE.fullmatch(relative):
+                require(relative in pinned, 'A removal record is not pinned by the index: '+relative, 'corrupt_store')
+                require(digest(read(relative)) == pinned[relative], 'A removal record differs from its pin: '+relative, 'corrupt_store')
+                tombstone = _decode_removed(read(relative), relative)
+                require(tombstone['idea_id'] not in held, 'A removed idea is still in the backlog: '+tombstone['idea_id'], 'corrupt_store')
+                removed_ideas.append((tombstone['idea_id'], tombstone['backlog_revision']))
+                expected.add(relative)
+        require(inventory - self._held_owned(inventory) == expected, 'Missing, orphaned or unlinked authority/evidence', 'corrupt_store')
+        view = dict(files, **normalized)
+        if held:
+            metadata = copy.deepcopy(index.metadata)
+            metadata['order'] = [key for key in metadata['order'] if key not in held]
+            view['IDEAS.md'] = md.encode_document(metadata, index.body)
+        candidate = md.decode_state(view, check_body=False)
+        for removed_id, removed_backlog in removed_ideas:
+            # A removed id is back in the order only through import-idea after that removal. Ordered by the backlog
+            # counter, never by wall clocks (seats' clocks differ): an import placement started from the counter it
+            # found, which is at least the counter at removal; the import that preceded the removal started below it.
+            require(removed_id not in index.metadata['order'] or any(
+                        p['idea_id'] == removed_id and p['reason'].startswith(_IMPORT_PREFIX)
+                        and p['source_backlog_revision'] >= removed_backlog
+                        for p in candidate['placements']),
+                    'A removed idea is still in the backlog: '+removed_id, 'corrupt_store')
+        baseline = copy.deepcopy(candidate)
+        for key, idea in candidate['ideas'].items():
+            prior = baseline['ideas'][key]
+            latest = idea['revisions'][-1]
+            for field in ('shape', 'ratings', 'assessments'):
+                prior[field] = copy.deepcopy(latest[field])
+            # Restore accepted records while retaining the unchanged persisted
+            # draft/navigation state witnessed by the generated body.
+            historical = latest.get('workflow')
+            if historical is not None:
+                require('workflow' in idea, 'Current workflow missing', 'corrupt_store')
+                for step, record in idea['workflow']['steps'].items():
+                    old = historical['steps'][step]
+                    require(record['acceptance'] == old['acceptance'] and record['invalidated_by'] == old['invalidated_by'],
+                            'Protected workflow receipt changed: '+key+':'+step, 'corrupt_store')
+                prior['workflow']['steps'] = copy.deepcopy(historical['steps'])
+            _validate_workflow_history(prior)
+            baseline_doc = md.parse_document(md.encode_detail(prior,extensions=docs[key+'.md'].metadata['extensions'],
+                                                                 history_links=docs[key+'.md'].metadata['history'])).metadata
+            # Check generated text against accepted evidence before naming an
+            # import candidate. Notes itself is never discarded or normalized.
+            md.detail_notes(docs[key+'.md'], baseline=baseline_doc)
+        validate(baseline)
+        if not held:  # the generated table lists every idea, so it can only be checked whole
+            md.decode_index(files['IDEAS.md'], state=baseline)
+        imported = copy.deepcopy(baseline)
+        for key in imported['ideas']:
+            imported['ideas'][key] = _external_idea(originals[key], baseline['ideas'][key], self.observer)
+        validate(imported)
+        if held:
+            imported = copy.deepcopy(baseline)  # no normalize commit while anything is held
+        asset_entries = self._asset_entries(baseline, files, docs)
+        self._verify_handoff_history(baseline, files, handoff_entries, asset_entries)
+        self._verify_asset_blobs(asset_entries)
+        asset_paths = self._asset_files()
+        return baseline, files, docs, imported, proposal_receipts, asset_entries, asset_paths
+
+    @staticmethod
+    def _migration_links(extensions, key):
+        """The detail's migration links, shape-checked; the copy's three-way hash check is the caller's."""
+        links = extensions.get(chain.LINKS, [])
+        require(type(links) is list, 'Migration links must be a list', 'corrupt_store')
+        keys = {'from_version', 'to_version', 'path', 'sha256', 'revision', 'actor', 'timestamp'}
+        for link in links:
+            require(type(link) is dict and set(link) == keys and type(link['path']) is str and type(link['sha256']) is str
+                    and type(link['from_version']) is int and type(link['to_version']) is int
+                    and re.fullmatch('history/'+key+r'/migrations/w'+str(link['from_version'])+'-[0-9a-f]{64}\\.md', link['path']),
+                    'Malformed migration link: '+key, 'corrupt_store')
+        return links
+
+    def _moved_detail(self, key, link, read, transaction_revision):
+        """Verify a moved pointer against its index link; return (pointer, detail bytes).
+
+        read(relative) returns the stored bytes of any reserved file.
+        """
+        md = _markdown()
+        raw = read(link['path'])
+        require(digest(raw) == link['sha256'], 'Moved pointer hash differs from its index link', 'corrupt_store')
+        pointer = _decode_pointer(md.decode_moved, raw)
+        require(pointer['idea_id'] == key, 'Moved pointer names another idea', 'corrupt_store')
+        history = []
+        for n in range(1, pointer['idea_revision']+1):
+            relative = 'history/'+key+'/r'+str(n)+'.md'
+            history.append(dict(path=relative, sha256=digest(read(relative))))
+        frozen = pointer['frozen']
+        return pointer, md.encode_detail(frozen['idea'], '', frozen['extensions'], history,
+                                         transaction_revision=transaction_revision)
+
+    def _moved_map(self, context):
+        """idea_id -> verified moved pointer, from the loaded index and files."""
+        index = context['docs'].get('IDEAS.md')
+        if index is None:
+            return {}
+        md = _markdown()
+        result = {}
+        for link in md.move_links(index.metadata['extensions']):
+            pointer = _decode_pointer(md.decode_moved, context['files'][link['path']])
+            result[link['idea_id']] = pointer
+        return result
+
+    @staticmethod
+    def _home(pointer):
+        return dict(workspace_name=pointer['workspace']['name'], workspace_path=pointer['workspace']['path'],
+                    file_path=pointer['home_path'])
+
+    def lifecycle(self, idea_id):
+        """Inside a transaction: dict(lifecycle, home, delivery) for one idea.
+
+        lifecycle is 'active', 'moved' or 'delivered'; home is the workspace
+        location of a moved idea's living detail file, else None.
+        """
+        context = getattr(self._contexts, 'active', None)
+        require(context is not None, 'Lifecycle requires a Store transaction', 'invalid_transaction')
+        pointer = self._moved_map(context).get(idea_id)
+        delivery = None
+        index = context['docs'].get('IDEAS.md')
+        if index is not None:
+            for link in _markdown().delivered_links(index.metadata['extensions']):
+                if link['idea_id'] == idea_id:
+                    delivery = _markdown().decode_delivered(context['files'][link['path']])
+        state = 'delivered' if delivery is not None else 'moved' if pointer is not None else 'active'
+        return dict(lifecycle=state, home=None if pointer is None else self._home(pointer), delivery=delivery)
+
+    def _refuse_moved(self, moved, key):
+        raise IdeaError('idea_moved', 'This idea moved to a workspace; edit its file there', home=self._home(moved[key]))
+
+    def _verify_handoff_history(self, state, files, packets, assets):
+        """Validate historical sources, never require present business eligibility.
+
+        Detail/index hashes are prepublication observations. The exact immutable
+        revision bytes and accepted snapshot establish historical source identity.
+        Filesystem availability of workspace is checked only for new delivery.
+        """
+        for key, entries in packets.items():
+            idea = state['ideas'][key]
+            for entry in entries:
+                packet = entry['record']; revision = packet['source_revision']
+                require(revision <= idea['revision'], 'Handoff references a future revision', 'corrupt_store')
+                paths = dict(detail=key+'.md',index='IDEAS.md',revision='history/'+key+'/r'+str(revision)+'.md')
+                # Codec verifies exact relative layouts under the recorded root.
+                # That absolute root is historical observation, not Store identity.
+                require(packet['source_files']['revision']['sha256'] == digest(files[paths['revision']]),
+                        'Handoff immutable revision hash differs', 'corrupt_store')
+                require(packet['origin'] == idea['origin'], 'Handoff immutable origin differs', 'corrupt_store')
+                snapshot = idea['revisions'][revision-1]
+                historical = snapshot.get('workflow')
+                require(historical is not None and 'workflow' in idea,
+                        'Handoff lacks managed revision evidence', 'corrupt_store')
+                expected_steps = {step:dict(copy.deepcopy(record),invalidated_by=[])
+                                  for step,record in packet['accepted'].items()}
+                require(all(historical['steps'][step] == record for step,record in expected_steps.items()),
+                        'Handoff accepted records differ from immutable revision', 'corrupt_store')
+                draft = entry['receipt']['draft_version']
+                require(historical['draft_version'] <= draft <= idea['workflow']['draft_version'],
+                        'Handoff publishing draft counter differs from authority', 'corrupt_store')
+                design = packet['design_set']
+                if design is not None:
+                    records = [asset['record'] for asset in assets.get(key, [])]
+                    selected = next((record for record in records if record['kind'] == 'design-set'
+                                     and record['set_id'] == design['set_id']), None)
+                    require(selected is not None, 'Handoff design set evidence is missing', 'corrupt_store')
+                    members = [{name:value for name,value in member.items() if name != 'path'}
+                               for member in design['members']]
+                    require(members == selected['members'],
+                            'Handoff design membership differs from immutable set', 'corrupt_store')
+
+    @contextmanager
+    def transaction(self, write=False):
+        require(type(write) is bool, 'write must be a boolean')
+        require(getattr(self._contexts, 'active', None) is None, 'Store transactions cannot be nested', 'store_busy')
+        self._safe_root(create=write)
+        if not self.path.exists():
+            state = empty_state()
+            yield state
+            return
+        self._safe('.lock')
+        with store_lock(self.path/'.lock') as lock:
+            transactions.recover(self.path).raise_for_error()
+            index = self._safe('IDEAS.md')
+            legacy = self._safe('state.json')
+            require(not (index.exists() and legacy.exists()), 'Both JSON and Markdown authority exist without a verified migration', 'ambiguous_store')
+            if legacy.exists():
+                legacy_raw = read_bytes(legacy, MAX_STATE)
+                state = decode(legacy_raw)
+                validate(state)
+                files, docs, kind = {}, {}, 'legacy'
+            elif index.exists():
+                migration_evidence = self._migration_evidence(read_bytes(index, MAX_STATE))
+                loaded = self._reuse_load()
+                if loaded is None:
+                    # One place, under the store lock, after recover, on a cache miss only: a hit proves
+                    # every byte is unchanged since a load that already ran the chain.
+                    report = chain.run(self, lock)
+                    self._quarantine(report.held)
+                    self.migration_report = report
+                    loaded = self._load_markdown(held=report.held)
+                    self._remember_load(loaded)
+                else:
+                    self.migration_report = chain.Report(held=dict(self._held_raw))
+                state, files, docs, imported, proposal_receipts, asset_entries, asset_paths = loaded
+                loaded = None
+                kind = 'markdown'
+                self._finish_removals(dict(files=files, asset_entries=asset_entries, asset_paths=asset_paths))
+            else:
+                lock.seek(0)
+                require(not lock.read(1), 'Authority is missing from an initialized store; refusing to reset', 'corrupt_store')
+                require(not any(name not in ('.lock', transactions.JOURNAL) for name in self._entries()),
+                        'Authority is missing from a nonempty store; refusing to reset', 'corrupt_store')
+                state, files, docs, kind = empty_state(), {}, {}, 'empty'
+            context = dict(write=write, kind=kind, lock=lock, files=files, docs=docs, baseline=copy.deepcopy(state))
+            if kind == 'legacy':
+                context['legacy_raw'] = legacy_raw
+            elif kind == 'markdown':
+                context['migration_evidence'] = migration_evidence
+                context['proposal_receipts'] = proposal_receipts
+                context['asset_entries'] = asset_entries
+                context['asset_paths'] = asset_paths
+                context['retained_staging'] = self._retained_asset_stages(asset_paths,asset_entries)
+            else:
+                context['asset_entries'] = {}
+                context['asset_paths'] = {name:set() for name in ('evidence','blobs','staging')}
+            self._contexts.active = context
+            try:
+                if kind == 'markdown' and imported != state:
+                    context['write'] = True
+                    self.commit(imported)
+                    context['write'] = write
+                    state = imported
+                context['state'] = state
+                yield state
+            finally:
+                self._contexts.active = None
+
+    def _check_cas(self, context):
+        if context['kind'] == 'legacy':
+            require(not self._safe('IDEAS.md').exists(), 'Markdown authority appeared during legacy transaction', 'save_conflict')
+            require(transactions.file_hash(self.path, 'state.json') == digest(context['legacy_raw']),
+                    'Legacy source changed during transaction', 'save_conflict')
+            return
+        inventory = self._inventory()
+        require(inventory - self._held_owned(inventory) == set(context['files']), 'Authority/evidence changed during transaction', 'save_conflict')
+        for relative, raw in context['files'].items():
+            require(transactions.file_hash(self.path, relative) == digest(raw),
+                    'Observed file changed during transaction: '+relative, 'save_conflict')
+        for relative, raw in context.get('migration_evidence', {}).items():
+            require(transactions.file_hash(self.path, relative) == digest(raw),
+                    'Observed migration evidence changed during transaction: '+relative, 'save_conflict')
+        for relative, raw in context.get('proposal_receipts', {}).items():
+            require(transactions.file_hash(self.path, relative) == digest(raw),
+                    'Observed linked proposal receipt changed during transaction: '+relative, 'save_conflict')
+        # Metadata remains immutable, but a cooperating local editor can still
+        # alter blob bytes. Rehash both existing and staged verified witnesses.
+        for entries in context.get('asset_entries', {}).values():
+            for entry in entries:
+                if entry['blob'] is not None:
+                    require(self._asset_blob(entry['record']) == entry['blob'],
+                            'Observed asset blob changed during transaction', 'save_conflict')
+
+    def _prepare_commit(self, state, context, *, initial_zero=False, proposal_append=None,
+                        proposal_evidence=None, asset_append=None, asset_evidence=None,
+                        handoff_append=None, handoff_evidence=None):
+        baseline = context['baseline']
+        self._refuse_held_target(state, baseline, proposal_append, asset_append, handoff_append)
+        moved = self._moved_map(context) if context['kind'] == 'markdown' else {}
+        for key in moved:
+            if key in state['ideas'] and state['ideas'][key] != baseline['ideas'][key]:
+                self._refuse_moved(moved, key)
+        for key in ([proposal_append[0]] if proposal_append is not None else []) + list(asset_append or ()) + ([handoff_append[0]] if handoff_append is not None else []):
+            if key in moved:
+                self._refuse_moved(moved, key)
+        for placement in state['placements'][len(baseline['placements']):]:
+            if placement['idea_id'] in moved:
+                self._refuse_moved(moved, placement['idea_id'])
+        require(set(state['ideas']) >= set(baseline['ideas']), 'Ideas cannot be removed by a normal commit', 'corrupt_store')
+        for key, prior in baseline['ideas'].items():
+            current = state['ideas'][key]
+            require(current['origin'] == prior['origin'] and current['revisions'][:prior['revision']] == prior['revisions'],
+                    'Immutable origin/history cannot change', 'corrupt_store')
+            for field in ('proposals', 'plans', 'executions'):
+                require(current[field][:len(prior[field])] == prior[field], 'Immutable '+field+' metadata cannot change', 'corrupt_store')
+        # Ignore caller counter changes; Store owns this persistence generation.
+        state['transaction_revision'] = baseline['transaction_revision']
+        validate(state)
+        changed = state != baseline or proposal_append is not None or bool(asset_append) or handoff_append is not None
+        if not changed and (context['kind'] == 'markdown' or (context['kind'] == 'legacy' and not initial_zero)):
+            self._check_cas(context)
+            return context['files'], {}, False
+        if changed or not initial_zero:
+            state['transaction_revision'] += 1
+        md = _markdown()
+        verified_proposals = {}
+        verified_assets = {}
+        verified_handoffs = {}
+        for path, document in context['docs'].items():
+            if _IDEA_FILE.fullmatch(path):
+                for link in md.agent_proposal_links(document.metadata['extensions'], document.metadata['idea']['idea_id']):
+                    verified_proposals[link['path']] = context['files'][link['path']]
+                for link in md.asset_links(document.metadata['extensions'], document.metadata['idea']['idea_id']):
+                    verified_assets[link['path']] = context['files'][link['path']]
+                for link in md.handoff_links(document.metadata['extensions'], document.metadata['idea']['idea_id']):
+                    verified_handoffs[link['path']] = context['files'][link['path']]
+        extensions = None
+        if proposal_append is not None:
+            require(context['kind'] == 'markdown', 'Migrate before publishing agent evidence', 'migration_required')
+            key, link = proposal_append
+            require(key in state['ideas'] and key+'.md' in context['docs'], 'Unknown proposal idea', 'not_found')
+            ext = copy.deepcopy(context['docs'][key+'.md'].metadata['extensions'])
+            links = md.agent_proposal_links(ext,key)
+            ext[md.AGENT_PROPOSAL_EXTENSION] = links+[copy.deepcopy(link)]
+            extensions = {key:ext}
+            require(type(proposal_evidence) is dict and set(proposal_evidence) == {link['path']},
+                    'New proposal requires exactly its immutable bytes')
+            require(link['path'] not in verified_proposals, 'Proposal evidence already exists', 'save_conflict')
+            verified_proposals.update(proposal_evidence)
+        else:
+            require(proposal_evidence is None, 'Evidence bytes require an append')
+        if asset_append:
+            require(context['kind'] == 'markdown', 'Migrate before publishing asset evidence', 'migration_required')
+            extensions = {} if extensions is None else extensions
+            appended = set()
+            for key, new_links in asset_append.items():
+                require(key in state['ideas'] and key+'.md' in context['docs'], 'Unknown asset idea', 'not_found')
+                ext = extensions.setdefault(key, copy.deepcopy(context['docs'][key+'.md'].metadata['extensions']))
+                ext[md.ASSET_EXTENSION] = md.asset_links(ext,key)+copy.deepcopy(new_links)
+                md.asset_links(ext,key)
+                appended.update(link['path'] for link in new_links)
+            require(type(asset_evidence) is dict and set(asset_evidence) == appended,
+                    'Asset appends require exactly their immutable bytes')
+            require(not set(asset_evidence) & set(verified_assets), 'Asset evidence already exists', 'save_conflict')
+            verified_assets.update(asset_evidence)
+        else:
+            require(asset_evidence is None, 'Asset evidence requires an append')
+        if handoff_append is not None:
+            require(context['kind'] == 'markdown', 'Migrate before publishing handoff evidence', 'migration_required')
+            key, link = handoff_append
+            require(key in state['ideas'] and key+'.md' in context['docs'], 'Unknown handoff idea', 'not_found')
+            extensions = {} if extensions is None else extensions
+            ext = extensions.setdefault(key,copy.deepcopy(context['docs'][key+'.md'].metadata['extensions']))
+            ext[md.HANDOFF_EXTENSION] = md.handoff_links(ext,key)+[copy.deepcopy(link)]
+            md.handoff_links(ext,key)
+            require(type(handoff_evidence) is dict and set(handoff_evidence) == {link['path']},
+                    'New handoff requires exactly its immutable bytes')
+            require(link['path'] not in verified_handoffs, 'Handoff evidence already exists', 'save_conflict')
+            verified_handoffs.update(handoff_evidence)
+        else:
+            require(handoff_evidence is None, 'Handoff evidence requires an append')
+        previous_docs = context['docs']
+        if self.held and 'IDEAS.md' in previous_docs:
+            previous_docs = dict(previous_docs, **{'IDEAS.md': self._index_without_held(previous_docs['IDEAS.md'], baseline)})
+        after = md.encode_state(state, previous=previous_docs, previous_state=baseline,
+                                extensions=extensions,proposal_evidence=verified_proposals,asset_evidence=verified_assets,
+                                handoff_evidence=verified_handoffs)
+        if self.held and 'IDEAS.md' in after:
+            after['IDEAS.md'] = self._splice_held_rows(context['docs']['IDEAS.md'], after['IDEAS.md'])
+        for key, pointer in moved.items():
+            after.pop(key+'.md', None)  # the living file is outside the store
+            after[md.pointer_path(key, 'moved')] = context['files'][md.pointer_path(key, 'moved')]
+        require(len(after) <= MAX_STORE_FILES and sum(len(raw) for raw in after.values()) <= MAX_STORE_BYTES,
+                'Store after-images exceed file/byte limits', 'too_large')
+        # Fresh physical inventory plus new immutable evidence, before publish.
+        asset_paths = self._asset_files()
+        physical = set().union(*asset_paths.values())
+        require(len(physical | set(asset_evidence or {})) <= MAX_STORE_FILES,
+                'Asset inventory after-images exceed file limit', 'too_large')
+        if 'IDEAS.md' in context['files']:
+            before_index = context['docs']['IDEAS.md']
+            after_index = md.decode_index(after['IDEAS.md'])
+            before_fields = {k:v for k,v in before_index.metadata.items() if k != 'transaction_revision'}
+            after_fields = {k:v for k,v in after_index.metadata.items() if k != 'transaction_revision'}
+            if before_fields == after_fields and before_index.body == after_index.body:
+                after['IDEAS.md'] = context['files']['IDEAS.md']
+        changes = {path:raw for path,raw in after.items() if context['files'].get(path) != raw}
+        self._check_cas(context)
+        if not changes:
+            state['transaction_revision'] = baseline['transaction_revision']
+            return context['files'], {}, False
+        return after, changes, changed
+
+    def _publish_commit(self, state, context, after, changes, extra=None, extra_expected=None, move_out=None, removals=None):
+        prior_cache = self._load_cache
+        self._load_cache = None  # any publish attempt invalidates the remembered load
+        self._check_cas(context)
+        if context['kind'] == 'legacy' and (changes or extra):
+            import idea_migration as migration
+            observed = self._legacy_views(context)
+            prepared = migration.prepare(context['legacy_raw'], context['baseline'], state, observed,
+                                         actor=self.observer, timestamp=now())
+            for relative, raw in observed.items():
+                require(transactions.file_hash(self.path, relative) == digest(raw),
+                        'Observed legacy evidence changed before migration: '+relative, 'save_conflict')
+            after = prepared['after']
+            combined = dict(prepared['changes'], **(extra or {}))
+            expected = dict(prepared['expected'], **(extra_expected or {}))
+            result = transactions.publish(self.path, combined, expected, freeze_legacy=True,
+                                          legacy_sha256=prepared['legacy_sha256'])
+            migration_evidence = {path:combined[path] for path in (transactions.FROZEN, transactions.RECEIPT)}
+        else:
+            combined = dict(changes, **(extra or {}))
+            if not combined:
+                return None
+            expected = {path:None if path not in context['files'] else digest(context['files'][path]) for path in changes}
+            expected.update(extra_expected or {})
+            result = transactions.publish(self.path, combined, expected, move_out=move_out, removals=removals)
+            migration_evidence = context.get('migration_evidence', {})
+        result.raise_for_error()
+        initialize_marker(context['lock']).raise_for_error()
+        if prior_cache is not None and context['kind'] != 'legacy' and not changes:
+            # A commit that changed no authority/evidence file (create_session: only a new session
+            # file nobody has linked) leaves every byte the remembered load read as it was, so that
+            # load is still true. Re-arm it. _reuse_load re-compares every byte it read on the next
+            # read, so a change by anyone else still misses; a written path the load read does not re-arm.
+            read_paths = set(prior_cache[1]) | set(prior_cache[4])
+            if not read_paths & set(extra or {}):
+                self._load_cache = prior_cache
+        md = _markdown()
+        context.update(kind='markdown', baseline=copy.deepcopy(state), files=after,
+                       docs={path:md.parse_document(raw) for path,raw in after.items() if path == 'IDEAS.md' or _IDEA_FILE.fullmatch(path)})
+        for link in md.move_links(context['docs']['IDEAS.md'].metadata['extensions']):
+            context['docs'][link['idea_id']+'.md'] = md.parse_document(self._moved_detail(
+                link['idea_id'], link, after.__getitem__, context['docs']['IDEAS.md'].metadata['transaction_revision'])[1])
+        context['migration_evidence'] = migration_evidence
+        # Purely reconstruct after-images already checked at the boundary.
+        # Existing/staged blob witnesses remain verified; this adds no I/O.
+        new_entries = self._asset_entries(state, after, context['docs'])
+        witnesses = {entry['record']['asset_id']:entry['blob'] for entries in context.get('asset_entries', {}).values()
+                     for entry in entries if entry['blob'] is not None}
+        for entries in new_entries.values():
+            for entry in entries:
+                if entry['record']['kind'] == 'asset':
+                    entry['blob'] = witnesses[entry['record']['asset_id']]
+        context['asset_entries'] = new_entries
+        context.setdefault('asset_paths', {name:set() for name in ('evidence','blobs','staging')})['evidence'].update(
+            path for path in after if path.startswith('assets/evidence/'))
+        for relative, raw in (extra or {}).items():
+            if relative in context.get('proposal_receipts', {}):
+                context['proposal_receipts'][relative] = raw
+        return result
+
+    def _workspace_home(self, idea_id, name, path):
+        """Validate a move target; return (canonical workspace path, home file path)."""
+        require(type(name) is str and 1 <= len(name) <= 100 and name.strip() and '\n' not in name and '\r' not in name
+                and not any(0xD800 <= ord(c) <= 0xDFFF for c in name), 'Workspace name must be one line of 1 to 100 characters')
+        unavailable = lambda why: IdeaError('workspace_unavailable', 'Workspace is unavailable: '+why)
+        if type(path) is not str or not path or '\0' in path or not os.path.isabs(path):
+            raise unavailable('the path must be absolute')
+        target = Path(path)
+        if any(part in ('', '.', '..') for part in path.split('/')[1:] if part != '') or '//' in path:
+            raise unavailable('the path must be canonical')
+        for component in reversed((target, *target.parents)):
+            try:
+                mode = component.lstat().st_mode
+            except OSError as exc:
+                raise unavailable('missing '+str(component)) from exc
+            if stat.S_ISLNK(mode):
+                raise unavailable('a symlink in the path: '+str(component))
+            if not stat.S_ISDIR(mode):
+                raise unavailable('not a directory: '+str(component))
+        if not os.access(target, os.W_OK | os.X_OK):
+            raise unavailable('not writable')
+        store, real = Path(os.path.realpath(self.path)), Path(os.path.realpath(target))
+        if real == store or store in real.parents or real in store.parents:
+            raise IdeaError('target_overlaps_store', 'The workspace and the idea store must not contain one another')
+        home = target/'ideas'/(idea_id+'.md')
+        folder = home.parent
+        if folder.is_symlink() or (folder.exists() and not folder.is_dir()):
+            raise unavailable('the ideas folder is not a plain directory')
+        return target, home
+
+    def move_out(self, state, idea_id, *, expected_revision, plan, workspace_name, workspace_path, actor, timestamp=None):
+        """Move one idea's living detail file to <workspace>/ideas/<idea_id>.md.
+
+        Call inside a writable transaction with its state. plan is the complete
+        plan record (including content) exactly as register-plan builds it; it is
+        published in the same journaled commit as the immutable moved pointer,
+        the IDEAS.md link and the removal of the store copy. Revisions, metadata
+        and plan evidence stay. Returns dict(idea_id, home, pointer_path,
+        moved_sha256, plan, resumed). Raises idea_moved, not_found,
+        stale_revision, invalid_input, workspace_unavailable,
+        target_overlaps_store, home_conflict.
+        """
+        context = getattr(self._contexts, 'active', None)
+        require(context is not None and context['write'], 'Move requires a writable Store transaction', 'invalid_transaction')
+        require(not context.get('request_running'), 'Request mutators cannot publish or perform I/O', 'invalid_transaction')
+        require(context['kind'] == 'markdown', 'Migrate before moving an idea', 'migration_required')
+        md = _markdown()
+        check_id(idea_id)
+        require(idea_id in state['ideas'], 'Unknown idea', 'not_found')
+        moved = self._moved_map(context)
+        if idea_id in moved:
+            self._refuse_moved(moved, idea_id)
+        integer(expected_revision, 'expected revision', 1)
+        text(actor, 'actor', 200)
+        idea = state['ideas'][idea_id]
+        require(idea['revision'] == expected_revision, 'Idea changed since it was read', 'stale_revision')
+        require(type(plan) is dict and plan.get('idea_id') == idea_id and plan.get('idea_revision') == idea['revision']
+                and plan.get('path') == str(self.path/'plan-evidence'/(str(plan.get('plan_id'))+'.md'))
+                and all(prior['plan_id'] != plan.get('plan_id') for prior in idea['plans']),
+                'Plan record must be new and belong to this idea revision')
+        require(idea_id+'.md' in context['files'], 'Idea detail file is not persisted', 'not_ready')
+        target, home = self._workspace_home(idea_id, workspace_name, workspace_path)
+        detail = context['files'][idea_id+'.md']
+        moved_sha = digest(detail)
+        resumed = False
+        if home.exists() or home.is_symlink():
+            info = home.lstat()
+            if stat.S_ISREG(info.st_mode) and info.st_size <= MAX_STATE and read_bytes(home, MAX_STATE) == detail:
+                resumed = True
+            else:
+                raise IdeaError('home_conflict', 'A different file already exists at the destination', home=dict(file_path=str(home)))
+        trial = copy.deepcopy(state)
+        entry = trial['ideas'][idea_id]
+        entry['plans'].append(copy.deepcopy(plan))
+        entry['status'] = 'archived'
+        trial['archives'].setdefault(idea_id+'/r'+str(entry['revision'])+'.json',
+                                     dict(idea_id=idea_id, origin=copy.deepcopy(entry['origin']), revision=copy.deepcopy(entry['revisions'][-1])))
+        after, _, _ = self._prepare_commit(trial, context)
+        frozen_idea = {k:copy.deepcopy(v) for k,v in trial['ideas'][idea_id].items() if k != 'revisions'}
+        for record in frozen_idea['plans']:
+            record.pop('content', None)
+        extensions = copy.deepcopy(context['docs'][idea_id+'.md'].metadata['extensions'])
+        pointer = md.encode_moved(idea_id, idea_revision=entry['revision'], plan_id=plan['plan_id'],
+                                  workspace=dict(name=workspace_name, path=str(target)), home_path=str(home),
+                                  moved_sha256=moved_sha, actor=actor, timestamp=timestamp or now(),
+                                  frozen=dict(idea=frozen_idea, extensions=extensions))
+        pointer_path = md.pointer_path(idea_id, 'moved')
+        after = dict(after)
+        after.pop(idea_id+'.md', None)
+        after[pointer_path] = pointer
+        index_extensions = copy.deepcopy(context['docs']['IDEAS.md'].metadata['extensions'])
+        index_extensions[md.MOVE_EXTENSION] = md.move_links(index_extensions) + [dict(idea_id=idea_id, path=pointer_path, sha256=digest(pointer))]
+        after['IDEAS.md'] = md.encode_index(trial, index_extensions, previous=context['docs']['IDEAS.md'], previous_state=context['baseline'])
+        # Prove a fresh load rebuilds exactly the state being published.
+        probe = {path:raw for path,raw in after.items()}
+        link = md.move_links(md.decode_index(after['IDEAS.md']).metadata['extensions'])[0]
+        probe[idea_id+'.md'] = self._moved_detail(idea_id, link, after.__getitem__, trial['transaction_revision'])[1]
+        rebuilt = md.decode_state(probe, check_body=False)
+        require(rebuilt['ideas'][idea_id] == trial['ideas'][idea_id], 'Moved idea would not reload identically', 'corrupt_store')
+        changes = {path:raw for path,raw in after.items() if context['files'].get(path) != raw}
+        if not resumed:
+            result = platform_write(home, detail, immutable=True)
+            result.raise_for_error()
+        published = self._publish_commit(trial, context, after, changes, move_out=idea_id+'.md')
+        state.clear()
+        state.update(trial)
+        return dict(idea_id=idea_id, home=dict(workspace_name=workspace_name, workspace_path=str(target), file_path=str(home)),
+                    pointer_path=pointer_path, moved_sha256=moved_sha, plan=plan, resumed=resumed, write_result=published)
+
+    # ---- import_idea: one idea in from another store, byte for byte ----
+
+    def import_idea(self, source, idea_id, *, actor, dry_run=False):
+        """Bring one idea in from another store without opening that store.
+
+        The source is read as bytes only: no lock, no chain, no normalize commit.
+        The detail is read once and every content-addressed file it pins is read
+        and hashed (a mismatch is import_hash_mismatch, naming the path, with
+        nothing written). Copied byte for byte: the detail, history/<id>/**, the
+        linked asset evidence and blobs, plan evidence, and the session-recovery
+        files whose receipts name this idea. Not copied: the source IDEAS.md,
+        history/backlog/*, assets/staging. Under the target lock, in one journaled
+        publish: the files, the idea appended last in order, and one placement
+        record whose reason is `imported from <abs source> · manifest sha256 <hex>`.
+        Then Assess is marked for review the way a re-rank marks it: the imported
+        idea gets one added revision (action `import`, current step assess), and so
+        does every idea whose backlog neighbours the append shifted. Only that
+        detail and that one history revision differ from the source bytes.
+        A removed id may be imported again; its earlier tombstone stays pinned.
+        Refusals: id_clash, import_unsupported (moved, delivered, held target, other
+        workflow version), import_session_shared, import_hash_mismatch, same_store.
+        The same source (matching provenance) again returns repeated=True. dry_run
+        returns the preview and writes nothing.
+        """
+        require(type(dry_run) is bool, 'dry_run must be a boolean')
+        check_id(idea_id)
+        text(actor, 'actor', 200)
+        root = Path(source).expanduser().absolute()
+        self._import_not_same_store(root)
+        plan = _import_read_source(root, idea_id)
+        reason = _IMPORT_PREFIX+str(root)+' · manifest sha256 '+plan['manifest_sha256']
+        require(len(reason) <= 65536, 'Provenance line is too long')
+        if dry_run and not self.path.exists():
+            return self._import_publish(None, empty_state(), plan, actor, reason, dry_run=True)
+        with self.transaction(write=not dry_run) as state:
+            return self._import_publish(self._contexts.active, state, plan, actor, reason, dry_run=dry_run)
+
+    def _import_not_same_store(self, root):
+        mine, theirs = Path(os.path.realpath(self.path)), Path(os.path.realpath(root))
+        if mine == theirs or mine in theirs.parents or theirs in mine.parents:
+            raise IdeaError('same_store', 'The source store is, or overlaps, this store')
+
+    def _import_publish(self, context, state, plan, actor, reason, *, dry_run):
+        md = _markdown()
+        idea_id, detail_raw = plan['idea_id'], plan['files'][plan['idea_id']+'.md']
+        files = context['files'] if context is not None else {}
+        docs = context['docs'] if context is not None else {}
+        baseline = context['baseline'] if context is not None else empty_state()
+        kind = context['kind'] if context is not None else 'empty'
+        require(kind in ('markdown', 'empty'), 'Migrate the target store before importing', 'migration_required')
+        if self.held:
+            raise IdeaError('import_unsupported', 'The target holds ideas its migration could not bring forward; settle them first')
+        wanted = ' · manifest sha256 '+plan['manifest_sha256']
+        if idea_id in state['ideas'] or idea_id in self.held:
+            # The detail carries the import's own review revision now, so sameness is the recorded provenance, not the detail bytes.
+            same = any(p['idea_id'] == idea_id and p['reason'].startswith(_IMPORT_PREFIX) and p['reason'].endswith(wanted)
+                       for p in state['placements'])
+            if not same:
+                raise IdeaError('id_clash', 'This store already holds a different idea with that id', idea_id=idea_id)
+            return dict(idea_id=idea_id, repeated=True, dry_run=dry_run, write_result=None)
+        # The imported idea, rebuilt and re-verified from its own bytes.
+        synthetic = md.encode_document(dict(schema_version=2, kind='index', order=[idea_id], backlog_revision=0,
+                                            transaction_revision=0, placements=[], extensions={}), '')
+        decoded = md.decode_state(dict(plan['files'], **{'IDEAS.md': synthetic}), check_body=False)
+        idea = decoded['ideas'][idea_id]
+        # Colliding paths must already hold the very same bytes.
+        for relative, raw in plan['files'].items():
+            if relative in files and files[relative] != raw:
+                raise IdeaError('id_clash', 'A different file already exists at '+relative, path=relative)
+        for relative, raw in plan['blobs'].items():
+            path = self._safe(relative) if context is not None else None
+            if path is not None and path.exists() and read_bytes(path, len(raw)) != raw:
+                raise IdeaError('id_clash', 'A different blob already exists at '+relative, path=relative)
+        sessions, extra_expected = {}, {}
+        for relative, raw in plan['sessions'].items():
+            path = self._safe(relative) if context is not None else None
+            if path is not None and path.exists():
+                if read_bytes(path, MAX_RECEIPT_BYTES) != raw:
+                    raise IdeaError('id_clash', 'A different session file already exists at '+relative, path=relative)
+                continue
+            sessions[relative] = raw
+            extra_expected[relative] = None
+        trial = copy.deepcopy(state)
+        before = list(trial['order'])
+        trial['ideas'][idea_id] = idea
+        trial['order'].append(idea_id)
+        trial['archives'].update(decoded['archives'])
+        revision = max(trial['backlog_revision']+1, plan['backlog_need'])
+        trial['backlog_revision'] = revision
+        placement = dict(idea_id=idea_id, idea_revision=idea['revision'], position=len(trial['order']), reason=reason,
+                         actor=actor, timestamp=now(), source_backlog_revision=revision-1,
+                         neighbors=dict(before=before[-1] if before else None, after=None),
+                         snapshot=dict(ratings=copy.deepcopy(idea['ratings']), assessments=copy.deepcopy(idea['assessments'])),
+                         accepted_backlog_revision=revision)
+        trial['placements'].append(placement)
+        trial['transaction_revision'] = baseline['transaction_revision']+1
+        unmarked = copy.deepcopy(trial)
+        marked = self._import_review(trial, idea_id, before, actor)
+        validate(trial)
+        previous = docs.get('IDEAS.md')
+        after = dict(files)
+        after.update(plan['files'])
+        if marked:
+            after.update(self._import_marked_files(trial, unmarked, marked, plan, docs, after))
+        placement_path = 'history/backlog/r'+str(len(trial['placements']))+'.md'
+        after[placement_path] = md._encode_placement(placement)
+        after['IDEAS.md'] = md.encode_index(trial, None, previous=previous, previous_state=baseline if previous else None)
+        require(len(after) <= MAX_STORE_FILES and sum(len(raw) for raw in after.values()) <= MAX_STORE_BYTES,
+                'Store after-images exceed file/byte limits', 'too_large')
+        if context is not None and not self._moved_map(context):
+            rebuilt = md.decode_state(after)  # a fresh load of what is about to be published
+            require(rebuilt['ideas'][idea_id] == trial['ideas'][idea_id] and rebuilt['order'] == trial['order']
+                    and all(rebuilt['ideas'][key] == trial['ideas'][key] for key in marked),
+                    'Imported idea would not reload identically', 'corrupt_store')
+        preview = dict(idea_id=idea_id, repeated=False, dry_run=dry_run, source=plan['source'],
+                       files=[dict(path=path, bytes=len(raw), sha256=digest(raw), role=role)
+                              for path, raw, role in plan['listing']],
+                       position=len(trial['order']), backlog_revision=revision,
+                       sessions=dict(taken=sorted(plan['sessions']), skipped=copy.deepcopy(plan['skipped'])),
+                       provenance=reason, manifest_sha256=plan['manifest_sha256'], placement=placement,
+                       marked_for_review=list(marked),
+                       # Everything this import writes that is not a plain copy of the source: the new review revision, and
+                       # the rewritten details of the imported idea and of every neighbour marked for review.
+                       generated=['IDEAS.md', placement_path]+[path for path in sorted(after)
+                                                                if path not in ('IDEAS.md', placement_path)
+                                                                and after[path] != plan['files'].get(path, files.get(path))])
+        if dry_run:
+            return dict(preview, write_result=None)
+        require(context['write'], 'Import requires a writable Store transaction', 'invalid_transaction')
+        written = self._import_blobs(plan)
+        publishing = False
+        try:
+            staged = copy.deepcopy(context.get('asset_entries', {}))
+            entries = []
+            for link in md.asset_links(plan['extensions'], idea_id):
+                from idea_asset_evidence import decode_record
+                record = decode_record(plan['files'][link['path']], path=link['path'], expected_idea_id=idea_id, link=link)
+                entries.append(dict(record=record, evidence=copy.deepcopy(link),
+                                    blob=self._asset_blob(record) if record['kind'] == 'asset' else None))
+            staged[idea_id] = entries
+            self._asset_graph(trial, staged)
+            context['asset_entries'] = staged
+            changes = {path:raw for path, raw in after.items() if files.get(path) != raw}
+            publishing = True
+            published = self._publish_commit(trial, context, after, changes, sessions, extra_expected)
+        except BaseException as exc:
+            # Once the journaled publish may have committed, the evidence names these blobs: they stay.
+            # Only a failure known not to have committed takes them back.
+            known_not_committed = not publishing or (
+                isinstance(exc, IdeaError) and not exc.details.get('committed') and exc.code != 'durability_uncertain')
+            if known_not_committed:
+                self._import_unwrite(written)
+            raise
+        state.clear()
+        state.update(trial)
+        return dict(preview, write_result=published)
+
+    @staticmethod
+    def _import_review(trial, idea_id, before, actor):
+        """Mark Assess for review the way a re-rank does: the imported idea, then every idea whose neighbours the append shifted.
+
+        Returns the ids marked, the imported idea first. An archived idea, or one with no accepted Assess, has nothing to mark.
+        """
+        from idea_service import _invalidate_placement, review_revision
+        from idea_workflow import invalidate_external
+        imported = trial['ideas'][idea_id]
+        marked = []
+        if imported['status'] != 'archived' and 'workflow' in imported and imported['workflow']['steps']['assess']['acceptance'] is not None:
+            reviewed = invalidate_external(imported, ('assess',))['idea']
+            reviewed['workflow']['current_step'] = 'assess'  # it opens on the step that needs the answer
+            trial['ideas'][idea_id] = review_revision(reviewed, actor, 'import')
+            marked.append(idea_id)
+        revisions = {key: trial['ideas'][key]['revision'] for key in before}
+        _invalidate_placement(trial, before, actor, 'An imported idea changed the placement neighbors', exclude=(idea_id,), refresh_draft=False)
+        return marked+[key for key in before if trial['ideas'][key]['revision'] != revisions[key]]
+
+    def _import_marked_files(self, trial, unmarked, marked, plan, docs, after):
+        """The detail and the one new history revision of every idea marked for review; everything older stays as written."""
+        md = _markdown()
+        previous = {path: document for path, document in docs.items() if path != 'IDEAS.md'}  # the index is encoded by the caller
+        previous[plan['idea_id']+'.md'] = md.parse_document(plan['files'][plan['idea_id']+'.md'])
+        proposals, assets, handoffs = {}, {}, {}
+        for path, document in previous.items():
+            if not _IDEA_FILE.fullmatch(path):
+                continue
+            key = document.metadata['idea']['idea_id']
+            for link in md.agent_proposal_links(document.metadata['extensions'], key):
+                proposals[link['path']] = after[link['path']]
+            for link in md.asset_links(document.metadata['extensions'], key):
+                assets[link['path']] = after[link['path']]
+            for link in md.handoff_links(document.metadata['extensions'], key):
+                handoffs[link['path']] = after[link['path']]
+        evidence = dict(proposal_evidence=proposals, asset_evidence=assets, handoff_evidence=handoffs)
+        encoded = md.encode_state(trial, previous=previous, previous_state=unmarked, **evidence)
+        # The imported detail keeps the generation counter it arrived with when that is ahead of the target's.
+        carried = previous[plan['idea_id']+'.md'].metadata['transaction_revision']
+        lifted = md.encode_state(dict(trial, transaction_revision=max(carried, trial['transaction_revision'])),
+                                 previous=previous, previous_state=unmarked, **evidence)
+        generated = {}
+        for key in marked:
+            path = key+'.md'
+            generated[path] = (lifted if key == plan['idea_id'] else encoded)[path]
+            for relative, raw in encoded.items():
+                if relative.startswith('history/'+key+'/r') and relative.endswith('.md'):
+                    if relative in after:
+                        require(after[relative] == raw, 'An older revision would change: '+relative, 'corrupt_store')
+                    else:
+                        generated[relative] = raw
+        return generated
+
+    def _import_blobs(self, plan):
+        """Write the linked blobs sealed like the target seals its own. Returns what this call created."""
+        shared = is_shared_root(self.path)
+        created = []
+        for relative, raw in plan['blobs'].items():
+            path = self._safe(relative)
+            if path.exists():
+                continue
+            missing = []
+            for candidate in (path.parent, path.parent.parent):
+                if candidate != self.path and not candidate.exists():
+                    missing.append(candidate)
+            for candidate in reversed(missing):
+                make_directory(candidate, shared)
+                created.append(candidate)
+            platform_write(path, raw, immutable=True, seal=True).raise_for_error()
+            created.append(path)
+        return created
+
+    @staticmethod
+    def _import_unwrite(created):
+        for path in reversed(created):
+            try:
+                path.rmdir() if path.is_dir() else path.unlink()
+            except OSError:
+                pass
+
+    # ---- remove_idea: the one removal road ----
+
+    def _file_print(self, relative):
+        """Size and sha256 of one store file, streamed so a large blob is never held whole."""
+        path = self._safe(relative)
+        hashed, size = hashlib.sha256(), 0
+        with path.open('rb') as stream:
+            while True:
+                chunk = stream.read(65536)
+                if not chunk:
+                    break
+                size += len(chunk)
+                hashed.update(chunk)
+        return size, hashed.hexdigest()
+
+    def _removal_plan(self, context, idea_id):
+        """Everything this one idea owns, as (path, role) pairs: store files, then blobs and retained upload stages."""
+        md = _markdown()
+        document = context['docs'][idea_id+'.md']
+        meta = document.metadata
+        extensions = meta['extensions']
+        listing = [(idea_id+'.md', 'detail')]
+        listing += [(link['path'], 'history') for link in meta['history']]
+        for items in meta['metadata_evidence'].values():
+            listing += [(link['path'], 'metadata') for link in items]
+        listing += [(link['path'], 'proposal') for link in md.agent_proposal_links(extensions, idea_id)]
+        listing += [(link['path'], 'asset evidence') for link in md.asset_links(extensions, idea_id)]
+        listing += [(link['path'], 'handoff') for link in md.handoff_links(extensions, idea_id)]
+        listing += [(link['path'], 'migration copy') for link in self._migration_links(extensions, idea_id)]
+        listing += [('plan-evidence/'+plan['plan_id']+'.md', 'plan evidence') for plan in meta['idea']['plans']]
+        store_files = []
+        for relative, role in listing:
+            require(relative in context['files'], 'Owned file is missing from the store: '+relative, 'corrupt_store')
+            store_files.append((relative, role))
+        # The archive views (origin text and the revision snapshot) are not store authority, so they are read from disk, every one.
+        for name in sorted(self._entries('archive/'+idea_id)):
+            require(re.fullmatch(r'r[1-9][0-9]*\.json', name) is not None, 'Unrecognized archive file: archive/'+idea_id+'/'+name, 'corrupt_store')
+            store_files.append(('archive/'+idea_id+'/'+name, 'archive view'))
+        others = {entry['record']['blob_path'] for key, entries in context.get('asset_entries', {}).items() if key != idea_id
+                  for entry in entries if entry['record']['kind'] == 'asset'}
+        mine = context.get('asset_entries', {}).get(idea_id, [])
+        blobs = sorted({entry['record']['blob_path'] for entry in mine if entry['record']['kind'] == 'asset'} - others)
+        # Only upload intents and finished assets carry an upload id; a design set (the Visualize choice) has none.
+        carries = ('upload-intent', 'asset')
+        uploads = {entry['record']['upload_id'] for entry in mine if entry['record']['kind'] in carries}
+        other_uploads = {entry['record']['upload_id'] for key, entries in context.get('asset_entries', {}).items() if key != idea_id
+                         for entry in entries if entry['record']['kind'] in carries}
+        stages = sorted(path for path in context.get('asset_paths', {}).get('staging', ())
+                        if 'upload_'+_ASSET_STAGE.fullmatch(path.rsplit('/', 1)[1]).group(1) in uploads - other_uploads)
+        return store_files, [(path, 'asset blob') for path in blobs]+[(path, 'upload stage') for path in stages]
+
+    def remove_idea(self, idea_id, *, actor, confirm=False):
+        """Remove one idea and everything it owns, for good, in one journaled publish.
+
+        Without confirm: a preview and nothing written. With confirm, under the
+        store lock: the detail, history/<id>/**, its linked evidence, plan
+        evidence and index row go in one transaction together with the immutable
+        tombstone history/removed/<id>.md (idea id, actor, time, first words and
+        a manifest of removed paths with sha256). The asset blobs and retained
+        upload stages no other idea links are unlinked right after that commit.
+        Placement records stay as history (their files are positional and
+        immutable). Session receipts stay too; the Store cannot see saved browser
+        sessions, so the launcher drops the ones that select the idea after this commit.
+        Refusals: not_found, idea_moved, idea_delivered, and a held idea's
+        unsupported_idea_version sentence.
+        """
+        require(type(confirm) is bool, 'confirm must be a boolean')
+        check_id(idea_id)
+        text(actor, 'actor', 200)
+        if not self.path.exists():
+            raise IdeaError('not_found', 'Unknown idea: '+idea_id)
+        with self.transaction(write=confirm) as state:
+            context = self._contexts.active
+            self.refuse_held(idea_id)
+            require(idea_id in state['ideas'] and context is not None, 'Unknown idea: '+idea_id, 'not_found')
+            require(context['kind'] == 'markdown', 'Migrate before removing an idea', 'migration_required')
+            info = self.lifecycle(idea_id)
+            if info['lifecycle'] == 'moved':
+                self._refuse_moved(self._moved_map(context), idea_id)
+            if info['lifecycle'] == 'delivered':
+                raise IdeaError('idea_delivered', 'This idea was delivered; its record is kept', delivery=info['delivery'])
+            md = _markdown()
+            store_files, loose = self._removal_plan(context, idea_id)
+            listing = []
+            for relative, role in store_files:
+                raw = context['files'][relative] if relative in context['files'] else read_bytes(self._safe(relative), MAX_STATE)
+                listing.append(dict(path=relative, bytes=len(raw), sha256=digest(raw), role=role))
+            for relative, role in loose:
+                size, sha = self._file_print(relative)
+                listing.append(dict(path=relative, bytes=size, sha256=sha, role=role))
+            origin = state['ideas'][idea_id]['origin']['text']
+            words = _first_words(origin)
+            number = 1
+            while removed_path(idea_id, number) in context['files']:
+                number += 1  # the idea came back through import-idea after an earlier removal
+            tombstone = removed_path(idea_id, number)
+            preview = dict(idea_id=idea_id, removed=False, dry_run=not confirm, first_words=words,
+                           position=state['order'].index(idea_id)+1, files=listing, tombstone=tombstone,
+                           kept=['placement records (history/backlog/*)', 'session receipts (session-recovery/*)'])
+            if not confirm:
+                return dict(preview, write_result=None)
+            require(context['write'], 'Removal requires a writable Store transaction', 'invalid_transaction')
+            require(tombstone not in context['files'], 'This idea already has a removal record', 'save_conflict')
+            baseline = context['baseline']
+            trial = copy.deepcopy(state)
+            del trial['ideas'][idea_id]
+            trial['order'].remove(idea_id)
+            for key in [k for k in trial['archives'] if k.startswith(idea_id+'/')]:
+                del trial['archives'][key]
+            trial['transaction_revision'] = baseline['transaction_revision']+1
+            validate(trial)
+            raw_tombstone = _encode_removed(idea_id, actor, now(), words, [dict(path=i['path'], sha256=i['sha256']) for i in listing],
+                                            state['backlog_revision'])
+            previous = context['docs']['IDEAS.md']
+            if self.held:
+                previous = self._index_without_held(previous, baseline)
+            pins = copy.deepcopy(previous.metadata['extensions'])
+            pins[REMOVAL_EXTENSION] = removal_links(pins)+[dict(idea_id=idea_id, path=tombstone, sha256=digest(raw_tombstone))]
+            index = md.encode_index(trial, pins, previous=previous, previous_state=baseline)
+            held_view = index  # what a load sees in memory while ideas are held: their rows filtered out
+            if self.held:
+                index = self._splice_held_rows(context['docs']['IDEAS.md'], index)
+            gone = {relative for relative, _ in store_files}
+            after = {path: raw for path, raw in context['files'].items() if path not in gone}
+            after['IDEAS.md'] = index
+            after[tombstone] = raw_tombstone
+            if not self._moved_map(context):
+                # A fresh load of what is about to be published, through the same held-filtered view a load uses.
+                rebuilt = md.decode_state(dict(after, **{'IDEAS.md': held_view}))
+                require(rebuilt['order'] == trial['order'] and idea_id not in rebuilt['ideas'],
+                        'Removal would not reload identically', 'corrupt_store')
+            changes = {path: raw for path, raw in after.items() if context['files'].get(path) != raw}
+            published = self._publish_commit(trial, context, after, changes, removals=sorted(gone))
+            state.clear()
+            state.update(trial)
+            self._unlink_removed(loose, store_files)
+            return dict(preview, removed=True, write_result=published)
+
+    def _finish_removals(self, context):
+        """Under the store lock, on every open: finish what an interrupted removal left behind.
+
+        A removal unlinks its blobs and upload stages after the journal commit. The tombstone's
+        manifest names them, so any such path that still exists, still holds the bytes the
+        manifest recorded and is not linked by a live idea is unlinked now, and the
+        directories are fsynced. Anything else at that path is not ours and stays.
+        """
+        if self.held:
+            # A held idea is never parsed, so the links it may hold are unknown: finish nothing until none is held.
+            self.finished_removals = []
+            return
+        live_blobs, live_uploads = set(), set()
+        for entries in context['asset_entries'].values():
+            for entry in entries:
+                record = entry['record']
+                if record['kind'] == 'asset':
+                    live_blobs.add(record['blob_path'])
+                if record['kind'] in ('upload-intent', 'asset'):
+                    live_uploads.add(record['upload_id'])
+        finished, folders = [], set()
+        for relative, raw in context['files'].items():
+            if not _TOMBSTONE.fullmatch(relative):
+                continue
+            for item in _decode_removed(raw, relative)['manifest']:
+                path = item['path']
+                if path.startswith('assets/blobs/'):
+                    if path in live_blobs:
+                        continue
+                elif path.startswith('assets/staging/'):
+                    match = _ASSET_STAGE.fullmatch(path.rsplit('/', 1)[1])
+                    if match is None or 'upload_'+match.group(1) in live_uploads:
+                        continue
+                else:
+                    continue
+                try:
+                    target = self._safe(path)
+                    if not target.is_file() or target.is_symlink() or self._file_print(path)[1] != item['sha256']:
+                        continue
+                    target.unlink()
+                except OSError:  # gone already, or this process may not unlink it: not ours to force
+                    continue
+                finished.append(path)
+                folders.add(target.parent)
+                context['asset_paths'].get('blobs' if path.startswith('assets/blobs/') else 'staging', set()).discard(path)
+        for folder in sorted(folders):
+            sync_directory(folder)
+        self.finished_removals.extend(sorted(finished))
+
+    def _unlink_removed(self, loose, store_files):
+        """After the commit: unlink the blobs and stages, then any history folder the removal emptied.
+
+        While an idea is held its links are unknown, so its blobs may be shared: the blobs and stages
+        stay, named in the tombstone, and a later open with nothing held finishes them."""
+        for relative, _ in ([] if self.held else loose):
+            try:
+                self._safe(relative).unlink()
+            except FileNotFoundError:
+                pass
+        folders = sorted({str(Path(relative).parent) for relative, _ in store_files}, key=len, reverse=True)
+        for folder in folders:
+            path = self.path/folder
+            while path != self.path and folder.startswith(('history/idea_', 'archive/idea_')):
+                try:
+                    path.rmdir()
+                except OSError:
+                    break
+                path = path.parent
+                if path.name in ('history', 'archive'):
+                    break
+        sync_directory(self.path)
+
+    def lifecycles(self, state):
+        """Inside a transaction: {idea_id: dict(lifecycle, home, delivery)} for every idea, one pass."""
+        context = getattr(self._contexts, 'active', None)
+        if context is None and not self.path.exists():
+            return {key: dict(lifecycle='active', home=None, delivery=None) for key in state['ideas']}  # nothing stored yet
+        require(context is not None, 'Lifecycle requires a Store transaction', 'invalid_transaction')
+        md = _markdown()
+        moved = self._moved_map(context)
+        delivered = {}
+        index = context['docs'].get('IDEAS.md')
+        if index is not None:
+            for link in md.delivered_links(index.metadata['extensions']):
+                delivered[link['idea_id']] = md.decode_delivered(context['files'][link['path']])
+        return {key: dict(lifecycle='delivered' if key in delivered else 'moved' if key in moved else 'active',
+                          home=self._home(moved[key]) if key in moved else None, delivery=delivered.get(key))
+                for key in state['ideas']}
+
+    def deliver(self, state, idea_id, *, ref, actor, timestamp=None):
+        """Record that a moved idea was delivered: one immutable pointer plus its index link.
+
+        Call inside a writable transaction with its unmodified state. Published
+        in one journaled commit. Same ref again returns repeated=True without a
+        write; a different ref raises delivery_conflict; an idea that is not
+        moved raises not_moved. There is no way back.
+        """
+        context = getattr(self._contexts, 'active', None)
+        require(context is not None and context['write'], 'Deliver requires a writable Store transaction', 'invalid_transaction')
+        require(not context.get('request_running'), 'Request mutators cannot publish or perform I/O', 'invalid_transaction')
+        require(context['kind'] == 'markdown', 'Migrate before delivering an idea', 'migration_required')
+        md = _markdown()
+        check_id(idea_id)
+        require(idea_id in state['ideas'], 'Unknown idea', 'not_found')
+        require(state == context['baseline'], 'Deliver requires an unmodified transaction state', 'invalid_transaction')
+        text(actor, 'actor', 200)
+        current = self.lifecycle(idea_id)
+        require(current['lifecycle'] != 'active', 'Only a moved idea can be delivered', 'not_moved')
+        if current['delivery'] is not None:
+            if current['delivery']['ref'] != ref:
+                raise IdeaError('delivery_conflict', 'This idea was already delivered with a different reference',
+                                delivered_ref=current['delivery']['ref'])
+            return dict(idea_id=idea_id, ref=ref, repeated=True, delivery=current['delivery'], write_result=None)
+        pointer = md.encode_delivered(idea_id, ref=ref, actor=actor, timestamp=timestamp or now())
+        pointer_path = md.pointer_path(idea_id, 'delivered')
+        trial = copy.deepcopy(state)
+        trial['transaction_revision'] = context['baseline']['transaction_revision'] + 1
+        index = context['docs']['IDEAS.md']
+        index_extensions = copy.deepcopy(index.metadata['extensions'])
+        index_extensions[md.DELIVERED_EXTENSION] = md.delivered_links(index_extensions) + [
+            dict(idea_id=idea_id, path=pointer_path, sha256=digest(pointer))]
+        after = dict(context['files'])
+        after[pointer_path] = pointer
+        after['IDEAS.md'] = md.encode_index(trial, index_extensions, previous=index, previous_state=context['baseline'])
+        changes = {path:raw for path,raw in after.items() if context['files'].get(path) != raw}
+        published = self._publish_commit(trial, context, after, changes)
+        state.clear()
+        state.update(trial)
+        return dict(idea_id=idea_id, ref=ref, repeated=False, delivery=md.decode_delivered(pointer),
+                    pointer_path=pointer_path, write_result=published)
+
+    def commit(self, state):
+        """Existing CLI/application contract; requests use the atomic receipt seam."""
+        context = getattr(self._contexts, 'active', None)
+        require(context is not None and context['write'], 'Commit requires a writable Store transaction', 'invalid_transaction')
+        require(not context.get('request_running'), 'Request mutators cannot publish or perform I/O', 'invalid_transaction')
+        after, changes, _ = self._prepare_commit(state, context)
+        return self._publish_commit(state, context, after, changes)
+
+    def _read_receipts(self, session_id):
+        relative = _request_ids(session_id)
+        path = self._safe(relative)
+        require(path.exists(), 'Initialized receipt session is missing; create a fresh session', 'receipt_session_missing')
+        try:
+            raw = read_bytes(path, MAX_RECEIPT_BYTES)
+            record = _receipt_record(decode(raw),session_id)
+        except (IdeaError, KeyError, TypeError, ValueError, RecursionError) as exc:
+            raise IdeaError('corrupt_receipts', 'Malformed initialized receipt session: '+session_id) from exc
+        return relative, raw, copy.deepcopy(record)
+
+    def create_session(self):
+        """Create fresh durable recovery metadata; never recreate a supplied ID.
+
+        Service session-open binds this ID to its separate private credentials.
+        Lost session files fail closed, including after a process/service restart.
+        """
+        with self.transaction(write=True) as state:
+            context = self._contexts.active
+            require(len(self._entries('session-recovery')) < MAX_STORE_FILES, 'Session recovery directory is full', 'receipt_capacity_exhausted')
+            session_id = 'session_'+uuid.uuid4().hex
+            relative = _request_ids(session_id)
+            require(not self._safe(relative).exists(), 'Generated session already exists', 'save_conflict')
+            raw = encoded(dict(schema_version=1,session_id=session_id,receipts={}))
+            after, changes, _ = self._prepare_commit(state,context,initial_zero=True)
+            self._publish_commit(state,context,after,changes,{relative:raw},{relative:None})
+            return session_id
+
+    def request_result(self, session_id, request_id, payload_digest=None):
+        """Reconcile a historical successful mutation under the same store lock."""
+        _request_ids(session_id,request_id)
+        require(payload_digest is None or (type(payload_digest) is str and re.fullmatch(r'[0-9a-f]{64}',payload_digest) is not None), 'Invalid payload digest')
+        with self.transaction():
+            _, _, record = self._read_receipts(session_id)
+            require(request_id in record['receipts'], 'Unknown request result', 'request_not_found')
+            receipt = record['receipts'][request_id]
+            require(payload_digest is None or payload_digest == receipt['payload_sha256'], 'Request ID was used for a different payload', 'request_conflict')
+            return copy.deepcopy(receipt['result'])
+
+    def mutate(self, session_id, request_id, validated_payload, mutator):
+        """One pure/state-only internal mutation + result in one recoverable journal.
+
+        The callable is never browser supplied. Schema/operation authorization
+        and revision CAS live in the trusted service/reducer; replay occurs first.
+        A callback may only edit its detached state and return bounded JSON.
+        Oversized results abort before publication, so external effects are banned.
+        """
+        return self._mutate_request(session_id,request_id,validated_payload,mutator)
+
+    def mutate_assets(self, session_id, request_id, validated_payload, mutator, *, prepare_records=None):
+        """Atomic pure decision + immutable asset appends + existing receipt.
+
+        After replay, optional trusted prepare_records(state) returns new records
+        without changing state. Store verifies identity/capacity/blob witnesses
+        at its local I/O boundary, then exposes prepared records in memory to
+        mutator(state). The ordinary Visualize handler can therefore validate a
+        new set before the same transaction publishes its accepted pointer.
+        Neither callback may wait/read network, read files or publish. The business
+        callback returns the existing bounded result dict, never raw record bytes.
+        No factory means existing-set acceptance without appending evidence.
+        """
+        require(prepare_records is None or callable(prepare_records), 'Trusted record factory is required')
+        return self._mutate_request(session_id,request_id,validated_payload,mutator,
+                                    asset_mode=True,prepare_records=prepare_records)
+
+    def _stage_assets(self, state, context, records, session_id):
+        from idea_asset_evidence import validate_record, encode_record, record_link, record_id
+        require(type(records) is list and len(records) <= _markdown().MAX_ASSET_LINKS,
+                'New asset record list exceeds capacity', 'too_large')
+        if not records:
+            return {}, {}, []
+        require(context['kind'] == 'markdown', 'Migrate before publishing asset evidence', 'migration_required')
+        staged = copy.deepcopy(context.get('asset_entries', {}))
+        appended, evidence, links, total = {}, {}, [], 0
+        known_ids = {record_id(entry['record']) for entries in staged.values() for entry in entries}
+        for value in records:
+            record = validate_record(value); key = record['idea_id']
+            rid = record_id(record)
+            require(rid not in known_ids, 'Asset record identity already exists', 'request_conflict')
+            known_ids.add(rid)
+            require(key in state['ideas'] and key+'.md' in context['docs'], 'Unknown asset idea', 'not_found')
+            require(record['session_id'] == session_id, 'Asset belongs to another receipt session', 'request_conflict')
+            raw = encode_record(record); link = record_link(record, raw)
+            total += len(raw)
+            require(total <= _markdown().MAX_ASSET_EVIDENCE_BYTES, 'New asset evidence exceeds byte limit', 'too_large')
+            staged.setdefault(key, []).append(dict(record=record, evidence=link, blob=None))
+            require(len(staged[key]) <= _markdown().MAX_ASSET_LINKS, 'Asset link capacity exhausted', 'too_large')
+            appended.setdefault(key, []).append(link)
+            evidence[link['path']] = raw; links.append(link)
+        self._asset_graph(state, staged)
+        # Existing witnesses were checked at transaction read. Candidate blobs
+        # are verified here, after replay/factory and before pure business logic.
+        for entries in staged.values():
+            for entry in entries:
+                if entry['record']['kind'] == 'asset' and entry['blob'] is None:
+                    entry['blob'] = self._asset_blob(entry['record'])
+        context['asset_entries'] = staged
+        context['retained_staging'] = self._retained_asset_stages(context['asset_paths'],staged)
+        return appended, evidence, links
+
+    def _mutate_request(self, session_id, request_id, validated_payload, mutator, *, asset_mode=False, prepare_records=None):
+        _request_ids(session_id,request_id)
+        require(not request_id.startswith(AGENT_RESPONSE_PREFIX), 'Agent response receipt namespace is reserved')
+        payload_hash = digest(_request_json(validated_payload))
+        require(callable(mutator), 'A trusted internal mutation callable is required')
+        with self.transaction(write=True) as state:
+            context = self._contexts.active
+            relative, before, record = self._read_receipts(session_id)
+            records = record['receipts']
+            if request_id in records:
+                previous = records[request_id]
+                require(previous['payload_sha256'] == payload_hash, 'Request ID was used for a different payload', 'request_conflict')
+                return copy.deepcopy(previous['result'])
+            require(len(records) < MAX_SESSION_RECEIPTS and len(before) < MAX_RECEIPT_BYTES,
+                    'Receipt capacity exhausted; create a fresh session', 'receipt_capacity_exhausted')
+            appended, asset_bytes, asset_links = {}, {}, []
+            if prepare_records is not None:
+                unchanged = copy.deepcopy(state)
+                context['request_running'] = True
+                try:
+                    candidates = prepare_records(state)
+                finally:
+                    context['request_running'] = False
+                require(state == unchanged, 'Asset record factory must not mutate state', 'invalid_handler')
+                appended, asset_bytes, asset_links = self._stage_assets(state,context,candidates,session_id)
+            context['request_running'] = True
+            try:
+                business = mutator(state)
+            finally:
+                context['request_running'] = False
+            _request_json(business)
+            if appended:
+                require(len(appended) == 1 and type(business.get('idea_id')) is str
+                        and business['idea_id'] in appended,
+                        'Asset append receipt must name exactly its single idea', 'invalid_handler')
+            # Accepted-state validity remains the pure business reducer's job;
+            # graph validity also guards factory records after its state changes.
+            if asset_mode:
+                self._asset_graph(state, context.get('asset_entries', {}))
+            after, changes, changed = self._prepare_commit(state,context,initial_zero=True,
+                asset_append=appended or None,asset_evidence=asset_bytes if appended else None)
+            result = copy.deepcopy(business)
+            metadata = {'ok':True,'code':'ok','request_id':request_id,'write_state':'applied' if changed else 'no_op',
+                        'backlog_revision':state['backlog_revision']}
+            if asset_mode:
+                metadata['asset_records'] = copy.deepcopy(asset_links)
+            for key,value in metadata.items():
+                require(key not in result or (type(result[key]) is type(value) and result[key] == value), 'Mutation returned conflicting result metadata: '+key)
+                result[key] = value
+            idea_id = result.get('idea_id')
+            if idea_id is not None:
+                check_id(idea_id)
+                require(idea_id in state['ideas'], 'Result links an unknown idea')
+                idea = state['ideas'][idea_id]
+                counters = {'revision':idea['revision']}
+                if 'workflow' in idea:
+                    counters['draft_version'] = idea['workflow']['draft_version']
+                for key,value in counters.items():
+                    require(key not in result or (type(result[key]) is int and result[key] == value), 'Mutation result counter mismatch: '+key)
+                    result[key] = value
+            _request_json(result)
+            _result_counters(result)
+            records[request_id] = dict(payload_sha256=payload_hash,result=result)
+            _receipt_record(record,session_id)
+            raw = encoded(record)
+            require(len(raw) <= MAX_RECEIPT_BYTES, 'Receipt capacity exhausted; create a fresh session', 'receipt_capacity_exhausted')
+            self._publish_commit(state,context,after,changes,{relative:raw},{relative:digest(before)})
+            return copy.deepcopy(result)
+
+    def asset_records(self, state, idea_id, *, with_links=False):
+        """Detached verified records, including prepared records, with no I/O."""
+        context = getattr(self._contexts, 'active', None)
+        require(context is not None and state is context.get('state'),
+                'Asset inspection requires the active transaction', 'invalid_transaction')
+        require(type(with_links) is bool, 'Asset link option must be boolean')
+        check_id(idea_id)
+        require(idea_id in state['ideas'], 'Unknown asset idea', 'not_found')
+        entries = context.get('asset_entries', {}).get(idea_id, [])
+        return copy.deepcopy(entries if with_links else [entry['record'] for entry in entries])
+
+    def asset_inventory(self, state, idea_id):
+        """Memory-only records plus full-count/bounded-ID store orphan diagnostics."""
+        entries = self.asset_records(state,idea_id,with_links=True)
+        context = self._contexts.active
+        paths = context.get('asset_paths', {name:set() for name in ('evidence','blobs','staging')})
+        return dict(records=entries, orphans=self._asset_orphans(
+            paths,context.get('asset_entries', {}),context.get('retained_staging', ())))
+
+    def agent_proposals(self, state, idea_id, *, with_links=False):
+        """Detached verified suggestions in the existing transaction.
+
+        This is a memory-only accessor, including inside acceptance mutators.
+        The transaction read verified links/bytes/receipts; no nested lock,
+        filesystem read, source eligibility check or publication occurs here.
+        with_links retains the exact verified relative Markdown path/hash witness.
+        """
+        context = getattr(self._contexts, 'active', None)
+        require(context is not None and state is context.get('state'),
+                'Proposal inspection requires the active transaction', 'invalid_transaction')
+        require(type(with_links) is bool, 'Proposal link option must be boolean')
+        check_id(idea_id)
+        require(idea_id in state['ideas'], 'Unknown proposal idea', 'not_found')
+        if context['kind'] != 'markdown':
+            return []
+        from idea_proposal_evidence import decode_proposal
+        document = context['docs'].get(idea_id+'.md')
+        # An unpublished new idea has no persisted evidence yet.
+        if document is None:
+            return []
+        records = []
+        for link in _markdown().agent_proposal_links(document.metadata['extensions'], idea_id):
+            require(link['path'] in context['files'], 'Missing verified proposal bytes', 'corrupt_store')
+            record = decode_proposal(context['files'][link['path']], path=link['path'],
+                                     expected_idea_id=idea_id, link=link)
+            records.append(dict(record=record, evidence={name:link[name] for name in ('path','sha256')})
+                           if with_links else record)
+        return copy.deepcopy(records)
+
+    def handoffs(self, state, idea_id, *, with_links=False):
+        """Detached historical packets verified by the active transaction read.
+
+        Memory only: no filesystem read, nested lock, publication or currentness
+        assertion. Evidence keeps the confined relative link, including packet ID.
+        """
+        context = getattr(self._contexts, 'active', None)
+        require(context is not None and state is context.get('state'),
+                'Handoff inspection requires the active transaction', 'invalid_transaction')
+        require(type(with_links) is bool, 'Handoff link option must be boolean')
+        check_id(idea_id)
+        require(idea_id in state['ideas'], 'Unknown handoff idea', 'not_found')
+        if context['kind'] != 'markdown':
+            return []
+        document = context['docs'].get(idea_id+'.md')
+        if document is None:
+            return []
+        from idea_handoff_evidence import decode_record
+        records = []
+        for link in _markdown().handoff_links(document.metadata['extensions'], idea_id):
+            packet = decode_record(context['files'][link['path']],path=link['path'],
+                                   expected_idea_id=idea_id,link=link)
+            records.append(dict(record=packet,evidence=copy.deepcopy(link)) if with_links else packet)
+        return copy.deepcopy(records)
+
+    def handoff_observations(self, state, idea_id):
+        """Trusted current source observations for publication and managed CLI.
+
+        Unlike historical handoffs(), this checks current shared eligibility and
+        the existing canonical workspace directory. Blob bytes were verified by
+        transaction read and are rehashed by commit CAS. No user path is returned
+        as a Store object: document/blob paths are generated from verified IDs.
+        Never call this I/O boundary from a pure factory or request mutator.
+        """
+        from idea_handoff_evidence import eligible_source
+        context = getattr(self._contexts,'active',None)
+        require(context is not None and state is context.get('state') and not context.get('request_running'),
+                'Handoff observations require the active transaction boundary', 'invalid_transaction')
+        check_id(idea_id)
+        require(idea_id in state['ideas'], 'Unknown handoff idea', 'not_found')
+        idea = state['ideas'][idea_id]
+        visual = idea.get('workflow',{}).get('steps',{}).get('visualize',{}).get('fields')
+        design = None
+        if visual is not None and visual['disposition'] == 'accepted_set':
+            records = self.asset_records(state,idea_id)
+            selected = next((record for record in records if record['kind'] == 'design-set'
+                             and record['set_id'] == visual['design_set_id']),None)
+            require(selected is not None, 'Accepted design set is missing', 'not_ready')
+            design = dict(set_id=selected['set_id'],members=[dict(member,
+                path=str(self._safe('assets/blobs/'+member['asset_id']+'.bin').resolve(strict=True))) for member in selected['members']])
+        eligible_source(state,idea,design)
+        workspace = Path(idea['workflow']['steps']['capture']['fields']['workspace']['path'])
+        try:
+            require(workspace.is_absolute() and workspace.resolve(strict=True) == workspace
+                    and stat.S_ISDIR(workspace.lstat().st_mode) and not workspace.is_symlink(),
+                    'Confirmed workspace is no longer a canonical directory', 'workspace_unavailable')
+        except (OSError,RuntimeError) as exc:
+            raise IdeaError('workspace_unavailable','Confirmed workspace is unavailable on the service host') from exc
+        key = idea_id; revision = idea['revision']
+        source_files = {}
+        for name,relative in (('detail',key+'.md'),('index','IDEAS.md'),
+                              ('revision','history/'+key+'/r'+str(revision)+'.md')):
+            require(relative in context['files'], 'Handoff source is not persisted', 'not_ready')
+            # Preserve original Store spelling for safety checks; canonicalize
+            # only generated observations after root/child symlink checks.
+            source_files[name] = dict(path=str(self._safe(relative).resolve(strict=True)),sha256=digest(context['files'][relative]))
+        return copy.deepcopy(dict(source_files=source_files,design_set=design))
+
+    def _handoff_http_preflight(self, packet, link, result):
+        """Bound the full real HTTP representation before any publication."""
+        from idea_handoff_evidence import render_prompt, recorded_packet_path
+        absolute = recorded_packet_path(packet,link)
+        handoff = dict(handoff_id=packet['handoff_id'],source_revision=packet['source_revision'],
+            source_digest=packet['source_digest'],path=absolute,sha256=link['sha256'],
+            prompt=render_prompt(packet,absolute),source_files=packet['source_files'],design_set=packet['design_set'])
+        try:
+            _request_json(dict(result,handoff=handoff,handoff_current=True))
+            _request_json(dict(result,code='historical_handoff',handoff=handoff,handoff_current=False))
+        except IdeaError as exc:
+            if exc.code == 'too_large':
+                raise IdeaError('handoff_capacity','Full handoff response exceeds the 1 MiB limit') from exc
+            raise
+
+    def publish_handoff(self, session_id, request_id, validated_payload, build_packet):
+        """Packet/link/compact receipt in one existing recoverable writer.
+
+        validated_payload is Service's exact {operation:'handoff',payload:...}
+        envelope. Factory signature equals codec.build_record: detached state,
+        detached idea, keyword source_files/design_set/generated identities,
+        OS-bound actor and timestamp. It is pure; no I/O/locks/publication/waits.
+        Return the immutable compact receipt, never a currentness assertion.
+        Replay comes before current eligibility, workspace checks and new CAS.
+        """
+        from idea_handoff_evidence import (build_record, encode_record, eligible_source,
+            validate_record, record_link, verify_current_paths)
+        _request_ids(session_id,request_id)
+        require(not request_id.startswith(AGENT_RESPONSE_PREFIX), 'Agent response receipt namespace is reserved')
+        payload_hash = digest(_request_json(validated_payload))
+        require(callable(build_packet), 'Trusted handoff factory is required')
+        require(set(validated_payload) == {'operation','payload'} and validated_payload['operation'] == 'handoff',
+                'Unexpected handoff envelope')
+        payload = validated_payload['payload']
+        require(type(payload) is dict and set(payload) == {'request_id','idea_id','expected_revision',
+                'expected_draft_version','expected_backlog_revision'} and payload['request_id'] == request_id,
+                'Unexpected handoff request fields')
+        check_id(payload['idea_id'])
+        for name in ('expected_revision','expected_draft_version','expected_backlog_revision'):
+            integer(payload[name],name,1 if name == 'expected_revision' else 0)
+        with self.transaction(write=True) as state:
+            context = self._contexts.active
+            relative,before,session = self._read_receipts(session_id)
+            receipts = session['receipts']
+            if request_id in receipts:
+                prior = receipts[request_id]
+                require(prior['payload_sha256'] == payload_hash, 'Request ID was used for a different payload', 'request_conflict')
+                return copy.deepcopy(prior['result'])
+            require(len(receipts) < MAX_SESSION_RECEIPTS and len(before) < MAX_RECEIPT_BYTES,
+                    'Receipt capacity exhausted; create a fresh session', 'receipt_capacity_exhausted')
+            key = payload['idea_id']
+            require(key in state['ideas'], 'Unknown handoff idea', 'not_found')
+            idea = state['ideas'][key]
+            require(payload['expected_revision'] == idea['revision'], 'Stale handoff revision', 'stale_revision')
+            require(payload['expected_draft_version'] == idea.get('workflow',{}).get('draft_version'),
+                    'Stale handoff draft version', 'stale_draft_version')
+            require(payload['expected_backlog_revision'] == state['backlog_revision'], 'Stale handoff backlog', 'stale_backlog')
+            observations = self.handoff_observations(state,key)
+            source = eligible_source(state,idea,observations['design_set'])
+            entries = self.handoffs(state,key,with_links=True)
+            chosen = None
+            for n,entry in reversed(list(enumerate(entries,1))):
+                if (entry['record']['source_revision'] != idea['revision'] or
+                    entry['record']['source_digest'] != source['source_digest']):
+                    continue
+                try:
+                    verify_current_paths(entry['record'],observations['source_files'],observations['design_set'])
+                except IdeaError as exc:
+                    if exc.code != 'stale_source': raise
+                    continue
+                chosen = n,entry
+                break
+            append, raw_map = None, None
+            if chosen is not None:
+                ordinal,entry = chosen; packet,link = entry['record'],entry['evidence']
+            else:
+                require(len(entries) < _markdown().MAX_HANDOFF_LINKS, 'Handoff link capacity exhausted', 'handoff_capacity')
+                args = dict(observations,handoff_id='handoff_'+uuid.uuid4().hex,session_id=session_id,
+                            request_id=request_id,actor=self.observer,timestamp=now())
+                detached = copy.deepcopy(state); detached_idea = detached['ideas'][key]
+                untouched = copy.deepcopy(detached)
+                context['request_running'] = True
+                try:
+                    packet = validate_record(build_packet(detached,detached_idea,**copy.deepcopy(args)))
+                finally:
+                    context['request_running'] = False
+                require(detached == untouched and state == context['baseline'], 'Handoff factory must not mutate state', 'invalid_handler')
+                require(packet == build_record(state,idea,**args), 'Handoff factory changed trusted source observations', 'invalid_handler')
+                raw = encode_record(packet); link = record_link(packet,raw)
+                ordinal = len(entries)+1; append = (key,link); raw_map = {link['path']:raw}
+            result = dict(ok=True,code='ok',request_id=request_id,write_state='applied' if append else 'no_op',
+                idea_id=key,revision=idea['revision'],draft_version=idea['workflow']['draft_version'],
+                backlog_revision=state['backlog_revision'],handoff_index=ordinal,**link)
+            self._handoff_http_preflight(packet,link,result)
+            receipts[request_id] = dict(payload_sha256=payload_hash,result=copy.deepcopy(result))
+            _receipt_record(session,session_id); receipt_raw = encoded(session)
+            require(len(receipt_raw) <= MAX_RECEIPT_BYTES, 'Receipt capacity exhausted; create a fresh session', 'receipt_capacity_exhausted')
+            after,changes,_ = self._prepare_commit(state,context,initial_zero=True,
+                handoff_append=append,handoff_evidence=raw_map)
+            witnessed = dict(context.get('proposal_receipts',{}),**{relative:receipt_raw})
+            require(len(after)+len(witnessed) <= MAX_STORE_FILES
+                    and sum(map(len,after.values()))+sum(map(len,witnessed.values())) <= MAX_STORE_BYTES,
+                    'Store and linked receipt after-images exceed capacity', 'too_large')
+            context.setdefault('proposal_receipts',{})[relative] = before
+            self._publish_commit(state,context,after,changes,{relative:receipt_raw},{relative:digest(before)})
+            return copy.deepcopy(result)
+
+    def persist_agent_proposal(self, state, evidence, *, actor, validate_current):
+        """Publish suggestion/link/receipt under an existing binding->Store guard.
+
+        Never opens a Store transaction or accepts an idea. validate_current is
+        trusted pure code, returning the exact checked source on first publish;
+        replay precedes it. Generated metadata is excluded from replay hashing.
+        """
+        from idea_proposal_evidence import encode_proposal, proposal_link
+        context = getattr(self._contexts,'active',None)
+        require(context is not None and context['write'] and not context.get('request_running')
+                and state is context.get('state') and state == context['baseline'],
+                'Agent evidence requires the active unchanged writable transaction', 'invalid_transaction')
+        require(context['kind'] == 'markdown', 'Migrate before publishing agent evidence', 'migration_required')
+        require(callable(validate_current), 'Trusted proposal source validator is required')
+        payload = _agent_payload(evidence,actor)
+        evidence = payload['evidence']
+        payload_hash = digest(_request_json(payload))
+        rid = _agent_receipt_id(evidence)
+        sid = evidence['correlation']['session_id']
+        relative, before, session = self._read_receipts(sid)
+        records = session['receipts']
+        if rid in records:
+            previous = records[rid]
+            require(previous['payload_sha256'] == payload_hash, 'Agent reply conflicts with recorded response', 'request_conflict')
+            result = previous['result']
+            require(set(result) == {'ok','code','request_id','write_state','idea_id','revision',
+                    'draft_version','backlog_revision','proposal_index','proposal_id','path','sha256'},
+                    'Malformed recorded agent response result', 'corrupt_store')
+            link = {name:result[name] for name in ('proposal_id','path','sha256')}
+            # Every link is verified against its receipt during transaction read.
+            links = _markdown().agent_proposal_links(context['docs'][evidence['correlation']['idea_id']+'.md'].metadata['extensions'],
+                                                       evidence['correlation']['idea_id'])
+            require(link in links, 'Recorded agent response lacks its linked evidence', 'corrupt_store')
+            return copy.deepcopy(link)
+        require(len(records) < MAX_SESSION_RECEIPTS and len(before) < MAX_RECEIPT_BYTES,
+                'Receipt capacity exhausted; create a fresh session', 'receipt_capacity_exhausted')
+        correlation = evidence['correlation']; key = correlation['idea_id']
+        require(key in state['ideas'], 'Unknown proposal idea', 'not_found')
+        idea = state['ideas'][key]
+        require(correlation['accepted_revision'] == idea['revision'], 'Stale proposal idea revision', 'stale_revision')
+        require(correlation['draft_version'] == idea.get('workflow',{}).get('draft_version',0),
+                'Stale proposal draft version', 'stale_draft_version')
+        checked_state = copy.deepcopy(state)
+        context['request_running'] = True
+        try:
+            checked_source = validate_current(checked_state,copy.deepcopy(evidence))
+        finally:
+            context['request_running'] = False
+        require(checked_state == state and state == context['baseline'], 'Proposal source validation must not mutate state', 'invalid_handler')
+        require(_request_json(checked_source) == _request_json(evidence['source']), 'Proposal source changed', 'stale_source')
+        record = _agent_record(evidence,actor,'proposal_'+uuid.uuid4().hex,now())
+        raw = encode_proposal(record); link = proposal_link(record,raw)
+        ordinal = len(_markdown().agent_proposal_links(context['docs'][key+'.md'].metadata['extensions'],key))+1
+        result = dict(ok=True,code='ok',request_id=rid,write_state='applied',idea_id=key,
+            revision=correlation['accepted_revision'],draft_version=correlation['draft_version'],
+            backlog_revision=state['backlog_revision'],proposal_index=ordinal,**link)
+        records[rid] = dict(payload_sha256=payload_hash,result=result)
+        _receipt_record(session,sid)
+        receipt_raw = encoded(session)
+        require(len(receipt_raw) <= MAX_RECEIPT_BYTES, 'Receipt capacity exhausted; create a fresh session', 'receipt_capacity_exhausted')
+        after, changes, _ = self._prepare_commit(state,context,proposal_append=(key,link),proposal_evidence={link['path']:raw})
+        context.setdefault('proposal_receipts', {})[relative] = before
+        self._publish_commit(state,context,after,changes,{relative:receipt_raw},{relative:digest(before)})
+        return copy.deepcopy(link)
+
+    def view_issues(self, state, repair=False):
+        issues = [ 'Idea '+key+' is held: '+self.held[key]+' ('+self._held_raw.get(key, '')+')' for key in self.held]
+        views = [(self.path/'archive'/key, encoded(snapshot)) for key,snapshot in state['archives'].items()]
+        for idea in state['ideas'].values():
+            for plan in idea['plans']:
+                expected_path = self.path/'plan-evidence'/(plan['plan_id']+'.md')
+                if str(expected_path) != plan['path']:
+                    issues.append('Plan evidence path does not match store: '+plan['path'])
+                    continue
+                views.append((expected_path, plan['content'].encode('utf-8')))
+        for path, expected in views:
+            relative = path.relative_to(self.path).as_posix()
+            try:
+                self._safe(relative)
+                if path.exists():
+                    if read_bytes(path, MAX_STATE) != expected:
+                        issues.append('Immutable archive differs: '+str(path))
+                elif repair:
+                    atomic_write(path, expected, immutable=True)
+                else:
+                    issues.append('Missing archive: '+str(path))
+            except (OSError, IdeaError) as exc:
+                issues.append(str(path)+': '+str(exc))
+        return issues
+
+    def artifact_issues(self, state):
+        issues = []
+        for idea in state['ideas'].values():
+            for entry in idea['plans']+idea['executions']:
+                try:
+                    raw = read_bytes(entry['path'])
+                    require(digest(raw) == entry['sha256'], 'Hash differs: '+entry['path'], 'changed_artifact')
+                    if 'receipt' in entry:
+                        require(decode(raw) == entry['receipt'], 'Receipt content differs: '+entry['path'])
+                except (OSError, IdeaError) as exc:
+                    issues.append(str(exc))
+        return issues
