@@ -45,7 +45,7 @@ Placeholders such as `/absolute/path/to/...` are yours to replace.
 
 ### 4.1 Automated harness
 
-From the repository root:
+From the skill folder (`skills/glitch-idea` in the tools repository):
 
 ```bash
 node tests/browser_flow_smoke.mjs \

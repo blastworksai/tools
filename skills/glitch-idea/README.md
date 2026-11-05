@@ -85,7 +85,7 @@ You may instead create it yourself (`python3 -m venv /absolute/path/to/venv` or 
 
 ## Install
 
-From this repository's root.
+From this skill's folder, `skills/glitch-idea` in the [tools repository](https://github.com/blastworksai/tools) (clone it, then `cd tools/skills/glitch-idea`).
 Replace the placeholders with your own absolute paths.
 
 ```bash

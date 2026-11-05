@@ -16,6 +16,7 @@ The results are public for each skill: follow its Walkdown link in the table.
 | --- | --- | --- |
 | [DANGER PROTOCOL](skills/dangerprotocol/README.md) | Read-only check of a GitHub repo before you install or run it. | [results](https://blastworksai.github.io/tools/skills/dangerprotocol/walkdown/summary.html) |
 | [TERN PLUGIN DEVELOPMENT](skills/tern-plugin-development/README.md) | Create, test, debug, and package Tern plugins with isolated integration tests and pure Luau modules. | [results](https://blastworksai.github.io/tools/skills/tern-plugin-development/walkdown/summary.html) |
+| [GLITCH IDEA](skills/glitch-idea/README.md) | Capture a software idea, explore it step by step in a local browser page with your agent, and hand a planning prompt to `/glitch-plan`. Opens on your own computer over SSH, docked in Tern. | [results](https://blastworksai.github.io/tools/skills/glitch-idea/walkdown/summary.html) |
 
 ## PLUGINS
 
@@ -26,6 +27,7 @@ The results are public for each skill: follow its Walkdown link in the table.
 | [SPAWN](plugins/tern/SPAWN/README.md) | Tern | Define and SPAWN your (entire) agentic army. |
 | [USAGE](plugins/tern/USAGE/README.md) | Tern | Show your subscription usage across all agents. DEPENDENCY: NEEDS [SPAWN](plugins/tern/SPAWN/README.md). |
 | [ORCH+](plugins/tern/ORCH+/README.md) | Tern | Orchestration+ Basic Improvements to Native Tern Orchestration. DEPENDENCY: NEEDS [SPAWN](plugins/tern/SPAWN/README.md); [USAGE](plugins/tern/USAGE/README.md) optional for quota routing (needs a USAGE release with the capacity interface). |
+| [GLITCH IDEA](skills/glitch-idea/glitch-idea/tern-plugin/README.md) | Tern | Opens the GLITCH IDEA page, already paired, in a pane above your focused pane. Part of the [GLITCH IDEA](skills/glitch-idea/README.md) skill. |
 
 ## Found a bug? Have an idea?
 
