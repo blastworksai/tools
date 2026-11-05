@@ -9,6 +9,47 @@ It is not an upstream Glitch engine release.
 It handles **new ideas only**; it does not import, synchronise or modify an existing backlog.
 Glitch's planning and execution workflows are optional integrations.
 
+## The flow, step by step
+
+These screenshots walk one made-up idea (a plant-watering reminder) through the browser flow, from Capture to the planning prompt.
+Everything in them is demo content.
+
+**1. Capture.** You write the idea in your own words and name the project folder it is for.
+
+![Capture](docs/screenshots/01-capture.png)
+
+**2. Priorities.** You rate urgency and importance from 1 to 10; no AI assessment prefills them.
+
+![Priorities](docs/screenshots/02-priorities.png)
+
+**3. Methods.** The page shows what your Glitch remembers, and you pick one of four equal development methods and may say why.
+
+![Methods](docs/screenshots/03-methods.png)
+
+**4. Discovery.** Your terminal agent and you settle the problem, audience, current workaround, evidence, kill criteria, existing products and a challenge, and the answers appear in the page.
+
+![Discovery](docs/screenshots/04-discovery.png)
+
+**5. Exploration.** The desired result, alternatives, risks, scope, next slice and a short sketch of the first items are worked out through your chosen method.
+
+![Exploration](docs/screenshots/05-exploration.png)
+
+**6. Visualize.** You can design in Claude Design, build a prototype in place, or skip visualization; here it was skipped.
+
+![Visualize](docs/screenshots/06-visualize.png)
+
+**7. Assess.** You review the agent's WSJF assessment next to your own ratings and choose the idea's place in the backlog.
+
+![Assess](docs/screenshots/07-assess.png)
+
+**8. Review.** Every saved decision is shown in one place.
+
+![Review](docs/screenshots/08-review.png)
+
+**Planning prompt.** Generate planning prompt builds the immutable packet and a ready-made `/glitch-plan` prompt that you copy into a new window.
+
+![Planning prompt](docs/screenshots/09-review-planning-prompt.png)
+
 ## Status
 
 | Platform | State |
@@ -24,6 +65,9 @@ Where this document says "not yet qualified" it means exactly that: nothing has 
 - Python **3.10 or newer**, for both the installer and the runtime.
 - **PyYAML 6.0.3 (MIT)**, pinned in `glitch-idea/requirements.txt`, inside the runtime interpreter's environment.
 - A browser on the machine you sit at (the operator's own computer).
+- **pip**, which you run yourself when the installer asks for PyYAML.
+- Optional, for SSH mode (the browser is on another computer than the one running the service): an SSH client and SSH keys in each direction; the detail is in the runbook.
+- Privacy: Discovery's prior-art question searches the web with your agent's own web tool, and the query describes your idea. Everything else stays on 127.0.0.1.
 
 The installer never downloads anything.
 If the runtime lacks PyYAML it stops with error code `runtime_prerequisite` and prints the exact `pip install` command for you to run yourself, then you rerun the installer.
@@ -96,11 +140,13 @@ Supported keys, and only these:
 | `runtime_python` | Absolute path of the runtime interpreter. |
 | `browser_port` | `null` or absent (random port), or an integer from 1024 to 65535. The idea page listens on this fixed loopback port. |
 | `prototype_port` | The same bounds, for `prototype-serve`. When both are set they must differ. |
-| `browser_mode` | `null` or absent (unset), `"link"` or `"system"`. The default for `browser-open` when `--browser` is omitted. |
+| `browser_mode` | `null` or absent (unset), `"link"`, `"system"` or `"ssh"`. The default for `browser-open` when `--browser` is omitted. `"ssh"` needs `browser_port`. |
+| `ssh_client` | Optional. The ssh config alias of your computer, for SSH mode; overrides detection. |
+| `ssh_server_port` | Optional. The ssh port of the machine running the service, for SSH mode (default 22). |
 | `default_workspace` | Optional `{"name": ..., "path": ...}`: an absolute, existing folder that capture prefills (the field stays editable). A configured folder that does not exist is an `invalid_config` error. |
 
 Unset keeps random ports: with `browser_port` and `prototype_port` null or absent, each launch picks a fresh port as before.
-Set them when a standing SSH tunnel must forward the same port every time (see the runbook, "Tern on a remote host").
+Set them when a standing tunnel must forward the same port every time (see the runbook, "Tern on a remote host").
 With `browser_mode` unset, `browser-open` needs `--browser` and fails with `browser_mode_required` without it.
 `--browser link` prints a click-to-open link instead of opening a tab.
 If the configured port is taken, launch fails with `port_in_use` (or `prototype_port_in_use`) and never falls back to another port.
@@ -145,14 +191,22 @@ idea_tool=~/.codex/skills/glitch-idea/scripts/idea.py
 ### When the browser is on another computer (SSH)
 
 The browser opens on the computer you sit at, but the service listens on the machine where the helper ran.
-So that your browser can reach it:
+SSH mode (`browser-open --browser ssh`, or `browser_mode: "ssh"` in the configuration) finds your computer, checks the connection both ways and opens the page on it for you.
+The one-time link travels over ssh and never appears in a command line.
+On Windows with Tern and the Glitch Idea plugin, the page opens in a Tern browser pane above the focused pane; with no ready plugin you are handed the link instead. On macOS and Linux it opens in your default browser.
+The focused pane is the pane with focus in your Tern window, normally the one you just typed `/glitch-idea` in. Tern gives no way to tell which window pane a remote program runs in, so if you click another pane before the page opens, it lands above that one.
 
-1. Run `session-open` (not `browser-open --browser system`) on the remote machine and note the port in the printed `origin`.
-2. On **your own computer**, open a tunnel with the **same port**: `ssh -L <port>:127.0.0.1:<port> <host>`.
-3. Open the printed `http://127.0.0.1:<port>/` locally and enter the pairing code.
+Setup, once per seat:
 
-A different local port fails, because the service accepts only its exact origin.
-The system-browser mode opens a browser on the machine running the helper; it is not an SSH substitute.
+1. Give the seat a fixed `browser_port` (and `prototype_port` for prototypes).
+2. Keep a standing tunnel running on your computer that forwards that same port to the machine (`ssh -N`, left running).
+3. Give the account that runs the helper an ssh key that your computer accepts.
+
+If a direction is not working, the helper stops and names it (`ssh_no_key`, `ssh_tunnel_down` and the others; see the runbook, section 5.2).
+It never asks you to type a throwaway tunnel line.
+If several computers fit, set `ssh_client` to the ssh config alias of yours.
+With only a standing tunnel and no key back to your computer, use link mode (`browser_mode: "link"`): it prints a link and you click it.
+`--browser system` is for a browser on the same computer as the helper; it is not an SSH substitute.
 
 ### Orca
 

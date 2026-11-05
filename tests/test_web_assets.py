@@ -383,8 +383,8 @@ def private_term_violations(path):
 # extensionless text file such as LICENSE); anything else (png, zip, woff2, ...) is skipped.
 # Excluded: the term list itself, __pycache__, STATE.md and the other git-ignored files
 # (kept off GitHub), and the git-ignored evidence/ideas folders (never walked: only the named
-# top-level files, tests/ and docs/ are read). Only LOCAL_TERMS apply here: "/opt/" and "/home/"
-# occur legitimately in tests, and "notice-only:" terms are for the notice and provenance files alone.
+# top-level files, tests/ and docs/ are read). LOCAL_TERMS apply everywhere here; "/opt/" and "/home/"
+# apply outside tests/ only (they occur legitimately in tests), and "notice-only:" terms are for the notice and provenance files alone.
 PUBLISHED_TEXT_EXT = PACKAGE_TEXT_EXT | {".mjs", ".cjs", ".ts", ".toml", ".cfg", ".ini", ".sh", ".example", ".csv"}
 PUBLISHED_TOP_LEVEL = ["README.md", "LICENSE", "install.py", "capability.json", "config.example.json"]
 PUBLISHED_TEXT_NAMES = {"LICENSE"}
@@ -406,11 +406,23 @@ def published_text_files(repo=REPO):
     return out
 
 
+# Built-in minimum, so a clean clone without tests/private-terms.txt still refuses internal
+# paths: "/opt/" and "/home/" are refused in docs/ and the top-level files (tests/ is exempt, as
+# before). The only allowance is the placeholder home folders the repository itself uses, removed
+# before matching: /home/you/ (config.example.json), /home/x and /home/other (test strings).
+PATH_TERMS = ["/opt/", "/home/"]
+PLACEHOLDER_HOMES = re.compile(r"/home/(?:you|x|other)(?![A-Za-z0-9_])")
+
+
 def published_private_term_violations(repo=REPO):
     out = []
     for p in published_text_files(repo):
         low = p.read_text(encoding="utf-8", errors="replace").lower()
-        hits = [t for t in LOCAL_TERMS if re.search(r"\b" + re.escape(t), low)]
+        terms = list(LOCAL_TERMS)
+        if p.relative_to(repo).parts[0] != "tests":
+            terms += PATH_TERMS
+            low = PLACEHOLDER_HOMES.sub("", low)
+        hits = [t for t in terms if re.search(r"\b" + re.escape(t) if t[0] != "/" else re.escape(t), low)]
         if hits:
             out.append(f"{p.relative_to(repo).as_posix()}: {len(hits)} private term(s)")
     return out

@@ -11,6 +11,7 @@ import sys
 from idea_domain import IdeaError, decode, encoded, number, require, text
 from idea_store import read_bytes
 from idea_service import run_legacy as run, default_workspace
+from idea_ssh import valid_ssh_alias, SshError, MESSAGES as SSH_MESSAGES
 
 
 class Parser(argparse.ArgumentParser):
@@ -76,7 +77,7 @@ def parser():
             p.add_argument('--resume')
             p.add_argument('--idea-id')
         if name == 'browser-open':
-            p.add_argument('--browser',choices=('link','orca','system'))
+            p.add_argument('--browser',choices=('link','orca','system','ssh'))
             p.add_argument('--orca-worktree')
             p.add_argument('--orca-terminal')
             p.add_argument('--orca-host')
@@ -142,7 +143,11 @@ def _fixed_ports(value):
         require(port is None or (type(port) is int and 1024<=port<=65535),'Invalid '+key.replace('_',' '),'invalid_config')
         ports[key]=port
     mode=value.get('browser_mode')
-    require(mode is None or mode in ('link','system'),'Invalid browser mode','invalid_config')
+    require(mode is None or mode in ('link','system','ssh'),'Invalid browser mode','invalid_config')
+    client=value.get('ssh_client')
+    require(client is None or valid_ssh_alias(client),'Invalid ssh client','invalid_config')
+    sshd=value.get('ssh_server_port')
+    require(sshd is None or (type(sshd) is int and 1<=sshd<=65535),'Invalid ssh server port','invalid_config')
     require(ports['browser_port'] is None or ports['browser_port']!=ports['prototype_port'],
             'browser_port and prototype_port must differ','invalid_config')
     return ports['browser_port'],ports['prototype_port'],mode
@@ -270,7 +275,7 @@ def _session_check(args):
 
     Returns idea_id -> sorted binding ids that select it. Reads the bindings without a running service.
     No runtime folder means no sessions. Only this seat's runtime is visible: another seat's session on a
-    shared store is not. Runs early (fast answer, preview) and again inside the Store's removal transaction.
+    shared store is not. Runs before a removal (an unreadable runtime refuses early), for the preview, and again after the commit to drop sessions.
     """
     from idea_runtime import Runtime, RuntimeError as RuntimeFailure
     store,runtime,_,_,_,_=_launcher_paths(args)
@@ -284,11 +289,49 @@ def _session_check(args):
     return holders
 
 
-def _refuse_idea_in_use(args,holders):
-    if not (type(args.idea_id) is str and re.fullmatch(r'idea_[0-9a-f]{32}',args.idea_id)): return
-    ids=holders(args.idea_id)
+DROP_NOTE='--confirm removes the idea and drops these saved sessions of this seat (an open tab on one ends); another seat\'s sessions are not visible here and are set aside at that seat\'s next start'
+
+
+def _session_rows(args,ids):
+    """Preview rows: binding id and whether the session is in use (None when no service runs to say)."""
+    from idea_runtime import Runtime
+    store,runtime,_,_,_,_=_launcher_paths(args)
+    live={}
     if ids:
-        raise IdeaError('idea_in_use','A saved browser session still selects this idea; discard it first (session-discard --binding)',binding_ids=ids)
+        try:
+            for row in _safe_sessions(Runtime(store,runtime).list_sessions(timeout=5)) or []: live[row['binding_id']]=row['in_use']
+        except Exception: live={}
+    return [dict(binding_id=i,in_use=live.get(i)) for i in ids]
+
+
+def _drop_session(args,binding_id):
+    """The session-discard road when this seat's owner service runs (a live tab is ended cleanly);
+    otherwise the binding record is removed directly. The session-recovery receipt stays as history."""
+    from idea_runtime import Runtime, RuntimeError as RuntimeFailure
+    store,runtime,_,_,_,_=_launcher_paths(args)
+    try:
+        Runtime(store,runtime).discard_binding(binding_id,confirm=True,timeout=5)
+        return
+    except RuntimeFailure as exc:
+        if exc.code=='binding_not_found': return
+        if exc.code!='owner_unavailable': raise
+    owner=Runtime(store,runtime)
+    owner.acquire_owner()
+    try: owner.remove_binding(binding_id)
+    except RuntimeFailure as exc:
+        if exc.code!='binding_not_found': raise
+    finally: owner.close()
+
+
+def _drop_sessions(args,holders):
+    """After the removal committed: re-scan, then drop every session that selects the idea. Never undoes the removal."""
+    try: ids=holders(args.idea_id)
+    except IdeaError: return dict(sessions_dropped=[],sessions_unreadable=True)
+    dropped,kept=[],[]
+    for binding_id in ids:
+        try: _drop_session(args,binding_id); dropped.append(binding_id)
+        except Exception: kept.append(binding_id)
+    return dict(sessions_dropped=dropped,**(dict(sessions_not_dropped=kept) if kept else {}))
 
 
 def _safe_launch_details(details):
@@ -301,6 +344,10 @@ def _safe_launch_details(details):
         elif type(value) is str and re.fullmatch(prefix+r'[0-9a-f]{32}',value):
             result[key]=value
     if type(details.get('resume_required')) is bool: result['resume_required']=details['resume_required']
+    client=details.get('ssh_client')
+    if valid_ssh_alias(client): result['ssh_client']=client
+    aliases=details.get('client_aliases')
+    if type(aliases) is list and 0<len(aliases)<=16 and all(valid_ssh_alias(a) for a in aliases): result['client_aliases']=list(aliases)
     if type(details.get('port')) is int and 1 <= details['port'] <= 65535: result['port']=details['port']
     return result
 
@@ -369,11 +416,16 @@ def run_launcher(args):
         elif reconnect is not None:
             result=reconnect_browser_session(store,runtime,config,binding_id=reconnect,orcabinding=orcabinding,
                                              runtime_python=executable,readiness_timeout=args.readiness_timeout)
+        elif args.browser=='ssh':
+            from idea_ssh import open_ssh_session
+            source=_configuration_source()[0]
+            result=open_ssh_session(store,runtime,config,ssh_client=source.get('ssh_client'),
+                                    ssh_server_port=source.get('ssh_server_port'),**options)
         else: result=open_browser_session(store,runtime,config,mode=args.browser,orcabinding=orcabinding,**options)
         if args.runtime_root_fallback: result=dict(result,runtime_root_fallback=args.runtime_root_fallback)
         return dict(ok=True,**result)
-    except (LaunchError,NativeError,RuntimeError,BridgeError,IdeaError) as exc:
-        result=dict(ok=False,error=dict(code=exc.code,message=exc.code),
+    except (LaunchError,NativeError,RuntimeError,BridgeError,IdeaError,SshError) as exc:
+        result=dict(ok=False,error=dict(code=exc.code,message=SSH_MESSAGES.get(exc.code,exc.code) if isinstance(exc,SshError) else exc.code),
                     **_safe_launch_details(getattr(exc,'details',{})))
         sessions=_safe_sessions(getattr(exc,'sessions',None)) if exc.code=='binding_capacity' else None
         if sessions is not None: result['sessions']=sessions
@@ -496,11 +548,18 @@ def main(argv=None):
         elif args.command in SESSION_COMMANDS: result=run_sessions(args)
         elif args.command in PROTOTYPE_COMMANDS: result=run_prototype(args)
         else:
-            holders=None
             if args.command=='remove-idea':
+                valid=type(args.idea_id) is str and re.fullmatch(r'idea_[0-9a-f]{32}',args.idea_id)
                 holders=_session_check(args)
-                _refuse_idea_in_use(args,holders)
-            result=dict(ok=True,**(run(args,configuration()) if holders is None else run(args,configuration(),in_use=holders)))
+                early=holders(args.idea_id) if valid else []  # unreadable sessions refuse before anything is touched
+                result=dict(ok=True,**run(args,configuration()))
+                if not args.confirm:
+                    if valid:
+                        result=dict(result,sessions_to_drop=_session_rows(args,early),**(dict(sessions_note=DROP_NOTE) if early else {}))
+                elif valid and result.get('removed'):
+                    result=dict(result,**_drop_sessions(args,holders))
+            else:
+                result=dict(ok=True,**run(args,configuration()))
     except IdeaError as exc:
         result=dict(ok=False,error=dict(code=exc.code,message=exc.code if launching else str(exc)),
                     **({} if launching else exc.details))

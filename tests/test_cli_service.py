@@ -8,6 +8,8 @@ import sys
 import tempfile
 import unittest
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from hermetic_cli import idea_script
 SCRIPTS=Path(__file__).resolve().parents[1]/'glitch-idea/scripts'
 sys.path.insert(0,str(SCRIPTS))
 import idea
@@ -22,7 +24,7 @@ class CliServiceTests(unittest.TestCase):
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
         self.directory=Path(self.temp.name);self.root=self.directory/'ideas'
-        self.script=SCRIPTS/'idea.py';self.workspace=self.directory/'workspace';self.workspace.mkdir()
+        self.script=idea_script();self.workspace=self.directory/'workspace';self.workspace.mkdir()
         self.store=Store(self.root);self.sid=self.store.create_session()
         self.context=TrustedContext('bound-browser',self.sid)
         self.browser=Service(self.store,{},self.context,handlers={step:TrustedStepHandler(lambda *args:None) for step in ('method','discovery','exploration')})

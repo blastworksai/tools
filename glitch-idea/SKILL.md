@@ -1,6 +1,8 @@
 ---
 name: glitch-idea
 description: Use when capturing a new software idea, aligning it through questions and an exploration before planning, prioritising a local idea backlog, or resuming an idea and its next slice by permanent ID. Handles newly captured ideas and their saved lifecycle; existing backlogs are outside this skill.
+license: MIT
+compatibility: "Python 3.10+ (python3 on macOS/Linux, py -3 on Windows) with PyYAML 6.0.3 from requirements.txt, which the operator installs with pip. Needs a local browser; an SSH client and an SSH key each way only in SSH mode (browser on another computer); Orca optional. Qualified on Linux with Claude Code and Codex."
 ---
 
 # Glitch idea
@@ -19,7 +21,7 @@ Read [commands.md](references/commands.md) before using the bundled Python helpe
 
 The Capture **workspace** is the project the idea is for (the folder it would be built in), named and given as an absolute path on the service host. It is not the ideas store, which `--store` or the config selects. The service refuses with `workspace_unavailable` a path that is not absolute, does not exist or cannot be read there, or is not a folder.
 
-For a new idea, save the original wording verbatim with `capture` **before questions or analysis**. Read the returned ID and state before claiming it is saved. For an existing personal ID, use `show`; use `list` to resolve an ambiguous reference. Do not import or modify another backlog; the one exception is `import-idea`, only on the operator's yes after its preview (see "Bringing an idea in from another store" in `references/commands.md`). Never remove an idea unasked: `remove-idea` is always previewed first and run with `--confirm` only on the operator's explicit yes (see "Removing an idea" in `references/commands.md`).
+For a new idea, save the original wording verbatim with `capture` **before questions or analysis**. Read the returned ID and state before claiming it is saved. For an existing personal ID, use `show`; use `list` to resolve an ambiguous reference. Do not import or modify another backlog; the one exception is `import-idea`, only on the operator's yes after its preview (see "Bringing an idea in from another store" in `references/commands.md`). Never remove an idea unasked: `remove-idea` is always previewed first and run with `--confirm` only on the operator's explicit yes; the preview lists this seat's saved browser sessions that select the idea and `--confirm` drops them with it, so one yes covers both (see "Removing an idea" in `references/commands.md`).
 
 Immediately after capture, explicitly request the operator's **urgency (1–10)** and **importance (1–10)** as two separate answers, unless already supplied. Never infer either rating, even when asked to “score it yourself”; supply a separate brain assessment instead. If the operator stops or cannot answer, keep null ratings and return the saved ID. Capture and resumption never depend on completed scoring.
 
@@ -42,9 +44,11 @@ The one-time pairing code may ride the URL fragment (`#pair=<code>`); it is sing
 Agent credentials, the tab secret and cookies stay inside the helper and the page; never put them in argv, response files, URLs or memory.
 
 **Launch.** After a successful `browser-open`, set `idea_session` from its `session_id` and start `events --after 0` at once, in this same pane, without waiting to be asked. `browser-open` opens the tab at `<origin>/#pair=<code>`, and the page redeems that one-time code itself, so the operator types nothing.
+On the computer that runs the browser, pass `--browser system` to `browser-open` (or set `browser_mode` to `"system"` in the config); in a VS Code terminal either works, and in a Tern pane on a remote host use SSH mode instead.
 In link mode (see **Link mode** below) nothing is opened: `browser.link` carries the same `#pair=` fragment and the operator clicks it.
+In SSH mode (see **SSH mode** below) the page opens on the operator's own computer.
 If `browser-open` returns `service_readiness_timeout`, the service is still starting (a large store takes a few seconds to load): run the same `browser-open` once more without telling the operator, and report it only if the second run fails too. Never retry after `owner_unavailable` from an open, because it may already have created a session.
-Otherwise tell the operator the page is open and paired. When a prototype is involved, add the prototype tunnel line (see Visualize for when it is skipped). Nothing else about the plumbing.
+Otherwise tell the operator the page is open and paired. Never hand the operator an `ssh -L` line, a tunnel recipe or a port to forward: remote use is SSH mode, or link mode with a standing tunnel. Nothing else about the plumbing.
 Show the result's `fallback_line` (the 60-second typed pairing code) only when the operator says the tab did not open paired, never by default, because typing a code the tab already redeemed ends the session.
 Ready first: before a typed code is ever issued (plain `session-open`, or `session-open --resume <binding_id>` after an expired or failed pairing), ask the operator ONE question, "ready to type a code?", and run the verb only on their yes, then give the origin and the fresh code in the same message that carries it. The code lasts 60 seconds: measured, 12 seconds when the operator is at the box, expired when the code travels through a prompt first.
 With `browser-open --browser orca --resume`, the reconnect opens the new tab first and then closes that binding's previous Orca tab, so only the new paired tab remains. An old tab still open elsewhere (a system browser, say) says it was replaced by a newer one (`session_superseded`).
@@ -55,6 +59,17 @@ Never print `pairing_code` or `fallback_line` unless the operator says the click
 If the link expired or the click was missed, run `browser-open --browser link --resume <binding_id>` and show the new link the same way. In link mode this replaces the "ready to type a code?" question; the typed-code path above keeps its Ready-first rule.
 `events` does not report a pairing that expired unredeemed (it only appears as `pairing_expired_or_locked` when a redeem is attempted), so do not wait for an event: offer the fresh link when the operator says the click failed or the 60 seconds have clearly passed.
 A seat that sets `browser_port` has a standing ssh tunnel on that port, so the link works as is.
+
+**SSH mode (the browser is on another computer).** When the seat's config sets `browser_mode: "ssh"`, or the operator says the browser is on another computer than this one, run `browser-open --browser ssh`. It needs a fixed `browser_port` and a standing tunnel from the operator's computer, and it checks a key in both directions.
+It finds the operator's computer by itself, proves the tunnel reaches this service, and opens the page on that computer: through the Glitch Idea Tern plugin (a browser pane above the focused pane) on a Windows computer running Tern, else the default browser on macOS and Linux. When the plugin is not ready or does not answer, nothing opens and the result carries the link to show the operator. The one-time link travels over ssh on stdin, never in a command line.
+Show no link when `browser.opened` is `true`: tell the operator the page is open and paired. When it is `false` (the warning `ssh_open_failed`), show `browser.link` exactly as in link mode.
+These errors are loud and the open stops. Name the failing direction in plain words and stop; never print an `ssh -L` line or retry around them:
+- `ssh_requires_fixed_port`: the seat has no `browser_port`; SSH mode needs one.
+- `ssh_no_client`, `ssh_client_unreachable`, `ssh_client_os_unknown`, `ssh_client_no_curl`: this machine cannot find, reach, identify or use the operator's computer.
+- `ssh_no_key`: the key from this machine to the operator's computer is missing or refused.
+- `ssh_client_ambiguous`: more than one computer fits; ask the operator which one and have them set `ssh_client` in the config.
+- `ssh_tunnel_down`: the standing tunnel from the operator's computer to this machine is not answering.
+- `ssh_tunnel_foreign`: something else answers on that port on the operator's computer.
 
 **Rebuilt tab.** Orca can rebuild a tab's page (after many worktree switches, or when its SSH route reconnects); the page then shows "Connect this browser" with a line that the terminal reconnects it. Never hand out a code for that and never `--resume` for it: the background `events` loop runs `browser-open --browser orca <same selectors> --reconnect <binding_id>` after every wait, which re-pairs only a tab marked unpaired, in place, with the agent untouched. Run it once yourself when the operator says "reconnect". `tab_still_paired` means nothing was wrong; on `tab_not_recorded` or `tab_unreadable`, tell the operator in one line and resume only on their word.
 
@@ -185,10 +200,10 @@ If that reply is refused `request_cancelled` or `request_closed` because the ope
 
 When it is installed, run the prototype skill and build the prototype into `<runtime_root>/prototypes/<idea_id>/` (folder mode 0700).
 Then start `idea.py prototype-serve --session <session_id> --dir <that folder>`; it runs until the session ends, so start it in the background (a background job or `&`).
-Read its first JSON line for `origin`, `port`, `fixed_port` and `ssh_line`.
+Read its first JSON line for `origin`, `port` and `fixed_port`.
 It serves on its own loopback port, sandboxed by CSP, with no cookies.
 Open a second tab on `origin` (Orca `tab create --url <origin>` in the same worktree, or the system browser).
-When the browser is on another computer, give the operator the `ssh_line` with `<host>` filled in, unless `fixed_port` is `true`: then the seat's standing tunnel carries the prototype, so show no tunnel or ssh line.
+When the browser is on another computer and `fixed_port` is `true`, the same standing tunnel carries the prototype, so show no tunnel or ssh line. When `fixed_port` is `false` on a remote seat, tell the operator SSH mode needs fixed ports (`browser_port` and `prototype_port`) and stop; never print an `ssh -L` line.
 Take a PNG screenshot (`orca screenshot --page <id> --format png`, or the browser's own screenshot as a fallback) and zip the prototype folder.
 Upload each file with one `idea.py asset --session <session_id> --idea <idea_id> --revision <N> --request <request_id> --file <path>` call (a `.png` and a `.zip`; the type follows the extension, or pass `--type`; the usual asset limits apply; see commands.md).
 Each call prints the new `asset_id`.
@@ -216,7 +231,7 @@ A fill is refused with `invalid_fill` (a field you may not write, or a malformed
 
 Installing is the operator's step, documented in the repository README and runbook; this skill never installs anything. If the runtime interpreter lacks PyYAML 6.0.3, the installer fails with `runtime_prerequisite` and prints the exact `"<python>" -m pip install -r "<requirements.txt>"` command for the operator to run, then they rerun the installer. If the interpreter is older than Python 3.10, the installer fails with `install_error` and no pip command: the operator needs a newer Python (a new venv from it), not a package. Never run that command, fetch a package or create a venv yourself. Direct installs go through `install.py` with `python3` on macOS and Linux and `py -3` on Windows.
 
-Launch with `browser-open` (or `session-open`) as described in commands.md, using the configured runtime interpreter. The service accepts only its exact `127.0.0.1:<port>` origin and needs an owner-private runtime directory (mode 0700, no symlink components). When the browser is on another computer and the seat has no standing tunnel (`browser_port` not configured), tell the operator to open `ssh -L <port>:127.0.0.1:<port> <host>` on their own computer with the same port the service printed, then open the printed origin there. If Orca launch fails with `origin_missing` or `usage`, no session exists yet: report it and have the selectors corrected, without `--resume`. If it fails later, the error carries the `binding_id` but no origin: report the code and the `binding_id`, do not silently open another browser, and let the operator choose between fixing Orca and rerunning `browser-open ... --resume binding_ID`, or running `session-open --resume binding_ID`, which prints the origin and a fresh pairing code to open themselves.
+Launch with `browser-open` (or `session-open`) as described in commands.md, using the configured runtime interpreter. The service accepts only its exact `127.0.0.1:<port>` origin and needs an owner-private runtime directory (mode 0700, no symlink components). When the browser is on another computer and the seat has no fixed `browser_port`, tell the operator SSH mode needs a fixed port and a standing tunnel; never print an `ssh -L` line. If Orca launch fails with `origin_missing` or `usage`, no session exists yet: report it and have the selectors corrected, without `--resume`. If it fails later, the error carries the `binding_id` but no origin: report the code and the `binding_id`, do not silently open another browser, and let the operator choose between fixing Orca and rerunning `browser-open ... --resume binding_ID`, or running `session-open --resume binding_ID`, which prints the origin and a fresh pairing code to open themselves.
 Plain `session-open` launches no browser: the operator opens the origin and types the code, after the ready-first question above.
 
 When the browser's Review step offers **Generate planning prompt** and **Copy planning prompt**, the operator copies a prompt beginning `/glitch-plan` and pastes it into a new window. Do not paste or run it yourself, and do not treat the copy as registration: only `register-plan` on a real saved plan archives the revision.

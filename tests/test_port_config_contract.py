@@ -16,8 +16,10 @@ from idea_domain import IdeaError
 
 GOOD = (1024, 8840, 65535)
 BAD = (True, False, 0, 80, 1023, 65536, '8840', 8840.0, [], {}, -1)
-MODES_GOOD = ('link', 'system')
+MODES_GOOD = ('link', 'system', 'ssh')
 MODES_BAD = ('orca', '', 1, True, 0, [], 'LINK')
+CLIENTS_GOOD = ('workstation', 'a' * 255, 'workstation.tailnet.example.net', 'x-1')
+CLIENTS_BAD = ('', 'a' * 256, 'two words', 'tab\there', 'new\nline', 'nul\x00', '-oProxyCommand=x', '-J', 1, True, 0, [], {})
 
 
 class Contract(unittest.TestCase):
@@ -120,8 +122,38 @@ class Contract(unittest.TestCase):
                 self.assertEqual(self.installer(browser_mode=m)[0], 'refused')
                 self.assertEqual(self.runtime(browser_mode=m), ('refused', 'invalid_config'))
 
+    def test_good_ssh_clients_accepted_by_installer_and_runtime(self):
+        for c in CLIENTS_GOOD:
+            with self.subTest(client=c):
+                status, cfg = self.installer(ssh_client=c)
+                self.assertEqual((status, cfg.get('ssh_client')), ('ok', c))
+                self.assertEqual(self.runtime(ssh_client=c)[0], 'ok')
+
+    def test_bad_ssh_clients_refused_by_installer_and_runtime(self):
+        for c in CLIENTS_BAD:
+            with self.subTest(client=c):
+                self.assertEqual(self.installer(ssh_client=c)[0], 'refused')
+                self.assertEqual(self.runtime(ssh_client=c), ('refused', 'invalid_config'))
+
+    def test_null_ssh_client_is_unset(self):
+        status, cfg = self.installer(ssh_client=None)
+        self.assertEqual(status, 'ok')
+        self.assertNotIn('ssh_client', cfg)
+        self.assertEqual(self.runtime(ssh_client=None), ('ok', (None, None, None)))
+
+    def test_ssh_server_port_bounds_agree(self):
+        for v in (1, 22, 2222, 65535):
+            with self.subTest(good=v):
+                self.assertEqual(self.installer(ssh_server_port=v)[1].get('ssh_server_port'), v)
+                self.assertEqual(self.runtime(ssh_server_port=v)[0], 'ok')
+        for v in (True, False, 0, -1, 65536, '22', 22.0, [], {}):
+            with self.subTest(bad=v):
+                self.assertEqual(self.installer(ssh_server_port=v)[0], 'refused')
+                self.assertEqual(self.runtime(ssh_server_port=v), ('refused', 'invalid_config'))
+        self.assertNotIn('ssh_server_port', self.installer(ssh_server_port=None)[1])
+
     def test_launch_config_allow_list_refuses_the_keys_it_does_not_carry(self):
-        for key, v in (('prototype_port', 8841), ('browser_mode', 'link')):
+        for key, v in (('prototype_port', 8841), ('browser_mode', 'link'), ('ssh_client', 'workstation'), ('ssh_server_port', 22)):
             with self.subTest(key=key):
                 self.assertEqual(self.launch(**{key: v}), ('refused', 'invalid_config'))
 
@@ -129,6 +161,7 @@ class Contract(unittest.TestCase):
         for key in ('browser_port', 'prototype_port'):
             self.assertIn(key, self.installer(**{key: 80})[1])
         self.assertIn('browser_mode', self.installer(browser_mode='orca')[1])
+        self.assertIn('ssh_client', self.installer(ssh_client='two words')[1])
 
 
 if __name__ == '__main__':

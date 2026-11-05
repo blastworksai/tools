@@ -7,6 +7,8 @@ import sys
 import unittest
 from unittest.mock import patch
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from hermetic_cli import idea_script
 SCRIPTS=Path(__file__).resolve().parents[1]/'glitch-idea/scripts'
 sys.path.insert(0,str(SCRIPTS))
 sys.path.insert(0,str(Path(__file__).resolve().parent))
@@ -29,7 +31,7 @@ class SessionVerbTests(unittest.TestCase):
     listed=slots.SessionSlotsTests.listed
 
     def cli(self,verb,*extra,root=None,expect=None):
-        argv=[sys.executable,str(SCRIPTS/'idea.py'),'--store',str(self.store),verb,
+        argv=[sys.executable,str(idea_script()),'--store',str(self.store),verb,
               '--runtime-root',str(root or self.root),*map(str,extra)]
         result=subprocess.run(argv,capture_output=True,timeout=15)
         self.assertEqual(result.stderr,b'','structured stdout only')

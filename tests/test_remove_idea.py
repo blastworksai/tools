@@ -8,6 +8,8 @@ import sys
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from hermetic_cli import idea_script
 SCRIPTS = Path(__file__).resolve().parents[1]/'glitch-idea/scripts'
 sys.path.insert(0, str(SCRIPTS))
 import idea_markdown as md
@@ -62,7 +64,7 @@ class ReimportAfterRemoval(ImportCase):
 
     def doctor(self):
         import json, subprocess
-        run = subprocess.run([sys.executable, str(SCRIPTS/'idea.py'), '--store', str(self.target), 'doctor'], capture_output=True, text=True)
+        run = subprocess.run([sys.executable, str(idea_script()), '--store', str(self.target), 'doctor'], capture_output=True, text=True)
         return json.loads(run.stdout)
 
     def test_import_remove_import_again_loads_and_both_pins_verify(self):
@@ -471,7 +473,7 @@ class InterruptedRemovalTests(RemoveCase):
     def test_doctor_reports_it_and_is_healthy(self):
         self.crash_after_commit()
         import json, subprocess, sys
-        run = subprocess.run([sys.executable, str(SCRIPTS/'idea.py'), '--store', str(self.source), 'doctor'], capture_output=True, text=True)
+        run = subprocess.run([sys.executable, str(idea_script()), '--store', str(self.source), 'doctor'], capture_output=True, text=True)
         data = json.loads(run.stdout)
         self.assertTrue(data['healthy'], data)
         self.assertTrue(any('finished an interrupted removal' in n for n in data['notices']), data)

@@ -136,21 +136,46 @@ A path that is not absolute, does not exist or cannot be read there, or is not a
 ### 5.2 Browser on another computer (SSH)
 
 The browser runs on the computer you sit at; the service runs where you launched it.
-On **your own computer** open
+Run `browser-open --browser ssh` (or set `browser_mode: "ssh"`).
+It opens the page on your computer for you; there is no tunnel line to type.
+`browser-open --browser system` would open a browser on the remote machine, and it is not an SSH route.
 
-```bash
-ssh -L <port>:127.0.0.1:<port> <host>
-```
+**What it needs.**
+- A fixed `browser_port` in the seat's config.
+- A standing tunnel on your computer that forwards that port to the machine (`ssh -N`, left running).
+- An ssh key from the account that runs the helper to your computer, and the tunnel's own key the other way.
 
-using the **same** port that `origin` printed, then open `http://127.0.0.1:<port>/` locally.
-A different local port, a hostname or a wildcard address is rejected, because the service accepts only its exact origin.
-Use `session-open` for this case: `browser-open --browser system` would open a browser on the remote machine, and it is not an SSH route.
-The port changes whenever the service restarts, so reopen the tunnel with the new port after a restart.
+**What it does.**
+It finds your computer from the live ssh connections to this machine and from the ssh config aliases of the account, keeping only those with a working key.
+Several candidates are narrowed to the one whose tunnel proves this service, using a secret-backed probe that only the live owner answers.
+Then it opens the page on your computer: through the Glitch Idea Tern plugin on Windows, else in the default browser on macOS and Linux.
+Without a ready plugin on Windows nothing opens: you get the link back (`ssh_open_failed`) to open yourself.
+The one-time link travels on ssh's stdin, never in a command line on the VM; macOS `open` and Linux `xdg-open` take it as an argument, so it is briefly visible in that computer's own process list.
+Optional config: `ssh_client` (an ssh config alias of your computer; overrides detection) and `ssh_server_port` (default 22): the port sshd listens on, on the machine that runs the service, used only to find the live ssh connections that reveal your computer. It filters incoming connections there and cannot change how this account reaches your computer.
+
+**Errors.**
+Each one names a direction and stops the open.
+
+| Code | Meaning | Fix |
+| --- | --- | --- |
+| `ssh_requires_fixed_port` | The seat has no `browser_port`. | Set `browser_port` in the seat's config. |
+| `ssh_no_client` | No computer of yours was found. | Connect from your computer once, or set `ssh_client`. |
+| `ssh_no_key` | The key from this machine to your computer is missing or refused. | Authorise this account's key on your computer. |
+| `ssh_client_ambiguous` | More than one computer fits. | Set `ssh_client` to the alias of the right one. |
+| `ssh_client_unreachable` | Your computer did not answer over ssh. | Check it is on and its ssh server is running; if its sshd is not on port 22, set `Port` on that computer's alias in this account's ssh config (`ssh_server_port` does not affect this). |
+| `ssh_client_os_unknown` | Your computer's system could not be identified. | Check that ssh gives a normal shell there. |
+| `ssh_client_no_curl` | `curl` is missing on your computer. | Install `curl` there. |
+| `ssh_tunnel_down` | The standing tunnel from your computer to this machine is not answering. | Start the standing tunnel again. |
+| `ssh_tunnel_foreign` | Something else answers on that port on your computer. | Stop it, or move the seat to another fixed port. |
+
+The warning `ssh_open_failed` means the page did not open on your computer.
+The result still carries `browser.link` with `browser.opened` set to `false`; click or paste that link.
+A throwaway `ssh -L` line is no longer the way.
 
 ### 5.2a Tern on a remote host
 
 Use this when you work in a Tern pane on your own computer, attached to a remote machine that runs the seat.
-The seat's config sets `browser_port`, `prototype_port` and `browser_mode: "link"` (README, Configuration).
+The seat's config sets `browser_port`, `prototype_port` and `browser_mode: "link"` (README, Configuration), or `"ssh"` for 5.2.
 The estate keeps one standing `ssh -N` tunnel on your computer that forwards every seat's fixed ports, so nobody opens a tunnel by hand.
 How that tunnel is built and undone is in the estate kit's own README, kept beside the seat configs on the remote host.
 
@@ -198,7 +223,7 @@ Error codes and what to do:
 
 | Code | Meaning | Recovery |
 | --- | --- | --- |
-| `cli_missing`, `cli_unavailable` | The `orca` command is not on this machine's path or cannot run. | Install or fix Orca, or run `session-open --resume binding_ID` and open the origin it prints in a browser (SSH tunnel as in 5.2). |
+| `cli_missing`, `cli_unavailable` | The `orca` command is not on this machine's path or cannot run. | Install or fix Orca, or run `session-open --resume binding_ID` and open the origin it prints in a browser (through the standing tunnel, as in 5.2). |
 | `cli_timeout` | A command exceeded 8 seconds. | Retry with `--resume`. |
 | `origin_missing` | Selector values are absent, malformed or not a full worktree ID; no session was created. | Read the initiating pane's worktree ID and terminal handle again and pass them exactly; rerun without `--resume`. |
 | `identity_mismatch` | The terminal does not uniquely match the worktree, handle or host you gave. | Correct the selector setting (the host must be that of the initiating pane), then rerun with `--resume binding_ID` from the error. |

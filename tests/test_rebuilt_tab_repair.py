@@ -17,6 +17,8 @@ import time
 from types import SimpleNamespace
 import unittest
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from hermetic_cli import idea_script
 SCRIPTS = Path(__file__).resolve().parents[1] / 'glitch-idea/scripts'
 sys.path.insert(0, str(SCRIPTS))
 import idea_launch as launch
@@ -200,7 +202,7 @@ class ReconnectInPlaceTests(unittest.TestCase):
 
 class ReconnectCliTests(unittest.TestCase):
     def run_cli(self, *argv):
-        completed = subprocess.run([sys.executable, str(SCRIPTS / 'idea.py'), '--store', '/nonexistent/ideas', *argv],
+        completed = subprocess.run([sys.executable, str(idea_script()), '--store', '/nonexistent/ideas', *argv],
                                    capture_output=True, text=True, timeout=20)
         return json.loads(completed.stdout)
 

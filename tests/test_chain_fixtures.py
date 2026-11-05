@@ -9,6 +9,8 @@ import tempfile
 import unittest
 
 HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from hermetic_cli import idea_script
 SCRIPTS = HERE.parent / 'glitch-idea/scripts'
 sys.path.insert(0, str(SCRIPTS))
 import idea_store as storage
@@ -31,7 +33,7 @@ class PreriorArtStore(unittest.TestCase):
         shutil.copytree(FIXTURE, self.root)
 
     def cli(self, *args):
-        r = subprocess.run([sys.executable, str(SCRIPTS / 'idea.py'), '--store', str(self.root), *args], capture_output=True, timeout=30)
+        r = subprocess.run([sys.executable, str(idea_script()), '--store', str(self.root), *args], capture_output=True, timeout=30)
         return r.returncode, json.loads(r.stdout)
 
     def test_preprior_store_opens_without_refusal(self):

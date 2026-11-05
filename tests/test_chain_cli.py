@@ -8,6 +8,8 @@ import sys
 import tempfile
 import unittest
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from hermetic_cli import idea_script
 SCRIPTS = Path(__file__).resolve().parents[1]/'glitch-idea/scripts'
 sys.path.insert(0, str(SCRIPTS))
 from idea_service import Service, TrustedContext
@@ -29,7 +31,7 @@ class Base(unittest.TestCase):
         shutil.copytree(FIXTURE, self.root)
 
     def cli(self, *args):
-        done = subprocess.run([sys.executable, str(SCRIPTS/'idea.py'), '--store', str(self.root), *map(str, args)],
+        done = subprocess.run([sys.executable, str(idea_script()), '--store', str(self.root), *map(str, args)],
                               capture_output=True, timeout=30)
         return done.returncode, json.loads(done.stdout), done.stderr.decode()
 

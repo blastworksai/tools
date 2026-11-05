@@ -8,11 +8,13 @@ import tempfile
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from hermetic_cli import idea_script
 SCRIPTS = Path(__file__).resolve().parents[1]/'glitch-idea/scripts'
 sys.path.insert(0, str(SCRIPTS))
 from test_handoff_store import seed as seed_handoff
 
-SCRIPT = SCRIPTS/'idea.py'
+SCRIPT = idea_script()
 
 
 def tree(root):

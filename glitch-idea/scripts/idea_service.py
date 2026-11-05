@@ -878,7 +878,7 @@ def _moved_health(store,state):
     return issues,notices
 
 
-def run_legacy(args,config,in_use=None):
+def run_legacy(args,config):
     command=args.command
     if command=='shape':
         raise IdeaError('unsupported_command','The shape verb is retired; use exploration to reopen Exploration for the next slice')
@@ -904,7 +904,7 @@ def run_legacy(args,config,in_use=None):
         text(args.actor,'actor',200)
         check_id(args.idea_id)
         try:
-            result=store.remove_idea(args.idea_id,actor=args.actor,confirm=args.confirm,in_use=in_use)
+            result=store.remove_idea(args.idea_id,actor=args.actor,confirm=args.confirm)
         except IdeaError as exc:
             notice=_migration_notice(store)
             if notice is not None: exc.details.setdefault('notice',notice)

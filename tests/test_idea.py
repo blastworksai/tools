@@ -269,7 +269,7 @@ class IdeaTests(unittest.TestCase):
         config = json.loads(config_path.read_text(encoding='utf-8'))
         if config.get('plan_validator_argv') is None:
             self.skipTest('Optional integration: plan_validator_argv is not configured')
-        self.script=SCRIPT
+        self.script=SCRIPT  # deliberate opt-in: this integration test exercises the developer's own local config
         idea=self.ready()
         path=self.plan_file(idea)
         path.write_text(path.read_text().replace('No file changes.','### CREATE src/idea-example.txt\nWrite the observed result.'))

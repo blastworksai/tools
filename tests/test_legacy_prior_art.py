@@ -9,6 +9,8 @@ import unittest
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from hermetic_cli import idea_script
 SCRIPTS = Path(__file__).resolve().parents[1] / 'glitch-idea/scripts'
 sys.path.insert(0, str(SCRIPTS))
 import idea_markdown as md
@@ -57,7 +59,7 @@ class LegacyPriorArtTests(unittest.TestCase):
         return {str(p.relative_to(root)): p.read_bytes() for p in sorted(root.rglob('*')) if p.is_file() and p.name != '.lock'}
 
     def cli(self, root, *args):
-        r = subprocess.run([sys.executable, str(SCRIPTS / 'idea.py'), '--store', str(root), *args], capture_output=True, timeout=20)
+        r = subprocess.run([sys.executable, str(idea_script()), '--store', str(root), *args], capture_output=True, timeout=20)
         return r.returncode, json.loads(r.stdout)
 
     def check_shape(self, shape):

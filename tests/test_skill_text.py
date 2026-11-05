@@ -17,6 +17,9 @@ def section(text, heading):
 
 
 class SkillTextTests(unittest.TestCase):
+    def test_skill_names_the_system_browser_flag(self):
+        self.assertIn("--browser system", SKILL)
+
     def test_apiv_framing_line(self):
         self.assertIn("This is Align, the A of APIV (Align · Plan · Implement · Verify); /glitch-plan is the P", SKILL)
 

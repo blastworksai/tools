@@ -1992,7 +1992,7 @@ class Store:
                         if 'upload_'+_ASSET_STAGE.fullmatch(path.rsplit('/', 1)[1]).group(1) in uploads - other_uploads)
         return store_files, [(path, 'asset blob') for path in blobs]+[(path, 'upload stage') for path in stages]
 
-    def remove_idea(self, idea_id, *, actor, confirm=False, in_use=None):
+    def remove_idea(self, idea_id, *, actor, confirm=False):
         """Remove one idea and everything it owns, for good, in one journaled publish.
 
         Without confirm: a preview and nothing written. With confirm, under the
@@ -2002,17 +2002,12 @@ class Store:
         a manifest of removed paths with sha256). The asset blobs and retained
         upload stages no other idea links are unlinked right after that commit.
         Placement records stay as history (their files are positional and
-        immutable). Session receipts stay too; the launcher checks that no
-        retained session selects the idea, because the Store cannot see them.
+        immutable). Session receipts stay too; the Store cannot see saved browser
+        sessions, so the launcher drops the ones that select the idea after this commit.
         Refusals: not_found, idea_moved, idea_delivered, and a held idea's
-        unsupported_idea_version sentence. in_use, when given, is called with the
-        idea id under the store lock on a confirmed removal, before anything is
-        published; the ids it returns make the removal refuse idea_in_use (the
-        launcher passes its session check, so a session saved after its early
-        scan is still seen).
+        unsupported_idea_version sentence.
         """
         require(type(confirm) is bool, 'confirm must be a boolean')
-        require(in_use is None or callable(in_use), 'in_use must be callable')
         check_id(idea_id)
         text(actor, 'actor', 200)
         if not self.path.exists():
@@ -2048,11 +2043,6 @@ class Store:
             if not confirm:
                 return dict(preview, write_result=None)
             require(context['write'], 'Removal requires a writable Store transaction', 'invalid_transaction')
-            if in_use is not None:
-                holders = in_use(idea_id)
-                if holders:
-                    raise IdeaError('idea_in_use', 'A saved browser session still selects this idea; discard it first (session-discard --binding)',
-                                    binding_ids=list(holders))
             require(tombstone not in context['files'], 'This idea already has a removal record', 'save_conflict')
             baseline = context['baseline']
             trial = copy.deepcopy(state)

@@ -3,6 +3,9 @@ import copy
 import json
 from pathlib import Path
 import sys
+from pathlib import Path as _P
+sys.path.insert(0, str(_P(__file__).resolve().parent))
+from hermetic_cli import idea_script
 import subprocess
 import tempfile
 import unittest
@@ -281,7 +284,7 @@ class WorkflowSchemaTests(unittest.TestCase):
         self.assertEqual(adapt_snapshot(origin_only), origin_only)
 
     def test_actual_cli_history_preserves_attribution_metadata_and_exact_bytes(self):
-        script = Path(__file__).resolve().parents[1] / 'glitch-idea/scripts/idea.py'
+        script = idea_script()
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             raw = root/'words.txt'

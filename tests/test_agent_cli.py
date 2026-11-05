@@ -9,6 +9,8 @@ import unittest
 
 import test_agent_client as fixture
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from hermetic_cli import idea_script
 SCRIPTS=Path(__file__).resolve().parents[1]/'glitch-idea/scripts'
 
 
@@ -19,7 +21,7 @@ class AgentCliTests(unittest.TestCase):
     reply=fixture.AgentClientTests.reply
 
     def cli(self,verb,*extra,ok=True,script=None):
-        argv=[sys.executable,str(script or SCRIPTS/'idea.py'),'--store',str(self.owner.store_path),
+        argv=[sys.executable,str(script or idea_script()),'--store',str(self.owner.store_path),
               verb,'--runtime-root',str(self.owner.runtime_root),'--session',self.sid,*map(str,extra)]
         self.assertFalse(any(self.token in value for value in argv),'credential never enters argv')
         result=subprocess.run(argv,capture_output=True,timeout=8)
@@ -61,14 +63,14 @@ class AgentCliTests(unittest.TestCase):
             self.cli('respond','--request','request-1','--payload',path,ok=False)
         missing=Path(self.temp.name)/'private-path-must-not-print'
         # Input paths never go to HTTP or diagnostics. No credential in argv.
-        result=subprocess.run([sys.executable,str(SCRIPTS/'idea.py'),'respond','--session',self.sid,
+        result=subprocess.run([sys.executable,str(idea_script()),'respond','--session',self.sid,
                                '--request','request-1','--payload',str(missing)],capture_output=True,timeout=8)
         self.assertEqual(result.stderr,b'');self.assertNotIn(b'private-path-must-not-print',result.stdout)
         self.assertEqual(json.loads(result.stdout)['error']['code'],'missing_artifact')
         self.assertEqual(self.calls,[])
 
     def test_usage_errors_redact_untrusted_argv(self):
-        result=subprocess.run([sys.executable,str(SCRIPTS/'idea.py'),'events','--session',self.sid,
+        result=subprocess.run([sys.executable,str(idea_script()),'events','--session',self.sid,
                                '--timeout','private-argument'],capture_output=True,timeout=8)
         self.assertEqual(result.returncode,1);self.assertEqual(result.stderr,b'')
         self.assertEqual(json.loads(result.stdout),dict(ok=False,error=dict(code='usage',message='usage')))

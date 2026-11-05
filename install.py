@@ -18,7 +18,7 @@ PRODUCT = "glitch-idea-personal"
 MANIFEST = ".glitch-idea-install.json"
 SUPPORTED_KEYS = frozenset(("store_path", "plan_validator_argv", "validator_timeout_seconds",
                             "runtime_root", "runtime_python", "default_workspace",
-                            "browser_port", "prototype_port", "browser_mode"))
+                            "browser_port", "prototype_port", "browser_mode", "ssh_client", "ssh_server_port"))
 MINIMUM_PYTHON = (3, 10)
 # A Glitch Brain is identified by its engine updater beside its operations manual.
 BRAIN_MARKERS = (Path(".claude") / "scripts" / "update.py", Path("operations-reference.md"))
@@ -227,9 +227,21 @@ def effective_config(source, destination, explicit_store, recognized, explicit_r
     if "browser_port" in result and "prototype_port" in result and result["browser_port"] == result["prototype_port"]:
         raise InstallError("browser_port and prototype_port must differ")
     if config.get("browser_mode") is not None:
-        if config["browser_mode"] not in ("link", "system"):
-            raise InstallError("browser_mode must be 'link' or 'system'")
+        if config["browser_mode"] not in ("link", "system", "ssh"):
+            raise InstallError("browser_mode must be 'link', 'system' or 'ssh'")
         result["browser_mode"] = config["browser_mode"]
+    if config.get("ssh_client") is not None:  # a JSON null is unset, as the helper reads it
+        client = config["ssh_client"]
+        # Same bounds as the helper: an ssh config Host alias, one token, never an option (no leading dash).
+        if (not isinstance(client, str) or not 1 <= len(client) <= 255 or client.startswith("-")
+                or any(ch.isspace() or ord(ch) < 32 or ord(ch) == 127 for ch in client)):
+            raise InstallError("ssh_client must be a one-word ssh config Host alias of 1 to 255 characters, not starting with '-'")
+        result["ssh_client"] = client
+    if config.get("ssh_server_port") is not None:  # the sshd port client detection reads connections on
+        sshd = config["ssh_server_port"]
+        if type(sshd) is not int or not 1 <= sshd <= 65535:
+            raise InstallError("ssh_server_port must be an integer from 1 to 65535")
+        result["ssh_server_port"] = sshd
     if len(json_bytes(result)) > LAUNCH_CONFIG_LIMIT:
         raise InstallError(f"store_path and plan_validator_argv together exceed the {LAUNCH_CONFIG_LIMIT}-byte launch limit")
     explicit_runtime = explicit_runtime or {}

@@ -10,6 +10,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from hermetic_cli import idea_script
 SCRIPTS = Path(__file__).resolve().parents[1]/'glitch-idea/scripts'
 sys.path.insert(0, str(SCRIPTS))
 import idea_store as storage
@@ -51,7 +53,7 @@ class MarkdownStoreTests(unittest.TestCase):
             return copy.deepcopy(state)
 
     def cli(self, *arguments):
-        result = subprocess.run([sys.executable, str(SCRIPTS/'idea.py'), '--store', str(self.root), *map(str,arguments)], capture_output=True, timeout=8)
+        result = subprocess.run([sys.executable, str(idea_script()), '--store', str(self.root), *map(str,arguments)], capture_output=True, timeout=8)
         return result.returncode, json.loads(result.stdout)
 
     def test_real_cli_capture_show_uses_markdown_frontmatter(self):
