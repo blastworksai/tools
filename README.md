@@ -23,7 +23,7 @@ The results are public for each skill: follow its Walkdown link in the table.
 | Name | Plugin for | What it does |
 | --- | --- | --- |
 | [TODO](plugins/tern/TODO/README.md) | Tern | Interactive `/glitch-plan` checkpoints, read from the agent’s canonical plan locally or over SSH. |
-| [WORK](plugins/tern/WORK/README.md) | Tern | Native pane listing active [Glitch](https://github.com/Glitch-Cat-Club) workspaces known to `/work-on`, with per-row GitHub links and a Work On button that opens your default agent beside WORK, already running `/work-on <workspace>`. |
+| [WORK](plugins/tern/WORK/README.md) | Tern | Native pane listing active [Glitch](https://github.com/Glitch-Cat-Club) workspaces known to `/work-on`, with per-row GitHub links and a Work On button that opens an agent beside WORK, already running `/work-on <workspace>`. [SPAWN](plugins/tern/SPAWN/README.md) optional: with it, Work On drops down your saved SPAWN agents (with provider logos) plus your default agent; without it, Work On opens your default agent. |
 | [SPAWN](plugins/tern/SPAWN/README.md) | Tern | Define and SPAWN your (entire) agentic army. |
 | [USAGE](plugins/tern/USAGE/README.md) | Tern | Show your subscription usage across all agents. DEPENDENCY: NEEDS [SPAWN](plugins/tern/SPAWN/README.md). |
 | [ORCH+](plugins/tern/ORCH+/README.md) | Tern | Orchestration+ Basic Improvements to Native Tern Orchestration. DEPENDENCY: NEEDS [SPAWN](plugins/tern/SPAWN/README.md); [USAGE](plugins/tern/USAGE/README.md) optional for quota routing (needs a USAGE release with the capacity interface). |
