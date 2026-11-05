@@ -1,7 +1,7 @@
 schema = 1
 id = "orchplus"
 name = "ORCH+"
-version = "0.2.0"
+version = "0.3.0"
 description = "Managed orchestration on top of SPAWN: durable controller ownership, dispatch, rollover, landing and recovery."
 icon = "flow"
 host = "host.luau"

@@ -17,6 +17,7 @@ snapshot.REASONS = {
 	local_login_unavailable = true, source_metadata_disabled = true, vendor_usage_unavailable = true,
 	source_timeout = true, source_context_ambiguous = true, source_profile_invalid = true,
 	source_profile_unavailable = true, source_usage_unavailable = true, source_remote = true, api_key_login = true,
+	web_login_forbidden = true,
 }
 local REASONS = snapshot.REASONS
 
@@ -238,6 +239,31 @@ local function ids(raw: any): any?
 	return result
 end
 
+-- Binding evidence mirrors usage_service/protocol.py _binding_fields: accounts may
+-- carry `profile_binding`, consumers `account_ids`; either needs a definition revision.
+local function binding_fields(raw: any, result: any, evidence: string): boolean
+	if raw[if evidence == "profile_binding" then "account_ids" else "profile_binding"] ~= nil then return false end
+	if raw.definition_revision ~= nil then
+		if type(raw.definition_revision) ~= "string" or #raw.definition_revision ~= 64
+			or not raw.definition_revision:match("^[0-9a-f]+$") then return false end
+		result.definition_revision = raw.definition_revision
+	end
+	if raw.profile_binding ~= nil then
+		local binding = raw.profile_binding
+		if type(binding) ~= "table" or result.definition_revision == nil or not text(binding.handle, 256)
+			or not timestamp(binding.generation) or binding.generation < 1 then return false end
+		local canonical = ids(binding.canonical_ids)
+		if canonical == nil or #canonical < 1 or #canonical > 32 then return false end
+		result.profile_binding = { handle = binding.handle, generation = binding.generation, canonical_ids = canonical }
+	end
+	if raw.account_ids ~= nil then
+		local accounts = ids(raw.account_ids)
+		if accounts == nil or #accounts ~= 1 or result.definition_revision == nil then return false end
+		result.account_ids = accounts
+	end
+	return true
+end
+
 -- SPAWN membership published with a snapshot (roster schema 1).
 local function decode_roster(raw: any): any?
 	if type(raw) ~= "table" or raw.version ~= 1 or array_count(raw.scopes, 128) == nil then return nil end
@@ -255,8 +281,10 @@ local function decode_roster(raw: any): any?
 			local canonical_ids, reading_ids = ids(entry.canonical_ids), ids(entry.reading_ids)
 			if canonical_ids == nil or reading_ids == nil then return nil end
 			members[entry.id] = true
-			table.insert(entries, { id = entry.id, provider = entry.provider, provider_label = entry.provider_label,
-				account_label = entry.account_label, canonical_ids = canonical_ids, reading_ids = reading_ids })
+			local item = { id = entry.id, provider = entry.provider, provider_label = entry.provider_label,
+				account_label = entry.account_label, canonical_ids = canonical_ids, reading_ids = reading_ids }
+			if not binding_fields(entry, item, "profile_binding") then return nil end
+			table.insert(entries, item)
 		end
 		for _, consumer in scope.consumers do
 			if type(consumer) ~= "table" or not text(consumer.id, 4096) or members[consumer.id]
@@ -264,10 +292,19 @@ local function decode_roster(raw: any): any?
 			local reading_ids = ids(consumer.reading_ids)
 			if reading_ids == nil then return nil end
 			members[consumer.id] = true
-			table.insert(consumers, { id = consumer.id, label = consumer.label, reading_ids = reading_ids })
+			local item = { id = consumer.id, label = consumer.label, reading_ids = reading_ids }
+			if not binding_fields(consumer, item, "account_ids") then return nil end
+			table.insert(consumers, item)
 		end
-		table.insert(scopes, { id = scope.id, revision = scope.revision, updated_at_ms = scope.updated_at_ms,
-			accounts = entries, consumers = consumers })
+		local item = { id = scope.id, revision = scope.revision, updated_at_ms = scope.updated_at_ms,
+			accounts = entries, consumers = consumers }
+		if scope.spawn_join ~= nil then
+			local join = scope.spawn_join
+			if type(join) ~= "table" or not text(join.namespace, 512) or not text(join.host_key, 512)
+				or not timestamp(join.config_revision) then return nil end
+			item.spawn_join = { namespace = join.namespace, host_key = join.host_key, config_revision = join.config_revision }
+		end
+		table.insert(scopes, item)
 	end
 	return { version = 1, scopes = scopes }
 end

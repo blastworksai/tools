@@ -318,13 +318,16 @@ def rpc(argv, env, initialize, calls, *, initialized=False, timeout=35):
     return answers[1:]
 
 
-def http_json(url, headers, *, method="GET", timeout=8):
+def http_json(url, headers, *, method="GET", timeout=8, rejected=None):
     request = urllib.request.Request(url, headers=headers, method=method, data=b"" if method == "POST" else None)
     try:
         with urllib.request.build_opener(urllib.request.ProxyHandler({}), helper.NoRedirect()).open(request, timeout=timeout) as response:
             raw = response.read(helper.MAX_BYTES + 1)
     except urllib.error.HTTPError as exc:
-        raise Unavailable("local_login_unavailable" if exc.code in {401, 403} else "source_usage_unavailable") from None
+        # Callers that can tell an expired token (401) from a refused one (403)
+        # pass their own mapping; loopback reads treat both as no login.
+        codes = rejected or {401: "local_login_unavailable", 403: "local_login_unavailable"}
+        raise Unavailable(codes.get(exc.code, "source_usage_unavailable")) from None
     except urllib.error.URLError as exc:
         raise Unavailable("source_timeout" if isinstance(exc.reason, TimeoutError) else "source_usage_unavailable") from None
     if len(raw) > helper.MAX_BYTES:
@@ -377,9 +380,16 @@ def collect(provider, home, env, io):
     observed = int(time.time() * 1000)
     credit_balance = None
     if provider == "claude":
-        # A signed-out CLI exits nonzero before metadata can be projected.
-        # Classify only missing Claude credentials here; unreadable/malformed
-        # files and command failures retain their existing non-auth errors.
+        # `claude auth status` runs first so a token the CLI renews on the way
+        # is the one read from disk. A signed-out CLI exits nonzero, so its
+        # failure is held until missing and expired credentials have been classified
+        # (a token still expired afterwards is one the CLI could not renew);
+        # unreadable/malformed files and command failures keep their non-auth errors.
+        account = status_failure = None
+        try:
+            account = metadata(provider, home, env, io)
+        except Exception as exc:
+            status_failure = exc
         try:
             credentials = obj(io.read_json(Path(env.get("CLAUDE_CONFIG_DIR", home / ".claude")) / ".credentials.json"))
         except FileNotFoundError:
@@ -393,9 +403,11 @@ def collect(provider, home, env, io):
         expires = oauth.get("expiresAt")
         if type(expires) in (int, float) and expires <= time.time() * 1000:
             raise Unavailable("web_login_expired")
-        account = metadata(provider, home, env, io)
+        if status_failure is not None:
+            raise status_failure
         document = http_json("https://api.anthropic.com/api/oauth/usage",
-                             {"Authorization": "Bearer " + token, "anthropic-beta": "oauth-2025-04-20", "Accept": "application/json"})
+                             {"Authorization": "Bearer " + token, "anthropic-beta": "oauth-2025-04-20", "Accept": "application/json"},
+                             rejected={401: "web_login_expired", 403: "web_login_forbidden"})
         windows = parse_claude(document, observed)
     elif provider == "openai":
         login, quota = rpc(["codex", "app-server", "--stdio"], env,

@@ -34,6 +34,14 @@ for _,answer in ipairs({'producer_retired\nextra','incomplete\n',{status=1,timed
  result=run(op,{answer})
  check(result.status=='uncertain' and #calls==1,'ambiguous producer result never starts target retirement')
 end
+result=run(op,{'producer_unsettled\n'})
+check(result.status=='rejected' and result.error.code=='producer_unsettled' and #calls==1,'exact pre-effect unsettled-journal refusal is definite and never starts target retirement')
+for _,answer in ipairs({'producer_unsettled\nextra',{status=1,timed_out=false,stdout='producer_unsettled\n',stderr=''},{status=0,timed_out=true,stdout='producer_unsettled\n',stderr=''}})do
+ result=run(op,{answer})
+ check(result.status=='uncertain' and #calls==1,'only the exact exit-0 producer_unsettled line is a definite refusal')
+end
+result=run(op,{'producer_retired\n','producer_unsettled\n'})
+check(result.status=='uncertain' and #calls==2,'a target child can never claim producer refusal after cleanup')
 result=run(op,{'producer_retired\n','admission_full\ncapacity_admission\n1\n1\n'})
 check(result.status=='uncertain' and not result.admission_refused,'target contention after cleanup cannot claim operation-wide pre-effect refusal')
 local ordinary=copy(op);ordinary.retire_producer=nil

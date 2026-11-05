@@ -214,6 +214,18 @@ end
 local function session_for(view: any): any?
 	return if authority.registry ~= nil and view.orch_session_id ~= nil then authority.registry.sessions[view.orch_session_id] else nil
 end
+-- The window an assist intent must run in: the continued origin's window, named by the session's command
+-- cursor while it belongs to the active controller owner/generation. With no cursor yet, or a controller
+-- restored uncertain (no live origin to prefer), nil keeps assistance open to any window showing it.
+local function assist_window(view: any): any?
+	local session = session_for(view)
+	local owner = if session then session.controller else nil
+	if not owner or owner.phase ~= "active" or not authority.registry.dispatch then return nil end
+	local cursor = (authority.registry.dispatch.command_cursors or {})[view.orch_session_id]
+	local origin = if type(cursor) == "table" then cursor.origin else nil
+	if type(origin) ~= "table" or origin.owner_id ~= owner.owner_id or origin.owner_generation ~= owner.generation then return nil end
+	return { window_key = origin.window_key, window_epoch = origin.window_epoch, native_session_id = origin.native_session_id, window_host_id = origin.window_host_id }
+end
 local function binding(view: any): any
 	return { host_pane_id = tostring(view.pane), alias_nonce = view.alias_nonce }
 end
@@ -242,7 +254,7 @@ local function capture_dispatch(view: any, response: any, receipt: any?)
 	if response.ok and a.phase == "complete" and retained.receipt then
 		-- Another worker may compact a settled read before this window consumes its
 		-- commit receipt. Retain only a completed projection, never runnable authority.
-		retained.completed = { request = a.request, request_bytes = a.request_bytes, phase = "complete", claim = a.claim, worker_id = a.worker_id }
+		retained.completed = { request = a.request, request_bytes = a.request_bytes, phase = "complete", claim = dispatch.public_claim(a.claim), worker_id = a.worker_id }
 	end
 	view.scoped_results[response.action_id] = retained
 end
@@ -411,8 +423,10 @@ local function handle(view: any, ev: any, cx: any)
 		end
 		response.action_id = response.action_id or input.action_id
 		response.grant_id = input.grant_id or (if response.claim then response.claim.grant_id else nil)
+		-- cancel_work is not workflow-only: withdrawing a rejected launch queues its mailbox retirement,
+		-- which the window drives from this command result like any other queued effect.
 		local workflow_only = table.find({ "observe", "policy", "pause", "resume", "answer", "cancel_gate", "recheck_gate", "continue_controller",
-			"cancel_landing", "move_landing", "landing_lost", "reconcile_landing", "capacity", "cancel_work", "sweep" }, input.command) ~= nil
+			"cancel_landing", "move_landing", "landing_lost", "reconcile_landing", "capacity", "sweep" }, input.command) ~= nil
 		if operator then
 			view.dispatch_command_result = response
 			response.command = input.command
@@ -529,7 +543,8 @@ local function handle(view: any, ev: any, cx: any)
 		-- Window-side controls (pickers, prompts, panes) run in the window. Publish the exact stored
 		-- request as a bounded one-shot intent; the window re-validates everything before acting.
 		local intent = { version = 1, source_nonce = view.alias_nonce, serial = nonce(),
-			kind = if entry.kind == "operator-intent" then "dispatch" else "assist", request = entry.request }
+			kind = if entry.kind == "operator-intent" then "dispatch" else "assist", request = entry.request,
+			window = if entry.kind == "assist-intent" then assist_window(view) else nil }
 		local ok, bytes = pcall(tern.json.encode, intent)
 		if not ok or #bytes > INTENT_LIMIT then
 			view.notice = "REFUSED: this control's request exceeds the " .. tostring(INTENT_LIMIT) .. "-byte intent bound; nothing ran."
@@ -669,7 +684,7 @@ local function arm()
 			if not live[pane] then contexts[pane] = nil
 			elseif entry.view.operator_intent ~= nil and tern.now() - (entry.view.operator_intent_at or 0) > INTENT_TTL_MS then
 				entry.view.operator_intent = nil; entry.view.operator_intent_at = nil
-				entry.view.notice = "A clicked control was not confirmed by a window showing this controller in its admitted session within 30 s; it will not run later. Check the current state, then use a current control."
+				entry.view.notice = "A clicked control was not confirmed by a window showing this controller in its admitted session within 30 s; it will not run later. Check the current state, then use a current control. After a reload, run ORCH+ Continue controller in this window from the palette first."
 				entry.cx:render()
 			end
 		end

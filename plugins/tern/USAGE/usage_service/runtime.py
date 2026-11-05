@@ -39,7 +39,8 @@ _TOKEN = re.compile(r"[A-Za-z0-9_-]{43,128}\Z")
 _ENDPOINT = re.compile(r"http://127\.0\.0\.1:([1-9][0-9]{0,4})\Z")
 _OPERATIONS = frozenset({"display", "register_client", "diagnostics", "setup_state", "configure",
                          "unpair", "pair_offer", "pair_accept", "usage_refresh", "usage_status",
-                         "usage_preferences", "usage_results", "usage_publish"})
+                         "usage_preferences", "usage_results", "usage_publish", "capacity",
+                         "binding_candidates"})
 _BACKUP = re.compile(r"upgrade-[0-9a-f]{32}\.sqlite3\Z")
 
 

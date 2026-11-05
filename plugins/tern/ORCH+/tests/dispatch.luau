@@ -4,14 +4,15 @@ local sections = { fixture = true, core = true, receipts = true, callbacks = tru
 	chain = true, late = true, reconcile_chain = true, refused_chain = true, ack = true, ack_uncertain = true, ack_terminal = true,
 	suspend = true, auto_reconcile = true, auto_reconcile_bounded = true, auto_reconcile_worker = true, sweep_rules = true, sweep_policy = true,
 	auto_reconcile_all = true, capacity_resume = true, expired_authorization = true, slot_classes = true, duplicate_claim = true, slow_receipt = true,
-	retirement_auth = true, retirement_finish = true, retirement_race = true, retirement_uncertain = true, retirement_restore = true, retirement_capability = true, retirement_codec = true,
+	retirement_auth = true, retirement_finish = true, retirement_race = true, retirement_uncertain = true, retirement_restore = true, retirement_capability = true, retirement_codec = true, retirement_refused = true,
 	rejected_read = true, finish = true, finish_capacity = true, command_retention = true, continuation = true, wake_separation = true, catalog_join = true, policy = true,
 	rollover = true, rollover_launch_failure = true, rollover_token = true, rollover_stop_uncertain = true, rollover_reload = true, rollover_policy = true,
-	rollover_coordinator = true, rollover_coordinator_ambiguous = true, rollover_coordinator_reload = true, rollover_coordinator_restored = true, rollover_coordinator_policy = true,
+	rollover_coordinator = true, rollover_coordinator_ambiguous = true, rollover_coordinator_reload = true, rollover_coordinator_restored = true, rollover_coordinator_policy = true, rollover_coordinator_successor_rejected = true,
 	rollover_read_path = true, rollover_reload_continuation = true, recheck_report = true, adopt = true,
 	rollover_coordinator_self_release = true, publication_readback = true, accept_after_owner_recovery = true,
 	quota_normalize = true, quota_assembly = true, quota_routing = true, quota_gate = true, quota_claim = true,
-	quota_rollover = true, quota_ledger = true, quota_selector = true, window_bookkeeping = true, intent_buttons = true }
+	quota_rollover = true, quota_ledger = true, quota_selector = true, quota_continuation = true, window_bookkeeping = true, intent_buttons = true,
+	withdraw_fenced = true }
 assert(section == nil or sections[section], "unknown dispatch test section: " .. tostring(section))
 local runtime, environment = tern, getfenv()
 local function clone(v) return runtime.json.decode(runtime.json.encode(v)) end
@@ -695,7 +696,7 @@ local function keyed(node, key)
 	for _, child in node.c or {} do local found = keyed(child, key); if found then return found end end
 	return nil
 end
-local sent, toasts, drop_acks = {}, {}, false
+local sent, toasts, picks, drop_acks = {}, {}, {}, false
 local host_row = { id = "local", state = "connected", panes = { 11 } }
 local controller_row = { pane = 11, block = "orchplus.orchestrator", tab = 1 }
 local function window_cx(key)
@@ -718,16 +719,21 @@ local function window_cx(key)
 	end
 	return { session = session, sessions = { current = function() return { id = 7, host = "local" } end },
 		hosts = { current = function() return host_row end, list = function() return { host_row } end },
-		window_key = function() return key end, toast = function(_, _, _, message) table.insert(toasts, { window = key, message = message }) end }
+		window_key = function() return key end, toast = function(_, _, _, message) table.insert(toasts, { window = key, message = message }) end,
+		pick = function(_, options) table.insert(picks, { window = key, placeholder = options.placeholder }); return { next = function() end } end }
 end
+local palette = {}
 local function window_vm()
 	local wtern = table.clone(itern)
+	local registered = {}
 	wtern.timer = function() return { cancel = function() end } end
-	wtern.command = function() end; wtern.files = { button = function() end }; wtern.on = function() end
+	wtern.command = function(def) registered[def.id] = def end; wtern.files = { button = function() end }; wtern.on = function() end
 	wtern.route = { link = function() error("ORCH+ must not claim links; controls are native buttons") end }
 	local chunk = assert(loadstring(runtime.fs.read(root .. "/window.luau"), "intent-window"))
 	setfenv(chunk, setmetatable({ tern = wtern, require = iload }, { __index = environment }))
-	return chunk()
+	local api = chunk()
+	palette[api] = registered
+	return api
 end
 local first_api, second_api = window_vm(), window_vm()
 local first, second = window_cx(""), window_cx("second-window")
@@ -800,6 +806,48 @@ check(view.operator_intent == nil and type(view.notice) == "string" and view.not
 	"an unsettled intent expires after its bound with a visible notice")
 first_api.intents(first)
 check(commands("", "policy") == 1, "an expired intent never runs")
+
+-- Continuation and the recovery guide: a host-block click names no window (clients of one window key
+-- also share its shown session and focus), so a window that is not the continued origin leaves these
+-- intents silently too; the palette commands run in the window that invoked them.
+local function since(window, start) local n = 0; for i = start + 1, #sent do if sent[i].window == window then n += 1 end end; return n end
+press(kind("config-close"), "Open ORCH+ controller")
+for _, command in { "continue_controller", "recovery_guide" } do
+	local start, picked, toasted = #sent, #picks, #toasts
+	press(operator(command), command)
+	second_api.intents(second); second_api.intents(second)
+	check(since("second-window", start) == 0 and #picks == picked and #toasts == toasted and view.operator_intent ~= nil,
+		command .. ": a window that is not the continued origin never takes, settles, prompts or toasts")
+	first_api.intents(first)
+	check(view.operator_intent == nil and since("", start) == 1 and since("second-window", start) == 0
+		and #picks == picked + (if command == "continue_controller" then 1 else 0) and (picks[#picks] == nil or picks[#picks].window == ""),
+		command .. ": the window that already is the continued origin runs the clicked button once")
+end
+local start, picked = #sent, #picks
+palette[second_api].continue_controller.run(second)
+check(#picks == picked + 1 and picks[#picks].window == "second-window" and picks[#picks].placeholder:find("Continue controller", 1, true) == 1
+	and #sent == start, "ORCH+ Continue controller in this window opens its attested picker only in the invoking window")
+local toasted = #toasts
+palette[second_api].recovery_guide.run(second)
+check(#toasts == toasted and #sent == start and #picks == picked + 1, "ORCH+ Reload recovery guide starts in the invoking window without acting elsewhere")
+
+-- Assistance after first use: the host names the continued origin's window, so another window showing
+-- the same controller leaves Inspect, Recheck, Reveal owner and Stop assistance silently too.
+local function settled_by(window, from)
+	local n = 0
+	for i = from + 1, #sent do if sent[i].window == window and sent[i].act == "operator-intent-done" then n += 1 end end
+	return n
+end
+for _, assist in { "inspect", "recheck", "reveal", "stop" } do
+	local from, toasted_before, picked_before = #sent, #toasts, #picks
+	press(function(entry) return entry.kind == "assist-intent" and entry.request.kind == assist and entry.request.target == "controller" end, assist)
+	second_api.intents(second); second_api.intents(second)
+	check(since("second-window", from) == 0 and #toasts == toasted_before and #picks == picked_before and view.operator_intent ~= nil,
+		assist .. " assistance: a window that is not the continued origin never takes, settles, prompts or toasts")
+	first_api.intents(first); first_api.intents(first)
+	check(view.operator_intent == nil and settled_by("", from) == 1 and since("second-window", from) == 0,
+		assist .. " assistance: the continued origin's window runs the clicked button once")
+end
 end
 
 -- Exercise the real WindowCx timer/operator-intent consumer, including a bounded nested-status
@@ -828,7 +876,8 @@ local function window_consumer(mode)
 	if chained then wf:catalog(0) end
 	local window_tern = table.clone(fake)
 	window_tern.now = function() return clock end
-	window_tern.command = function() end; window_tern.files = { button = function() end }
+	local palette_commands = {}
+	window_tern.command = function(def) palette_commands[def.id] = def end; window_tern.files = { button = function() end }
 	window_tern.route = { link = function() error("ORCH+ must not claim links; controls are native buttons") end }
 	window_tern.timer = function(_, fn) table.insert(timers, fn); return {} end
 	local local_host = { id = "local", state = "connected", panes = { 9001, 9003 } }
@@ -1029,7 +1078,7 @@ local function window_consumer(mode)
 		return n
 	end
 	if chained then
-		click("continue_controller")
+		palette_commands.continue_controller.run(table.clone(cx)) -- A fresh incarnation continues from its own palette.
 		click("queue")
 		check(wf.authority.registry.sessions[wf.origin.logical_session_id].orchestrator ~= nil and #events == 0, "chained startup reserves coordinator before native provisioning")
 		if ack_mode then
@@ -1711,6 +1760,31 @@ if section == nil or section == "finish" then
 	check(state.rehydrate(clone(f.authority.registry)) ~= nil, "finished worker and exact retirement proofs pass persistence validation")
 	local forged = clone(f.authority.registry); forged.dispatch.workers[id].finish.seq = w.accepted_seq + 1
 	check(state.rehydrate(forged) == nil, "finish cannot claim an unaccepted report boundary")
+end
+-- SPAWN's exact pre-effect refusal (stopped producer journal unsettled) settles the attempt as
+-- refused-without-effect; an uncertain retirement is never treated that way.
+if section == nil or section == "retirement_refused" then
+	local f = fixture(); local id = f:accepted(false)
+	stop_ordinary(f, id)
+	local retire = f:apply("poll", { worker_id = id }); assert(retire.ok and f:action(retire.action_id).request.mode == "retire")
+	assert(f:apply("claim", { action_id = retire.action_id, executor = f.origin.window_epoch }).ok)
+	local refused = f:apply("result", { action_id = retire.action_id, executor = f.origin.window_epoch, grant_id = f:action(retire.action_id).claim.grant_id,
+		response_bytes = frame(f:action(retire.action_id).request, "rejected", nil, { code = "producer_unsettled", message = "The stopped producer journal is not settled at the authorized floors; nothing was retired" }) })
+	local w = f.authority.registry.dispatch.workers[id]
+	check(refused.code == "retirement_refused" and f:action(retire.action_id).phase == "complete" and w.phase == "accepted"
+		and w.reason.code == "retirement_refused" and not w.mailbox_retired, "exact pre-effect refusal settles the attempt without holding the worker or retiring the mailbox")
+	check(not dispatch.unresolved(f.authority.registry, f.origin.logical_session_id, f.origin.owner_id), "a refused retirement releases its effect slot and blocks no owner clearing")
+	check(f:apply("poll", { worker_id = id }).code == "retirement_refused", "the driver never re-issues a refused retirement by itself")
+	check(state.rehydrate(clone(f.authority.registry)) ~= nil, "a refused retirement marker passes persistence validation")
+	check(f:apply("finish", { worker_id = id }).code == "retirement_rearmed", "explicit owner control re-arms one fresh retirement")
+	local again = f:apply("poll", { worker_id = id }); local request = f:action(again.action_id).request
+	check(again.ok and again.action_id ~= retire.action_id and request.op == "mailbox_retire" and request.mode == "retire"
+		and request.grant_id ~= f:action(retire.action_id).request.grant_id, "the re-armed retirement carries a fresh grant")
+	check(f:finish(again.action_id, "retired", {}).ok and f.authority.registry.dispatch.workers[id].mailbox_retired, "a settled journal then retires normally")
+	local g = fixture(); local gid = g:accepted(false); stop_ordinary(g, gid)
+	local uncertain = g:apply("poll", { worker_id = gid })
+	check(g:finish(uncertain.action_id, "uncertain", nil).code == "effect_uncertain" and g:apply("finish", { worker_id = gid }).code == "finish_already_requested"
+		and g:apply("poll", { worker_id = gid }).code == "operation_pending", "a possibly applied retirement stays uncertain and is never re-armed")
 end
 if section == nil or section == "sweep_rules" then
 	local f = fixture()
@@ -2481,6 +2555,57 @@ if section == nil or section == "rollover_coordinator_restored" then
 	check(f:apply("claim", { action_id = publish.action_id, executor = f.origin.window_epoch }).ok, "reconciliation releases the held successor effects")
 	check(state.rehydrate(clone(f.authority.registry)) ~= nil, "restoration evidence restores")
 end
+if section == nil or section == "rollover_coordinator_successor_rejected" then
+	-- A coordinator successor that mistyped its handover token: the predecessor coordinator was stopped and retired, then SPAWN refused the
+	-- successor's ACCEPTED (one mistyped handover-token digit). No coordinator is active.
+	local f, id = coordinator_ready()
+	local hid = coordinator_retirement_requested(f, id)
+	assert(coordinator_released(f, id, coordinator_stop_action(f, id)).code == "coordinator_retired")
+	local r = rollover_of(f, hid); local succ_id, owner = r.successor_worker_id, coordinator_owner(f)
+	assert(r.phase == "successor_granted" and owner.owner_id == r.successor_owner_id)
+	local provision = actions_of(f, succ_id, "mailbox_provision"); assert(#provision == 1)
+	local provisioned = f:action(provision[1]).request
+	check(provisioned.handover_id == hid and provisioned.handover_sha256 == codec.sha256(hid .. ":" .. r.handover_token)
+		and not runtime.json.encode(provisioned):find(r.handover_token, 1, true), "the successor mailbox is provisioned with the handover ID and pair digest, never the token")
+	assert(f:finish(provision[1], "provisioned", { handle = "mailbox-coordinator-successor", binding_digest = string.rep("c", 64),
+		capabilities = runtime.json.array({ "report-files-v1", "native-ask-v1", "coordinator-control-v1" }), limits = {} }).ok)
+	assert(f:finish(worker_of(f, succ_id).launch_action_id, "awaiting_acceptance", { pane_binding = successor_pane(f) }).ok)
+	assert(rollover_of(f, hid).phase == "successor_created")
+	local read = f:apply("poll", { worker_id = succ_id }); assert(read.ok, read.message)
+	local request = f:action(read.action_id).request
+	assert(request.op == "mailbox_read" and request.selector.stream == "report" and request.selector.slot == 1, request.op)
+	assert(f:apply("claim", { action_id = read.action_id, executor = f.origin.window_epoch }).ok)
+	local problem = { code = "binding_mismatch", message = "Acceptance differs from the issued assignment or handover." }
+	local refused = f:apply("result", { action_id = read.action_id, executor = f.origin.window_epoch, grant_id = f:action(read.action_id).claim.grant_id,
+		response_bytes = frame(request, "rejected", nil, problem) })
+	r = rollover_of(f, hid)
+	check(refused.code == "bridge_rejected" and worker_of(f, succ_id).phase == "held" and r.phase == "successor_created" and r.hold.code == "successor_unaccepted",
+		"a refused successor acceptance holds the coordinator handover")
+	local text = r.hold.message
+	check(text:find(problem.message, 1, true) ~= nil and text:find("already stopped and retired, so no coordinator is active", 1, true) ~= nil
+		and text:find("fenced recovery for orchestrator owner " .. owner.owner_id, 1, true) ~= nil and text:find("keeps running", 1, true) == nil,
+		"the hold reports the retired predecessor, the SPAWN diagnostic and the recovery path: " .. text)
+	check(f:queue(true).code == "rollover_reserved" and handover_successors(f, hid) == 1 and #actions_of(f, succ_id, "launch") == 1,
+		"the held handover keeps the slot; nothing is relaunched")
+	local function owner_event(kind, fields)
+		local event = { kind = kind, request_id = "successor-recovery-" .. kind .. "-" .. tostring(f.authority.registry.revision), orch_session_id = f.origin.logical_session_id,
+			target = "orchestrator", expected_owner_id = owner.owner_id, expected_generation = owner.generation }
+		for k, v in fields do event[k] = v end
+		return f.authority:apply(event)
+	end
+	assert(owner_event("observe_owner", { status = "unavailable", evidence = "observed" }).ok)
+	assert(owner_event("observe_owner", { status = "operator verified stopped", owner_active = false, pending_executors = 0, evidence = "operator_attested", operator_verified = true }).ok)
+	local intent = owner_event("begin_recovery", { expected_revision = f.authority.registry.revision }); assert(intent.ok, intent.message)
+	local confirmed = owner_event("confirm_recovery", { expected_revision = intent.revision, intent_id = intent.intent_id, evidence = "operator_attested", operator_verified = true })
+	assert(confirmed.ok, confirmed.message)
+	assert(f:apply("observe", { worker_id = succ_id, pane_binding = successor_pane(f), native_state = "exited" }).ok)
+	r = rollover_of(f, hid)
+	check(r.phase == "cancelled" and r.hold.code == "successor_owner_recovered" and coordinator_owner(f) == nil
+		and handover_successors(f, hid) == 1 and #actions_of(f, succ_id, "launch") == 1, "fenced recovery of the successor's owner closes the rollover without relaunching")
+	local fresh = f:queue(true)
+	check(fresh.ok and fresh.code == "task_queued" and coordinator_owner(f).managed_worker_id == fresh.worker_id, "the freed slot accepts an explicit new coordinator start")
+	check(state.rehydrate(clone(f.authority.registry)) ~= nil, "closed coordinator handover restores")
+end
 if section == nil or section == "rollover_coordinator_policy" then
 	local clock = { now_ms = 1000, mono_ms = 1000, epoch = "coordinator-policy-host" }
 	local f = fixture(function() return clone(clock) end)
@@ -2954,17 +3079,251 @@ if section == nil or section == "publication_readback" then
 	local lgrant = g:action(launch).claim
 	assert(g:apply("lost", { action_id = launch, executor = lgrant.executor, grant_id = lgrant.grant_id }).ok)
 	check(g:apply("readback_publication", { action_id = launch }).code == "readback_refused" and g:action(launch).phase == "uncertain", "an uncertain launch is never repeated by readback")
-	-- After reload the worker must be explicitly continued first.
-	local h = fixture(); local hid = h:accepted(false)
-	assert(h:apply("reply", { worker_id = hid }).ok)
-	local hp = h:apply("poll", { worker_id = hid }); assert(hp.ok, hp.message)
-	assert(h:apply("claim", { action_id = hp.action_id, executor = h.origin.window_epoch }).ok)
-	local hgrant = h:action(hp.action_id).claim
-	assert(h:apply("lost", { action_id = hp.action_id, executor = hgrant.executor, grant_id = hgrant.grant_id }).ok)
-	h.authority = host.new_authority(h.memory); assert(h.authority:load().ok)
-	assert(h:apply("continue_controller", { expected_revision = h.authority.registry.revision, operator_verified = true }).ok)
-	check(h:apply("readback_publication", { action_id = hp.action_id }).code == "worker_unbound" and h:action(hp.action_id).phase == "uncertain",
-		"after reload the worker's current route must be explicitly continued before readback")
+	-- After any reload an uncertain publication that SPAWN never recorded still blocks
+	-- reattachment, and readback on the continued controller route is its individual settlement.
+	local function readback_reload(name, f, reload)
+		local fid = f:accepted(false)
+		assert(f:apply("reply", { worker_id = fid }).ok)
+		local pub = f:apply("poll", { worker_id = fid }); assert(pub.ok, pub.message)
+		local request = f:action(pub.action_id).request
+		assert(f:apply("claim", { action_id = pub.action_id, executor = f.origin.window_epoch }).ok)
+		local original = clone(f.authority.registry.dispatch.workers[fid])
+		reload(f, pub.action_id)
+		assert(f:apply("continue_controller", { expected_revision = f.authority.registry.revision, operator_verified = true }).ok)
+		check(f:action(pub.action_id).phase == "uncertain", name .. ": continuation keeps the stopped executor's publication uncertain, never resolved")
+		local pane = { pane_id = "9009", window_key = "", window_epoch = f.origin.window_epoch, native_session_id = "7", window_host_id = "local" }
+		local function attach()
+			return f:apply("continue_worker", { worker_id = fid, pane_binding = pane,
+				continuation_proof = dispatch.continuation_proof(f.authority.registry, f.authority.registry.dispatch.workers[fid]), operator_verified = true })
+		end
+		check(attach().code == "settlement_pending", name .. ": the uncertain publication still blocks reattachment")
+		local readback = f:apply("readback_publication", { action_id = pub.action_id })
+		check(readback.ok and f:action(pub.action_id).phase == "resolved", name .. ": readback settles it on the continued controller route before reattachment: " .. tostring(readback.message))
+		local attached = attach(); check(attached.ok, name .. ": reattachment proceeds after the readback: " .. tostring(attached.message))
+		assert(f:finish(attached.action_id, "attached", { pane_binding = pane, previous_origin_binding = original.origin_binding, previous_pane_binding = original.pane_binding }).ok)
+		local again = f:apply("poll", { worker_id = fid }); assert(again.ok, again.message)
+		local repeated = f:action(again.action_id).request
+		check(repeated.op == "mailbox_publish_reply" and again.action_id ~= pub.action_id and repeated.object_sha256 == request.object_sha256,
+			name .. ": the reattached route re-issues the exact same reply bytes")
+		assert(f:finish(again.action_id, "published", {}).ok)
+		check(f:action(again.action_id).phase == "complete" and state.rehydrate(clone(f.authority.registry)) ~= nil, name .. ": one settled publication; the state restores")
+	end
+	readback_reload("host restart", fixture(), function(f, action_id)
+		local grant = f:action(action_id).claim
+		assert(f:apply("lost", { action_id = action_id, executor = grant.executor, grant_id = grant.grant_id }).ok)
+		f.authority = host.new_authority(f.memory); assert(f.authority:load().ok)
+	end)
+	-- Window-only restart: the host stays alive, so restore never marked the old claim uncertain.
+	readback_reload("window-only restart", fixture(), function(f)
+		f.origin.window_epoch = "replacement-window"; f.controller_pane = "9010"
+	end)
+end
+-- Never-launched work whose provision, launch or adoption explicit continuation fenced as unexecuted
+-- has an owner withdrawal (cancel_work), gated on SPAWN's retained status when SPAWN received the
+-- request. Regression: a retried launch was fenced never_claimed while SPAWN still
+-- held its expired window challenge; neither cancel_work nor rebind_unlaunched applied, so the work
+-- and its reservations were wedged.
+if section == nil or section == "withdraw_fenced" then
+	local AUTH_FULL = { resource = "window_authorization", current = 1, limit = 1, retryable = true, effect_started = false }
+	local PROVISIONED_W = { handle = "mailbox-withdraw", binding_digest = string.rep("e", 64),
+		capabilities = runtime.json.array({ "report-files-v1", "native-ask-v1", "coordinator-control-v1" }), limits = {} }
+	local function continue_on_b(fx)
+		fx.origin.window_epoch = "replacement-window"; fx.controller_pane = "9010"
+		assert(fx:apply("continue_controller", { expected_revision = fx.authority.registry.revision, operator_verified = true }).ok)
+	end
+	-- The window's exact SPAWN status read of the fenced request and SPAWN's framed answer.
+	local function status_evidence(fx, a, status, outcome_status, outcome_payload, overrides)
+		local query = { schema = 1, origin = "orchplus", op = "status", request_id = next_id(), action_id = next_id(), origin_binding = clone(a.request.origin_binding),
+			controller_pane = fx.controller_pane or "9001", controller_generation = a.request.controller_generation, target_request_id = a.request.request_id }
+		for k, v in overrides or {} do query[k] = v end
+		local payload = if outcome_status then { outcome = { schema = 1, op = a.request.op, request_id = a.request.request_id, action_id = a.request.action_id,
+			origin_binding = clone(a.request.origin_binding), controller_generation = a.request.controller_generation, status = outcome_status, payload = outcome_payload } } else nil
+		return { query_bytes = runtime.json.encode(query), response_bytes = frame(query, status, payload) }
+	end
+	local function cancel(fx, worker_id, evidence)
+		local fields = { worker_id = worker_id }
+		for k, v in evidence or {} do fields[k] = v end
+		return fx:apply("cancel_work", fields)
+	end
+	local function withdrawal(fx, worker_id)
+		local w = dispatch.project(fx.authority.registry, fx.origin.logical_session_id, fx.origin.alias_nonce).workers[worker_id]
+		return if w then w.withdrawal else nil
+	end
+	-- The live defect: an expired challenge backpressured the launch, the automatic recheck made it
+	-- ready again (keeping SPAWN's answer), and continuation fenced it before any new claim.
+	local f = fixture(); f:catalog(0)
+	local queued = f:queue(false); assert(queued.ok, queued.message)
+	assert(f:finish(queued.action_id, "provisioned", PROVISIONED_W).ok)
+	local id = queued.worker_id
+	local launch_id = worker_of(f, id).launch_action_id
+	check(f:finish(launch_id, "full", AUTH_FULL).code == "backpressure", "an expired SPAWN window challenge settles the launch as pre-effect backpressure")
+	assert(f:apply("retry", { action_id = launch_id }).ok)
+	local before = clone(f:action(launch_id))
+	continue_on_b(f)
+	local fenced = f:action(launch_id)
+	check(fenced.phase == "resolved" and fenced.resolution.evidence == "never_claimed" and fenced.request_bytes == before.request_bytes
+		and worker_of(f, id).origin_binding.window_epoch == "fixture-window", "continuation fences the retried old-route launch; it is neither moved nor re-sent")
+	local offered = withdrawal(f, id)
+	check(offered ~= nil and offered.action_id == launch_id and offered.op == "launch" and offered.status_required == true
+		and offered.request_id == fenced.request.request_id and offered.controller_generation == fenced.request.controller_generation,
+		"the controller offers withdrawal of the fenced launch, gated on SPAWN's status of that exact request")
+	local projection = state.project(f.authority.registry)
+	projection.dispatch = dispatch.project(f.authority.registry, f.origin.logical_session_id, f.origin.alias_nonce)
+	local rendered = load("views").render({ pane = 42, alias_nonce = f.origin.alias_nonce, orch_session_id = f.origin.logical_session_id,
+		action_serial = 0, actions = {} }, projection, "ready")
+	local worker_node = assert(role_node(rendered, "orchplus.worker", "workflow-worker-" .. id), "the fenced worker keeps its machine node")
+	local worker_span = worker_node.p.spans[1]
+	local machine = runtime.json.decode(if type(worker_span) == "string" then worker_span else worker_span.t)
+	check(runtime.json.encode(rendered):find("Cancel never-launched work", 1, true) ~= nil and machine.withdrawal.request_id == fenced.request.request_id
+		and machine.withdrawal.origin_binding.window_epoch == "fixture-window", "the controller renders the withdrawal control and the exact request the window reads status for")
+	check(cancel(f, id).code == "status_required" and worker_of(f, id) ~= nil, "SPAWN received the launch, so withdrawal needs its retained SPAWN status")
+	check(cancel(f, id, status_evidence(f, fenced, "found", "pending", { authorization_required = true })).code == "authorization_live" and worker_of(f, id) ~= nil,
+		"a still-live SPAWN challenge refuses withdrawal until it expires")
+	check(cancel(f, id, status_evidence(f, fenced, "found", "resolved", { prompt_delivery = "not_submitted" })).code == "spawn_outcome_open" and worker_of(f, id) ~= nil,
+		"an authorized SPAWN launch awaiting its executor is never withdrawn")
+	check(cancel(f, id, status_evidence(f, fenced, "found", "uncertain")).code == "spawn_outcome_open" and worker_of(f, id) ~= nil,
+		"an uncertain SPAWN outcome is never withdrawn")
+	check(cancel(f, id, status_evidence(f, fenced, "found", "full", AUTH_FULL, { target_request_id = "launch-other" })).code == "binding_mismatch" and worker_of(f, id) ~= nil,
+		"the status of another request is not evidence")
+	local cancelled = cancel(f, id, status_evidence(f, fenced, "found", "full", AUTH_FULL))
+	check(cancelled.ok and cancelled.code == "work_cancelled" and worker_of(f, id) == nil and f:action(launch_id) == nil and f:action(queued.action_id) == nil,
+		"SPAWN's expired challenge proves the launch can never run: the work and its settled actions are removed")
+	check(state.rehydrate(clone(f.authority.registry)) ~= nil, "the withdrawn state restores")
+	local again = f:queue(false)
+	check(again.ok and again.worker_id ~= id and worker_of(f, again.worker_id).launch_request_id ~= fenced.request.request_id,
+		"the assignment can be queued again; it gets a new launch request ID")
+	-- A provision SPAWN refused before effects, fenced at continuation; SPAWN has no record of it.
+	local g = fixture(); g:catalog(0)
+	local gq = g:queue(false); assert(gq.ok)
+	check(g:finish(gq.action_id, "full", { resource = "mailbox_allocation", current = 16, limit = 16, retryable = true, effect_started = false }).code == "backpressure",
+		"a full mailbox allocation refuses the provision before effects")
+	continue_on_b(g)
+	local gprov = g:action(gq.action_id)
+	check(gprov.phase == "resolved" and gprov.resolution.evidence == "pre_effect_refusal" and worker_of(g, gq.worker_id).phase == "queued"
+		and withdrawal(g, gq.worker_id).op == "mailbox_provision", "continuation fences the refused provision and offers withdrawal")
+	check(cancel(g, gq.worker_id, status_evidence(g, gprov, "found", "rejected")).code == "work_cancelled" and worker_of(g, gq.worker_id) == nil,
+		"a terminal SPAWN rejection proves the provision can never run")
+	local h = fixture(); h:catalog(0)
+	local hq = h:queue(false); assert(hq.ok)
+	assert(h:finish(hq.action_id, "full", { resource = "mailbox_allocation", current = 16, limit = 16, retryable = true, effect_started = false }).ok)
+	continue_on_b(h)
+	check(cancel(h, hq.worker_id, status_evidence(h, h:action(hq.action_id), "missing")).code == "work_cancelled" and worker_of(h, hq.worker_id) == nil,
+		"no SPAWN record of the fenced provision: the work is withdrawn")
+	-- Adoption whose native ask was never claimed: never sent, so no SPAWN read is needed.
+	local m = fixture(); m:catalog(0)
+	local function hand(fx) return { pane_id = "9020", window_key = fx.origin.window_key, window_epoch = fx.origin.window_epoch,
+		native_session_id = fx.origin.native_session_id, window_host_id = fx.origin.window_host_id } end
+	local function adopt(fx)
+		return fx:apply("adopt", { record_id = "native", record_revision = 0, catalog_revision = 0, prompt = "Adopted fixture task.", pane_binding = hand(fx),
+			attestation = "operator_verified_exact_agent_pane" })
+	end
+	local adopted = adopt(m); assert(adopted.ok, adopted.message)
+	assert(m:finish(adopted.action_id, "provisioned", PROVISIONED_W).ok)
+	local ask = worker_of(m, adopted.worker_id).launch_action_id
+	continue_on_b(m)
+	check(m:action(ask).request.op == "adopt" and m:action(ask).phase == "resolved" and m:action(ask).resolution.evidence == "never_claimed"
+		and withdrawal(m, adopted.worker_id).status_required == false, "continuation fences the never-claimed adoption ask; SPAWN never received it")
+	check(cancel(m, adopted.worker_id).code == "work_cancelled" and worker_of(m, adopted.worker_id) == nil, "the fenced adoption is withdrawn without a SPAWN read")
+	check(adopt(m).code == "adoption_queued", "the owner may explicitly adopt the pane again in the continued window")
+	-- A fenced coordinator start releases its never-bound orchestrator reservation.
+	local c = fixture(); c:catalog(0)
+	local cq = c:queue(true); assert(cq.ok, cq.message)
+	assert(c:finish(cq.action_id, "provisioned", PROVISIONED_W).ok)
+	local cid = cq.worker_id
+	local claunch = worker_of(c, cid).launch_action_id
+	check(c:finish(claunch, "full", AUTH_FULL).code == "backpressure", "the coordinator launch is refused before effects")
+	continue_on_b(c)
+	local reserved = coordinator_owner(c)
+	check(c:action(claunch).resolution.evidence == "pre_effect_refusal" and reserved.phase == "reserved" and reserved.managed_worker_id == cid,
+		"the fenced coordinator start still holds the session's orchestrator reservation")
+	check(c:queue(true).code == "orchestrator_slot_occupied", "no second coordinator can start while the fenced one holds the slot")
+	check(cancel(c, cid, status_evidence(c, c:action(claunch), "found", "full", AUTH_FULL)).code == "work_cancelled" and worker_of(c, cid) == nil
+		and coordinator_owner(c) == nil and c.authority.registry.retired[reserved.owner_id] ~= nil, "withdrawal releases the never-bound coordinator reservation")
+	check(c:queue(true).code == "task_queued" and state.rehydrate(clone(c.authority.registry)) ~= nil, "the freed slot accepts an explicit new coordinator start")
+	-- A launch claimed on the old window may have run: it stays uncertain and is never withdrawn.
+	local u = fixture(); u:catalog(0)
+	local uq = u:queue(false); assert(uq.ok)
+	assert(u:finish(uq.action_id, "provisioned", PROVISIONED_W).ok)
+	local ulaunch = worker_of(u, uq.worker_id).launch_action_id
+	assert(u:apply("claim", { action_id = ulaunch, executor = u.origin.window_epoch }).ok)
+	continue_on_b(u)
+	check(u:action(ulaunch).phase == "uncertain" and withdrawal(u, uq.worker_id) == nil
+		and cancel(u, uq.worker_id, status_evidence(u, u:action(ulaunch), "missing")).code == "worker_unbound" and worker_of(u, uq.worker_id) ~= nil,
+		"an uncertain claimed launch is never withdrawn, even when SPAWN reports no record")
+	-- A launch (or adoption ask) SPAWN definitively rejected after its mailbox was provisioned: the
+	-- owner's cancel retires the never-used mailbox through the exact retirement path; the worker stays
+	-- visible until SPAWN confirms `retired`, and a refused or uncertain retirement keeps it.
+	local OCCUPIED = { code = "binding_mismatch", message = "Occupied SPAWN controller binding; inspect Config and recover the prior owner explicitly" }
+	local function reject(fx, action_id, problem)
+		if fx:action(action_id).phase == "ready" then assert(fx:apply("claim", { action_id = action_id, executor = fx.origin.window_epoch }).ok) end
+		local a = fx:action(action_id)
+		return fx:apply("result", { action_id = action_id, executor = a.claim.executor, grant_id = a.claim.grant_id, response_bytes = frame(a.request, "rejected", nil, problem) })
+	end
+	local function rejected_launch(fx, coordinator)
+		local q = fx:queue(coordinator); assert(q.ok, q.message)
+		assert(fx:finish(q.action_id, "provisioned", PROVISIONED_W).ok)
+		local launch = worker_of(fx, q.worker_id).launch_action_id
+		check(reject(fx, launch, OCCUPIED).code == "bridge_rejected", "SPAWN's definite launch rejection commits after provisioning")
+		return q.worker_id, launch
+	end
+	local r = fixture(); r:catalog(0)
+	local rid, rlaunch = rejected_launch(r, false)
+	local rw = worker_of(r, rid)
+	check(rw.phase == "held" and rw.mailbox_handle ~= nil and rw.pane_binding == nil and r:action(rlaunch).phase == "complete", "the work is held with a provisioned, never-used mailbox")
+	local roffer = withdrawal(r, rid)
+	check(roffer ~= nil and roffer.evidence == "spawn_rejected" and roffer.op == "launch" and roffer.status_required == false and roffer.mailbox_retire == "not_requested",
+		"the controller offers withdrawal that will retire the unused mailbox")
+	check(cancel(r, rid, status_evidence(r, r:action(rlaunch), "missing")).code == "invalid_command", "a terminal SPAWN rejection takes no status evidence")
+	local retiring = cancel(r, rid)
+	local retire = r:action(retiring.action_id)
+	check(retiring.code == "withdrawal_retiring" and worker_of(r, rid) ~= nil and retire.request.op == "mailbox_retire" and retire.request.mode == "retire"
+		and retire.request.handle == rw.mailbox_handle and worker_of(r, rid).mailbox_retire_action_id == retiring.action_id and withdrawal(r, rid).mailbox_retire == "retiring",
+		"cancel queues the exact mailbox retirement and keeps the worker visible")
+	check(state.rehydrate(clone(r.authority.registry)) ~= nil, "a withdrawal retirement without native stop restores")
+	check(cancel(r, rid).code == "retirement_unresolved", "a pending retirement is never issued twice")
+	check(reject(r, retiring.action_id, OCCUPIED).code == "bridge_rejected" and worker_of(r, rid) ~= nil and withdrawal(r, rid).mailbox_retire == "refused"
+		and worker_of(r, rid).reason.code == "binding_mismatch", "a refused retirement keeps the worker visible with SPAWN's outcome")
+	local again = cancel(r, rid)
+	check(again.code == "withdrawal_retiring" and again.action_id ~= retiring.action_id, "after a definite refusal the owner may cancel again with one fresh retirement")
+	check(r:finish(again.action_id, "retired", nil).ok and worker_of(r, rid).mailbox_retired == true and withdrawal(r, rid) == nil,
+		"SPAWN's confirmed retirement retires the unused mailbox")
+	check(state.rehydrate(clone(r.authority.registry)) ~= nil, "the retired withdrawal restores")
+	check(r:queue(false).code == "task_queued" and worker_of(r, rid) == nil, "the retired never-launched worker is reclaimed like any retired generation")
+	-- An uncertain retirement is never re-issued.
+	local s = fixture(); s:catalog(0)
+	local sid = rejected_launch(s, false)
+	local sretire = cancel(s, sid).action_id
+	assert(s:apply("claim", { action_id = sretire, executor = s.origin.window_epoch }).ok)
+	local sgrant = s:action(sretire).claim
+	assert(s:apply("lost", { action_id = sretire, executor = sgrant.executor, grant_id = sgrant.grant_id }).ok)
+	check(s:action(sretire).phase == "uncertain" and cancel(s, sid).code == "retirement_unresolved" and worker_of(s, sid) ~= nil and withdrawal(s, sid).mailbox_retire == "retiring",
+		"an uncertain retirement keeps the worker visible and is never repeated")
+	-- After continuation the retirement runs on the continued route.
+	local k = fixture(); k:catalog(0)
+	local kid = rejected_launch(k, false)
+	continue_on_b(k)
+	local kretire = cancel(k, kid)
+	check(kretire.code == "withdrawal_retiring" and k:action(kretire.action_id).request.origin_binding.window_epoch == "replacement-window"
+		and state.rehydrate(clone(k.authority.registry)) ~= nil, "the withdrawal retirement is issued on the continued route")
+	check(k:finish(kretire.action_id, "retired", nil).ok and worker_of(k, kid).mailbox_retired == true, "the continued route confirms retirement")
+	-- A rejected adoption ask is withdrawn the same way.
+	local a = fixture(); a:catalog(0)
+	local apane = { pane_id = "9020", window_key = a.origin.window_key, window_epoch = a.origin.window_epoch, native_session_id = a.origin.native_session_id, window_host_id = a.origin.window_host_id }
+	local aq = a:apply("adopt", { record_id = "native", record_revision = 0, catalog_revision = 0, prompt = "Adopted fixture task.", pane_binding = apane,
+		attestation = "operator_verified_exact_agent_pane" }); assert(aq.ok, aq.message)
+	assert(a:finish(aq.action_id, "provisioned", PROVISIONED_W).ok)
+	check(reject(a, worker_of(a, aq.worker_id).launch_action_id, { code = "target_unavailable", message = "Target pane is not an idle native agent in the exact window, session and host; nothing was sent" }).code == "bridge_rejected"
+		and withdrawal(a, aq.worker_id).op == "adopt" and cancel(a, aq.worker_id).code == "withdrawal_retiring", "a refused adoption ask retires its unused mailbox on cancel")
+	-- A coordinator start releases its orchestrator slot once the unused mailbox retires.
+	local co = fixture(); co:catalog(0)
+	local coid = rejected_launch(co, true)
+	local coowner = coordinator_owner(co)
+	check(coowner.phase == "reserved" and coowner.managed_worker_id == coid, "the rejected coordinator start still holds the reserved slot")
+	local coretire = cancel(co, coid)
+	check(coretire.code == "withdrawal_retiring" and coordinator_owner(co) ~= nil, "the slot stays reserved until retirement is confirmed")
+	check(co:finish(coretire.action_id, "retired", nil).ok and coordinator_owner(co) == nil and co.authority.registry.retired[coowner.owner_id] ~= nil,
+		"confirmed retirement releases the never-bound coordinator reservation")
+	check(co:queue(true).code == "task_queued" and state.rehydrate(clone(co.authority.registry)) ~= nil, "a new coordinator start takes the freed slot")
 end
 -- USAGE capacity consumer and quota routing (plan §7): pure normalization/assembly plus the real reducer.
 do
@@ -3069,6 +3428,33 @@ do
 		roster.scopes[1].accounts[1].profile_binding.generation = 3
 		check(q_reason(q_document({ q_publication("local-source", "native") }, { q_source("local-source") }, { current_roster = roster })) == "local_roster_changed",
 			"a rebound local profile invalidates the published binding")
+		-- OMP consumers route on their single associated account; direct accounts are unchanged.
+		local function q_consumer(source_id, account_ids)
+			local pub = q_publication(source_id, "native")
+			pub.snapshot.roster.scopes[1].consumers = { { id = "omp-worker", label = "OMP worker", reading_ids = {}, definition_revision = string.rep("e", 64), account_ids = account_ids } }
+			return pub
+		end
+		local associated = q_normalize(q_document({ q_consumer("remote-a", { "native" }) }, { q_source("remote-a") }), { "omp-worker", "native" })
+		local direct = q_entry(associated, "native")
+		check(q_entry(associated, "omp-worker").state == "known" and q_entry(associated, "omp-worker").remaining_pct == 60
+			and q_entry(associated, "omp-worker").binding == direct.binding and direct.state == "known" and direct.remaining_pct == 60,
+			"an associated OMP consumer routes on its account's quota and the direct account is unchanged")
+		check(q_reason(q_document({ q_consumer("remote-a", nil) }, { q_source("remote-a") }), "omp-worker") == "consumer_unassociated"
+			and quota.REASONS.consumer_unassociated:find("Associate OMP records", 1, true) ~= nil,
+			"an OMP consumer without an account association is unbound and points at USAGE Setup")
+		check(q_reason(q_document({ q_consumer("remote-a", { "other-account" }) }, { q_source("remote-a") }), "omp-worker") == "consumer_unassociated",
+			"an association to an account outside the scope is not a binding")
+		roster.scopes[1].accounts[1].profile_binding.generation = 2
+		roster.scopes[1].consumers = { { id = "omp-worker", definition_revision = string.rep("e", 64), account_ids = { "native" } } }
+		check(q_entry(q_normalize(q_document({ q_consumer("local-source", { "native" }) }, { q_source("local-source") }, { current_roster = roster }), { "omp-worker" }), "omp-worker").state == "known",
+			"a local consumer matching the current roster is bound")
+		roster.scopes[1].consumers[1].definition_revision = string.rep("f", 64)
+		check(q_reason(q_document({ q_consumer("local-source", { "native" }) }, { q_source("local-source") }, { current_roster = roster }), "omp-worker") == "local_roster_changed",
+			"a changed current consumer definition fails closed")
+		roster.scopes[1].consumers[1] = { id = "omp-worker", definition_revision = string.rep("e", 64) }
+		check(q_reason(q_document({ q_consumer("local-source", { "native" }) }, { q_source("local-source") }, { current_roster = roster }), "omp-worker") == "local_roster_changed",
+			"a current roster that dropped the association fails closed")
+		roster.scopes[1].consumers = nil; roster.scopes[1].accounts[1].profile_binding.generation = 3
 		check(q_reason(q_document({ q_publication("remote-a", "native") }, { q_source("remote-a") }, { quota_unit = "tokens" })) == "unit_unknown", "unknown quota units are unknown")
 		-- Host assessment and its exact reserve boundary.
 		local p = q_policy()
@@ -3364,6 +3750,22 @@ do
 		check(claimed.ok and f:action(launch).phase == "claimed" and f:action(launch).claim.capacity.revision == B and f:action(launch).claim.capacity.validated_at_ms == QNOW,
 			"a current validation of the bound revision claims and is recorded on the durable claim")
 		check(state.rehydrate(clone(f.authority.registry)) ~= nil, "a claim bound to capacity evidence restores")
+		-- SPAWN's window authorizes only a scoped action whose claim is exactly the bridge contract
+		-- `{executor,epoch,grant_id}`; the bound USAGE validation stays host-side. Live defect: the
+		-- projected claim carried `capacity`, so every routed launch's window challenge expired unconsumed.
+		local projection = state.project(f.authority.registry)
+		projection.dispatch = dispatch.project(f.authority.registry, f.origin.logical_session_id, f.origin.alias_nonce)
+		local rendered = load("views").render({ pane = 42, alias_nonce = f.origin.alias_nonce, orch_session_id = f.origin.logical_session_id,
+			action_serial = 0, actions = {} }, projection, "ready")
+		local scoped_node = assert(role_node(rendered, "orchplus.dispatch", "dispatch-action-" .. launch), "the routed launch has its scoped action node")
+		local scoped_span = scoped_node.p.spans[1]
+		local scoped = runtime.json.decode(if type(scoped_span) == "string" then scoped_span else scoped_span.t)
+		local claim_keys = {}
+		for key in scoped.action.claim do table.insert(claim_keys, key) end
+		table.sort(claim_keys)
+		check(scoped.action.phase == "claimed" and table.concat(claim_keys, ",") == "epoch,executor,grant_id"
+			and scoped.action.claim.grant_id == f:action(launch).claim.grant_id and f:action(launch).claim.capacity ~= nil,
+			"a routed launch's claim reaches SPAWN as exactly {executor,epoch,grant_id}; capacity evidence stays on the durable claim")
 		-- Turning routing off re-evaluates as explicit selection: an unsubstituted record claims without USAGE.
 		local o = q_fixture()
 		assert(o:apply("policy", { policy = { quota_routing = true } }).ok)
@@ -3526,6 +3928,125 @@ do
 			"the controller shows the selector as unverified, never enforced")
 		assert(f:apply("policy", { policy = { initial_dispatch_model = true } }).ok)
 		check(q_worker(f, queued.worker_id).record_id == "alt-model", "selector state is evidence only: it neither blocks nor enables a permitted substitution")
+	end
+
+	if section == nil or section == "withdraw_fenced" then
+		-- SPAWN definitively rejected a routed provision before any effect
+		-- ("Occupied SPAWN controller binding"). The selected work is held with no mailbox and no
+		-- launch; its retained rejection is terminal, so the owner withdraws it without a status read.
+		local f = q_fixture()
+		assert(f:apply("policy", { policy = { quota_routing = true } }).ok)
+		assert(q_capacity(f, { q_known("native", 60) }).ok)
+		local queued = q_queue(f); assert(queued.code == "task_queued", queued.message)
+		assert(f:apply("claim", { action_id = queued.action_id, executor = f.origin.window_epoch }).ok)
+		local provision = f:action(queued.action_id)
+		local occupied = { code = "binding_mismatch", message = "Occupied SPAWN controller binding; inspect Config and recover the prior owner explicitly" }
+		check(f:apply("result", { action_id = queued.action_id, executor = provision.claim.executor, grant_id = provision.claim.grant_id,
+			response_bytes = frame(provision.request, "rejected", nil, occupied) }).code == "bridge_rejected", "SPAWN's definite provision rejection commits")
+		local w = q_worker(f, queued.worker_id)
+		check(w.phase == "held" and w.mailbox_handle == nil and w.routing.phase == "selected" and f:action(w.launch_action_id) == nil,
+			"the routed work is held: selected, never provisioned and never launched")
+		local offered = dispatch.project(f.authority.registry, f.origin.logical_session_id, f.origin.alias_nonce).workers[queued.worker_id].withdrawal
+		check(offered ~= nil and offered.evidence == "spawn_rejected" and offered.op == "mailbox_provision" and offered.status_required == false,
+			"the controller offers withdrawal on SPAWN's retained rejection, with no further status read")
+		local cancelled = f:apply("cancel_work", { worker_id = queued.worker_id })
+		check(cancelled.code == "work_cancelled" and q_worker(f, queued.worker_id) == nil and q_actions(f, queued.worker_id) == 0,
+			"the rejected work and its settled provision are removed, releasing its routing reservation")
+		check(state.rehydrate(clone(f.authority.registry)) ~= nil and q_queue(f).code == "task_queued", "the state restores and new routed work is queued")
+		-- A provision whose outcome is unknown stays strict: it may have created a mailbox.
+		local u = q_fixture()
+		assert(u:apply("policy", { policy = { quota_routing = true } }).ok)
+		assert(q_capacity(u, { q_known("native", 60) }).ok)
+		local uq = q_queue(u); assert(uq.code == "task_queued", uq.message)
+		assert(u:apply("claim", { action_id = uq.action_id, executor = u.origin.window_epoch }).ok)
+		local grant = u:action(uq.action_id).claim
+		assert(u:apply("lost", { action_id = uq.action_id, executor = grant.executor, grant_id = grant.grant_id }).ok)
+		check(u:action(uq.action_id).phase == "uncertain" and u:apply("cancel_work", { worker_id = uq.worker_id }).code == "worker_unbound"
+			and q_worker(u, uq.worker_id) ~= nil, "an uncertain provision is never withdrawn")
+		-- So does a claimed one still awaiting SPAWN.
+		local c = q_fixture()
+		assert(c:apply("policy", { policy = { quota_routing = true } }).ok)
+		assert(q_capacity(c, { q_known("native", 60) }).ok)
+		local cq = q_queue(c); assert(cq.code == "task_queued", cq.message)
+		assert(c:apply("claim", { action_id = cq.action_id, executor = c.origin.window_epoch }).ok)
+		check(c:apply("cancel_work", { worker_id = cq.worker_id }).code == "worker_unbound" and q_worker(c, cq.worker_id) ~= nil, "a claimed provision is never withdrawn")
+	end
+
+	if section == nil or section == "quota_continuation" then
+		-- Routed work queued on window A that had not launched when the controller continued on
+		-- window B launches on B; a launch already claimed on A stays strict.
+		local function validation() return { revision = A, auth_revision = "auth-1", status = "current", validated_at_ms = QNOW, expires_at_ms = QNOW + 60000 } end
+		local function routed()
+			local f = q_fixture()
+			assert(f:apply("policy", { policy = { quota_routing = true } }).ok)
+			assert(q_capacity(f, { q_known("native", 60) }).ok)
+			local queued = q_queue(f); assert(queued.code == "task_queued", queued.message)
+			return f, queued
+		end
+		local function continue_on_b(f)
+			f.origin.window_epoch = "replacement-window"; f.controller_pane = "9010"
+			assert(f:apply("continue_controller", { expected_revision = f.authority.registry.revision, operator_verified = true }).ok)
+		end
+		local function on_b(request) return request.origin_binding.window_epoch == "replacement-window" and request.controller_pane == "9010" end
+		local function launch_on_b(f, worker_id, name)
+			local w = q_worker(f, worker_id)
+			local claimed = f:apply("claim", { action_id = w.launch_action_id, executor = f.origin.window_epoch, capacity_validation = validation() })
+			check(claimed.ok and f:action(w.launch_action_id).phase == "claimed", name .. ": the continued window claims the launch: " .. tostring(claimed.message))
+			check(state.rehydrate(clone(f.authority.registry)) ~= nil, name .. ": the moved worker and its retained provision restore")
+			local pane = { pane_id = "9003", window_key = f.origin.window_key, window_epoch = f.origin.window_epoch, native_session_id = f.origin.native_session_id, window_host_id = f.origin.window_host_id }
+			local launched = f:finish(w.launch_action_id, "awaiting_acceptance", { pane_binding = pane })
+			check(launched.ok and q_worker(f, worker_id).pane_binding.pane_id == "9003" and q_worker(f, worker_id).routing.reservation.phase == "launching",
+				name .. ": it launches in the continued window and keeps its reservation: " .. tostring(launched.message))
+		end
+		-- Live defect: provision claimed on A, controller continued on B, provision completes after.
+		local f, queued = routed()
+		local old_origin = clone(f.origin)
+		assert(f:apply("claim", { action_id = queued.action_id, executor = f.origin.window_epoch }).ok)
+		local provision = clone(f:action(queued.action_id))
+		continue_on_b(f)
+		check(f:action(queued.action_id).phase == "uncertain" and f:action(queued.action_id).request_bytes == provision.request_bytes,
+			"the provision claimed on the old window stays uncertain with its exact request")
+		local settled = f:apply("result", { action_id = queued.action_id, executor = provision.claim.executor, grant_id = provision.claim.grant_id,
+			response_bytes = frame(provision.request, "provisioned", PROVISIONED) })
+		check(settled.ok, "the old provision settles through the continued route: " .. tostring(settled.message))
+		local w = q_worker(f, queued.worker_id)
+		local launch = f:action(w.launch_action_id)
+		check(launch.phase == "ready" and launch.claim == nil and on_b(launch.request) and w.origin_binding.window_epoch == "replacement-window"
+			and launch.request.request_id == w.launch_request_id and w.routing.reservation.phase == "reserved",
+			"the launch released after continuation is bound to the continued route, with its reserved IDs and reservation")
+		local stale = f:event("claim", { action_id = w.launch_action_id, executor = old_origin.window_epoch, capacity_validation = validation() })
+		stale.origin = clone(old_origin); stale.controller_pane = "9001"
+		check(not f.authority:apply(stale).ok and f:action(w.launch_action_id).phase == "ready", "the old window cannot run it")
+		launch_on_b(f, queued.worker_id, "late provision")
+		-- Never-claimed provision at continuation: rewritten in place on the continued route.
+		local h, hq = routed()
+		local before = clone(h:action(hq.action_id).request)
+		continue_on_b(h)
+		local moved = h:action(hq.action_id)
+		check(moved.phase == "ready" and moved.resolution == nil and on_b(moved.request) and moved.request.request_id == before.request_id
+			and on_b(runtime.json.decode(moved.request_bytes)), "a never-claimed provision moves to the continued route under the same IDs")
+		assert(h:finish(hq.action_id, "provisioned", PROVISIONED).ok)
+		check(on_b(h:action(q_worker(h, hq.worker_id).launch_action_id).request), "its launch is built on the continued route")
+		launch_on_b(h, hq.worker_id, "ready provision")
+		-- Never-claimed launch at continuation: rewritten in place on the continued route.
+		local k, kq = routed()
+		assert(k:finish(kq.action_id, "provisioned", PROVISIONED).ok)
+		local kw = q_worker(k, kq.worker_id)
+		continue_on_b(k)
+		check(k:action(kw.launch_action_id).phase == "ready" and on_b(k:action(kw.launch_action_id).request), "a ready, never-claimed launch moves to the continued route")
+		launch_on_b(k, kq.worker_id, "ready launch")
+		-- A launch already claimed on the old window keeps its route and becomes uncertain.
+		local g, gq = routed()
+		assert(g:finish(gq.action_id, "provisioned", PROVISIONED).ok)
+		local glaunch = q_worker(g, gq.worker_id).launch_action_id
+		assert(g:apply("claim", { action_id = glaunch, executor = g.origin.window_epoch, capacity_validation = validation() }).ok)
+		continue_on_b(g)
+		check(g:action(glaunch).phase == "uncertain" and g:action(glaunch).request.origin_binding.window_epoch == "fixture-window"
+			and q_worker(g, gq.worker_id).origin_binding.window_epoch == "fixture-window" and q_worker(g, gq.worker_id).routing.reservation.phase == "uncertain",
+			"a launch claimed on the old window keeps its route and becomes uncertain")
+		check(g:apply("claim", { action_id = glaunch, executor = g.origin.window_epoch, capacity_validation = validation() }).code == "claim_mismatch"
+			and g:action(glaunch).phase == "uncertain", "the continued window never re-runs it")
+		check(state.rehydrate(clone(g.authority.registry)) ~= nil, "the strict launch state restores")
 	end
 end
 return "dispatch" .. (if section then "/" .. section else "") .. ": " .. tostring(checks) .. " checks passed"

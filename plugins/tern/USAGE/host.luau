@@ -3,6 +3,7 @@
 local ui = tern.ui
 local aggregate = require("./aggregate").new()
 local collector = require("./source_collect")
+local host_setup = require("./host_setup")
 local presentation = require("./presentation")
 local view_layout = require("./view_layout")
 local refresh: any
@@ -20,6 +21,8 @@ type BlockState = {
 	mode: string,
 	account: string?,
 	problem: string?,
+	-- Config blocks only: host-run Setup for attached windows.
+	setup: any?,
 }
 
 local blocks: { [number]: { cx: BlockCx, state: BlockState } } = {}
@@ -61,6 +64,7 @@ local REASONS: { [string]: string } = {
 	source_profile_unavailable = "account profile unavailable or signed out",
 	source_remote = "runs on another machine over SSH; USAGE reads it only on that machine",
 	api_key_login = "signed in with an API key; no subscription quota",
+	web_login_forbidden = "provider refused usage access; sign in again with the provider's CLI",
 }
 
 -- collector.state() codes: why the latest source publication did not land.
@@ -427,6 +431,7 @@ local function config_view(state: BlockState): Node
 	append_problems(children)
 	if refresh.preference_problem ~= nil then table.insert(children, ui.text(ui.span(refresh.preference_problem, "error"))) end
 	if state.problem ~= nil then table.insert(children, ui.text(ui.span(state.problem, "error"))) end
+	if state.setup ~= nil then table.insert(children, host_setup.view(state.setup)) end
 	return ui.node("col", { role = "usage-config-root", gap = "sm" }, children)
 end
 
@@ -542,6 +547,11 @@ end
 
 local function on_event(event: UiEvent, state: BlockState, cx: BlockCx)
 	if event.ev ~= "action" then return end
+	if event.act == host_setup.ACTION then
+		-- A completed host change is picked up by this host's collector and display at once.
+		if state.setup ~= nil then host_setup.event(state.setup, event, cx, function() collector.flush(); fetch() end) end
+		return
+	end
 	if event.act == "close_config" and state.kind == "config" then
 		cx:open("usage://config/close")
 		return
@@ -566,7 +576,7 @@ local function definition(kind: string): BlockDef<BlockState>
 				if kind == "account" and type(saved.account) == "string" then account = saved.account end
 			end
 			if kind ~= "accounts" then mode = kind end
-			local state: BlockState = { kind = kind, mode = mode, account = account }
+			local state: BlockState = { kind = kind, mode = mode, account = account, setup = if kind == "config" then host_setup.new() else nil }
 			blocks[cx.pane] = { cx = cx, state = state }
 			if kind == "config" then refresh:read_preferences() end
 			fetch()
@@ -598,6 +608,7 @@ end
 tern.block.define("accounts", definition("accounts"))
 tern.block.define("account", definition("account"))
 tern.block.define("config", definition("config"))
+require("./capacity").install()
 
 tern.on("pane_exited", function(event: PaneExitedEvent)
 	blocks[event.pane] = nil

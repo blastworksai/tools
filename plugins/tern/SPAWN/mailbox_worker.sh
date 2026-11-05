@@ -169,10 +169,31 @@ publish_pending() {
  jq -cn --arg handle "$handle" --argjson seq "$seq" --arg event "$event" --arg digest "$expected" --argjson count "$count" --argjson length "$length" '{transport:"report-files-v1",version:1,type:"manifest",mailbox_handle:$handle,direction:"report",slot:$seq,message_id:$event,message_sha256:$digest,message_bytes:$length,count:$count}' > "$work/part"
  publish "reports/$seq/manifest.json" "$work/part"
 }
+# A rollover successor's provision.json carries the issued handover ID and
+# sha256(handover_id:handover_token), never the token. ACCEPTED must match it before
+# any sequence is allocated, so a mistyped pair is retried instead of published.
+# Messages name the field and never echo either value. Only ACCEPTED reads the provisioned
+# handover, so every other mode behaves like the PowerShell helper even if it is malformed.
+handover_check() {
+ [ "$(jq -r '.kind' "$1")" = ACCEPTED ] || return 0
+ jq -e 'if has("handover") then (.handover|type)=="object" and (.handover|keys)==["handover_id","handover_sha256"] and (.handover.handover_id|type)=="string" and (.handover.handover_id|test("^[A-Za-z0-9_-]{1,96}$")) and (.handover.handover_sha256|type)=="string" and (.handover.handover_sha256|test("^[0-9a-f]{64}$")) else true end' "$box/provision.json" >/dev/null || fail binding_mismatch
+ issued=$(jq -r '.handover.handover_id // ""' "$box/provision.json")
+ supplied=$(jq -r '.handover_id // ""' "$1")
+ if [ -z "$issued" ]; then
+  [ -z "$supplied" ] || fail 'binding_mismatch: handover_id was not issued to this generation; report ACCEPTED without a handover pair'
+  return 0
+ fi
+ [ -n "$supplied" ] || fail 'binding_mismatch: handover_id and handover_token are required; copy both verbatim from the launch preface and report ACCEPTED again'
+ [ "$supplied" = "$issued" ] || fail 'binding_mismatch: handover_id differs from the provisioned handover; copy it verbatim from the launch preface and report ACCEPTED again'
+ jq -j '.handover_id + ":" + .handover_token' "$1" > "$work/handover" || fail storage_error
+ [ "$(hash "$work/handover")" = "$(jq -r '.handover.handover_sha256' "$box/provision.json")" ] || fail 'binding_mismatch: handover_token differs from the provisioned handover digest; copy it verbatim from the launch preface and report ACCEPTED again'
+ rm "$work/handover" || fail storage_error
+}
 allocate() {
  input=$1 consumed=${2:-0} source_journal=${3:-$journal}
  strict "$input" 65536
  jq -e --arg schema report_input -f "$reply_validator" "$input" >/dev/null || fail invalid_schema
+ handover_check "$input"
  seq=$(jq -r '.next_seq' "$source_journal"); [ "$seq" -ge 1 ] && [ "$seq" -lt 9007199254740991 ] || fail journal_corrupt
  kind=$(jq -r '.kind' "$input")
  count=$(jq --arg kind "$kind" '[.pending[]|select((.kind=="reply_ack")==($kind=="reply_ack"))]|length' "$source_journal")
@@ -372,13 +393,20 @@ else
    jq -e --argjson binding "$binding" '
     (keys|sort)==(["logical_session_id","worker_id","worker_generation","launch_request_id","work_id","enrolment_token","mailbox_handle"]|sort) and .==$binding
    ' "$work/expected-binding" >/dev/null || fail binding_mismatch
-   jq -e --arg owner "$owner" --argjson report "$report_floor" --argjson reply "$reply_floor" --arg chain "$report_chain" '
-    .binding.enrolment_token==$owner and
+   jq -e --arg owner "$owner" '.binding.enrolment_token==$owner' "$journal" >/dev/null || fail binding_mismatch
+   # An unsettled journal is refused before anything is removed: release the gates and report
+   # the definite pre-effect outcome on stdout so SPAWN never records it as uncertain.
+   unsettled=0
+   jq -e --argjson report "$report_floor" --argjson reply "$reply_floor" --arg chain "$report_chain" '
     .receipt_seq==$report and .next_seq==($report+1) and
     .consumed_reply_floor==$reply and .reply_next==($reply+1) and
     .receipt_chain==$chain and (.pending|length)==0 and
     all(.consumed[]; .acknowledged==true and .execution=="resolved")
-   ' "$journal" >/dev/null || fail incomplete
+   ' "$journal" >/dev/null || unsettled=$?
+   if [ "$unsettled" != 0 ]; then
+    [ "$unsettled" = 1 ] || fail journal_corrupt
+    cleanup; printf 'producer_unsettled\n'; exit 0
+   fi
    rm "$journal";;
   *) fail invalid_schema;;
  esac

@@ -105,9 +105,9 @@ Nothing is deleted. Tern keeps `plugin-data/tern-fleet-usage/` after removal, an
 | Command | What it does |
 | --- | --- |
 | **USAGE Details** | Opens the USAGE pane in your saved layout, or focuses it if it is already open. The speedometer button in the Files pane header does the same. |
-| **USAGE Refresh** | Starts one refresh for every account. Repeated requests while it runs join the same refresh. |
+| **USAGE Refresh** | Starts one refresh for every account. Repeated requests while it runs join the same refresh. In a window attached to a remote Tern host, it refreshes that host (see [Configuring an attached remote host](#configuring-an-attached-remote-host)). |
 | **USAGE Configuration** | Layout and refresh interval. The × in its top-right corner closes it. |
-| **USAGE Setup** | Private runtime, headless-read permission, summary and optional sharing. |
+| **USAGE Setup** | Private runtime, headless-read permission, summary, capacity export, account bindings and optional sharing. In a window attached to a remote Tern host, it configures that host (see [Configuring an attached remote host](#configuring-an-attached-remote-host)). |
 | **USAGE Show Summary** | Turns the status-bar summary on once. |
 | **USAGE Diagnostics** | Companion, refresh and sharing state. |
 
@@ -165,7 +165,7 @@ USAGE never adds quotas together across accounts or agents. It also hides Anthro
 
 ### OMP
 
-OMP has no allowance of its own. Its rows are listed under OMP as consumers of your other subscriptions and never count as accounts.
+OMP has no allowance of its own. Its rows are listed under OMP as consumers of your other subscriptions and never count as accounts. To let ORCH+ route an OMP record by quota, associate it with a bound account (see [Capacity export](#capacity-export-for-other-plugins-orch)).
 
 ### Muse
 
@@ -174,6 +174,31 @@ OMP has no allowance of its own. Its rows are listed under OMP as consumers of y
 ### Logins are not the same as quota credentials
 
 "Usage credentials unavailable on source" means USAGE could not find the saved subscription login it reads quota with. It does **not** prove the interactive CLI is signed out. For example, a shell that exports `CLAUDE_CODE_OAUTH_TOKEN`, or a CLI configured with an API key, can run normally while there is no saved subscription login for USAGE to read. USAGE does not read shell profiles, does not take tokens from running sessions and does not refresh tokens itself. An expired Claude login is reported as expired and is not sent anywhere; opening Claude once normally renews it.
+
+## Configuring an attached remote host
+
+USAGE reads and refreshes on the machine that runs the Tern host. When your window is attached to a remote Tern host (a VM, say), that host is the source: its SPAWN roster, its provider logins and its own USAGE companion. USAGE blocks opened in that session show the host's readings, and ORCH+ reads the host's capacity export. You need no Tern window running on the host itself.
+
+When the current session's host is remote, **USAGE Setup** configures that host and names it everywhere:
+
+- The picker is titled `USAGE Setup — host <name> (attached source) · <role> · <installation UUID>`. A toast says "USAGE Setup configures host <name>".
+- Every row and every confirmation names the host, for example **Allow headless usage reads on vm-b** or **Host vm-b · Bind this SPAWN account to its signed-in login?**. After a change, the toast reads "USAGE configuration saved on host <name>".
+
+The rows:
+
+- **Install private dependencies on <name>**, offered when the host's runtime isn't ready. Python 3.11+ must already be installed on the host.
+- **Allow / Stop headless usage reads on <name>**.
+- **Enable / Revoke capacity export on <name>**.
+- **Bind SPAWN accounts on <name>…** and **Associate OMP records on <name>…**, shown while the host allows headless usage reads.
+- **Configure this window's machine instead** opens the ordinary Setup for the machine running the window: pairing, summary, interpreter choice and its own permissions.
+
+Each change needs the same explicit confirmation as local Setup; attaching enables nothing. Setup sends the confirmed change to the host's **USAGE Configuration** block. If none is open in the session, Setup opens one beside your current pane without taking focus. The block runs the change with the host's own companion and shows the result. It accepts only the operations listed above: it can't enable sharing, pair, refresh or change any other setting.
+
+**Who counts as the owner.** USAGE treats a Tern remote attach as the host's local owner, because attaching requires your key in the host's authorized keys and runs as the same OS user there. Anything able to attach as that user can already run commands on the host. As with the capacity export, a Tern block event doesn't prove that a person clicked; the confirmation in Setup is the consent USAGE asks for.
+
+**Refresh.** In a window attached to a remote host, **USAGE Refresh** refreshes the host, not the window's machine. It sends the request to a USAGE pane (Details, an account PIP or Configuration) already open in the attached session; the toast reads "USAGE refresh on host <name>" and progress shows in that pane. It never opens a pane: with none open, the toast says so, and you open **USAGE Details** first. The Refresh button in the host's USAGE pane does the same.
+
+A window on a local host keeps using its own companion exactly as before, for Setup and for Refresh.
 
 ## Optional sharing between machines
 
@@ -188,9 +213,22 @@ A member forwards only Refresh, status and interval changes to its hub. The hub'
 
 Hub and members should run the same USAGE version. Update them together.
 
-**What is shared:** provider, account identity (often an email address) and label, organization/workspace scope, subscription, quota windows, reset and measurement times, and source label, plus the SPAWN account and provider labels. **Never shared:** credentials, terminal output, SPAWN commands and paths, OS user names and provider profile paths.
+**What is shared:** provider, account identity (often an email address) and label, organization/workspace scope, subscription, quota windows, reset and measurement times, and source label, plus the SPAWN account and provider labels and any account-binding evidence (SPAWN catalog join, definition revisions, bound login IDs). **Never shared:** credentials, terminal output, SPAWN commands and paths, OS user names and provider profile paths.
 
 Every peer connection pins the hub's TLS certificate. Redirects, proxies, wrong pins, replayed publications and invitation reuse are rejected. The owner-only control channel listens on loopback only and is protected by a random token in an owner-only file.
+
+## Capacity export for other plugins (ORCH+)
+
+Other Tern plugins running as the same OS user, such as [ORCH+](../ORCH+/README.md) quota routing, can read USAGE's evidence through the read-only `usage.capacity` block. It is **off by default** and carries quota only for accounts you bind.
+
+1. **USAGE Setup › Enable capacity export** and confirm. **Revoke capacity export** turns it off and invalidates snapshots already handed out. In a window attached to a remote host, this and the binding rows below configure that host ([Configuring an attached remote host](#configuring-an-attached-remote-host)).
+2. Allow headless usage reads and refresh once, so each account has a current reading.
+3. **USAGE Setup › Bind SPAWN accounts…** (shown while headless usage reads are allowed) lists every SPAWN account with the login its latest current reading proved, for example `Claude · Work → you@example.com`. Pick one; the confirmation shows the provider, the SPAWN record, the principal and its identity scope. Confirm to bind it. Picking a bound account offers **Revoke binding**.
+4. Optional: **USAGE Setup › Associate OMP records…** declares which bound account's quota an OMP record uses. USAGE cannot read OMP's own login, so this is your declaration, not a measurement.
+
+A binding ends by itself, and must be confirmed again, when you edit that SPAWN record or a reading proves a different login. While a reading is unavailable, last-known or missing, the binding is left out of what USAGE publishes. Stopping headless usage reads hides every binding until you allow them again.
+
+**What the export contains:** the version-1 document (`records`, `sources`, `current_roster`, `current_source_id`, `stale_after_ms`, `quota_unit`), the SPAWN catalog join (`spawn_join`) and each account's `definition_revision`, and, for bound accounts only, `profile_binding` with the readings and quota windows that prove it. Unbound accounts are listed without readings or quota. **Never exported:** credentials, SPAWN commands, arguments, OS user names and profile paths. Capacity reads cannot refresh, configure or launch anything.
 
 ## Privacy and permissions
 
@@ -205,7 +243,8 @@ Every peer connection pins the hub's TLS certificate. Redirects, proxies, wrong 
 | --- | --- |
 | "0 accounts" or "Define accounts in SPAWN" | Install SPAWN on this machine, define accounts and open SPAWN's Config once. USAGE reads SPAWN's saved roster, not open panes. |
 | "headless usage reads are off" | **USAGE Setup › Allow headless usage reads**. |
-| "USAGE setup is required" | **USAGE Setup › Install private dependencies**. It needs Python 3.11+ and access to PyPI once. |
+| "USAGE setup is required" | **USAGE Setup › Install private dependencies**. It needs Python 3.11+ and access to PyPI once. In a window attached to a remote host, the row is **Install private dependencies on <host>**, and Python and PyPI access are needed on that host. |
+| "USAGE is not ready on host <name>" | Install USAGE on that host (the [Install](#install) steps, run there) and reload it. Setup in an attached window configures the host's USAGE; it can't install the plugin. |
 | "usage credentials unavailable on source" | Sign in once with the provider's own CLI as the OS user SPAWN uses, then refresh. An env-token or API-key setup can work interactively without a saved subscription login. |
 | "provider login expired" | Open the provider's CLI normally once so it renews its login, then refresh. |
 | "signed in with an API key" | That login has no subscription quota to show. |
@@ -221,7 +260,8 @@ Every peer connection pins the hub's TLS certificate. Redirects, proxies, wrong 
 - **Linux only for this release.** macOS is untested; Claude Code on macOS keeps its login in the Keychain, which USAGE does not read. Windows is untested, and the companion's file-permission checks are known to be slow there.
 - Usage is read from each provider's current CLI or endpoint. A provider can change its output; USAGE then reports "could not parse" rather than guessing.
 - A SPAWN account that runs over SSH is shown but never read from this machine.
-- Accounts on another machine show up only when that machine runs USAGE and shares with this one.
+- Accounts on another machine show up only when that machine runs USAGE and shares with this one, or when your window is attached to that machine's Tern host.
+- In a window attached to a remote host, the status-bar summary and USAGE Diagnostics still describe the window's own machine. USAGE blocks opened in the attached session describe the host. The **USAGE Refresh** command needs one of those blocks open to reach the host.
 - Codex readings without an email (rare) are shown without an account identity and are not merged with other rows.
 - USAGE needs Python and a one-time dependency download. It does not install Python for you.
 
@@ -244,12 +284,14 @@ All fixtures are synthetic. Keep runtime data, logs and screenshots out of the p
 
 ### Files
 
-- `plugin.toml`: manifest (id `usage`) with the accounts, account and config blocks.
+- `plugin.toml`: manifest (id `usage`) with the accounts, account, config and capacity blocks.
 - `window.luau`, `setup.luau`, `view_layout.luau`, `view_state.luau`, `usage.css`: commands, Setup, layouts and PIPs, refresh progress, styles.
 - `host.luau`, `presentation.luau`: the USAGE blocks and what they show.
+- `capacity.luau`, `usage_service/capacity.py`: the read-only `usage.capacity` export.
+- `host_setup.luau`: host-run Setup for windows attached to a remote host (the `usage.setup` action on the config block).
 - `snapshot.luau`, `aggregate.luau`, `roster.luau`, `accounts.luau`, `identity.luau`, `enrichment.luau`: validating readings, matching them to SPAWN accounts and grouping windows.
 - `source_collect.luau`, `metadata_runner.luau`, `companion.luau`: publishing refresh results and talking to the Python companion.
-- `usage_service.py`, `usage_service/`: the companion (lifecycle, storage, refresh, SPAWN roster, provider readers, sharing).
+- `usage_service.py`, `usage_service/`: the companion (lifecycle, storage, refresh, SPAWN roster and account bindings, provider readers, sharing, capacity export).
 - `provider_metadata.py`, `metadata_providers.py`: the read-only helper that runs as the account's OS user.
 - `requirements.lock`, `pyproject.toml`: locked Python dependencies.
 - `tests/`, `tools/verify.py`: test suites and the Luau runner.

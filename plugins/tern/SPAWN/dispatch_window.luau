@@ -141,6 +141,9 @@ local function execute(cx,pane,projection)
  if type(launch)~='table' or type(launch.command)~='string' or type(launch.cwd)~='string' or launch.placement~=r.placement then return end
  if launch.backend=='native-agent' and (type(launch.prompt)~='string' or not launch.prompt:find('%S')) then return end
  if not origin_ok(cx,pane,r,projection.orch_claim) then return end
+ -- A managed launch runs in the background: it never keeps focus. Terminals open unfocused;
+ -- native agents:start has no focus option, so the pane focused before it gets focus back.
+ local focused=cx.session:focused()
  -- Validate first, then mark BEFORE native invocation: a throw may be an effect.
  mark(r,k..'/effect')
  local ok,created=pcall(function()
@@ -148,10 +151,14 @@ local function execute(cx,pane,projection)
    return cx.agents:start({command=launch.command,prompt=launch.prompt,cwd=launch.cwd,how=launch.placement})
   end
   local options={command=launch.command,cwd=launch.cwd}
-  if launch.placement=='split' then return cx.layout:split(tonumber(r.controller_pane),'right',options,{focus=true}) end
+  if launch.placement=='split' then return cx.layout:split(tonumber(r.controller_pane),'right',options,{focus=false}) end
   -- Managed terminal placement was validated by the shared backend before claim.
-  return cx.layout:new_tab(options,{focus=true})
+  return cx.layout:new_tab(options,{focus=false})
  end)
+ if ok and type(created)=='number' and focused~=nil and focused~=created then
+  -- Focus is presentation only; a failure here must never change the launch result.
+  pcall(function()if cx.session:focused()==created then cx.layout:focus(focused) end end)
+ end
  if not origin_ok(cx,pane,r,projection.orch_claim) then return end
  local result
  if ok and type(created)=='number' and member(cx,created,cx.hosts:current(),cx.sessions:current()) then

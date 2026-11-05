@@ -360,6 +360,8 @@ callback_controller_alias = "9011" -- Same host pane/owner, different window-loc
 callback_command("continue_controller", { command_seq = 2, expected_revision = ui_store.value.revision, operator_verified = true })
 check(ui_store.value.sessions[view1.orch_session_id].controller.pending_executors == callback_pending,
 	"explicit controller continuation retains every original pending executor")
+local continued_phase = ui_store.value.dispatch.actions[callback_action].phase
+check(continued_phase == "uncertain", "continuation marks the stopped old executor's claim uncertain, never resolved")
 local transport = load("transport")
 local body = { schema = 1, op = "catalog", request_id = retained_action.request.request_id, action_id = callback_action,
 	origin_binding = retained_action.request.origin_binding, controller_generation = retained_action.request.controller_generation,
@@ -369,7 +371,7 @@ local callback_frame = "SPAWN_DISPATCH v1 " .. runtime.json.encode({ schema = 1,
 	complete = true, body_bytes = #body_bytes, body_sha256 = transport.sha256(body_bytes), body_json = body_bytes })
 local callback_writes = ui_store.writes
 definition.event(view1, { ev = "action", act = "dispatch-result/" .. retained_action.claim.grant_id .. "/callback-old", value = callback_frame }, cx1)
-check(ui_store.writes == callback_writes and ui_store.value.dispatch.actions[callback_action].phase == retained_action.phase,
+check(ui_store.writes == callback_writes and ui_store.value.dispatch.actions[callback_action].phase == continued_phase,
 	"real host rejects the old-incarnation result callback after explicit continuation")
 definition.event(view1, { ev = "action", act = "dispatch-result/" .. retained_action.claim.grant_id .. "/callback-new", value = callback_frame }, cx1)
 check(ui_store.value.dispatch.actions[callback_action].phase == "complete" and view1.dispatch_receipt.grant_id == retained_action.claim.grant_id,

@@ -58,10 +58,12 @@ class SpawnRosterTests(unittest.TestCase):
 
     def test_live_definitions_update_remove_and_keep_file_time(self):
         self.save([record()])
-        first = self.scope()
+        result, local = self.read()
+        first = result["scopes"][0]
         self.assertEqual(first["updated_at_ms"], 2000000000000)
         self.assertEqual(first["accounts"], [{"id": "claude-work", "provider": "claude", "provider_label": "Claude",
-                                              "account_label": "Work", "canonical_ids": [], "reading_ids": []}])
+                                              "account_label": "Work", "canonical_ids": [], "reading_ids": [],
+                                              "definition_revision": local[0]["revision"]}])
         self.save([record(account_label="Renamed"), record("unmeasured", "Muse", "fixture-two", enabled=False)],
                   at=2000000001000)
         second = self.scope()
@@ -233,12 +235,13 @@ class SpawnRosterTests(unittest.TestCase):
                 self.assert_invalid()
 
     def test_omp_consumers_never_supply_accounts_or_wire_selectors(self):
-        self.save([record(), record("consumer", "OMP", "fixture-two", include_all=False),
-                   record("custom", "Custom Provider", "missing", enabled=False)])
+        omp = record("consumer", "OMP", "fixture-two", include_all=False)
+        self.save([record(), omp, record("custom", "Custom Provider", "missing", enabled=False)])
         result, definitions = self.read()
         scope = result["scopes"][0]
         self.assertEqual(len(scope["accounts"]), 2)
-        self.assertEqual(scope["consumers"], [{"id": "consumer", "label": "OMP · Work", "reading_ids": []}])
+        self.assertEqual(scope["consumers"], [{"id": "consumer", "label": "OMP · Work", "reading_ids": [],
+                                               "definition_revision": roster._digest(roster._definition(omp, "Work"))}])
         self.assertEqual(scope["accounts"][1]["provider"], "custom provider")
         self.assertEqual([item["id"] for item in definitions], ["claude-work", "custom"])
         encoded = json.dumps(result)
@@ -254,6 +257,39 @@ class SpawnRosterTests(unittest.TestCase):
         self.assertEqual(len(scope["consumers"]), 2)
         self.assertEqual(len(definitions), 11)
         self.assertTrue(all(not item["canonical_ids"] and not item["reading_ids"] for item in scope["accounts"]))
+
+    def test_spawn_join_and_bindings_follow_the_current_definition(self):
+        self.save([record(), record("remote", backend="ssh-command"), record("consumer", "OMP")])
+        result, local = self.read()
+        scope = result["scopes"][0]
+        self.assertEqual(scope["spawn_join"], {"namespace": "host-1-00000001-00000002-00000003-4",
+                                               "host_key": "host:fixture", "config_revision": 0})
+        self.assertNotIn("profile_binding", scope["accounts"][0])
+        revisions = {item["id"]: item["revision"] for item in local}
+        consumer_revision = scope["consumers"][0]["definition_revision"]
+        key = roster.binding_key(scope["id"], "claude-work")
+        bindings = {"accounts": {
+            key: {"definition_revision": revisions["claude-work"], "canonical_ids": ["claude:b", "claude:a"], "generation": 4},
+            roster.binding_key(scope["id"], "remote"): {"definition_revision": revisions["remote"],
+                                                        "canonical_ids": ["claude:a"], "generation": 5}},
+            "consumers": {roster.binding_key(scope["id"], "consumer"): {
+                "definition_revision": consumer_revision, "account_id": "claude-work"}}}
+        bound = roster.read_roster(self.path, "installation-one", bindings)[0]["scopes"][0]
+        accounts = {entry["id"]: entry for entry in bound["accounts"]}
+        self.assertEqual(accounts["claude-work"]["profile_binding"],
+                         {"handle": roster._digest(key), "generation": 4, "canonical_ids": ["claude:a", "claude:b"]})
+        # An SSH record is read on another machine; it is never bound here.
+        self.assertNotIn("profile_binding", accounts["remote"])
+        self.assertEqual(bound["consumers"][0]["account_ids"], ["claude-work"])
+        self.save([record(account_label="Edited"), record("remote", backend="ssh-command"), record("consumer", "OMP")])
+        edited = roster.read_roster(self.path, "installation-one", bindings)[0]["scopes"][0]
+        self.assertNotIn("profile_binding", edited["accounts"][0])
+        # The association stands only while its account's binding does.
+        self.assertNotIn("account_ids", edited["consumers"][0])
+        without_join = authority([record()])
+        del without_join["config_revision"]
+        self.write({"authority": without_join})
+        self.assertNotIn("spawn_join", self.scope())
 
 
 if __name__ == "__main__":

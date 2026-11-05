@@ -219,6 +219,34 @@ local function machine_node(node: any, role: string, depth: number): any?
 	for _, child in node.c or {} do local found = machine_node(child, role, depth + 1); if found then return found end end
 	return nil
 end
+-- The tick re-reads the same host-published nodes many times per turn; a strict Luau decode of
+-- each costs most of the 50 ms window budget. Identical bytes decode to the identical value, so
+-- successful decodes are memoized by exact bytes (bounded). Callers may mutate what they read,
+-- so every read gets its own copy of the cached value: a plain table copy is far cheaper than
+-- the strict decode, and strictness is unchanged because a hit requires an earlier decode.
+local decoded = (function()
+	local LIMIT = 128
+	local cache: any, order: any = {}, {}
+	-- strict_decode builds arrays with tern.json.array() (a native marker metatable, which
+	-- table.clone cannot copy) and objects as plain tables; rebuild each the same way.
+	local function copy(value: any): any
+		if type(value) ~= "table" then return value end
+		local out = if getmetatable(value) ~= nil then tern.json.array() else {}
+		for key, child in value do out[key] = copy(child) end
+		return out
+	end
+	return function(bytes: string, maximum: number): any?
+		if #bytes > maximum then return nil end
+		local hit = cache[bytes]
+		if hit == nil then
+			hit = codec.strict_decode(bytes, maximum)
+			if hit == nil then return nil end
+			cache[bytes] = hit; table.insert(order, bytes)
+			if #order > LIMIT then cache[table.remove(order, 1)] = nil end
+		end
+		return copy(hit)
+	end
+end)()
 local function surface_node(cx: WindowCx, pane: number, block: string, role: string, explicit_key: string?, max_bytes: number?): (any?, string?)
 	local info = cx.session:pane(pane)
 	if info == nil or info.block ~= block then return nil, nil end
@@ -236,11 +264,11 @@ end
 local function snapshot(cx: WindowCx, pane: number, action_id: string?): (any?, any?)
 	local node, bytes = surface_node(cx, pane, BLOCK, "orchplus.dispatch", if action_id then "dispatch-action-" .. action_id else nil)
 	if not bytes then return nil, nil end
-	local value = codec.strict_decode(bytes, 8192)
+	local value = decoded(bytes, 8192)
 	if value and value.action then
 		if action_id and value.action.action_id ~= action_id then return nil, nil end
 		local _, request_bytes = surface_node(cx, pane, BLOCK, "orchplus.request", if action_id then "dispatch-request-" .. action_id else nil)
-		local request = if request_bytes then codec.strict_decode(request_bytes, 8192) else nil
+		local request = if request_bytes then decoded(request_bytes, 8192) else nil
 		if not request or request.action_id ~= value.action.action_id then return nil, nil end
 		value.action.request = request; value.action.request_bytes = request_bytes
 	end
@@ -336,7 +364,7 @@ end
 local function workflow_node(cx: WindowCx, source: number, key: string, role: string): any?
 	-- workflow-index carries the policy with three bounded routing allowlists; 64 KiB covers them.
 	local _, bytes = surface_node(cx, source, BLOCK, role, key, codec.LIMITS.logical)
-	return if bytes then codec.strict_decode(bytes, codec.LIMITS.logical) else nil
+	return if bytes then decoded(bytes, codec.LIMITS.logical) else nil
 end
 local function worker_now(cx: WindowCx, source: number, worker_id: string): any?
 	local worker = workflow_node(cx, source, "workflow-worker-" .. worker_id, "orchplus.worker")
@@ -347,7 +375,7 @@ local function native_observation(cx: WindowCx, source: number, worker: any): (s
 	if not binding or not origin or not current_origin(cx, source, origin)
 		or binding.window_key ~= cx:window_key() or binding.window_epoch ~= incarnation
 		or binding.native_session_id ~= origin.native_session_id or binding.window_host_id ~= origin.window_host_id then
-		return "unknown", "Awaiting the exact authorized window/session binding; use explicit continuation after reload. Restored numeric pane IDs are not identity.", nil
+		return "unknown", "Awaiting the exact authorized window/session binding; after reload run ORCH+ Continue controller in this window from the palette. Restored numeric pane IDs are not identity.", nil
 	end
 	local target = tonumber(binding.pane_id)
 	local pane = if target then cx.session:pane(target) else nil
@@ -496,6 +524,9 @@ local start_driver: any = nil -- Assigned after the observation timer helpers.
 -- the latest observed SPAWN owner state for this window's controller alias.
 local guides: any = {}
 local owner_states: any = {}
+-- Owner withdrawal of fenced never-launched work: a pending read-only SPAWN `status` of the exact
+-- fenced request per controller, answered into that controller's `cancel_work` (see withdraw_step).
+local withdrawals: any = {}
 -- USAGE capacity reader (defined after the timer helpers). One reader per controller source.
 local readers: any = {}
 -- Controller source -> its one `usage.capacity` pane (lost on reload; the sweep and reader_step
@@ -544,6 +575,7 @@ end
 local function bridge_in_use(pane: number): boolean
 	for _, driver in drivers do if driver.bridge == pane then return true end end
 	for _, guide in guides do if guide.bridge == pane then return true end end
+	for _, probe in withdrawals do if probe.bridge == pane then return true end end
 	return false
 end
 -- Session and host ids (strings) of a tabbed bridge pane on a connected host.
@@ -732,7 +764,7 @@ end
 -- Bounded read of the host's routing contract node (views.luau "routing-index").
 local function routing_index(cx: WindowCx, source: number): any?
 	local _, bytes = surface_node(cx, source, BLOCK, "orchplus.routing", "routing-index", 65536)
-	local value = if bytes then codec.strict_decode(bytes, 65536) else nil
+	local value = if bytes then decoded(bytes, 65536) else nil
 	return if type(value) == "table" and value.version == 1 and type(value.records) == "table" and type(value.workers) == "table" then value else nil
 end
 local function public_frame(body: any): string
@@ -1369,7 +1401,7 @@ local function open_guide(cx: WindowCx, source: number, origin: any)
 			-- SPAWN keeps its independent operator check: ORCH+ only opens its recovery page.
 			local opened = pcall(function() fresh.actions:run("SPAWN: Running agents") end)
 			notice(fresh, source, origin.alias_nonce, (if opened then "Opened SPAWN: Running agents." else "Open SPAWN: Running agents from the palette.")
-				.. " Use Transport review → Fence managed controller, verify, then confirm. Reopen the guide afterwards; ORCH+ never attests SPAWN recovery.")
+				.. " Use Transport review → Fence managed controller, verify, then confirm. Reopen the guide afterwards (palette: ORCH+ Reload recovery guide); ORCH+ never attests SPAWN recovery.")
 		end
 	end)
 end
@@ -1384,7 +1416,7 @@ local function probe_step(cx: WindowCx)
 		local state: string? = nil
 		if guide.query == nil then
 			-- The probe shares the catalog bridge lane; never overwrite a live read's response node.
-			local busy = false
+			local busy = withdrawals[source] ~= nil and withdrawals[source].query ~= nil
 			for _, other in drivers do if other.source == source and other.worker_id == nil then busy = true end end
 			local bridge = if busy then nil else acquire_bridge(cx, source, guide.origin, "catalog")
 			local node = if bridge ~= nil then surface_node(cx, bridge, "spawn.dispatch", "spawn.dispatch.response") else nil
@@ -1405,6 +1437,38 @@ local function probe_step(cx: WindowCx)
 			guides[source] = nil
 			owner_states[source] = { nonce = guide.origin.alias_nonce, state = state }
 			if guide.open then open_guide(cx, source, guide.origin) else publish_steps(cx, source, guide.origin, guide_steps(cx, source, guide.origin)) end
+		end
+	end
+end
+-- One read-only SPAWN `status` of the fenced request on the catalog lane, then the owner's
+-- `cancel_work` carrying that exact query and answer; the host decides whether it is definitively
+-- unexecutable. No answer within 10 s awake ends with a notice and nothing is cancelled.
+local function withdraw_step(cx: WindowCx)
+	for source, probe in withdrawals do
+		if not current_origin(cx, source, probe.origin) then withdrawals[source] = nil; continue end
+		if probe.query == nil then
+			local busy = guides[source] ~= nil and guides[source].query ~= nil
+			for _, other in drivers do if other.source == source and other.worker_id == nil then busy = true end end
+			local bridge = if busy then nil else acquire_bridge(cx, source, probe.origin, "catalog")
+			local node = if bridge ~= nil then surface_node(cx, bridge, "spawn.dispatch", "spawn.dispatch.response") else nil
+			if node then
+				probe.bridge = bridge
+				probe.query = { schema = 1, origin = "orchplus", op = "status", request_id = dispatch_id(), action_id = dispatch_id(),
+					origin_binding = probe.fenced.origin_binding, controller_pane = tostring(source), controller_generation = probe.fenced.controller_generation,
+					target_request_id = probe.fenced.request_id }
+				cx.session:event(bridge, { ev = "action", id = node.id, act = "status", value = tern.json.encode(probe.query) })
+			end
+		else
+			local _, bytes = surface_node(cx, probe.bridge, "spawn.dispatch", "spawn.dispatch.response")
+			if bytes and dispatch.decode_response(bytes, probe.query) then
+				withdrawals[source] = nil
+				send_command(cx, source, probe.origin, "cancel_work", { worker_id = probe.worker_id, query_bytes = tern.json.encode(probe.query), response_bytes = bytes }, true)
+				continue
+			end
+		end
+		if awake_now() - probe.started > 10000 then
+			withdrawals[source] = nil
+			notice(cx, source, probe.origin.alias_nonce, "SPAWN did not answer the status read for " .. probe.worker_id .. "'s fenced request within 10 s; nothing was cancelled. Try again.")
 		end
 	end
 end
@@ -1456,6 +1520,8 @@ local function arm()
 			end
 			-- Guided reload recovery: at most one read-only owner_status probe step per controller.
 			if next(guides) ~= nil and not pcall(probe_step, fresh) then table.clear(guides) end
+			-- Fenced-work withdrawal: at most one read-only status step per controller.
+			if next(withdrawals) ~= nil and not pcall(withdraw_step, fresh) then table.clear(withdrawals) end
 			-- Earlier-incarnation SPAWN bridges: at most one native close or move per pass.
 			pcall(bridge_sweep, fresh)
 		end
@@ -1684,7 +1750,7 @@ local function dispatch_control(cx: WindowCx, source: number, request: any)
 	if request.command == "continue_controller" then
 		local data = snapshot(cx, source)
 		if not data or (request.expected_revision and request.expected_revision ~= data.revision) then
-			notice(cx, source, origin.alias_nonce, "Controller revision changed. Reopen its continuation control.")
+			notice(cx, source, origin.alias_nonce, "Controller revision changed. Run ORCH+ Continue controller in this window from the palette again.")
 			return
 		end
 		local revision = data.revision
@@ -1697,7 +1763,7 @@ local function dispatch_control(cx: WindowCx, source: number, request: any)
 			if not fresh or not choice or err or not choice.continue_controller or not current_context(fresh, source, origin) then return end
 			local current = snapshot(fresh, source)
 			if not current or current.revision ~= revision then
-				notice(fresh, source, origin.alias_nonce, "Controller changed during verification. Reopen continuation; nothing was rebound.")
+				notice(fresh, source, origin.alias_nonce, "Controller changed during verification. Run ORCH+ Continue controller in this window again; nothing was rebound.")
 				return
 			end
 			local continued = send_command(fresh, source, origin, "continue_controller", { expected_revision = revision, operator_verified = true }, true)
@@ -1707,7 +1773,7 @@ local function dispatch_control(cx: WindowCx, source: number, request: any)
 		return
 	end
 	if not current_origin(cx, source, origin) then
-		notice(cx, source, origin.alias_nonce, "This window is not the continued execution origin. Use Continue controller after reload, inspect retained outcomes, then explicitly reattach workers.")
+		notice(cx, source, origin.alias_nonce, "This window is not the continued execution origin. Run the palette command ORCH+ Continue controller in this window, inspect retained outcomes, then explicitly reattach workers.")
 		return
 	end
 	if request.command == "continue_worker" then
@@ -2062,11 +2128,35 @@ local function dispatch_control(cx: WindowCx, source: number, request: any)
 	elseif request.command == "cancel_work" then
 		local worker = if type(request.worker_id) == "string" then worker_now(cx, source, request.worker_id) else nil
 		if not worker then notice(cx, source, origin.alias_nonce, "Queued work changed; nothing was cancelled."); return end
-		cx:pick({ placeholder = "Cancel held work " .. worker.work_id .. "? It was never provisioned or launched; its assignment is discarded.", items = {
-			{ label = "Keep it held", confirm = false }, { label = "Cancel this queued work", detail = worker.worker_id, confirm = true },
+		-- Fenced never-launched work: its provision, launch or adoption request was fenced unexecuted at
+		-- continuation. When SPAWN received it, its retained SPAWN status is read and sent with the command.
+		local fenced = if type(worker.withdrawal) == "table" then worker.withdrawal else nil
+		if fenced and fenced.mailbox_retire == "retiring" then
+			notice(cx, source, origin.alias_nonce, "This work's unused mailbox is already being retired; inspect that retirement's outcome. Nothing else was started.")
+			return
+		end
+		-- A launch SPAWN rejected after provisioning also retires the unused mailbox (driven like any queued effect).
+		local retires = fenced ~= nil and fenced.mailbox_retire ~= nil
+		local placeholder = if fenced then "Cancel never-launched work " .. worker.work_id .. "? "
+			.. (if fenced.evidence == "spawn_rejected" then "SPAWN rejected its " .. tostring(fenced.op) .. " before any effect"
+				else "Continuation fenced its " .. tostring(fenced.op) .. " as unexecuted")
+			.. (if fenced.status_required then "; SPAWN's retained status of that request is read first and must prove it can never run" else "")
+			.. (if retires then ". Its unused mailbox is retired first; the worker stays visible until SPAWN confirms retirement."
+				else ". The worker and its assignment are discarded; a provisioned mailbox stays unused.")
+			else "Cancel held work " .. worker.work_id .. "? It was never provisioned or launched; its assignment is discarded."
+		cx:pick({ placeholder = placeholder, items = {
+			{ label = if fenced then "Keep it" else "Keep it held", confirm = false },
+			{ label = if fenced then "Cancel this never-launched work" else "Cancel this queued work", detail = worker.worker_id, confirm = true },
 		} }):next(function(choice: any, err: string?, fresh: WindowCx?)
 			if not fresh or not choice or err or not choice.confirm or not current_origin(fresh, source, origin) then return end
-			send_command(fresh, source, origin, "cancel_work", { worker_id = worker.worker_id }, true)
+			if fenced and fenced.status_required then
+				if withdrawals[source] then notice(fresh, source, origin.alias_nonce, "Another cancellation is still reading SPAWN status; nothing else was started."); return end
+				withdrawals[source] = { origin = origin, worker_id = worker.worker_id, fenced = fenced, started = awake_now() }
+				arm()
+				return
+			end
+			local id = send_command(fresh, source, origin, "cancel_work", { worker_id = worker.worker_id }, true)
+			if id and retires then start_driver(source, origin, id, worker.worker_id) end
 		end)
 	elseif request.command == "catalog" or request.command == "poll" or request.command == "reply" or request.command == "retire" then
 		local id = send_command(cx, source, origin, request.command, { bytes = request.bytes, worker_id = request.worker_id }, true)
@@ -2109,13 +2199,22 @@ guide_control = dispatch_control
 -- Operator intents: a clicked window-side control (see views.luau `dispatch_link`/`assistance`)
 -- is published by its controller block as `main.operator-intent`. Each scanned controller's
 -- intent runs at most once per (source_nonce, serial) in this VM, then is settled host-side.
--- Only the window that currently owns the controller's origin acts (a fresh incarnation may
--- only continue or open the recovery guide); every other window leaves it silently.
+-- Only the window that currently owns the controller's origin acts; every other window leaves it
+-- silently. That includes continuation and the recovery guide: a host-block click names no window,
+-- and every client attached to one window key shares its key, shown session and focus, so a fresh
+-- incarnation continues only through the palette commands below, which run where they are invoked.
+-- Assistance follows the same rule while a live origin exists: the host stamps that origin's window
+-- into the intent (`window`); unstamped (no command cursor yet, or a controller restored uncertain),
+-- any window showing the controller may assist.
 local INTENT_KINDS = { dispatch = true, assist = true }
 local ASSIST_KINDS = { inspect = true, recheck = true, reveal = true, stop = true }
-local CONTINUATION_COMMANDS = { continue_controller = true, recovery_guide = true }
 local INTENTS_SEEN_LIMIT = 256
 local intents_seen: any, intents_order: any = {}, {}
+local function stamped_window(cx: WindowCx, source: number, window: any): boolean
+	local host = host_for(cx, source)
+	return type(window) == "table" and host ~= nil and window.window_key == cx:window_key() and window.window_epoch == incarnation
+		and window.native_session_id == tostring(cx.sessions:current().id) and window.window_host_id == tostring(host.id)
+end
 local function intent_step(cx: WindowCx, source: number)
 	local node, bytes = surface_node(cx, source, BLOCK, "orchplus.intent", "operator-intent", codec.LIMITS.logical)
 	if not node or not bytes then return end
@@ -2130,8 +2229,9 @@ local function intent_step(cx: WindowCx, source: number)
 	local request = intent.request
 	if intent.kind == "dispatch" then
 		local origin = origin_now(cx, source, request)
-		if not origin or (not current_origin(cx, source, origin) and not CONTINUATION_COMMANDS[request.command]) then return end
-	elseif request.version ~= 2 or (request.target ~= "controller" and request.target ~= "orchestrator") or not ASSIST_KINDS[request.kind] then
+		if not origin or not current_origin(cx, source, origin) then return end
+	elseif request.version ~= 2 or (request.target ~= "controller" and request.target ~= "orchestrator") or not ASSIST_KINDS[request.kind]
+		or (intent.window ~= nil and not stamped_window(cx, source, intent.window)) then
 		return
 	end
 	-- Settle before acting: a failing or prompting control is never re-run from the same intent.
@@ -2156,6 +2256,33 @@ consume_intents = function(cx: WindowCx)
 	end
 end
 tern.command({ id = "open", title = "ORCH+", icon = "flow", group = "ORCH+", run = function(cx: WindowCx) open(cx) end })
+-- Palette continuation: the one input Tern attributes to the window it happened in. Targets this
+-- session's only controller with a recorded owner, else the focused one; dispatch_control re-validates it.
+local function palette_continuation(cx: WindowCx, command: string, title: string)
+	local host, session = cx.hosts:current(), cx.sessions:current()
+	local membership, candidates = tab_sessions(cx), {}
+	if host.state == "connected" then
+		for _, pane in panes_on(cx, host) do
+			local data = if scanned_controller(pane, membership, session) then snapshot(cx, pane.pane) else nil
+			if data and data.owner_id then table.insert(candidates, { pane = pane.pane, data = data }) end
+		end
+	end
+	local chosen = if #candidates == 1 then candidates[1] else nil
+	if not chosen and #candidates > 1 then
+		local focused = cx.session:focused()
+		for _, candidate in candidates do if candidate.pane == focused then chosen = candidate end end
+	end
+	if not chosen then
+		cx:toast("error", title, if #candidates == 0 then "No ORCH+ controller with a recorded owner is shown in this session on this host."
+			else "Several ORCH+ controllers are shown here: focus the one to recover, then run the command again.")
+		return
+	end
+	dispatch_control(cx, chosen.pane, { command = command, source_nonce = chosen.data.source_nonce, orch_session_id = chosen.data.orch_session_id })
+end
+tern.command({ id = "continue_controller", title = "ORCH+ Continue controller in this window", icon = "flow", group = "ORCH+",
+	run = function(cx: WindowCx) palette_continuation(cx, "continue_controller", "ORCH+ Continue controller in this window") end })
+tern.command({ id = "recovery_guide", title = "ORCH+ Reload recovery guide", icon = "flow", group = "ORCH+",
+	run = function(cx: WindowCx) palette_continuation(cx, "recovery_guide", "ORCH+ Reload recovery guide") end })
 -- The Files button opens the orchestration Config; Config has a button back to the controller.
 tern.files.button({ id = "open", title = "Open ORCH+ Config", icon = "flow", run = function(_files: FilesInfo, cx: WindowCx) open(cx, true) end })
 tern.on("window_start", function(_cx: WindowCx) arm() end)

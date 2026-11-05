@@ -52,7 +52,7 @@ def _retain_muse_observations(reading: dict[str, Any], previous: dict[str, Any] 
 
 SCHEMA = 1
 DEFAULTS = {
-    "role": "standalone", "export_enabled": False, "metadata_enabled": False,
+    "role": "standalone", "export_enabled": False, "metadata_enabled": False, "capacity_enabled": False,
     "sharing_bind": None, "sharing_port": 0, "paused": False,
     "max_sources": 128, "max_publishers": 2048, "max_total_bytes": 32 * MAX_BODY,
     "max_inventory": 100_000, "max_page_bytes": MAX_BODY,
@@ -278,7 +278,7 @@ class Store:
         for key, value in changes.items():
             if key in LIMITS:
                 value = integer(value, *LIMITS[key])
-            elif key in ("export_enabled", "metadata_enabled", "paused"):
+            elif key in ("export_enabled", "metadata_enabled", "paused", "capacity_enabled"):
                 if not isinstance(value, bool):
                     raise ServiceError("invalid_request")
             elif key == "role":
@@ -316,7 +316,8 @@ class Store:
                 db.execute("DELETE FROM invitations")
                 self._bump(db, True)
             elif cleaned:
-                self._bump(db, old["export_enabled"] and not updated["export_enabled"])
+                self._bump(db, (old["export_enabled"] and not updated["export_enabled"])
+                           or old["capacity_enabled"] != updated["capacity_enabled"])
             return updated
 
     def local_state(self, key: str) -> Any:
@@ -636,6 +637,15 @@ class Store:
                 db.executemany("INSERT INTO pages VALUES (?,?,?)", [(token, session, payload) for token, payload in zip(tokens, payloads)])
                 self._capacity(db, limits)
             return page_list[0]
+
+    def release_aggregate(self, authority: Authority, cursor: str) -> None:
+        """Release only the caller's completed temporary aggregate assembly."""
+        cursor = _opaque(cursor)
+        with self.transaction() as db:
+            self._authorize(db, authority)
+            db.execute("DELETE FROM page_sessions WHERE observer=? AND group_id=? AND session_id IN "
+                       "(SELECT session_id FROM pages WHERE cursor=?)",
+                       (authority.device_id, authority.group_id, cursor))
 
     def register_client(self, client_id: str, kind: str, ttl_seconds: int = CLIENT_LEASE_SECONDS) -> dict[str, Any]:
         client_id, ttl_seconds = _opaque(client_id), integer(ttl_seconds, 1, CLIENT_LEASE_SECONDS)
