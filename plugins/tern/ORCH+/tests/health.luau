@@ -1,6 +1,6 @@
 -- Deterministic real reducer/host/window coverage. Run bounded sections in native host callbacks.
 local root, section = ...
-assert(section == nil or table.find({ "clock", "native", "controls", "timer", "driver_controls", "epoch_window", "epoch_host", "finish", "continuation", "alias_recovery", "held_report", "sweep_schedule", "readable_views", "guided_recovery", "guided_recovery_host_restart", "expired_wake", "revoked_authorization", "observe_retention", "uncertain_read", "quota_reader", "bridge_lifecycle" }, section), "unknown health section")
+assert(section == nil or table.find({ "clock", "native", "controls", "timer", "driver_controls", "epoch_window", "epoch_host", "finish", "continuation", "alias_recovery", "held_report", "sweep_schedule", "readable_views", "guided_recovery", "guided_recovery_host_restart", "expired_wake", "revoked_authorization", "observe_retention", "uncertain_read", "quota_reader", "bridge_lifecycle", "withdraw_fenced" }, section), "unknown health section")
 local runtime, environment = tern, getfenv()
 local shared = assert(loadstring(runtime.fs.read(root .. "/tests/dispatch.luau"), "health-fixture"))(root, "fixture")
 local clone, state, dispatch = shared.clone, shared.state, shared.dispatch
@@ -128,7 +128,8 @@ local function window_fixture()
 	ftern.now = function() return now end
 	ftern.timer = function(_, callback) local token = { callback = callback }; function token:cancel() self.cancelled = true end; table.insert(timers, token); return token end
 	ftern.on = function(name, callback) hooks[name] = callback end
-	ftern.command = function() end; ftern.files = { button = function() end }
+	local palette = {}
+	ftern.command = function(def) palette[def.id] = def end; ftern.files = { button = function() end }
 	ftern.route = { link = function() error("ORCH+ must not claim links; controls are native buttons") end }
 	local function find(node, key)
 		if node.p and node.p.key == key then return node end
@@ -258,6 +259,8 @@ local function window_fixture()
 		intent = { version = 1, source_nonce = f.origin.alias_nonce, serial = "fixture-intent-" .. tostring(intent_serial), kind = "dispatch", request = request }
 		api.intents(table.clone(cx))
 	end
+	-- The owner runs an ORCH+ palette command in this window (the latest loaded VM's registration).
+	function w:palette(id) assert(palette[id], id).run(table.clone(cx)) end
 	function w:tick() now += 500; local token = assert(table.remove(timers, 1)); assert(not token.cancelled); token.callback(table.clone(cx)) end
 	function w:elapse(ms) now += ms; assert(f.authority:apply({ kind = "workflow_tick" }).ok) end
 	function w:set_wall(t) wall = t end
@@ -323,7 +326,7 @@ if section == nil or section == "epoch_window" then
 	w:reload(); w:click("pause")
 	check(#w.events == 0, "replacement VM cannot issue ordinary commands before explicit continuation")
 	check(w.api.native_observation(w.cx, 9001, w:worker()) == "unknown", "new VM cannot adopt old worker aliases by a clock collision")
-	w:click("continue_controller"); w:pick({ continue_controller = true })
+	w:palette("continue_controller"); w:pick({ continue_controller = true })
 	local current = w.events[#w.events].origin.window_epoch
 	check(current ~= original and w:outcome().ok, "explicit continuation uses a fresh VM identity even when both clocks repeat")
 	check(w.api.native_observation(w.cx, 9001, w:worker()) == "unknown", "controller continuation alone never adopts the worker's old pane alias")
@@ -586,9 +589,9 @@ if section == nil or section == "continuation" then
 	local old_worker = clone(w:worker())
 	w:click("policy", { field = "poll_ms", expected = flow(w.f).policy }) -- Keep its old callback to prove a delayed old-VM editor cannot save.
 	w:reload()
-	w:click("continue_controller"); w:pick({ continue_controller = false })
+	w:palette("continue_controller"); w:pick({ continue_controller = false })
 	check(#w.events == 0, "cancelled controller continuation changes no origin")
-	w:click("continue_controller"); w:pick({ continue_controller = true })
+	w:palette("continue_controller"); w:pick({ continue_controller = true })
 	assert(w:outcome().ok)
 	w.f.origin = clone(w.events[#w.events].origin)
 	w.f.target_pane = "9004"
@@ -634,7 +637,7 @@ if section == nil or section == "alias_recovery" then
 	assert(w.f:apply("claim", { action_id = pending.action_id, executor = w.f.origin.window_epoch }).ok)
 	local action = clone(w.f:action(pending.action_id))
 	w:reload(); w:move_controller(9010)
-	w:click("continue_controller"); w:pick({ continue_controller = true }); assert(w:outcome().ok)
+	w:palette("continue_controller"); w:pick({ continue_controller = true }); assert(w:outcome().ok)
 	w.f.origin = clone(w.events[#w.events].origin)
 	w:bridge({ schema = 1, op = action.request.op, request_id = action.request.request_id, action_id = action.request.action_id,
 		origin_binding = action.request.origin_binding, controller_generation = action.request.controller_generation,
@@ -698,7 +701,7 @@ if section == nil or section == "sweep_schedule" then
 	for _, t in { at(3, 3, 6), at(3, 12, 0), at(3, 23, 59) } do w:set_wall(t); w:tick(); w:tick() end
 	check(#sweeps() == 2 and #log().runs == 2, "never more than one run per scheduled day")
 	w:reload()
-	w:click("continue_controller"); w:pick({ continue_controller = true }); assert(w:outcome().ok)
+	w:palette("continue_controller"); w:pick({ continue_controller = true }); assert(w:outcome().ok)
 	w.f.origin = clone(w.events[#w.events].origin)
 	for _ = 1, 4 do w:tick() end
 	check(#sweeps() == 2 and #log().runs == 2, "a reloaded and continued window does not run the same day again")
@@ -749,7 +752,7 @@ if section == nil or section == "guided_recovery" then
 	local function labels() local out = {}; for _, item in w:picker().items do table.insert(out, item.label) end; return out end
 	local function probes() local n = 0; for _, e in w:bridge_events() do if e.op == "owner_status" then n += 1 end end; return n end
 	local before = #w.events
-	w:click("recovery_guide"); w:tick(); w:tick()
+	w:palette("recovery_guide"); w:tick(); w:tick()
 	local items = labels()
 	check(items[1] == "Next: Continue controller after reload" and items[2] == "Then: Recover the previous SPAWN owner (previous_incarnation)" and #items == 3,
 		"before continuation the guide lists continuation, then SPAWN owner recovery, in order")
@@ -770,7 +773,7 @@ if section == nil or section == "guided_recovery" then
 	w:pick({ kind = "spawn" })
 	check(w:ran_actions()[1] == "SPAWN: Running agents" and #w.events == sent, "the SPAWN step only opens SPAWN's own recovery page; ORCH+ sends and attests nothing")
 	w:owner_answer("none") -- The owner fenced, verified and confirmed in SPAWN Config.
-	w:click("recovery_guide"); w:tick(); w:tick()
+	w:palette("recovery_guide"); w:tick(); w:tick()
 	items = labels()
 	check(items[1] == "Next: " .. reattach and #items == 2 and probes() == 3, "after SPAWN recovery only the reattachment remains, read again from SPAWN")
 	w:pick({ kind = "reattach", worker_id = id })
@@ -791,7 +794,7 @@ if section == nil or section == "guided_recovery_host_restart" then
 	check(w.f.authority.registry.sessions[w.f.origin.logical_session_id].controller.phase == "uncertain", "host restart restores the controller as uncertain")
 	local function open()
 		local seen = w:picker()
-		w:click("recovery_guide")
+		w:palette("recovery_guide")
 		for _ = 1, 6 do if w:picker() ~= seen then break end; w:tick() end
 		local out = {}; for _, item in w:picker().items do table.insert(out, item.label) end; return out
 	end
@@ -993,7 +996,7 @@ if section == nil or section == "uncertain_read" then
 	assert(f.authority:load().ok)
 	w:reload()
 	w:bridge({ placeholder = true }); w:bridge_missing(true)
-	w:click("continue_controller"); w:pick({ continue_controller = true }); assert(w:outcome().ok)
+	w:palette("continue_controller"); w:pick({ continue_controller = true }); assert(w:outcome().ok)
 	f.origin = clone(w.events[#w.events].origin)
 	local executors = controller(f).pending_executors
 	check(f:action(read.action_id).phase == "uncertain" and executors >= 1 and worker(f, id).continuation_required,
@@ -1165,7 +1168,7 @@ if section == nil or section == "quota_reader" then
 	local reader_pane = placed[1].pane
 	w:add_usage(9650, 1)
 	w:reload()
-	w:click("continue_controller"); w:pick({ continue_controller = true }); assert(w:outcome().ok)
+	w:palette("continue_controller"); w:pick({ continue_controller = true }); assert(w:outcome().ok)
 	w.f.origin = clone(w.events[#w.events].origin)
 	server.requests = {}
 	refresh(function() return successes() == 3 end)
@@ -1210,7 +1213,7 @@ if section == nil or section == "bridge_lifecycle" then
 	w:add_bridge(9020, lease(), 50); w:add_bridge(9021, lease(), 50) -- Created directly in the bridge tab.
 	for pane = 9022, 9024 do w:add_bridge(pane, lease()) end -- Inert leftovers beside the controller.
 	w:reload()
-	w:click("continue_controller"); w:pick({ continue_controller = true }); assert(w:outcome().ok)
+	w:palette("continue_controller"); w:pick({ continue_controller = true }); assert(w:outcome().ok)
 	w.f.origin = clone(w.events[#w.events].origin)
 	w:click("reconcile", { action_id = action.request.action_id })
 	w:tick(); w:tick()
@@ -1233,23 +1236,23 @@ if section == nil or section == "bridge_lifecycle" then
 	for cycle = 1, 6 do
 		w:reload()
 		local sent = #w:bridge_panes()
-		w:click("recovery_guide"); for _ = 1, 3 do w:tick() end
+		w:palette("recovery_guide"); for _ = 1, 3 do w:tick() end
 		check(#w:bridge_panes() == sent + 1 and w:bridge_panes()[sent + 1] == 9020 and #w:bridge_placements() == 0 and bridges() == settled,
 			"reload " .. tostring(cycle) .. ": the owner probe reuses the idle bridge and the bridge count stays bounded")
 	end
-	for _ = 1, 10 do w:click("recovery_guide"); for _ = 1, 3 do w:tick() end end
+	for _ = 1, 10 do w:palette("recovery_guide"); for _ = 1, 3 do w:tick() end end
 	check(#w:bridge_placements() == 0 and bridges() == settled, "repeated effects in one window session reuse the lane's bridge")
 	w:lease(9020, lease({ held = true }))
 	w:reload()
 	local sent = #w:bridge_panes()
-	w:click("recovery_guide"); for _ = 1, 3 do w:tick() end
+	w:palette("recovery_guide"); for _ = 1, 3 do w:tick() end
 	check(w:bridge_panes()[sent + 1] == 9021 and #w:bridge_placements() == 0,
 		"a bridge SPAWN names in a requested authorization is never reused, nor an unreadable one; another idle bridge is")
 	w:lease(9021, lease({ live = true }))
 	w:next_bridge(9100, nil)
 	w:reload()
 	sent = #w:bridge_panes()
-	w:click("recovery_guide"); for _ = 1, 3 do w:tick() end
+	w:palette("recovery_guide"); for _ = 1, 3 do w:tick() end
 	local placed = w:bridge_placements()[1]
 	check(#w:bridge_placements() == 1 and placed.how == "beside" and placed.target == 8996 and placed.focus == false
 		and w.panes[9100].tab == 50 and w:bridge_panes()[sent + 1] == 9100 and w:moves() == 1,
@@ -1258,12 +1261,45 @@ if section == nil or section == "bridge_lifecycle" then
 	local v = window_fixture()
 	v:bridge({ placeholder = true })
 	v:reload()
-	v:click("recovery_guide"); for _ = 1, 3 do v:tick() end
+	v:palette("recovery_guide"); for _ = 1, 3 do v:tick() end
 	local first = v:bridge_placements()[1]
 	check(#v:bridge_placements() == 1 and first.how == "tab" and first.target == nil and first.focus == false
 		and v.panes[9003].tab ~= 1 and v:tab_names()[v.panes[9003].tab] == "SPAWN bridges",
 		"the session's first bridge opens in a new SPAWN bridges tab, never splitting the controller")
 	check(v:moves() == 0 and v:bridge_panes()[1] == 9003 and v:bridge_events()[1] ~= nil and v:bridge_events()[1].op == "owner_status",
 		"the first bridge is never moved, so its surface stays readable and the owner probe reaches it")
+end
+-- Owner withdrawal of fenced never-launched work through the real window (a retried launch whose expired challenge was rechecked): the
+-- owner confirms, the window reads SPAWN's status of the exact fenced request once (never
+-- resubmitting it) and sends that evidence; the host cancels on SPAWN's expired-challenge answer.
+if section == nil or section == "withdraw_fenced" then
+	local w = window_fixture()
+	local f = w.f
+	local queued = f:queue(false); assert(queued.ok, queued.message)
+	assert(f:finish(queued.action_id, "provisioned", { handle = "mailbox-withdraw", binding_digest = string.rep("e", 64),
+		capabilities = runtime.json.array({ "report-files-v1", "native-ask-v1" }), limits = {} }).ok)
+	local wid = queued.worker_id
+	local launch = f.authority.registry.dispatch.workers[wid].launch_action_id
+	local expired = { resource = "window_authorization", current = 1, limit = 1, retryable = true, effect_started = false }
+	assert(f:finish(launch, "full", expired).code == "backpressure")
+	assert(f:apply("retry", { action_id = launch }).ok)
+	w:reload(); w:palette("continue_controller"); w:pick({ continue_controller = true }); assert(w:outcome().ok)
+	local fenced = f:action(launch)
+	check(fenced.phase == "resolved" and fenced.resolution.evidence == "never_claimed", "continuation fences the retried old-route launch")
+	local r = fenced.request
+	w:bridge({ schema = 1, op = r.op, request_id = r.request_id, action_id = r.action_id, origin_binding = clone(r.origin_binding),
+		controller_generation = r.controller_generation, status = "full", payload = expired })
+	w:click("cancel_work", { worker_id = wid })
+	check(w:picker().placeholder:find("Cancel never-launched work", 1, true) == 1, "the owner confirms withdrawal of the never-launched work first")
+	local before = #w:bridge_events()
+	w:pick({ confirm = true })
+	for _ = 1, 8 do if f.authority.registry.dispatch.workers[wid] == nil then break end; w:tick() end
+	local reads = 0
+	for index = before + 1, #w:bridge_events() do
+		local e = w:bridge_events()[index]
+		if e.op == "status" and e.target_request_id == r.request_id then reads += 1 end
+	end
+	check(reads == 1 and w:outcome().command == "cancel_work" and w:outcome().code == "work_cancelled" and f.authority.registry.dispatch.workers[wid] == nil,
+		"the window reads SPAWN's status of the exact fenced request once and the host cancels on its expired-challenge evidence")
 end
 return "health/" .. tostring(section or "all") .. ": " .. tostring(checks) .. " checks passed"

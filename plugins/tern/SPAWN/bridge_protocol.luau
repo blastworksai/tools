@@ -56,7 +56,7 @@ local specs={
  stop={required={target_request_id=M.id,target_action_id=M.id,pane_binding=M.pane,worker_id=M.id,worker_generation=positive,enrolment_token=M.token,work_id=M.id}},
  native_wake={required={target_request_id=M.id,target_action_id=M.id}},
  attach_worker={required={target_request_id=M.id,target_action_id=M.id,previous_origin_binding=M.binding,previous_pane_binding=M.pane,pane_binding=M.pane,worker_id=M.id,worker_generation=positive,enrolment_token=M.token,work_id=M.id,attestation=function(v)return v=='old_executors_stopped_or_retired'end}},
- mailbox_provision={required={record_id=record_id,record_revision=revision,capability=function(v)return v=='report-files-v1'end}},
+ mailbox_provision={required={record_id=record_id,record_revision=revision,capability=function(v)return v=='report-files-v1'end},optional={handover_id=M.id,handover_sha256=M.digest}},
  mailbox_read={required={handle=M.id,expected_generation=positive,selector=function(v)return type(v)=='table'end}},
  mailbox_publish_ack={required={handle=M.id,expected_generation=positive,receipt_revision=positive,ack_b64=opaque,ack_sha256=M.digest}},
  mailbox_publish_reply={required={handle=M.id,expected_generation=positive,message_id=M.id,reply_seq=positive,action_revision=positive,reply_sha256=M.digest,part=function(v)return v=='chunk' or v=='manifest'end,object_b64=opaque,object_sha256=M.digest},optional={index=positive}},
@@ -72,7 +72,7 @@ function M.decode(bytes)
  if r.op:sub(1,8)=='mailbox_' then for k,v in pairs(B) do required[k]=v end end
  if not M.fields(r,required,spec.optional) or r.controller_generation~=r.origin_binding.owner_generation then return nil,{code='invalid_schema',message='Invalid operation-specific dispatch request'} end
  if r.logical_session_id and r.logical_session_id~=r.origin_binding.logical_session_id then return nil,{code='binding_mismatch',message='Logical session differs'} end
- if r.op=='accept' and ((r.handover_id==nil)~=(r.handover_token==nil)) then return nil,{code='invalid_schema',message='Handover fields must be paired'} end
+ if (r.op=='accept' and ((r.handover_id==nil)~=(r.handover_token==nil))) or (r.op=='mailbox_provision' and ((r.handover_id==nil)~=(r.handover_sha256==nil))) then return nil,{code='invalid_schema',message='Handover fields must be paired'} end
  if r.op=='adopt' and (r.enrolment.handover_id~=nil or r.enrolment.coordinator_owner_id~=nil) then return nil,{code='invalid_schema',message='Adoption enrols an ordinary first generation only'} end
  return r
 end

@@ -43,7 +43,8 @@ function Fixture([string]$Prefix='box_') {
  $null=[IO.Directory]::CreateDirectory($box)
  foreach ($lane in @('reports','replies','acks','watermarks','producer','consumer','staging')) { $null=[IO.Directory]::CreateDirectory((Join-Path $box $lane)) }
  $script:binding=@{logical_session_id='session';worker_id='worker';worker_generation=1;launch_request_id='launch';work_id='work';enrolment_token='enrolment_token_1234';mailbox_handle=$Handle}
- [IO.File]::WriteAllBytes((Join-Path $box 'provision.json'),(Encode @{handle=$Handle;binding=$binding}))
+ $script:descriptor=@{handle=$Handle;binding=$binding}
+ [IO.File]::WriteAllBytes((Join-Path $box 'provision.json'),(Encode $descriptor))
  # The real entrypoint retains this zero-byte producer lock file between calls.
  [IO.File]::WriteAllBytes((Join-Path $box 'producer/lock'),[byte[]]@())
  $script:journalPath=Join-Path $box 'producer/journal.json'
@@ -149,6 +150,18 @@ function RefusedRetirement([scriptblock]$Operation) {
  EqualBytes $sentinel ([IO.File]::ReadAllBytes($unknown))
  Assert (Test-Path -LiteralPath (Join-Path $box 'producer/lock')) 'Refusal removed producer lock'
 }
+# An unsettled journal at the authorized floors is a definite pre-effect refusal: exit 0 with
+# exactly producer_unsettled on stdout, and nothing removed.
+function UnsettledRetirement([scriptblock]$Operation) {
+ $before=[IO.File]::ReadAllBytes($journalPath)
+ $unknown=Join-Path $box 'producer/unknown'; $sentinel=$utf8.GetBytes('must retain unknown bytes')
+ [IO.File]::WriteAllBytes($unknown,$sentinel)
+ $result=& $Operation
+ Assert ($result.code -eq 0 -and $result.out -ceq "producer_unsettled`n") ('Unsettled journal was not a definite pre-effect refusal; helper='+ (ConvertTo-Json -InputObject $result -Compress))
+ EqualBytes $before ([IO.File]::ReadAllBytes($journalPath))
+ EqualBytes $sentinel ([IO.File]::ReadAllBytes($unknown))
+ Assert (Test-Path -LiteralPath (Join-Path $box 'producer/lock')) 'Refusal removed producer lock'
+}
 try {
  # DirectoryInfo.Parent is not a provider-emitted item: no PSIsContainer note
  # property is promised. Both production guards must walk real nested ancestry,
@@ -223,11 +236,11 @@ try {
   AuthorizedFixture; RefusedRetirement { AuthorizedRetire -Chain $bad }
  }
  AuthorizedFixture; RefusedRetirement { Worker 'retire-authorized' }
- AuthorizedFixture; RefusedRetirement { AuthorizedRetire -Report '1' }
- AuthorizedFixture; RefusedRetirement { AuthorizedRetire -Report '3' }
- AuthorizedFixture; RefusedRetirement { AuthorizedRetire -Reply '0' }
- AuthorizedFixture; RefusedRetirement { AuthorizedRetire -Reply '2' }
- AuthorizedFixture; RefusedRetirement { AuthorizedRetire -Chain ('b'*64) }
+ AuthorizedFixture; UnsettledRetirement { AuthorizedRetire -Report '1' }
+ AuthorizedFixture; UnsettledRetirement { AuthorizedRetire -Report '3' }
+ AuthorizedFixture; UnsettledRetirement { AuthorizedRetire -Reply '0' }
+ AuthorizedFixture; UnsettledRetirement { AuthorizedRetire -Reply '2' }
+ AuthorizedFixture; UnsettledRetirement { AuthorizedRetire -Chain ('b'*64) }
  AuthorizedFixture; RefusedRetirement { AuthorizedRetire -SuppliedOwner 'different_owner_1234' }
  foreach ($mutation in @('token','owner','binding','mailbox','receipt_seq','next_seq','consumed_reply_floor','reply_next','unclaimed','claimed','uncertain','unacknowledged','truthy','pending')) {
   AuthorizedFixture
@@ -251,7 +264,8 @@ try {
    'pending' { $null=Allocate @{kind='READY';payload=@{state='idle'}} }
   }
   [IO.File]::WriteAllBytes($journalPath,(Encode $journal))
-  RefusedRetirement { AuthorizedRetire }
+  if ($mutation -cin @('token','owner','binding','mailbox','next_seq')) { RefusedRetirement { AuthorizedRetire } }
+  else { UnsettledRetirement { AuthorizedRetire } }
  }
  foreach ($corruption in @('trailing','duplicate','fractional_cursor','string_cursor','object_pending','object_consumed')) {
   AuthorizedFixture
@@ -307,6 +321,22 @@ try {
  [IO.File]::WriteAllBytes($journalPath,(Encode $journal))
  $retired=AuthorizedRetire -Report '0' -Reply '0'
  Assert ($retired.code -eq 0 -and $retired.out -ceq "producer_retired`n") 'Zero-floor authorized retirement failed'
+
+ # Parity with the POSIX helper: only ACCEPTED reads the provisioned handover. A malformed
+ # one leaves authorized retirement and other reports unchanged and refuses ACCEPTED.
+ $malformedHandover=@{handover_id='bad id';handover_sha256='x'}
+ AuthorizedFixture
+ [IO.File]::WriteAllBytes((Join-Path $box 'provision.json'),(Encode @{handle=$Handle;binding=$binding;handover=$malformedHandover}))
+ $retired=AuthorizedRetire
+ Assert ($retired.code -eq 0 -and $retired.out -ceq "producer_retired`n" -and $retired.err -ceq '') ('Malformed provisioned handover blocked authorized retirement: '+$retired.err)
+ Fixture
+ [IO.File]::WriteAllBytes((Join-Path $box 'provision.json'),(Encode @{handle=$Handle;binding=$binding;handover=$malformedHandover}))
+ $before=ReadFile $journalPath 1572864
+ $result=Worker 'report' '{"kind":"ACCEPTED","payload":{"assignment_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}'
+ Assert ($result.code -ne 0 -and $result.err.Contains('binding_mismatch')) ('Malformed provisioned handover did not refuse ACCEPTED: '+$result.err)
+ EqualBytes $before (ReadFile $journalPath 1572864)
+ $result=Worker 'report' '{"kind":"READY","payload":{"state":"idle"}}'
+ Assert ($result.code -eq 0) ('Malformed provisioned handover blocked an ordinary report: '+$result.err)
 
  # Every codec report kind has a positive case; each rejects an unknown payload
  # field before journal bytes/next_seq can change.
@@ -396,11 +426,30 @@ try {
   Reject { Allocate (Decode ($utf8.GetBytes($wire))) } 'invalid_schema'
   EqualBytes $before (ReadFile $journalPath 1572864)
  }
- $accepted=@{kind='ACCEPTED';handover_id='handover';handover_token='handover_token_1234';payload=@{assignment_sha256=('b'*64)}}
+ # Rollover successor: the producer verifies the pair against the
+ # provisioned ID and sha256(handover_id:handover_token) before allocating a sequence.
+ $issuedToken=('29f79cde'*7)+'b5851668'; $mistypedToken=('29f79cde'*7)+'b585166a'
+ $accepted=@{kind='ACCEPTED';handover_id='handover_540';handover_token=$issuedToken;payload=@{assignment_sha256=('b'*64)}}
+ Reject { ReportInput $accepted } 'binding_mismatch: handover_id was not issued'
+ $script:descriptor.handover=@{handover_id='handover_540';handover_sha256=(Hash ($utf8.GetBytes('handover_540:'+$issuedToken)))}
  ReportInput $accepted
- $binding.assignment_sha256='a'*64
- Reject { ReportInput $accepted } 'binding_mismatch'
- $binding.Remove('assignment_sha256')
+ $mistyped=@{kind='ACCEPTED';handover_id='handover_540';handover_token=$mistypedToken;payload=@{assignment_sha256=('b'*64)}}
+ Reject { ReportInput $mistyped } 'binding_mismatch: handover_token differs'
+ Reject { ReportInput @{kind='ACCEPTED';handover_id='handover_541';handover_token=$issuedToken;payload=@{assignment_sha256=('b'*64)}} } 'binding_mismatch: handover_id differs'
+ Reject { ReportInput @{kind='ACCEPTED';payload=@{assignment_sha256=('b'*64)}} } 'binding_mismatch: handover_id and handover_token are required'
+ $script:descriptor.Remove('handover')
+ # Through the actual helper process: a one-digit-changed token is refused before any
+ # sequence or publication, without echoing either value; the exact pair then publishes.
+ Fixture
+ [IO.File]::WriteAllBytes((Join-Path $box 'provision.json'),(Encode @{handle=$Handle;binding=$binding;handover=@{handover_id='handover_540';handover_sha256=(Hash ($utf8.GetBytes('handover_540:'+$issuedToken)))}}))
+ $before=ReadFile $journalPath 1572864
+ $result=Worker 'report' ($utf8.GetString((Encode $mistyped)))
+ Assert ($result.code -ne 0 -and $result.err.Contains('binding_mismatch: handover_token differs from the provisioned handover digest') -and -not $result.err.Contains($mistypedToken) -and -not $result.err.Contains($issuedToken)) ('Mistyped handover token was not refused by field: '+$result.err)
+ EqualBytes $before (ReadFile $journalPath 1572864)
+ Assert (@([IO.Directory]::EnumerateFileSystemEntries((Join-Path $box 'reports'))).Count -eq 0) 'Refused handover published a report'
+ $result=Worker 'report' ($utf8.GetString((Encode $accepted)))
+ Assert ($result.code -eq 0 -and (Test-Path -LiteralPath (Join-Path $box 'reports/1/manifest.json'))) ('Exact handover pair was not published: '+$result.err)
+ Reload; Assert ($journal.next_seq -eq 2) 'Exact ACCEPTED did not take sequence 1'
 
  # init takes no input: a piped report is refused before any journal exists;
  # empty stdin initializes and points at mode report.

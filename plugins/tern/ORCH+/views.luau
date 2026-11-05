@@ -189,6 +189,7 @@ local function dispatch_view(view: any, projection: any, selected: any): (any, a
 	if bound then
 		table.insert(rows, dispatch_link(view, "continue_controller", "Continue controller after reload…", { expected_revision = projection.revision }))
 		table.insert(rows, dispatch_link(view, "recovery_guide", "Guided reload recovery — next step…"))
+		table.insert(rows, ui.text("After a reload, run the palette command ORCH+ Continue controller in this window, then ORCH+ Reload recovery guide, in the window you are using. A button click does not say which window it came from, so the two buttons above act only in the window that already is this controller's continued origin; every other window ignores them."))
 		table.insert(rows, ui.text("Reload recovery: first verify old executors and continue this exact controller; then recover the previous SPAWN owner in SPAWN's own Config when it still binds an earlier window; then explicitly reattach each worker. The guide lists every remaining step and opens each explicit, attested control in order; it never attests, retries or reactivates anything by itself."))
 		local guide = view.recovery_steps
 		if type(guide) == "table" and type(guide.steps) == "table" then
@@ -240,6 +241,23 @@ local function dispatch_view(view: any, projection: any, selected: any): (any, a
 			.. " · receipt " .. shown(worker.accepted_seq, "none yet") .. " / confirmed " .. shown(worker.compacted_floor, "none yet")))
 		if worker.reason then table.insert(rows, ui.text(tern.json.encode(worker.reason))) end
 		routing_rows(view, rows, worker, admitted)
+		local fenced = worker.withdrawal
+		if fenced then
+			table.insert(rows, ui.text(ui.span("Never launched: " .. (if fenced.evidence == "spawn_rejected" then "SPAWN rejected its " .. fenced.op .. " (" .. fenced.action_id .. ") before any effect"
+				else "explicit continuation fenced its " .. fenced.op .. " (" .. fenced.action_id .. ", " .. fenced.evidence .. ") as unexecuted")
+				.. ". Nothing re-issues it and the old request is never re-sent; cancel this work and queue the assignment again.", "warning")))
+			if fenced.mailbox_retire == "retiring" then
+				table.insert(rows, ui.text("Cancelled by the owner: its unused mailbox is being retired (" .. tostring(worker.mailbox_status) .. "). The worker is removed once SPAWN confirms retirement; an uncertain retirement is never re-issued, so inspect its retained outcome."))
+			elseif admitted then
+				table.insert(rows, dispatch_link(view, "cancel_work", "Cancel never-launched work…", { worker_id = worker.worker_id }))
+				table.insert(rows, ui.text(if fenced.status_required
+					then "SPAWN received that exact request, so cancel first reads its retained SPAWN status. The worker is removed and its reservations released only when the request can never run: SPAWN has no record of it, rejected it, or reports a pre-effect refusal such as an expired window challenge. A live challenge refuses until it expires (30 s). A provisioned mailbox stays unused; nothing native is stopped or retired."
+					elseif fenced.mailbox_retire == "refused" then "SPAWN refused the previous retirement of this work's unused mailbox (reason above); nothing was removed. Cancel again to issue one fresh retirement."
+					elseif fenced.mailbox_retire ~= nil then "SPAWN's rejection is terminal and no producer ever ran, so cancel retires the unused mailbox through the exact retirement path. The worker and its reservations are released once SPAWN confirms retirement; a refused or uncertain retirement keeps the worker here with that outcome."
+					elseif fenced.evidence == "spawn_rejected" then "SPAWN's retained rejection is terminal and no mailbox was created, so cancel removes the worker and releases its reservations directly. Nothing native is stopped or retired."
+					else "That exact request was never sent, so cancel removes the worker and releases its reservations directly. A provisioned mailbox stays unused; nothing native is stopped or retired."))
+			end
+		end
 		if worker.rejected_report then
 			table.insert(rows, ui.text(ui.span("Report held: " .. tostring(worker.rejected_report.code) .. " · "
 				.. tostring(worker.rejected_report.message) .. ". Its immutable bytes remain retained and unacknowledged. Inspect the producer and this generation; no report is skipped or automatically retried, and automatic report/watermark reads stop until you act (only pending outbound ACK/reply settlement continues). The explicit Read / settle and watermark controls remain available.", "error")))
@@ -275,6 +293,10 @@ local function dispatch_view(view: any, projection: any, selected: any): (any, a
 			if worker.finish_requested then
 				table.insert(rows, ui.text("Finish requested · native stop " .. shown(worker.stop_status, "not requested")
 					.. " · mailbox " .. shown(worker.mailbox_status, "not provisioned") .. ". Capacity is released only after verified stop and settled retirement."))
+				if worker.mailbox_status == "refused" then
+					table.insert(rows, dispatch_link(view, "finish", "Retry mailbox retirement once…", { worker_id = worker.worker_id }))
+					table.insert(rows, ui.text("SPAWN refused retirement before any effect: the stopped worker's helper journal still holds pending reports or unacknowledged/unresolved control messages. The mailbox stays provisioned and nothing is retried automatically; the nightly sweep or this control issues one fresh attempt."))
+				end
 			else
 				table.insert(rows, dispatch_link(view, "finish", "Finish ordinary worker…", { worker_id = worker.worker_id }))
 			end
@@ -438,6 +460,8 @@ local function workflow_view(view: any, projection: any, selected: any): (any, a
 			continuation_required = worker.continuation_required, continuation_proof = worker.continuation_proof,
 			orchestration_excluded = worker.orchestration_excluded, context_used_pct = worker.context_used_pct,
 			phase = worker.phase, due_rollover = worker.due_rollover, rollover = worker.rollover, restored = worker.restored, adopt_pane_binding = worker.adopt_pane_binding,
+			-- Fenced never-launched work only: the exact request the window reads SPAWN status for before cancel_work.
+			withdrawal = worker.withdrawal,
 			-- Routed work only; absent for explicit (unrouted) dispatch so its claim path is unchanged.
 			routing = if worker.routing then { phase = worker.routing.phase, mode = worker.routing.mode, evidence_revision = worker.routing.evidence_revision } else nil,
 		})

@@ -234,6 +234,28 @@ function Values($Value,[string]$Type,[int]$Minimum=0,[int]$Maximum=256) {
 function Choice($Value,[string[]]$Allowed) {
  if ($Value -isnot [string] -or $Value -cnotin $Allowed) { Fail 'invalid_schema' }
 }
+# A rollover successor's provision.json carries the issued handover ID and
+# sha256(handover_id:handover_token), never the token. ACCEPTED must match it before any
+# sequence is allocated, so a mistyped pair is retried instead of published.
+# Messages name the field and never echo either value. Only ACCEPTED reads the provisioned
+# handover, so every other mode behaves like the POSIX helper even if it is malformed.
+function ProvisionedHandover($Descriptor) {
+ if (-not $Descriptor.ContainsKey('handover')) { return $null }
+ $issued=$Descriptor.handover
+ if ($issued -isnot [hashtable] -or $issued.Count -ne 2 -or $issued.handover_id -isnot [string] -or $issued.handover_id -cnotmatch '^[A-Za-z0-9_-]{1,96}\z' -or $issued.handover_sha256 -isnot [string] -or $issued.handover_sha256 -cnotmatch '^[0-9a-f]{64}\z') { Fail 'binding_mismatch' }
+ return $issued
+}
+function HandoverCheck($Report) {
+ $issued=ProvisionedHandover $descriptor
+ $supplied=$Report.ContainsKey('handover_id')
+ if ($null -eq $issued) {
+  if ($supplied) { Fail 'binding_mismatch: handover_id was not issued to this generation; report ACCEPTED without a handover pair' }
+  return
+ }
+ if (-not $supplied) { Fail 'binding_mismatch: handover_id and handover_token are required; copy both verbatim from the launch preface and report ACCEPTED again' }
+ if ($Report.handover_id -cne $issued.handover_id) { Fail 'binding_mismatch: handover_id differs from the provisioned handover; copy it verbatim from the launch preface and report ACCEPTED again' }
+ if ((Hash ($utf8.GetBytes($Report.handover_id+':'+$Report.handover_token))) -cne $issued.handover_sha256) { Fail 'binding_mismatch: handover_token differs from the provisioned handover digest; copy it verbatim from the launch preface and report ACCEPTED again' }
+}
 function ReportInput($Report) {
  ObjectFields $Report @('kind','payload') @('action_id','action_revision','handover_id','handover_token')
  Choice $Report.kind @('REGISTER','READY','ACCEPTED','HEARTBEAT','WAITING','BLOCKED','ASK','CHECKPOINT','REVIEW_READY','REVIEW_RESULT','DONE','ROLLOVER_REQUEST','LANDING_REQUEST','LANDING_RESULT','reply_ack','COORDINATOR_RELEASE','COORDINATOR_PROPOSAL')
@@ -262,9 +284,7 @@ function ReportInput($Report) {
   'READY' { ObjectFields $p @('state') @('summary','context_used_pct'); Choice $p.state @('idle'); if ($p.ContainsKey('context_used_pct')) { ValueType $p.context_used_pct 'percent' } }
   'ACCEPTED' {
    ObjectFields $p @('assignment_sha256'); ValueType $p.assignment_sha256 'digest'
-   if (($binding.ContainsKey('handover_id') -and $Report.handover_id -cne $binding.handover_id) -or
-       ($binding.ContainsKey('handover_token') -and $Report.handover_token -cne $binding.handover_token) -or
-       ($binding.ContainsKey('assignment_sha256') -and $p.assignment_sha256 -cne $binding.assignment_sha256)) { Fail 'binding_mismatch' }
+   HandoverCheck $Report
   }
   'HEARTBEAT' { ObjectFields $p @('state') @('summary','request_id','context_used_pct'); Choice $p.state @('working','idle','waiting','blocked'); if ($p.ContainsKey('request_id')) { ValueType $p.request_id 'id' }; if ($p.ContainsKey('context_used_pct')) { ValueType $p.context_used_pct 'percent' } }
   'WAITING' { ObjectFields $p @('reason') @('request_id'); ValueType $p.reason 'short'; if ($p.ContainsKey('request_id')) { ValueType $p.request_id 'id' } }
@@ -546,10 +566,13 @@ function RetireAuthorized {
   $value=$script:journal[$key]
   if (($value -isnot [long] -and $value -isnot [int]) -or $value -lt 0 -or $value -gt 9007199254740991) { Fail 'journal_corrupt' }
  }
- if ($script:journal.receipt_seq -ne $report -or $script:journal.next_seq -ne $report+1 -or $script:journal.consumed_reply_floor -ne $reply -or $script:journal.reply_next -ne $reply+1 -or $script:journal.receipt_chain -cne $ReceiptChain) { Fail 'incomplete' }
- if ($script:journal.pending -isnot [array] -or $script:journal.pending.Count -ne 0 -or $script:journal.consumed -isnot [array]) { Fail 'incomplete' }
+ # An unsettled journal is refused before anything is removed; the outer handler reports the
+ # definite pre-effect outcome on stdout so SPAWN never records it as uncertain.
+ if ($script:journal.receipt_seq -ne $report -or $script:journal.next_seq -ne $report+1 -or $script:journal.consumed_reply_floor -ne $reply -or $script:journal.reply_next -ne $reply+1 -or $script:journal.receipt_chain -cne $ReceiptChain) { Fail 'producer_unsettled' }
+ if ($script:journal.pending -isnot [array] -or $script:journal.consumed -isnot [array]) { Fail 'journal_corrupt' }
+ if ($script:journal.pending.Count -ne 0) { Fail 'producer_unsettled' }
  foreach ($fact in $script:journal.consumed) {
-  if ($fact -isnot [hashtable] -or $fact.acknowledged -isnot [bool] -or -not $fact.acknowledged -or $fact.execution -cne 'resolved') { Fail 'incomplete' }
+  if ($fact -isnot [hashtable] -or $fact.acknowledged -isnot [bool] -or -not $fact.acknowledged -or $fact.execution -cne 'resolved') { Fail 'producer_unsettled' }
  }
  EnterCapacity
  try { Capacity 0 0 $true; $null=ReadFile $journalPath 1572864; [IO.File]::Delete($journalPath) } finally { LeaveCapacity }
@@ -636,5 +659,6 @@ if ($retire -and $Mode -eq 'retire-authorized') { [Console]::Out.Write("producer
  if ($_.Exception.Message.StartsWith("full`n")) {
   [Console]::Error.Write($_.Exception.Message+"`n"); exit 1
  }
+ if ($Mode -eq 'retire-authorized' -and $_.Exception.Message -ceq 'producer_unsettled') { [Console]::Out.Write("producer_unsettled`n"); exit 0 }
  throw
 }

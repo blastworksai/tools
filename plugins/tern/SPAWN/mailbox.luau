@@ -66,8 +66,18 @@ local function binding_digest(g)
  add(g.backend)
  for _,capability in ipairs(g.capabilities) do add(capability) end
  for _,key in ipairs({'root','helper','producer_helper','worker_identity','os','shell','kind','backend','host','user','key_path','host_os','host_shell'}) do add(g.target[key]) end
+ if g.handover then add('handover'); add(g.handover.handover_id); add(g.handover.handover_sha256) end
  return Codec.sha256(table.concat(parts,''))
 end
+-- A rollover successor is provisioned with its issued handover ID and the digest
+-- sha256(handover_id..':'..handover_token), never the token, so the producer can refuse a
+-- mistyped pair before it consumes a report sequence. Ordinary generations carry neither.
+local function issued_handover(r)
+ if r.handover_id==nil and r.handover_sha256==nil then return nil,true end
+ if not id(r.handover_id) or not digest(r.handover_sha256) then return nil,false end
+ return {handover_id=r.handover_id,handover_sha256=r.handover_sha256},true
+end
+local function descriptor(g) return {version=1,handle=g.binding.mailbox_handle,binding_digest=g.binding_digest,binding=g.binding,handover=g.handover} end
 local function valid_write(g,key,w)
  if not closed(w,{status=true,request=true,bytes=true,reply_seq=true,logical_bytes=true,result=true}) or type(w.request)~='table' or not bound(w.request,g.binding) then return false end
  local r=w.request
@@ -75,7 +85,7 @@ local function valid_write(g,key,w)
  local fields={schema=true,origin=true,op=true,request_id=true,action_id=true,origin_binding=true,controller_pane=true,controller_generation=true}
  for _,name in ipairs(B) do fields[name]=true end
  local specific={
-  mailbox_provision={'record_id','record_revision','capability'},
+  mailbox_provision={'record_id','record_revision','capability','handover_id','handover_sha256'},
   mailbox_publish_ack={'handle','expected_generation','receipt_revision','ack_b64','ack_sha256'},
   mailbox_publish_reply={'handle','expected_generation','message_id','reply_seq','action_revision','reply_sha256','part','index','object_b64','object_sha256'},
   mailbox_retire={'handle','expected_generation','mode','settlement_revision','report_floor','report_chain_sha256','reply_floor','grant_id'},
@@ -85,7 +95,7 @@ local function valid_write(g,key,w)
  if not closed(r,fields) then return false end
  if r.op=='mailbox_provision' then
   local object=Codec.strict_decode(w.bytes,2048)
-  return key=='provision' and r.capability=='report-files-v1' and r.record_id==g.record_id and r.record_revision==g.record_revision and w.reply_seq==nil and w.logical_bytes==nil and equal(object,{version=1,handle=g.binding.mailbox_handle,binding_digest=g.binding_digest,binding=g.binding})
+  return key=='provision' and r.capability=='report-files-v1' and r.record_id==g.record_id and r.record_revision==g.record_revision and w.reply_seq==nil and w.logical_bytes==nil and equal(issued_handover(r),g.handover) and equal(object,descriptor(g))
  end
  if r.handle~=g.binding.mailbox_handle or r.expected_generation~=g.binding.worker_generation then return false end
  if r.op=='mailbox_publish_ack' then
@@ -114,14 +124,15 @@ function M.get(registry,handle)
  local g=registry.generations[handle]
  if not g then return nil end
  local binding={}; for _,key in ipairs(B) do binding[key]=g.binding[key] end
- return {binding=binding,record_id=g.record_id,record_revision=g.record_revision,backend=g.backend,phase=g.status,location=M.location(registry,handle),capabilities=copy(g.capabilities)}
+ return {binding=binding,record_id=g.record_id,record_revision=g.record_revision,backend=g.backend,phase=g.status,location=M.location(registry,handle),capabilities=copy(g.capabilities),handover=copy(g.handover)}
 end
 function M.validate(registry)
  if not closed(registry,{version=true,generations=true}) or registry.version~=1 or type(registry.generations)~='table' then return nil,err('journal_corrupt') end
  local live,active=0,0
  for handle,g in pairs(registry.generations) do
   if not id(handle) or type(g)~='table' or type(g.binding)~='table' or g.binding.mailbox_handle~=handle or type(g.writes)~='table' or not record_id(g.record_id) or not integer(g.record_revision,true) or not digest(g.binding_digest) or not integer(g.report_floor,true) or not integer(g.reply_floor,true) or not integer(g.settlement_revision,true) then return nil,err('journal_corrupt') end
-  if not closed(g,{binding=true,record_id=true,record_revision=true,target=true,backend=true,capabilities=true,wake=true,status=true,writes=true,report_floor=true,reply_floor=true,settlement_revision=true,binding_digest=true,active=true,report_chain_sha256=true,frozen=true}) or not closed(g.binding,{logical_session_id=true,worker_id=true,worker_generation=true,launch_request_id=true,work_id=true,enrolment_token=true,mailbox_handle=true}) or not Capabilities.valid_set(g.backend,g.wake,g.capabilities) or (g.report_chain_sha256~=nil and not digest(g.report_chain_sha256)) or (g.frozen~=nil and type(g.frozen)~='boolean') then return nil,err('journal_corrupt') end
+  if not closed(g,{binding=true,record_id=true,record_revision=true,target=true,backend=true,capabilities=true,wake=true,status=true,writes=true,report_floor=true,reply_floor=true,settlement_revision=true,binding_digest=true,active=true,report_chain_sha256=true,frozen=true,handover=true}) or not closed(g.binding,{logical_session_id=true,worker_id=true,worker_generation=true,launch_request_id=true,work_id=true,enrolment_token=true,mailbox_handle=true}) or not Capabilities.valid_set(g.backend,g.wake,g.capabilities) or (g.report_chain_sha256~=nil and not digest(g.report_chain_sha256)) or (g.frozen~=nil and type(g.frozen)~='boolean') then return nil,err('journal_corrupt') end
+  if g.handover~=nil and (not closed(g.handover,{handover_id=true,handover_sha256=true}) or not equal(issued_handover(g.handover),g.handover)) then return nil,err('journal_corrupt') end
   for _,key in ipairs(B) do
    local value=g.binding[key]
    if key=='worker_generation' then if not integer(value) then return nil,err('journal_corrupt') end
@@ -160,7 +171,7 @@ function M.prepare(registry,request,record,context)
  local fields={schema=true,origin=true,op=true,request_id=true,action_id=true,origin_binding=true,controller_pane=true,controller_generation=true}
  for _,k in ipairs(B) do fields[k]=true end
  local specific={
-  mailbox_provision={'record_id','record_revision','capability'},
+  mailbox_provision={'record_id','record_revision','capability','handover_id','handover_sha256'},
   mailbox_read={'handle','expected_generation','selector'},
   mailbox_publish_ack={'handle','expected_generation','receipt_revision','ack_b64','ack_sha256'},
   mailbox_publish_reply={'handle','expected_generation','message_id','reply_seq','action_revision','reply_sha256','part','index','object_b64','object_sha256'},
@@ -174,6 +185,8 @@ function M.prepare(registry,request,record,context)
  local g
  if request.op=='mailbox_provision' then
   if request.capability~='report-files-v1' or not id(context.handle) or not record_id(request.record_id) or not integer(request.record_revision,true) then return reject('invalid_schema') end
+  local issued,paired=issued_handover(request)
+  if not paired then return reject('invalid_schema') end
   for _,k in ipairs(B) do
    local v=request[k]
    if k=='worker_generation' then if not integer(v) then return reject('invalid_schema') end
@@ -184,7 +197,7 @@ function M.prepare(registry,request,record,context)
    if existing.binding.launch_request_id==request.launch_request_id and existing.binding.logical_session_id==request.logical_session_id then handle=h; g=existing; break end
   end
   if g then
-   if not bound(request,g.binding) or g.record_id~=request.record_id or g.record_revision~=request.record_revision then return reject('content_conflict') end
+   if not bound(request,g.binding) or g.record_id~=request.record_id or g.record_revision~=request.record_revision or not equal(issued,g.handover) then return reject('content_conflict') end
   else
    handle=context.handle
    if next.generations[handle] then return reject('content_conflict') end
@@ -196,7 +209,7 @@ function M.prepare(registry,request,record,context)
    local target,why=Adapter.target(record,context)
    if not target then return reject(why) end
    local binding={mailbox_handle=handle}; for _,k in ipairs(B) do binding[k]=request[k] end
-   g={binding=binding,record_id=request.record_id,record_revision=request.record_revision,target=target,backend=record.backend,capabilities=capabilities,wake=record.mailbox.wake,status='intent',writes={},report_floor=0,reply_floor=0,settlement_revision=0}
+   g={binding=binding,record_id=request.record_id,record_revision=request.record_revision,target=target,backend=record.backend,capabilities=capabilities,wake=record.mailbox.wake,status='intent',writes={},report_floor=0,reply_floor=0,settlement_revision=0,handover=issued}
    g.binding_digest=binding_digest(g)
    next.generations[handle]=g
   end
@@ -210,7 +223,7 @@ function M.prepare(registry,request,record,context)
  local op={id=context.operation_id,request_id=request.request_id,handle=handle,generation=g.binding.worker_generation,target=copy(g.target),binding=copy(g.binding),kind=request.op,request=copy(request)}
  local key,raw,object
  if request.op=='mailbox_provision' then
-  key='provision'; op.mode='provision'; op.bytes=tern.json.encode({version=1,handle=handle,binding_digest=g.binding_digest,binding=g.binding}); op.path='provision.json'
+  key='provision'; op.mode='provision'; op.bytes=tern.json.encode(descriptor(g)); op.path='provision.json'
  elseif g.status~='provisioned' then return reject('unsupported_capability')
  elseif request.op=='mailbox_read' then
   op.path=M.selector(request.selector); if not op.path then return reject('invalid_schema') end

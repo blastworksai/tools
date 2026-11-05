@@ -19,7 +19,7 @@ local function fixture()
  local r={schema=1,origin='orchplus',op='mailbox_publish_reply',request_id='publication',action_id='action-publication',controller_pane='44',controller_generation=1,origin_binding=copy(origin),logical_session_id='session',worker_id='worker',worker_generation=1,launch_request_id='launch',work_id='work',enrolment_token='aaaaaaaaaaaaaaaa',handle='mailbox',expected_generation=1,message_id='message',reply_seq=1,action_revision=1,reply_sha256=c.sha256('reply'),part='manifest',object_b64='e30=',object_sha256=c.sha256('{}')}
  local claim={executor='epoch',epoch=1,grant_id='grant-one'}
  local state={version=1,source_nonce='alias',host_pane_id='12',orch_session_id='session',owner_id='owner',owner_generation=1,command_cursor={origin=copy(origin),controller_pane='44',seq=1},action={action_id=r.action_id,phase='claimed',claim=copy(claim),execution_origin=copy(origin),execution_controller_pane='44',reconciliation_only=false}}
- local f={p=p,c=c,w=w,request=r,current=copy(r),state=state,claim=claim,events=events,asks=0,starts=0,action_reads=0,idle_reads=0,agent_state='idle',projection={schema=1,kind='authorize',request=copy(r),nonce='challenge'}}
+ local f={p=p,c=c,w=w,request=r,current=copy(r),state=state,claim=claim,events=events,asks=0,starts=0,action_reads=0,idle_reads=0,agent_state='idle',focus=44,projection={schema=1,kind='authorize',request=copy(r),nonce='challenge'}}
  local host={id=7,state='connected',panes={44,45,55}}
  local session={id=3,host=7}
  local function surface(block,key,role,bytes)return {surface={role='plugin.'..block},main={id='main.'..key,k='text',p={role=role,spans={{t=bytes}}}}}end
@@ -47,12 +47,14 @@ local function fixture()
   start=function()
    f.starts+=1
    if f.start_error then error('ambiguous native start')end
+   f.focus=55 -- Native start focuses the new agent pane.
    return 55
   end,
   stop=function()close_target(true)end,
  }}
- cx.layout={close=function()close_target(false)end}
+ cx.layout={close=function()close_target(false)end,focus=function(_,id)f.focus=id;f.refocused=(f.refocused or 0)+1 end}
  cx.session={
+  focused=function()return f.focus end,
   pane=function(_,id)if id==55 and f.absent then return nil end return {block=if id==44 then 'orchplus.orchestrator' elseif id==45 then 'spawn.dispatch' else 'agent',tab=1,kind=if id==55 then f.pane_kind or 'agent' else 'plugin',exited=if id==55 then f.exit_status else nil}end,
   tabs=function()return {{id=1,session=3}}end,
   panes=function()return {{pane=45,block='spawn.dispatch'}}end,
@@ -142,6 +144,10 @@ if section==nil then
  check(invalid.starts==1 and #invalid.events==3,'valid restored assignment invokes native launch exactly once')
  local ambiguous=launch_fixture();begin_effect(ambiguous);ambiguous.start_error=true;ambiguous.tick();ambiguous.tick()
  check(ambiguous.starts==1 and #ambiguous.events==3 and ambiguous.c.strict_decode(ambiguous.events[3].value,65536).result.status=='uncertain','throwing native launch remains marked and is never repeated')
+ local focused=launch_fixture();begin_effect(focused);focused.tick()
+ check(focused.starts==1 and focused.focus==44 and focused.refocused==1,'a managed native launch returns focus to the previously focused controller pane')
+ local moved=launch_fixture();begin_effect(moved);moved.focus=45;moved.tick()
+ check(moved.starts==1 and moved.focus==45 and moved.refocused==1,'focus returns to the pane the owner had focused, not a fixed controller pane')
  -- Bookkeeping: markers survive while the ORCH+ action is claimed, uncertain or unreadable, and
  -- are released only once it reads back settled, without enabling any new effect.
  local settled=launch_fixture();begin_effect(settled);settled.tick()
