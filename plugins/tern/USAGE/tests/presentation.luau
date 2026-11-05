@@ -189,6 +189,9 @@ modules.source_collect = {
 	flush = function() flushes += 1 end,
 	state = function() return collector_health end,
 }
+-- The capacity block has its own suite (tests/capacity.luau); here only its host installation matters.
+local capacity_installs = 0
+modules.capacity = { install = function() capacity_installs += 1 end }
 local runtime = {
 	ui = tern.ui, json = tern.json,
 	pane = { list = function() return live end },
@@ -212,6 +215,7 @@ local chunk = assert(loadstring(tern.fs.read(root .. "/host.luau"), "host"))
 setfenv(chunk, setmetatable({ tern = runtime, require = load }, { __index = environment }))
 chunk()
 local def, detail_def, config_def = defs.accounts, defs.account, defs.config
+check(capacity_installs == 1, "the host installs the read-only capacity block once")
 local state = def.init(cx, {}, nil)
 local function has_span(value, text, tone)
 	if type(value) ~= "table" then return false end

@@ -200,4 +200,24 @@ restored:reply("usage_refresh", nil, { code = "source_roster_invalid", message =
 check(restored.toasts ~= nil and #restored.toasts == 1 and restored.toasts[1].kind == "error"
 	and restored.toasts[1].body == "SPAWN's account list is invalid.",
 	"a failed palette Refresh is reported even when the status bar is hidden")
+-- A window attached to a remote host refreshes that host through its own USAGE pane, never this machine's companion.
+local function on_host(kind)
+	local window = launch()
+	window.cx.hosts = { current = function() return { id = 2, kind = kind, name = "vm-orch", state = "connected" } end }
+	return window
+end
+local attached = on_host("remote")
+attached.commands.refresh.run(attached.cx)
+check(#attached.requests == 0 and #attached.events == 0 and #attached.created == 0 and attached.toasts[1].kind == "error"
+	and attached.toasts[1].title == "USAGE refresh on host vm-orch",
+	"without a USAGE pane on the host, Refresh opens none, refreshes nothing locally and says why")
+table.insert(attached.panes, { pane = 44, tab = 1, block = "usage.accounts" })
+attached.commands.refresh.run(attached.cx)
+check(#attached.requests == 0 and #attached.events == 1 and attached.events[1].id == 44 and attached.events[1].event.act == "refresh"
+	and attached.toasts[2].kind == "info" and attached.toasts[2].title == "USAGE refresh on host vm-orch",
+	"Refresh is requested from the host's USAGE block and labelled with the host")
+local local_host = on_host("local")
+local_host.commands.refresh.run(local_host.cx)
+check(#local_host.events == 0 and #local_host.requests == 1 and local_host.requests[1].operation == "usage_refresh",
+	"a window on a local host refreshes its own companion as before")
 return "PASS " .. tostring(checks) .. " window behavior checks"

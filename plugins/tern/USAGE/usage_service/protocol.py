@@ -24,7 +24,7 @@ CLIENT_LEASE_SECONDS = 90
 REASONS = frozenset({"not_reported", "unparsed", "source_unreachable", "not_yet_measured", "reset_passed", "stale", "web_login_expired", "unavailable", "server_sent_no_usage",
     "local_login_unavailable", "source_metadata_disabled", "vendor_usage_unavailable", "source_timeout",
     "source_context_ambiguous", "source_profile_invalid", "source_profile_unavailable", "source_usage_unavailable",
-    "source_remote", "api_key_login"})
+    "source_remote", "api_key_login", "web_login_forbidden"})
 # Readings written by pre-2.0 builds carry these usage_source values.
 LEGACY_USAGE_SOURCES = {"native-headless": "headless", "native-passive:last-good": "last-good"}
 MESSAGES = {
@@ -41,6 +41,7 @@ MESSAGES = {
     "web_login_expired": "The provider login has expired. Sign in again with the provider's own CLI.",
     "source_remote": "Runs on another machine over SSH; USAGE reads it only on that machine.",
     "api_key_login": "Signed in with an API key, which has no subscription quota.",
+    "web_login_forbidden": "The provider refused this login's usage request. Sign in again with the provider's own CLI to grant usage access.",
     "source_unreachable": "The sharing source is unreachable.",
     "address_in_use": "The sharing port is already in use on this machine.",
     "address_unavailable": "The sharing address is not available on this machine.",
@@ -66,6 +67,12 @@ MESSAGES = {
     "source_timeout": "The provider usage read exceeded its deadline.",
     "source_usage_unavailable": "The provider quota is unavailable.",
     "source_configuration_changed": "SPAWN changed during refresh; request a new reading.",
+    "export_disabled": "Enable read-only capacity export in USAGE Setup.",
+    "export_revoked": "Capacity authorization changed; request a new snapshot after owner approval.",
+    "evidence_changed": "Capacity evidence changed; assemble a new complete snapshot.",
+    "incomplete": "Assemble every snapshot page before current validation.",
+    "binding_unavailable": "This SPAWN account has no current headless reading with a provider identity; refresh, then bind it.",
+    "binding_changed": "The SPAWN account or its reading changed; choose Bind SPAWN accounts again.",
 }
 
 class ServiceError(Exception):
@@ -216,6 +223,33 @@ def _reading(raw: Any) -> dict[str, Any]:
     return result
 
 
+def _binding_fields(raw, result, evidence):
+    """Accounts may carry `profile_binding`; consumers may carry `account_ids`."""
+    other = "account_ids" if evidence == "profile_binding" else "profile_binding"
+    if raw.get(other) is not None:
+        raise ServiceError("snapshot_rejected")
+    if raw.get("definition_revision") is not None:
+        revision = text(raw["definition_revision"], 64)
+        if not re.fullmatch(r"[0-9a-f]{64}", revision):
+            raise ServiceError("snapshot_rejected")
+        result["definition_revision"] = revision
+    if raw.get("profile_binding") is not None:
+        binding = raw["profile_binding"]
+        if not isinstance(binding, dict) or set(binding) != {"handle", "generation", "canonical_ids"}:
+            raise ServiceError("snapshot_rejected")
+        ids = [text(value, 4096) for value in _list(binding["canonical_ids"], 32)]
+        if not ids or "definition_revision" not in result:
+            raise ServiceError("snapshot_rejected")
+        result["profile_binding"] = {"handle": text(binding["handle"], 256),
+                                     "generation": integer(binding["generation"], 1), "canonical_ids": ids}
+    if raw.get("account_ids") is not None:
+        # Owner-declared: the bound account whose quota this consumer record uses.
+        ids = [text(value, 4096) for value in _list(raw["account_ids"], 1)]
+        if not ids or "definition_revision" not in result:
+            raise ServiceError("snapshot_rejected")
+        result["account_ids"] = ids
+
+
 def _roster(raw: Any) -> dict[str, Any]:
     if not isinstance(raw, dict) or isinstance(raw.get("version"), bool) or raw.get("version") != 1:
         raise ServiceError("snapshot_rejected")
@@ -238,6 +272,7 @@ def _roster(raw: Any) -> dict[str, Any]:
             members.add(item["id"])
             for key in ("canonical_ids", "reading_ids"):
                 item[key] = [text(value, 4096) for value in _list(entry.get(key), 1000)]
+            _binding_fields(entry, item, "profile_binding")
             entries.append(item)
         for consumer in _list(scope.get("consumers"), 1000):
             if not isinstance(consumer, dict):
@@ -247,10 +282,19 @@ def _roster(raw: Any) -> dict[str, Any]:
             if item["id"] in members:
                 raise ServiceError("snapshot_rejected")
             members.add(item["id"])
+            _binding_fields(consumer, item, "account_ids")
             consumers.append(item)
-        scopes.append({"id": scope_id, "revision": text(scope.get("revision"), 512),
-                       "updated_at_ms": integer(scope.get("updated_at_ms")),
-                       "accounts": entries, "consumers": consumers})
+        normalized = {"id": scope_id, "revision": text(scope.get("revision"), 512),
+                      "updated_at_ms": integer(scope.get("updated_at_ms")),
+                      "accounts": entries, "consumers": consumers}
+        if scope.get("spawn_join") is not None:
+            join = scope["spawn_join"]
+            if not isinstance(join, dict) or set(join) != {"namespace", "host_key", "config_revision"}:
+                raise ServiceError("snapshot_rejected")
+            normalized["spawn_join"] = {"namespace": text(join["namespace"], 512),
+                                        "host_key": text(join["host_key"], 512),
+                                        "config_revision": integer(join["config_revision"])}
+        scopes.append(normalized)
     return {"version": 1, "scopes": scopes}
 
 

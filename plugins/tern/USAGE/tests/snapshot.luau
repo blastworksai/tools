@@ -101,6 +101,24 @@ roster_raw.roster.scopes[1].source_uid = "secret-sentinel"
 local roster_safe = assert(snapshot.decode(roster_raw))
 check(roster_safe.roster.scopes[1].accounts[1].account_label == "Account account"
 	and not tern.json.encode(roster_safe):find("secret-sentinel", 1, true), "roster fields survive without source-local matching context")
+local function with_binding(change: ((any) -> ())?): any
+	local value = envelope("bound", { reading("source", "account", 12, 1000) })
+	local scope = value.roster.scopes[1]
+	scope.spawn_join = { namespace = "spawn", host_key = "host:local", config_revision = 7 }
+	scope.accounts[1].definition_revision = string.rep("a", 64)
+	scope.accounts[1].profile_binding = { handle = "handle", generation = 2, canonical_ids = { "account" } }
+	scope.consumers = { { id = "omp", label = "OMP", reading_ids = {}, definition_revision = string.rep("b", 64), account_ids = { "account" } } }
+	if change ~= nil then change(scope) end
+	return snapshot.decode(value)
+end
+local bound_scope = assert(with_binding()).roster.scopes[1]
+check(bound_scope.spawn_join.config_revision == 7 and bound_scope.accounts[1].profile_binding.generation == 2
+	and bound_scope.consumers[1].account_ids[1] == "account", "SPAWN join, binding and OMP association survive decoding")
+check(with_binding(function(scope) scope.accounts[1].definition_revision = nil end) == nil, "a binding needs its definition revision")
+check(with_binding(function(scope) scope.accounts[1].account_ids = { "account" } end) == nil, "an account cannot carry a consumer association")
+check(with_binding(function(scope) scope.consumers[1].profile_binding = scope.accounts[1].profile_binding end) == nil,
+	"a consumer cannot carry a profile binding")
+check(with_binding(function(scope) scope.accounts[1].profile_binding.canonical_ids = {} end) == nil, "a binding names at least one login")
 local function rejected(change, message)
 	local candidate = tern.json.decode(tern.json.encode(raw))
 	change(candidate)

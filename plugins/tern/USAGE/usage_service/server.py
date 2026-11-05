@@ -21,6 +21,7 @@ from aiohttp import web
 from .listener import BoundedSite
 
 from .protocol import Authority, CLIENT_LEASE_SECONDS, MAX_BODY, ServiceError, decode, encode, identifier, integer, text
+from .capacity import Capacity
 from .display import Display
 from .refresh import Refresh, validate_preferences
 from .security import Security, bearer, ensure_certificate, tls_context, validate_invitation
@@ -82,6 +83,7 @@ class Companion:
         self.security=Security(self.store,self.root)
         self.sync=PeerSync(self.store,self.security)
         self.refresh=Refresh(self.store,self.root)
+        self.capacity=Capacity(self.store,configuration=lambda:self.refresh.configuration()[2])
         self.display=Display(self.store)
         self.stop_event=asyncio.Event()
         self.expected_host=""
@@ -180,6 +182,12 @@ class Companion:
             return _response(self.refresh.publish(payload))
         if operation=="display":
             return _response(self.display.page(authority,payload))
+        if operation=="capacity":
+            return _response(self.capacity.request(authority,payload))
+        if operation=="binding_candidates":
+            if payload:
+                raise ServiceError("invalid_request")
+            return _response(self.refresh.binding_candidates())
         if operation=="setup_state":
             if payload:
                 raise ServiceError("invalid_request")
@@ -260,10 +268,15 @@ class Companion:
                 "certificate_fingerprint":self.certificate_fingerprint}
 
     async def configure(self,payload):
-        if set(payload)-{"changes","consent"}:
+        if set(payload)-{"changes","consent","binding_action"}:
             raise ServiceError("invalid_request")
         changes=_object(payload.get("changes",{}))
         consent=_object(payload.get("consent",{}))
+        if "binding_action" in payload:
+            # Account bindings live in companion state, never in settings.
+            if changes:
+                raise ServiceError("invalid_request")
+            return self.refresh.binding_action(payload["binding_action"],consent)
         current=self.store.settings()
         desired={**current,**changes}
         if desired["role"]!=current["role"]:
@@ -275,6 +288,8 @@ class Companion:
         if changes.get("export_enabled") is True:
             self.export_consent(consent,desired["group_id"])
         if changes.get("metadata_enabled") is True and consent.get("metadata") is not True:
+            raise ServiceError("forbidden",403)
+        if changes.get("capacity_enabled") is True and consent.get("capacity") is not True:
             raise ServiceError("forbidden",403)
         binding=(desired.get("sharing_bind"),desired.get("sharing_port")) if desired.get("role")=="hub" else None
         old_binding=self.peer_binding
@@ -304,7 +319,7 @@ class Companion:
                 self.store.set_local_state("setup_consent",{
                     "export":configured["export_enabled"],"recipient_group":configured["group_id"],
                     "fields":EXPORT_FIELDS if configured["export_enabled"] else [],
-                    "metadata":configured["metadata_enabled"]})
+                    "metadata":configured["metadata_enabled"],"capacity":configured["capacity_enabled"]})
         except BaseException:
             if prepared is not None:
                 await prepared[0].cleanup()
