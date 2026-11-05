@@ -6,7 +6,7 @@ local controller = require("./lib/attach").new({
     json={encode=function(value) return tern.json.encode(value) end, decode=function(value) return tern.json.decode(value) end},
     process={run=function(argv,opts,callback) return tern.process.run(argv,opts,callback) end},
 })
-tern.command({id="show",title="TODO: attach to this panel",icon="list",run=function(cx) controller.start(cx,false) end})
+tern.command({id="show",title="TODO: attach to this panel",icon="list-checks",run=function(cx) controller.start(cx,false) end})
 
 -- Files-pane entry shares the palette action's panel-aware attach controller.
-tern.files.button({id="todo",title="TODO",icon="list",run=function(_files,cx) controller.chooseSession(cx) end})
+tern.files.button({id="todo",title="TODO",icon="list-checks",run=function(_files,cx) controller.chooseSession(cx) end})

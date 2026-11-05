@@ -1,7 +1,7 @@
 schema = 1
 id = "todo"
 name = "TODO"
-version = "0.5.1"
+version = "0.5.2"
 description = "English-first interactive plan checkpoints, read locally or over SSH."
 host = "host.luau"
 window = "window.luau"
@@ -9,5 +9,5 @@ window = "window.luau"
 [[blocks]]
 id = "list"
 title = "TODO"
-icon = "list"
+icon = "list-checks"
 palette = false

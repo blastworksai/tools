@@ -106,3 +106,12 @@ This run qualifies ordinary Claude execution adoption in that configured brain;
 it does not claim universal agent compliance or entry delivery in other harnesses.
 The actual reported, already-running NASTAQ session remains untouched pending
 permission to send its agent a metadata-adoption request.
+
+## 0.5.2 icon change
+
+The block, palette command and Files button used `icon = "list"`, which is not
+in Tern 0.9.10's native icon set (the SDK documents unknown Files-button icons
+as falling back to `puzzle`). They now use the native `list-checks` icon. Only
+`plugin.toml` and `window.luau` changed; reader, publisher and host bytes are
+identical to 0.5.1. The 12 helper tests pass. No native suite was rerun for this
+metadata-only change.
