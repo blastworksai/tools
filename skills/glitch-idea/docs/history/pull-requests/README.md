@@ -16,3 +16,4 @@ Commit subjects ending in `(#N)` from before the move refer to these files, not 
 | [#6](PR-006.md) | A rebuilt Orca tab re-pairs itself in place, never by a typed code | 2026-10-21 | 1 |
 | [#7](PR-007.md) | SKILLS-111..115: one-click Tern link through fixed ports | 2026-11-03 | 0 |
 | [#8](PR-008.md) | A removed idea no longer strands a seat's idea service | 2026-11-03 | 0 |
+| [#9](PR-009.md) | SSH mode, a Tern plugin for the idea page, one-step remove-idea, ready for tools | 2026-11-05 | 0 |
