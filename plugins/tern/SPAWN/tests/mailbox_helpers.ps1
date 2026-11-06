@@ -26,7 +26,7 @@ function TargetDirectory([string]$Path) {
 }
 $testRoot=Join-Path ([IO.Path]::GetTempPath()) ('spawn-mailbox-'+[Guid]::NewGuid().ToString('N'))
 $null=[IO.Directory]::CreateDirectory($testRoot)
-$Root=$testRoot; $Owner='regression_owner_1234'; $script:capacityDepth=0
+$Root=$testRoot; $Owner='regression_owner_1234'; $script:capacityDepth=0; $script:gateWaitMs=0
 $identity=[Security.Principal.WindowsIdentity]::GetCurrent().Name
 $engine=(Get-Process -Id $PID).Path
 $children=New-Object 'System.Collections.Generic.List[System.Diagnostics.Process]'
@@ -37,13 +37,16 @@ function Reject([scriptblock]$Operation,[string]$Code) {
  try { $null=& $Operation } catch { $caught=$true; Assert ($_.Exception.Message.StartsWith($Code)) ('Expected '+$Code+', got '+$_.Exception.Message) }
  Assert $caught ('Expected rejection '+$Code)
 }
-function Fixture([string]$Prefix='box_') {
+function Fixture([string]$Prefix='box_',[string[]]$Capabilities=$null,[byte[]]$Manifest=$null) {
  $script:Handle=$Prefix+[Guid]::NewGuid().ToString('N')
  $script:box=Join-Path $testRoot $Handle
  $null=[IO.Directory]::CreateDirectory($box)
  foreach ($lane in @('reports','replies','acks','watermarks','producer','consumer','staging')) { $null=[IO.Directory]::CreateDirectory((Join-Path $box $lane)) }
  $script:binding=@{logical_session_id='session';worker_id='worker';worker_generation=1;launch_request_id='launch';work_id='work';enrolment_token='enrolment_token_1234';mailbox_handle=$Handle}
  $script:descriptor=@{handle=$Handle;binding=$binding}
+ # Capabilities are independent of the manifest; manifest_sha256 only with a manifest.
+ if ($null -ne $Capabilities) { $descriptor['capabilities']=@($Capabilities) }
+ if ($null -ne $Manifest) { $descriptor['manifest_sha256']=(Hash $Manifest); [IO.File]::WriteAllBytes((Join-Path $box 'manifest.json'),$Manifest) }
  [IO.File]::WriteAllBytes((Join-Path $box 'provision.json'),(Encode $descriptor))
  # The real entrypoint retains this zero-byte producer lock file between calls.
  [IO.File]::WriteAllBytes((Join-Path $box 'producer/lock'),[byte[]]@())
@@ -90,10 +93,12 @@ function AckBytes {
  return ,(Encode $ack)
 }
 function QuoteArg([string]$Argument) { return '"'+$Argument.Replace('"','\"')+'"' }
-function StartHelper([string]$Path,[string[]]$Arguments,[string]$InputText='',[byte[]]$RawInput=$null) {
+function StartHelper([string]$Path,[string[]]$Arguments,[string]$InputText='',[byte[]]$RawInput=$null,[string]$Cwd='',[hashtable]$Environment=$null) {
  $info=New-Object Diagnostics.ProcessStartInfo
  $info.FileName=$engine; $info.UseShellExecute=$false; $info.CreateNoWindow=$true
  $info.RedirectStandardInput=$true; $info.RedirectStandardOutput=$true; $info.RedirectStandardError=$true
+ if ($Cwd -ne '') { $info.WorkingDirectory=$Cwd }
+ if ($null -ne $Environment) { foreach ($key in $Environment.Keys) { $info.EnvironmentVariables[$key]=$Environment[$key] } }
  $info.StandardOutputEncoding=$utf8; $info.StandardErrorEncoding=$utf8
  $argv=@('-NoProfile','-NonInteractive','-File',$Path)+$Arguments
  $info.Arguments=($argv | ForEach-Object { QuoteArg $_ }) -join ' '
@@ -120,10 +125,10 @@ function Target([string]$Mode,[string]$Selected,[byte[]]$Bytes=([byte[]]@()),[lo
  $args=@('-Root:',$Root,'-Handle:',$Handle,'-Mode:',$Mode,'-Selected:',$Selected,'-Operation:',('op_'+[Guid]::NewGuid().ToString('N')),'-Identity:',$identity,'-ReportFloor:',[string]$ReportFloor,'-ReplyFloor:',[string]$ReplyFloor)
  return FinishHelper (StartHelper $targetPath $args ([Convert]::ToBase64String($Bytes)))
 }
-function Worker([string]$Mode,[string]$InputText='',[string]$Message='',[switch]$RawOutput) {
+function Worker([string]$Mode,[string]$InputText='',[string]$Message='',[switch]$RawOutput,[string]$Cwd='',[hashtable]$Environment=$null) {
  $args=@('-Root:',$Root,'-Handle:',$Handle,'-Owner:',$Owner,'-Mode:',$Mode)
  if ($Message -ne '') { $args+=@('-MessageId:',$Message) }
- return FinishHelper (StartHelper $workerPath $args $InputText) -RawOutput:$RawOutput
+ return FinishHelper (StartHelper $workerPath $args $InputText -Cwd $Cwd -Environment $Environment) -RawOutput:$RawOutput
 }
 function AuthorizedFixture {
  Fixture '-retire_'
@@ -353,7 +358,10 @@ try {
   @{kind='COORDINATOR_PROPOSAL';payload=@{owner_id='owner';owner_generation=1;activation_token=('a'*64);proposal_id='proposal';kind='report';work_id='work';project_id='project'}},
   @{kind='COORDINATOR_PROPOSAL';payload=@{owner_id='owner';owner_generation=1;activation_token=('a'*64);proposal_id='proposal';kind='dispatch';work_id='work';project_id='project';record_id='configured native';record_revision=0;prompt='Explicit task'}},
   @{kind='REVIEW_READY';payload=@{checkpoint_id='cp';artifact_revision='rev'}},
-  @{kind='REVIEW_RESULT';action_id='action';action_revision=1;payload=@{artifact_revision='rev';outcome='approved';evidence=@()}},
+  @{kind='REVIEW_RESULT';action_id='action';action_revision=1;payload=@{review_id='review';round=1;artifact_revision='rev';outcome='changes_required';findings=@(@{finding_id='f1';path='a.luau';line=3;summary='Missing bound.'});summary='One'}},
+  @{kind='LABEL';action_id='label';action_revision=1;payload=@{work_ref='work';class='feature';reason='new mode'}},
+  @{kind='DONE';payload=@{checkpoint_id='cp';artifact_revision='rev';summary='done';output_ref='out/a.md'}},
+  @{kind='REGISTER';payload=@{capabilities=@('report-files-v1','native-ask-v1','worker-poll-v1','argv-v1','coordinator-control-v1','check-runner-v1','release-manager-v1')}},
   @{kind='DONE';payload=@{checkpoint_id='cp';artifact_revision='rev';summary='done'}},
   @{kind='ROLLOVER_REQUEST';payload=@{checkpoint_id='cp';reason='handover'}},
   @{kind='LANDING_REQUEST';payload=@{checkpoint_id='cp';project_id='project';repo_ref='repo';target_ref='main';target_revision='base';source_ref='work';source_revision='rev'}},
@@ -388,7 +396,10 @@ try {
   '{"kind":"ACCEPTED","handover_id":"h","payload":{"assignment_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}',
   '{"kind":"READY","action_id":"action","action_revision":1,"payload":{"state":"idle"}}',
   '{"kind":"WAITING","action_id":"action","payload":{"reason":"wait"}}',
-  '{"kind":"REVIEW_RESULT","payload":{"artifact_revision":"rev","outcome":"approved","evidence":[]}}',
+  '{"kind":"REVIEW_RESULT","payload":{"review_id":"review","round":1,"artifact_revision":"rev","outcome":"approved","findings":[]}}',
+  '{"kind":"REVIEW_RESULT","action_id":"action","action_revision":1,"payload":{"artifact_revision":"rev","outcome":"approved","evidence":[]}}',
+  '{"kind":"REGISTER","payload":{"capabilities":["report-files-v1","native-ask-v1","worker-poll-v1","argv-v1","coordinator-control-v1","check-runner-v1","release-manager-v1","invented-v1"]}}',
+  '{"kind":"DONE","payload":{"checkpoint_id":"cp","artifact_revision":"rev","summary":"done","output_ref":"oooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo"}}',
   '{"kind":"REGISTER","payload":{"capabilities":["report-files-v1","report-files-v1"]}}',
   '{"kind":"REGISTER","payload":{"capabilities":{}}}',
   '{"kind":"ASK","payload":{"question":"q","options":[{"id":"x","label":"a"},{"id":"x","label":"b"}]}}',
@@ -585,20 +596,21 @@ try {
  }
  # Landing grants are closed typed replies: exact landing/grant/project/checkpoint IDs plus
  # repository, target ref, expected head, source ref and source revision; nothing else.
- Fixture
+ $release=@('report-files-v1','release-manager-v1')
+ Fixture 'box_' $release
  $landingGrant=Decode (ReplyBytes)
  $landingGrant.kind='landing_grant'
- $landingGrant.payload=@{landing_id='landing';grant_id='grant';project_id='project';checkpoint_id='cp';repo_ref='repo';target_ref='main';target_revision='base';source_ref='work';source_revision='rev'}
+ $landingGrant.payload=@{landing_id='landing';grant_id='grant';project_id='project';checkpoint_id='cp';repo_ref='repo';target_ref='main';target_revision='base';source_ref='work';source_revision='rev';builder_work_id='builder';review_id='review';reviewer_family='openai';proof=@{mode='cross_family_review';artifact_revision='rev';review_id='review';check_refs=@()}}
  $exact=Encode $landingGrant
  InstallReply $exact
  $result=Worker 'consume' -RawOutput
  Assert ($result.code -eq 0) ('Landing grant rejected: '+$result.err)
  EqualBytes $exact $result.out
  $landingMutations=@()
- foreach ($key in @('landing_id','grant_id','project_id','checkpoint_id','repo_ref','target_ref','target_revision','source_ref','source_revision')) { $landingMutations+=@{key=$key;remove=$true} }
+ foreach ($key in @('landing_id','grant_id','project_id','checkpoint_id','repo_ref','target_ref','target_revision','source_ref','source_revision','builder_work_id','review_id','reviewer_family','proof')) { $landingMutations+=@{key=$key;remove=$true} }
  $landingMutations+=@(@{key='extra';value=$true},@{key='landing_id';value='bad id'},@{key='grant_id';value=''},@{key='repo_ref';value=''},@{key='target_revision';value=(([string][char]0x00E9)*513)},@{key='source_ref';value=1})
  foreach ($mutation in $landingMutations) {
-  Fixture; $bad=Decode (Encode $landingGrant)
+  Fixture 'box_' $release; $bad=Decode (Encode $landingGrant)
   if ($mutation.ContainsKey('remove') -and $mutation['remove']) { $bad.payload.Remove($mutation['key']) } else { $bad.payload[$mutation['key']]=$mutation['value'] }
   InstallReply (Encode $bad)
   $before=ReadFile $journalPath 1572864
@@ -760,10 +772,174 @@ try {
  Assert $published 'Target could not publish while worker waited'
  $waitResult=FinishHelper $waiting; Assert ($waitResult.code -eq 0) 'wait failed without a complete manifest'
 
+ # A later wait poll that meets the short-lived shared gate waits it out instead of
+ # failing, and leaves the producer lock free for the next call (POSIX lock-leak parity).
+ Fixture; $exact=ReplyBytes
+ $waiting=StartHelper $workerPath @('-Root:',$Root,'-Handle:',$Handle,'-Owner:',$Owner,'-Mode:','wait','-WaitSeconds:','20','-PollMs:','1000')
+ $watch=[Diagnostics.Stopwatch]::StartNew(); $observed=$false
+ while ($watch.ElapsedMilliseconds -lt 5000 -and -not $waiting.HasExited) {
+  try { $probe=[IO.File]::Open((Join-Path $box 'producer/lock'),[IO.FileMode]::Open,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None); $probe.Dispose() }
+  catch [IO.IOException] { if (-not (Test-Path -LiteralPath (Join-Path $box 'capacity.lock'))) { $observed=$true; break } }
+  Start-Sleep -Milliseconds 20
+ }
+ Assert $observed 'wait did not reach its polling sleep'
+ $script:gateWaitMs=5000; EnterCapacity; $script:gateWaitMs=0
+ try { InstallReply $exact; Start-Sleep -Milliseconds 2500; Assert (-not $waiting.HasExited) 'wait poll gave up on a busy shared gate' }
+ finally { LeaveCapacity }
+ $waitResult=FinishHelper $waiting -RawOutput
+ Assert ($waitResult.code -eq 0) ('wait failed on a busy shared gate: '+$waitResult.err); EqualBytes $exact $waitResult.out
+ Assert (-not (Test-Path -LiteralPath (Join-Path $box 'capacity.lock'))) 'wait retained capacity lock'
+ $next=Worker 'receipts'; Assert ($next.code -eq 0) ('Next call after wait refused: '+$next.err)
+
+ # Bounded gate wait: a gate released by its holder is entered; one held past the
+ # bound is reported capacity_locked and is never taken or removed.
+ Fixture; $gate=Join-Path $box 'capacity.lock'
+ $null=New-Item -ItemType Directory -Path $gate
+ $releaser=Start-Job -ScriptBlock { param($Path) Start-Sleep -Milliseconds 1000; [IO.Directory]::Delete($Path,$false) } -ArgumentList $gate
+ try {
+  $script:gateWaitMs=15000; EnterCapacity
+  Assert ($script:capacityDepth -eq 1 -and (Test-Path -LiteralPath $gate)) 'Gate wait did not enter the released gate'
+  LeaveCapacity
+ } finally { $script:gateWaitMs=0; $null=Wait-Job $releaser; Remove-Job $releaser }
+ Assert (-not (Test-Path -LiteralPath $gate)) 'Gate wait retained the gate'
+ $null=New-Item -ItemType Directory -Path $gate
+ try { $script:gateWaitMs=500; Reject { EnterCapacity } 'capacity_locked' } finally { $script:gateWaitMs=0 }
+ Assert ($script:capacityDepth -eq 0 -and (Test-Path -LiteralPath $gate)) 'Gate wait took a held gate'
+ [IO.Directory]::Delete($gate,$false)
+
  # Read/compaction remain available for an externally overfull mailbox.
  Fixture; $null=Allocate @{kind='READY';payload=@{state='idle'}}; PadTo 4194400
  $read=Target 'read' 'reports/1/manifest.json'; Assert ($read.out.StartsWith("object`n")) 'Overfull mailbox blocked reconciliation read'
  $compact=Target 'compact' '-' ([byte[]]@()) 1 0; Assert ($compact.out -ceq "compacted`n") 'Overfull mailbox blocked compaction'
+
+ # Checkpoint 2 reply kinds: closed payloads; grants need release-manager-v1.
+ foreach ($case in @(
+  @{kind='review_request';caps=$null;payload=@{review_id='review';round=1;question_id='implements_task_v1';builder_work_id='builder';task_ref='task';plan_ref='plan';plan_revision='3';source_ref='work';artifact_revision='rev';scope_paths=@('a.luau');findings_prev=@()}},
+  @{kind='rework';caps=$null;payload=@{review_id='review';round=2;artifact_revision='rev';failed_checks=@(@{check_id='c1';exit_code=1});findings=@(@{finding_id='f1';path='a.luau';line=3;summary='Missing bound.'})}},
+  @{kind='deploy_grant';caps=$release;payload=@{deploy_id='deploy';attempt_id='attempt';landing_id='landing';revision='rev';target_ref='production'}},
+  @{kind='label_request';caps=$null;payload=@{work_ref='work';classes=@('feature','fix');text='Classify.'}}
+ )) {
+  Fixture 'box_' $case.caps; $value=Decode (ReplyBytes); $value.kind=$case.kind; $value.payload=$case.payload
+  $exact=Encode $value; InstallReply $exact
+  $result=Worker 'consume' -RawOutput
+  Assert ($result.code -eq 0) ($case.kind+' rejected: '+$result.err); EqualBytes $exact $result.out
+  Fixture 'box_' $case.caps; $bad=Decode (Encode $value); $bad.payload['extra']=$true; InstallReply (Encode $bad)
+  $before=ReadFile $journalPath 1572864
+  Assert ((Worker 'consume').code -ne 0) ($case.kind+' accepted an extra field'); EqualBytes $before (ReadFile $journalPath 1572864)
+ }
+ foreach ($grant in @(@{kind='deploy_grant';payload=@{deploy_id='deploy';attempt_id='attempt';landing_id='landing';revision='rev';target_ref='production'}},@{kind='landing_grant';payload=$landingGrant.payload})) {
+  foreach ($caps in @($null,@('report-files-v1','check-runner-v1'))) {
+   Fixture 'box_' $caps; $value=Decode (ReplyBytes); $value.kind=$grant.kind; $value.payload=$grant.payload; InstallReply (Encode $value)
+   $before=ReadFile $journalPath 1572864
+   Assert ((Worker 'consume').code -ne 0) ($grant.kind+' accepted without release-manager-v1'); EqualBytes $before (ReadFile $journalPath 1572864)
+  }
+ }
+ # DEPLOY_RESULT needs release-manager-v1; report mode refuses helper-only kinds.
+ $deploy='{"kind":"DEPLOY_RESULT","action_id":"deploy","action_revision":1,"payload":{"deploy_id":"deploy","attempt_id":"attempt","landing_id":"landing","outcome":"deployed","revision":"rev","evidence":[]}}'
+ Fixture 'box_' $release; $result=Worker 'report' $deploy; Assert ($result.code -eq 0) ('DEPLOY_RESULT rejected: '+$result.err)
+ Fixture; $result=Worker 'report' $deploy; Assert ($result.code -ne 0 -and $result.err.StartsWith('capability_missing')) ('DEPLOY_RESULT without capability: '+$result.err)
+ $checks=@('report-files-v1','check-runner-v1')
+ foreach ($wire in @(
+  ('{"kind":"CHECK_RESULT","payload":{"check_id":"c","argv_sha256":"'+('a'*64)+'","exit_code":0,"output_sha256":"'+('a'*64)+'","head":"'+('a'*40)+'","ran_at_ms":1}}'),
+  ('{"kind":"CHECKOUT","payload":{"worktree_path":"C:\\w","common_dir":"C:\\w\\.git","branch":"main","head":"'+('a'*40)+'","changed_files":[],"changed_overflow":false,"changed_total":0,"dirty":false}}')
+ )) {
+  Fixture 'box_' $checks; $before=ReadFile $journalPath 1572864
+  $result=Worker 'report' $wire
+  Assert ($result.code -ne 0 -and $result.err.StartsWith('helper_only_kind') -and $result.out -ceq '') ('Helper-only kind accepted by report: '+$result.err)
+  EqualBytes $before (ReadFile $journalPath 1572864)
+  Assert (@(Get-ChildItem -LiteralPath (Join-Path $box 'reports')).Count -eq 0) 'Helper-only refusal published'
+ }
+
+ # Helper modes on disposable git repositories. Checks are .exe argv resolved via PATH, never a shell.
+ function GitIn([string]$Directory) {
+  # Windows PowerShell turns redirected native stderr into error records; keep them as text here.
+  $ErrorActionPreference='Continue'
+  $output=@(& git -C $Directory @args 2>&1 | ForEach-Object { [string]$_ })
+  if ($LASTEXITCODE -ne 0) { throw ('git failed: '+($output -join "`n")) }
+  $last=@($output | Select-Object -Last 1); if ($last.Count -eq 0) { return '' }
+  return ([string]$last[0]).Trim()
+ }
+ function NewRepo {
+  $path=Join-Path $testRoot ('repo_'+[Guid]::NewGuid().ToString('N')); $null=[IO.Directory]::CreateDirectory($path)
+  $null=GitIn $path init -q -b main; $null=GitIn $path config user.email test@example.invalid; $null=GitIn $path config user.name Test
+  [IO.File]::WriteAllText((Join-Path $path 'tracked.txt'),"base`n"); $null=GitIn $path add tracked.txt; $null=GitIn $path commit -q -m base
+  return (Resolve-Path -LiteralPath $path).ProviderPath
+ }
+ function ManifestBytes([string]$Base,$Checks=@()) { return ,$utf8.GetBytes((ConvertTo-Json -InputObject ([ordered]@{base_ref=$Base;checks=@($Checks);files=@();scope=[ordered]@{paths=@();systems=@()}}) -Compress -Depth 8)) }
+ function HelperMode([string]$Mode,[string]$CheckId='',[string]$Cwd,[hashtable]$Environment=$null) {
+  $args=@('-Root:',$Root,'-Handle:',$Handle,'-Owner:',$Owner,'-Mode:',$Mode)
+  if ($CheckId -ne '') { $args+=@('-CheckId:',$CheckId) }
+  return FinishHelper (StartHelper $workerPath $args '' -Cwd $Cwd -Environment $Environment)
+ }
+ function Published { Reload; Assert (@($journal.pending).Count -eq 1) 'Helper mode did not publish exactly one report'; return (Decode ([Convert]::FromBase64String($journal.pending[0].bytes))) }
+ function HelperRefused([string]$Mode,[string]$Code,[string]$CheckId='',[string]$Cwd,[hashtable]$Environment=$null) {
+  $before=ReadFile $journalPath 1572864
+  $result=HelperMode $Mode $CheckId $Cwd $Environment
+  Assert ($result.code -ne 0 -and $result.err.StartsWith($Code) -and $result.out -ceq '') ('Expected '+$Code+', got '+$result.err)
+  EqualBytes $before (ReadFile $journalPath 1572864)
+ }
+ $repo=NewRepo; $base=GitIn $repo rev-parse HEAD
+ $passing=@{check_id='t1-c1';argv=@('where.exe','where.exe')}; $failing=@{check_id='t1-c2';argv=@('where.exe','no_such_program_spawn_test.exe')}
+ $manifest=ManifestBytes $base @($passing,$failing)
+ foreach ($case in @(@{check=$passing;code=0},@{check=$failing;code=1})) {
+  Fixture 'box_' $checks $manifest
+  $result=HelperMode 'run-checks' $case.check.check_id $repo
+  Assert ($result.code -eq 0 -and $result.out -ceq '') ('run-checks failed: '+$result.err)
+  $report=Published; Assert ($report.kind -ceq 'CHECK_RESULT') 'run-checks published another kind'
+  Assert ($report.payload.check_id -ceq $case.check.check_id -and $report.payload.exit_code -eq $case.code) ('Wrong check outcome for '+$case.check.check_id)
+  Assert ($report.payload.head -ceq $base -and $report.payload.argv_sha256 -ceq (Hash (Encode @($case.check.argv)))) 'Check head or argv digest wrong'
+  Assert ($report.payload.output_sha256 -match '^[0-9a-f]{64}$') 'Output digest missing'
+ }
+ Fixture 'box_' $checks $manifest; HelperRefused 'run-checks' 'check_undeclared' 't1-c9' $repo
+ foreach ($mode in @('run-checks','checkout')) {
+  $id=''; if ($mode -eq 'run-checks') { $id='t1-c1' }
+  Fixture 'box_' @('report-files-v1') $manifest; HelperRefused $mode 'capability_missing' $id $repo
+  Fixture 'box_' $checks; HelperRefused $mode 'manifest_missing' $id $repo
+  Fixture 'box_' $checks $manifest; [IO.File]::Delete((Join-Path $box 'manifest.json')); HelperRefused $mode 'manifest_mismatch' $id $repo
+  Fixture 'box_' $checks $manifest; [IO.File]::WriteAllBytes((Join-Path $box 'manifest.json'),$utf8.GetBytes($utf8.GetString($manifest).Replace('no_such','also_no'))); HelperRefused $mode 'manifest_mismatch' $id $repo
+  Fixture 'box_' $checks $manifest; [IO.File]::WriteAllBytes((Join-Path $box 'manifest.json'),[byte[]]($manifest+$utf8.GetBytes(' '*4097))); HelperRefused $mode 'manifest_mismatch' $id $repo
+ }
+ function Checkout([string]$Directory,[string]$Base) {
+  Fixture 'box_' $checks (ManifestBytes $Base)
+  $result=HelperMode 'checkout' '' $Directory; Assert ($result.code -eq 0 -and $result.out -ceq '') ('checkout failed: '+$result.err)
+  $report=Published; Assert ($report.kind -ceq 'CHECKOUT') 'checkout published another kind'; return $report.payload
+ }
+ function SamePath([string]$Left,[string]$Right) { return ([IO.Path]::GetFullPath($Left).TrimEnd('\','/') -ieq [IO.Path]::GetFullPath($Right).TrimEnd('\','/')) }
+ $clean=Checkout $repo $base
+ Assert ((SamePath $clean.worktree_path $repo) -and (SamePath $clean.common_dir (Join-Path $repo '.git'))) 'Clean checkout identity wrong'
+ Assert ($clean.branch -ceq 'main' -and $clean.head -ceq $base -and $clean.base -ceq $base) 'Clean checkout revisions wrong'
+ Assert (@($clean.changed_files).Count -eq 0 -and $clean.changed_total -eq 0 -and -not $clean.changed_overflow -and -not $clean.dirty) 'Clean checkout reported changes'
+ [IO.File]::WriteAllText((Join-Path $repo 'committed.txt'),"c`n"); $null=GitIn $repo add committed.txt; $null=GitIn $repo commit -q -m work
+ [IO.File]::WriteAllText((Join-Path $repo 'tracked.txt'),"changed`n"); [IO.File]::WriteAllText((Join-Path $repo 'staged.txt'),"s`n"); $null=GitIn $repo add staged.txt
+ $dirty=Checkout $repo $base
+ Assert ((@($dirty.changed_files) -join '|') -ceq 'committed.txt|staged.txt|tracked.txt' -and $dirty.changed_total -eq 3 -and $dirty.dirty -and -not $dirty.changed_overflow) 'Dirty checkout union wrong'
+ $untrackedRepo=NewRepo; $untrackedBase=GitIn $untrackedRepo rev-parse HEAD
+ $null=[IO.Directory]::CreateDirectory((Join-Path $untrackedRepo 'sub')); [IO.File]::WriteAllText((Join-Path $untrackedRepo 'sub\new.txt'),"n`n")
+ $untracked=Checkout $untrackedRepo $untrackedBase
+ Assert ((@($untracked.changed_files) -join '|') -ceq 'sub/new.txt' -and $untracked.changed_total -eq 1 -and $untracked.dirty) 'Untracked-only checkout wrong'
+ $linked=Join-Path $testRoot ('linked_'+[Guid]::NewGuid().ToString('N')); $null=GitIn $repo worktree add -q -b side $linked
+ $nested=Join-Path $linked 'nested'; $null=[IO.Directory]::CreateDirectory($nested)
+ $worktree=Checkout $nested $base
+ Assert ((SamePath $worktree.worktree_path $linked) -and (SamePath $worktree.common_dir (Join-Path $repo '.git')) -and $worktree.branch -ceq 'side') 'Linked worktree identity wrong'
+ $manyRepo=NewRepo; $manyBase=GitIn $manyRepo rev-parse HEAD; $null=[IO.Directory]::CreateDirectory((Join-Path $manyRepo 'many'))
+ $names=@(); for ($index=0;$index -lt 600;$index++) { $name='many/f'+$index.ToString('0000')+'.txt'; $names+=$name; [IO.File]::WriteAllText((Join-Path $manyRepo $name),'x') }
+ $many=Checkout $manyRepo $manyBase
+ Assert ($many.changed_overflow -and $many.changed_total -eq 600 -and (@($many.changed_files) -join '|') -ceq (($names | Sort-Object -CaseSensitive | Select-Object -First 512) -join '|')) 'Overflow checkout wrong'
+ # No manifest base_ref: the first checkout pins HEAD, a later one reports committed work since it.
+ $pinRepo=NewRepo; $launch=GitIn $pinRepo rev-parse HEAD
+ Fixture 'box_' $checks (ManifestBytes ''); $pin=Join-Path $box 'checkout-base'
+ $result=HelperMode 'checkout' '' $pinRepo; Assert ($result.code -eq 0) ('pinned checkout failed: '+$result.err)
+ Assert ([IO.File]::ReadAllText($pin) -ceq ($launch+"`n") -and (Published).payload.base -ceq $launch) 'First checkout did not pin HEAD'
+ [IO.File]::WriteAllText((Join-Path $pinRepo 'outside.txt'),"x`n"); $null=GitIn $pinRepo add outside.txt; $null=GitIn $pinRepo commit -q -m out
+ $result=HelperMode 'checkout' '' $pinRepo; Assert ($result.code -eq 0) ('second pinned checkout failed: '+$result.err)
+ Reload; $second=(Decode ([Convert]::FromBase64String(@($journal.pending)[-1].bytes))).payload
+ Assert ($second.base -ceq $launch -and (@($second.changed_files) -join '|') -ceq 'outside.txt' -and [IO.File]::ReadAllText($pin) -ceq ($launch+"`n")) 'Pinned base missed committed out-of-scope file'
+ Fixture 'box_' $checks (ManifestBytes ''); [IO.File]::WriteAllText((Join-Path $box 'checkout-base'),"--output=x`n"); HelperRefused 'checkout' 'storage_error' '' $pinRepo
+ # git missing: PATH holds only the system directories, without git.
+ $noGit=@{PATH=[Environment]::GetFolderPath('System')}
+ Assert ($null -eq (Get-Command git -ErrorAction SilentlyContinue | Where-Object { $_.Source.StartsWith($noGit.PATH) })) 'System directory unexpectedly holds git'
+ Fixture 'box_' $checks $manifest; HelperRefused 'run-checks' 'git_unavailable' 't1-c1' $repo $noGit
+ Fixture 'box_' $checks $manifest; HelperRefused 'checkout' 'git_unavailable' '' $repo $noGit
  [Console]::Out.WriteLine('PowerShell mailbox helper regressions passed')
 } finally {
  foreach ($child in $children) { if (-not $child.HasExited) { $child.Kill(); $child.WaitForExit() }; $child.Dispose() }

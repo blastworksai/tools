@@ -1,7 +1,7 @@
 -- Pure configured mailbox contract shared by catalog eligibility and provisioning.
 -- Operator attestation is not runtime proof; target path/shell checks stay in the adapter.
 local M = {}
-local allowed = {['report-files-v1']=true,['worker-poll-v1']=true,['native-ask-v1']=true,['argv-v1']=true,['coordinator-control-v1']=true}
+local allowed = {['report-files-v1']=true,['worker-poll-v1']=true,['native-ask-v1']=true,['argv-v1']=true,['coordinator-control-v1']=true,['check-runner-v1']=true,['release-manager-v1']=true}
 function M.valid_set(backend,wake,capabilities)
  if backend~='native-agent' and backend~='local-terminal' and backend~='ssh-command' then return false end
  if wake~='worker-poll-v1' and wake~='native-ask-v1' then return false end
@@ -9,7 +9,7 @@ function M.valid_set(backend,wake,capabilities)
  if type(capabilities)~='table' then return false end
  local seen,count={},0
  for key,value in pairs(capabilities) do
-  if type(key)~='number' or key%1~=0 or key<1 or key>5 or type(value)~='string' or not allowed[value] or seen[value] then return false end
+  if type(key)~='number' or key%1~=0 or key<1 or key>7 or type(value)~='string' or not allowed[value] or seen[value] then return false end
   seen[value]=true;count+=1
  end
  for index=1,count do if capabilities[index]==nil then return false end end

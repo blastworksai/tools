@@ -145,6 +145,7 @@ SPAWN also provides `spawn.dispatch`, a non-palette bridge block that [ORCH+](..
 - **Fresh managed launch.** The host builds an immutable fresh command for the record; the exact authorised ORCH+ window starts it through native `agents:start` (OMP) or terminal layout APIs. Managed panes carry no ordinary ticket. A managed attempt needs an explicitly reviewed fresh launch on its record (**Config → Configured agents → Full record JSON**, then **Approve reviewed command and settings**).
 - **Explicit authorisation.** Each mutation is staged `pending`, then authorised by a one-shot, time-bound nonce checked against the live ORCH+ owner and window. A public request alone never causes an effect, and uncertain effects are never retried.
 - **Report-files mailboxes.** Workers report through bounded, opaque mailbox handles served by reviewed helpers (`mailbox_target.*`, `mailbox_worker.*`); no bridge operation accepts paths, commands or credentials.
+- **Helper-run checks and checkout facts.** ORCH+ can provision a mailbox with an authenticated assignment manifest (declared checks, files, scope and base ref), bound into the mailbox's provision digest. On a record that declares `check-runner-v1`, the worker helper's `checkout` mode reports the git worktree, head and changed files, and `run-checks` runs one declared check's exact argv from that manifest, without a shell, reporting its exit code and output digest. Workers cannot publish these reports themselves; the execution target needs `git`. `release-manager-v1` marks a record whose workers may receive ORCH+ landing and deploy grants and report deploy results.
 - **Recovery.** Config → Running agents shows managed bindings and outcomes, and offers **Fence managed controller for recovery**. Owner-gated roster import (**Allow roster import**) imports and launches nothing on its own.
 - **No policy or accounts.** SPAWN does not collect credentials, quotas or account inventory and does not enforce model policy; USAGE collects evidence and ORCH+ owns policy.
 
@@ -190,6 +191,7 @@ Mailbox helper regressions run outside Tern: `python3 tests/mailbox_posix.py` on
 - `mailbox.luau`, `mailbox_adapter.luau`, `mailbox_capabilities.luau`: mailbox planning, fixed helper protocol and configured mailbox contract
 - `mailbox_target.sh`, `mailbox_target.ps1`, `mailbox_worker.sh`, `mailbox_worker.ps1`, `mailbox_json.awk`, `mailbox_reply.jq`: reviewed POSIX and Windows mailbox helpers
 - `capability.json`: package capability descriptor
+- `CHANGELOG.md`: release notes
 - `tern.d.luau`: Tern type definitions for luau-lsp
 - `BRIDGE.md`: managed dispatch bridge reference
 - `assets/icons/`: provider artwork from [lobe-icons](https://github.com/lobehub/lobe-icons) (MIT, see `assets/icons/LICENSE.lobe-icons.txt`)

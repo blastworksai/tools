@@ -44,7 +44,7 @@ function value(depth, c,obj,key,count,tail,n) {
   p++;obj=++objects;count=0;ws()
   if(substr(s,p,1)==(c=="{"?"}":"]")){p++;return}
   while(1){
-   if(++count>(c=="{"?64:256))fail();ws()
+   if(++count>(c=="{"?64:512))fail();ws()
    if(c=="{"){key=string_value();if(length(key)>64||((obj SUBSEP key)in seen))fail();seen[obj SUBSEP key]=1;ws();if(substr(s,p++,1)!=":")fail()}
    value(depth+1);ws()
    if(substr(s,p,1)==(c=="{"?"}":"]")){p++;return}

@@ -5,7 +5,7 @@
   "path": "plugins/tern/ORCH+",
   "requires": ["plugins/tern/SPAWN"],
   "optional": ["plugins/tern/USAGE"],
-  "summary": "ORCH+ for Tern: durable per-session controller ownership, managed dispatch of coordinators and workers through SPAWN, structured report mailboxes and owner gates, verified worker and coordinator rollover, a per-target landing queue, guided reload recovery and optional USAGE quota routing. Effects run at most once and recovery fails closed.",
+  "summary": "ORCH+ 0.4.0 for Tern: durable per-session controller ownership, managed dispatch of builders, reviewers, a release manager, labellers and coordinators through SPAWN, structured report mailboxes with helper-run checks and checkout facts, owner gates with loop caps and in-scope policy approval, cross-family review as landing proof, verified worker and coordinator rollover, a per-target landing queue merged and deployed only by the release manager, plan/board/inbox work sources with a work-class router, guided reload recovery and optional USAGE quota routing with per-worker usage deltas. Effects run at most once and recovery fails closed.",
   "way_in": "Open ORCH+ Config button in the Files pane header (opens Config) or the ORCH+ palette command (opens the controller).",
   "scope": "Host-local: the controller, coordinator, workers, mailboxes and SPAWN records live on one Tern host. To orchestrate agents on a remote host, attach a Tern window to that host and open ORCH+ there. No SSH hop, no transcript reading."
 }

@@ -1,5 +1,55 @@
 # Changelog
 
+## 0.4.0
+
+Requires SPAWN 0.4.0 (new helper modes, capabilities and report kinds: reinstall its mailbox helpers with SPAWN). Quota routing and usage deltas work with USAGE 2.1.0 or later. Stored 0.3.0 settings, workers and landing items are migrated when the store is restored.
+
+Includes all 0.3.1 fixes (listed under 0.3.1 below).
+
+### Changed (breaking)
+
+- **Landing needs a review.** No landing grant is issued without a recorded proof for the exact source revision: by default an approved review from a reviewer worker of a different declared provider family; with **Enforce cross-family review** off, every declared check passing through SPAWN's helper plus an approved review by a reviewer other than the builder. Worker-attested checkpoint checks alone no longer suffice.
+- **The release manager merges.** Landing grants go to the session's release manager (a managed worker on a record with `release-manager-v1`, different from the builder's and the reviewer's), never to the builder. Builders request landing; a builder LANDING_RESULT is refused. Without a configured release manager, landing items hold `release_manager_missing`. A grant that 0.3.0 already sent to a builder becomes a `legacy_grant_outstanding` hold, settled only with **Result lost — hold slot…** or **Reconcile observed outcome…**.
+- **Coordinators no longer file reviews.** A coordinator REVIEW_RESULT is refused (`review_unauthorized`). An approved `review` proposal opens a review by a separate reviewer worker. Coordinator review results stored by 0.3.0 carry no proof and are dropped at restore.
+- **Policy saves are fenced by digest.** The `policy` command takes `expected_policy_sha256` (the `workflow-index` `policy_sha256` of the displayed settings) instead of the full expected policy, and refuses with `policy_conflict` when the saved settings changed. Templates and role guidance save one entry at a time (`template_put`, `template_remove`, `role_guidance_put`).
+- **Approved proposals execute.** An approved coordinator `dispatch`, `report`, `review` or `landing` proposal (owner or policy) is carried out exactly once; `rollover` stays record-only. Decisions answered before 0.4.0 are never executed. Gate answers carry a tagged source (owner or policy).
+- REVIEW_RESULT now has `review_id`, `round` and `findings` (file and line) instead of `evidence`; DONE may carry `output_ref`.
+- Every worker has a role (`builder`, `reviewer`, `release_manager`, `labeller`, `coordinator`); 0.3.0 workers restore as builders or coordinators.
+
+### Added
+
+- Config v4: 46 settings (from 27), with new cards Loops, Review & proof, Release, Checkouts, Autonomy, Work sources, Routing, Role guidance and Templates; a 48 KiB bound on the saved policy.
+- Loop caps: every loop that re-engages a model or worker (rollover checkpoint and report re-requests, owner retries, landing refreshes, check rework, review rounds, deploy retries, labeller retries, template chains) stops at `loop_cap` with one `loop_cap` owner gate.
+- Stale-claim alert: a claim older than `stale_claim_min` raises one `stale_claim` gate; ORCH+ never takes over a claim.
+- Code-proven checks and checkout facts: work declares files, scope and checks; ORCH+ sends SPAWN an authenticated assignment manifest; the builder's SPAWN helper reports CHECKOUT and CHECK_RESULT from git and the manifest's exact argv. New gates `shared_checkout` (checkout roots), `file_overlap` and `scope`; `checkout_mismatch` and `scope_open` landing holds.
+- Cross-family review: a fresh reviewer worker per round answers one fixed question with findings tied to file and line; reviewers are chosen from **Reviewer records** in order under a declared family map; `reviewer_unavailable` and `family_unknown` gates; typed `rework` carrying only findings and failed checks; `review_rounds` cap; reviewers finish automatically.
+- Deploys: after `landed`, one `deploy_grant` per attempt to the release manager, DEPLOY_RESULT (`deployed`, `held`, `not_applicable`, `failed`), a `deploy_hold` owner gate, owner retries capped by `loop_cap`, and read-only lost/reconcile controls.
+- Autonomy inside plan scope: `auto_approve_kinds` lets the session policy answer in-scope `dispatch`, `report`, `review` and `landing` decisions, visibly tagged as policy answers.
+- Work sources: **Start work…** imports a `/glitch-plan` file (checkpoints in order, INDEPENDENT tasks in parallel, stable check IDs), uses a Tern board or starts a saved template (also from **Start…** on a Config → Templates row); an inbox folder; durable, deduplicated intake with an optional intake gate; template chains bounded at 8 steps. New module `plan_import.luau`.
+- Imported plans are shown on the controller: one **Imported plan · <title>** card per plan with its checkpoints and tasks, eight rows per page.
+- Config record pickers offer only suitable records: the release-manager picker lists records with `release-manager-v1` that are not reviewer records, and the reviewer picker leaves out the release manager.
+- Checkout facts without a manifest `base_ref`: the first `checkout` pins the launch HEAD, so later checkouts report committed (including out-of-scope) files, not only uncommitted ones.
+- Work-class router and labeller: routes map a class to a record; a board card routes only by a `class-<class>` tag (optionally `#`-prefixed), an inbox file by a `**CLASS**:` line; intake without a class is labelled by a short-lived labeller worker; `label_unknown` gate.
+- Role guidance per role, prepended to every assignment of that role: typed tasks, coordinator starts, attached panes, approved dispatch proposals, and reviewer, release-manager, labeller, plan, board, inbox and template assignments.
+- Pause answers nothing by policy; on resume each still-pending in-scope proposal is policy-evaluated once against the current `auto_approve_kinds`.
+- Review voids record their cause: `{artifact_revision}` when a newer checkpoint voided the approval, `{target_revision}` when a landing refresh did.
+- Per-worker USAGE deltas: account readings at launch and DONE, shown per quota window on the health card with the number of workers that shared the account.
+- Worker and landing cards show role, declared family, review and proof status, release manager and deploy status. A landing row whose approval a refresh voided reads "approval void — awaiting fresh review/request".
+- Gate answers that ORCH+ refused itself read "Refused by ORCH+ (<code>), not an owner answer: <reason>".
+- New native test group `workflow`.
+
+### Fixed
+
+- A `stale_target` landing result now sends the builder one `landing_refresh` notice, as `target_moved` already did; previously the item waited for a refresh nobody was told about.
+- A coordinator proposal sent while the session is paused (`session_paused`), or naming work without a retained CHECKPOINT of its project (`scope_mismatch`), is now refused definitely: ORCH+ answers its gate `reject` itself (source `refusal`), delivers one `owner_decision`, and the coordinator's report lane is no longer held until the owner re-checks. The coordinator may propose again, even with the same `proposal_id`.
+- An untouched window no longer stalls orchestration. Tern does not wake an idle window for a due window timer, so ORCH+'s 500 ms observation loop stopped until someone next used the window. Under Xvfb, a worker HEARTBEAT went unread for minutes and actions sat in backpressure for about 30 minutes. Now, while the window drives an active controller with timed work, it keeps one short argv-only wait child in flight, whose exit wakes the window. The child is `sleep 2`, or `ping -n 3 127.0.0.1` on Windows. The Health card shows **Idle-wake helper active: …**. The helper never runs without such work, for a controller awaiting continuation, in host VMs, or after a failed child. Regression: `health/idle_wake`.
+- Finish no longer fails silently: a refused Finish (for example on a reattached worker held `target_unavailable` or holding an uncertain old effect) always shows its reason, and the mailbox-retirement retry is sent instead of being refused in the window. Regression: `health/finish_refusal`.
+- Intake inbox and board polling now keep the idle-wake helper running in an untouched window with no workers. Regression: `health/idle_wake`.
+
+### Known limits
+
+- Windows without an active ORCH+ controller (for example a window showing only SPAWN) get no idle-wake helper and can still stall until they are used; the underlying Tern timer issue is not fixed.
+
 ## 0.3.1
 
 Requires SPAWN 0.3.1 (its unused-mailbox retirement now accepts a launch whose window challenge expired unconsumed).

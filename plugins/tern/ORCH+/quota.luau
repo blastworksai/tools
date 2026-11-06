@@ -300,13 +300,50 @@ local function evaluate(document: any, sources: any, join: any, m: any, now_ms: 
 			if not int(w.observed_at_ms) then return nil, "malformed" end
 			local reset = null(w.resets_at_ms)
 			if reset ~= nil and not int(reset) then return nil, "malformed" end
-			table.insert(windows, { key = window_key(w), weekly = w.key == "seven_day" or w.key == "weekly", remaining = w.remaining, observed_at_ms = w.observed_at_ms, resets_at_ms = reset })
+			table.insert(windows, { key = window_key(w), name = w.key, pool = null(w.pool), weekly = w.key == "seven_day" or w.key == "weekly", remaining = w.remaining, observed_at_ms = w.observed_at_ms, resets_at_ms = reset })
 		end
 		if seen == 0 then return nil, "no_windows" end
 	end
 	local identity = table.concat({ tostring(pub.subject_source_id), tostring(scope.id), tostring(account.id), binding.handle,
 		string.format("%.0f", binding.generation), tostring(pub.generation), tostring(pub.profile_generation), table.concat(canonical_ids, "\n") }, "\0")
-	return { binding = codec.sha256(identity):sub(1, 16), principal = codec.sha256(table.concat(canonical_ids, "\n")):sub(1, 16), windows = windows }, nil
+	return { binding = codec.sha256(identity):sub(1, 16), principal = codec.sha256(table.concat(canonical_ids, "\n")):sub(1, 16), windows = windows,
+		canonical_ids = canonical_ids, generation = binding.generation }, nil
+end
+
+-- Per-worker USAGE reading (Task 7A, D17): the account identity (each USAGE canonical id as its
+-- sha256, sorted, plus the profile binding generation) and the newest window per key|pool. USAGE is
+-- percent-only and account-wide; a reading never identifies one worker's use. Nil when unbounded.
+M.USAGE_WINDOWS = 16
+M.USAGE_IDS = 4
+local function usage_reading(v: any, newest: any, observed: number): any?
+	local ids, keys, windows = {}, {}, {}
+	for _, canonical_id in v.canonical_ids do table.insert(ids, codec.sha256(canonical_id)) end
+	for k in newest do table.insert(keys, k) end
+	if #ids > M.USAGE_IDS or #keys > M.USAGE_WINDOWS then return nil end
+	table.sort(ids); table.sort(keys)
+	for _, k in keys do
+		local w = newest[k]
+		if not str(w.name, 96) or (w.pool ~= nil and not str(w.pool, 96)) then return nil end
+		table.insert(windows, { key = w.name, pool = w.pool, remaining = w.remaining, resets_at_ms = w.resets_at_ms, observed_at_ms = w.observed_at_ms })
+	end
+	return { account = { canonical_ids = ids, generation = v.generation }, windows = windows, observed_at_ms = observed }
+end
+-- Strict shape of a stored reading (evidence entries and worker usage_before/usage_after).
+function M.valid_usage(v: any): boolean
+	if not closed(v, "account windows observed_at_ms") or not int(v.observed_at_ms) or not closed(v.account, "canonical_ids generation")
+		or not int(v.account.generation) or type(v.account.canonical_ids) ~= "table" or type(v.windows) ~= "table" then return false end
+	local ids, windows = v.account.canonical_ids, v.windows
+	local n = 0; for _ in ids do n += 1 end
+	if n ~= #ids or #ids < 1 or #ids > M.USAGE_IDS then return false end
+	for _, canonical_id in ids do if not str(canonical_id, 256) then return false end end
+	n = 0; for _ in windows do n += 1 end
+	if n ~= #windows or #windows > M.USAGE_WINDOWS then return false end
+	for _, w in windows do
+		if not closed(w, "key pool remaining resets_at_ms observed_at_ms") or not str(w.key, 96) or (w.pool ~= nil and not str(w.pool, 96))
+			or type(w.remaining) ~= "number" or w.remaining ~= w.remaining or w.remaining < 0 or w.remaining > 100
+			or (w.resets_at_ms ~= nil and not int(w.resets_at_ms)) or not int(w.observed_at_ms) then return false end
+	end
+	return true
 end
 
 -- document: verified USAGE snapshot; meta: assembly + validate result; index: the routing index
@@ -396,6 +433,7 @@ function M.normalize(document: any, meta: any, index: any, now_ms: number): any
 								entry.state = "known"; entry.remaining_pct = remaining; entry.observed_at_ms = observed
 								entry.reset_at_ms = reset; entry.weekly_reset_ms = weekly; entry.windows = n
 								entry.binding = binding; entry.principal = valid[1].principal
+								entry.usage = usage_reading(valid[1], newest, observed)
 							end
 						end
 					end
@@ -417,15 +455,15 @@ function M.valid_evidence(e: any): boolean
 	for _ in e.records do n += 1 end
 	if n ~= #e.records then return false end
 	for _, r in e.records do
-		if not closed(r, "id revision state reason remaining_pct observed_at_ms reset_at_ms weekly_reset_ms windows binding principal")
+		if not closed(r, "id revision state reason remaining_pct observed_at_ms reset_at_ms weekly_reset_ms windows binding principal usage")
 			or not str(r.id, 96) or seen[r.id] or not int(r.revision) or not STATES[r.state] then return false end
 		seen[r.id] = true
 		if r.state == "unknown" then
 			if not M.REASONS[r.reason] or r.remaining_pct ~= nil or r.binding ~= nil or r.principal ~= nil or r.windows ~= nil
-				or r.observed_at_ms ~= nil or r.reset_at_ms ~= nil or r.weekly_reset_ms ~= nil then return false end
+				or r.observed_at_ms ~= nil or r.reset_at_ms ~= nil or r.weekly_reset_ms ~= nil or r.usage ~= nil then return false end
 		elseif r.reason ~= nil or type(r.remaining_pct) ~= "number" or r.remaining_pct ~= r.remaining_pct or r.remaining_pct < 0 or r.remaining_pct > 100
 			or not int(r.observed_at_ms) or (r.reset_at_ms ~= nil and not int(r.reset_at_ms)) or (r.weekly_reset_ms ~= nil and not int(r.weekly_reset_ms))
-			or not int(r.windows, 1, 4096) or not short(r.binding) or not short(r.principal) then return false end
+			or not int(r.windows, 1, 4096) or not short(r.binding) or not short(r.principal) or (r.usage ~= nil and not M.valid_usage(r.usage)) then return false end
 	end
 	return true
 end
@@ -564,5 +602,53 @@ function M.decide(input: any): any
 		.. requested.id .. " is " .. requested_assessed.status .. " (" .. (M.REASONS[requested_assessed.reason or ""] or tostring(candidates[1].rejection or requested_assessed.reason)) .. ")."
 		.. (if input.bound then " The provisioned record cannot change." else "") }
 	return decision
+end
+
+-- Account-level usage delta between two worker readings (Task 7A shape:
+-- { account = { canonical_ids, generation }, windows = {{ key, pool, remaining, resets_at_ms, observed_at_ms }}, observed_at_ms }).
+-- USAGE is percent-only and account-wide: a delta is never per-worker exact.
+-- Returns { comparable, reason?, windows = {{ key, used_before?, used_after?, delta?, reason? }} sorted by key }.
+local function reading_identity(r: any): (any?, number?)
+	if type(r) ~= "table" or type(r.account) ~= "table" or not int(r.account.generation) then return nil, nil end
+	local ids = sorted_ids(r.account.canonical_ids)
+	if not ids or #ids == 0 then return nil, nil end
+	return ids, r.account.generation
+end
+local function reading_windows(r: any): any
+	local out = {}
+	for _, w in list(r.windows) do
+		if type(w) == "table" and w.key ~= nil then out[window_key(w)] = w end
+	end
+	return out
+end
+local function valid_window(w: any): boolean
+	return type(w.remaining) == "number" and w.remaining == w.remaining and w.remaining >= 0 and w.remaining <= 100
+		and int(w.observed_at_ms) and (null(w.resets_at_ms) == nil or int(null(w.resets_at_ms)))
+end
+function M.usage_delta(before: any, after: any): any
+	local result: any = { comparable = false, windows = {} }
+	local ids_b, gen_b = reading_identity(before)
+	local ids_a, gen_a = reading_identity(after)
+	if not ids_b or not ids_a then result.reason = "unbound"; return result end
+	if gen_b ~= gen_a or not same_list(ids_b, ids_a) then result.reason = "different_account"; return result end
+	local wb, wa = reading_windows(before), reading_windows(after)
+	local keys, seen = {}, {}
+	for k in wb do if not seen[k] then seen[k] = true; table.insert(keys, k) end end
+	for k in wa do if not seen[k] then seen[k] = true; table.insert(keys, k) end end
+	table.sort(keys)
+	for _, k in keys do
+		local b, a = wb[k], wa[k]
+		local row: any = { key = k }
+		if not b or not a or not valid_window(b) or not valid_window(a) then row.reason = "stale"
+		else
+			row.used_before = 100 - b.remaining; row.used_after = 100 - a.remaining
+			if null(b.resets_at_ms) ~= null(a.resets_at_ms) then row.reason = "reset_crossed"
+			elseif a.observed_at_ms <= b.observed_at_ms then row.reason = "stale"
+			else row.delta = row.used_after - row.used_before; result.comparable = true end
+		end
+		table.insert(result.windows, row)
+	end
+	if not result.comparable then result.reason = if #keys == 0 then "stale" else result.windows[1].reason end
+	return result
 end
 return M

@@ -1,6 +1,13 @@
 -- Actual reducer/sole-host persistence cases. Run each section in a bounded host callback.
 local root, section = ...
-local api = assert(loadstring(tern.fs.read(root .. "/tests/dispatch.luau"), "dispatch-fixture"))(root, "fixture")
+-- Test chunks run in this group's environment (as tests/run.luau loads groups), so their tern.json calls are
+-- the stepped runner's yield points and a long section spans many native slices.
+local function load_test(name, chunkname, ...)
+ local chunk = assert(loadstring(tern.fs.read(root .. "/tests/" .. name .. ".luau"), chunkname))
+ setfenv(chunk, setmetatable({}, { __index = getfenv() }))
+ return chunk(root, ...)
+end
+local api = load_test("dispatch", "dispatch-fixture", "fixture")
 local checks = 0
 local function check(ok, message) assert(ok, message); checks += 1 end
 local function w(f, id) return f.authority.registry.dispatch.workers[id] end
@@ -142,5 +149,215 @@ if section == nil or section == "settled_history" then
  check(f:apply("intake", { worker_id = id, bytes = original_report }).code == "already_compacted", "confirmed receipt floor remains a permanent stale-report barrier")
  check(api.state.rehydrate(api.clone(f.authority.registry)) ~= nil, "reclaimed gates leave no dangling thread/health references")
 end
-assert(section == nil or table.find({ "lifecycle", "cancel", "native", "capacity", "settled_history" }, section), "unknown gates section")
+-- Stale claims (CP1): one advisory stale_claim gate per claimed action after stale_claim_min
+-- minutes on this host epoch; restore and epoch changes rebase aging; answers never move a claim.
+if section == nil or section == "stale_claim" then
+ local MIN = 60000
+ local function stale_gates(f, aid)
+  local found = {}
+  for key, g in f.authority.registry.dispatch.gates or {} do
+   if g.kind == "stale_claim" and (aid == nil or table.find(g.evidence, "action:" .. aid)) then table.insert(found, key) end
+  end
+  return found
+ end
+ local function stale_in(reg) local n = 0; for _, value in reg.dispatch.gates or {} do if value.kind == "stale_claim" then n += 1 end end; return n end
+ local function claimed(minutes)
+  local clock = { now_ms = 1700000000000, mono_ms = 1000, epoch = "stale-host" }
+  local f = api.fixture(function() return api.clone(clock) end); local id = f:accepted(false)
+  if minutes ~= nil then assert(f:apply("policy", { policy = { stale_claim_min = minutes } }).ok) end
+  local queued = f:apply("poll", { worker_id = id }); assert(queued.ok and queued.action_id, queued.message)
+  assert(f:apply("claim", { action_id = queued.action_id, executor = f.origin.window_epoch }).ok)
+  return f, clock, queued.action_id
+ end
+ local function advance(f, clock, ms) clock.mono_ms += ms; clock.now_ms += ms; return f.authority:apply({ kind = "workflow_tick" }) end
+ -- Default 30 minutes: fresh, N-1, N, then no duplicate.
+ local f, clock, aid = claimed(nil)
+ check(api.dispatch.policy(f.authority.registry, f.origin.logical_session_id).stale_claim_min == 30, "stale_claim_min defaults to 30 minutes")
+ local stamped = f:action(aid).claim.claimed_at
+ check(stamped ~= nil and stamped.epoch == "stale-host" and stamped.mono_ms == clock.mono_ms, "a claim is stamped with the host clock when it is granted")
+ advance(f, clock, 0)
+ check(#stale_gates(f) == 0, "cold start: a fresh claim never gates")
+ advance(f, clock, 29 * MIN)
+ check(#stale_gates(f) == 0 and f:action(aid).claim.stale_gate_id == nil, "at N-1 minutes no stale_claim gate opens")
+ advance(f, clock, MIN)
+ local opened = stale_gates(f, aid)
+ check(#opened == 1 and f:action(aid).claim.stale_gate_id == opened[1], "at N minutes exactly one stale_claim gate opens for the action")
+ local g = gate(f, opened[1])
+ local lead = "Action " .. aid .. " has been claimed for 30 minutes without a result. ORCH+ never takes over a claim; open the recovery guide to reconcile it by hand."
+ check(g.question:sub(1, #lead) == lead, "the stale_claim gate names the action, its minutes and that ORCH+ never takes over")
+ check(#g.options == 2 and g.options[1].id == "keep_waiting" and g.options[1].label == "Keep waiting" and g.options[2].id == "open_recovery"
+  and g.options[2].label == "Open recovery guide", "the stale_claim gate offers keep_waiting and open_recovery")
+ advance(f, clock, MIN); advance(f, clock, 60 * MIN)
+ check(#stale_gates(f) == 1, "later ticks never open a duplicate stale_claim gate")
+ check(api.state.rehydrate(api.clone(f.authority.registry)) ~= nil, "a stale-claim gate and stamped claim restore")
+ -- Answers never change the claim phase or grant.
+ local grant_id = f:action(aid).claim.grant_id
+ local keep = f:apply("answer", { gate_id = g.id, gate_revision = g.revision, choice_id = "keep_waiting", answer = "Keep waiting" })
+ check(keep.code == "stale_claim_answered" and f:action(aid).phase == "claimed" and f:action(aid).claim.grant_id == grant_id, "keep_waiting leaves the claim exactly as it was")
+ check(gate(f, g.id).phase ~= "pending" and gate(f, g.id).delivery == nil, "the answer settles the advisory gate without a worker reply")
+ local h, hclock, haid = claimed(1)
+ advance(h, hclock, MIN)
+ local hg = gate(h, stale_gates(h, haid)[1])
+ local hgrant = h:action(haid).claim.grant_id
+ check(h:apply("answer", { gate_id = hg.id, gate_revision = hg.revision, choice_id = "open_recovery", answer = "Open recovery guide" }).code == "stale_claim_answered"
+  and h:action(haid).phase == "claimed" and h:action(haid).claim.grant_id == hgrant, "open_recovery leaves the claim claimed with the same grant; recovery is by hand")
+ -- stale_claim_min = 0 is off; 1 is on.
+ local z, zclock = claimed(0)
+ advance(z, zclock, 1440 * MIN)
+ check(#stale_gates(z) == 0, "stale_claim_min = 0 never gates, even after a day")
+ local one, oclock, oaid = claimed(1)
+ advance(one, oclock, MIN)
+ check(#stale_gates(one, oaid) == 1, "stale_claim_min = 1 gates after one minute")
+ -- CP2 live smoke: a backpressured action is not a stuck claim, and its capacity rechecks (fresh
+ -- grants for the same exact request) never stream new stale_claim gates: one gate per action.
+ local b, bclock, baid = claimed(1)
+ local FULL = { resource = "capacity_admission", current = 1, limit = 1, retryable = true, effect_started = false }
+ check(b:finish(baid, "full", FULL).code == "backpressure", "a definitive pre-effect full refusal leaves the action backpressured with its claim")
+ advance(b, bclock, MIN); advance(b, bclock, 10 * MIN)
+ check(#stale_gates(b, baid) == 0, "a backpressured action never opens a stale_claim gate")
+ local s, sclock, said = claimed(1)
+ advance(s, sclock, MIN)
+ local first_gate = stale_gates(s, said)[1]
+ assert(first_gate and s:finish(said, "full", FULL).code == "backpressure")
+ advance(s, sclock, 0)
+ check(gate(s, first_gate).phase == "superseded", "the claim's open stale_claim gate is superseded once SPAWN refuses it before effects")
+ for round = 1, 3 do
+  assert(s:apply("retry", { action_id = said }).ok)
+  check(s:action(said).stale_gate_id == first_gate and s:action(said).claim == nil, "a rechecked action keeps its stale-claim lineage while it waits for a claim")
+  assert(s:apply("claim", { action_id = said, executor = s.origin.window_epoch }).ok)
+  check(s:action(said).claim.stale_gate_id == first_gate and s:action(said).stale_gate_id == nil, "the recheck's fresh claim inherits the action's stale_claim gate")
+  advance(s, sclock, 10 * MIN)
+  check(#stale_gates(s, said) == 1, "recheck claim " .. round .. " that waits past the limit opens no second stale_claim gate")
+  assert(s:finish(said, "full", FULL).code == "backpressure")
+ end
+ check(api.state.rehydrate(api.clone(s.authority.registry)) ~= nil, "a rechecked claim lineage restores")
+ assert(s:apply("retry", { action_id = said }).ok)
+ check(api.state.rehydrate(api.clone(s.authority.registry)) ~= nil, "a ready action carrying its stale-claim lineage restores")
+ -- A restored 0.3.0 claim without claimed_at is rebased on the first tick, never gated on it.
+ local r, rclock, raid = claimed(1)
+ local legacy = api.clone(r.authority.registry); legacy.dispatch.actions[raid].claim.claimed_at = nil
+ local restored = api.state.rehydrate(api.clone(legacy))
+ check(restored ~= nil and restored.dispatch.actions[raid].claim.claimed_at == nil, "a 0.3.0 claim without claimed_at restores unstamped")
+ rclock.mono_ms += 600 * MIN
+ local first = api.dispatch.tick(restored, { kind = "workflow_tick" }, api.clone(rclock))
+ check(first ~= nil and first.dispatch.actions[raid].claim.claimed_at.mono_ms == rclock.mono_ms and first.dispatch.actions[raid].claim.claimed_at.epoch == rclock.epoch
+  and stale_in(first) == 0, "the first tick after restore rebases the unstamped claim and opens no gate")
+ rclock.mono_ms += MIN - 1
+ check(stale_in(api.dispatch.tick(first, { kind = "workflow_tick" }, api.clone(rclock)) or first) == 0, "the rebased claim is not stale one millisecond before N minutes")
+ rclock.mono_ms += 1
+ local due = api.dispatch.tick(first, { kind = "workflow_tick" }, api.clone(rclock))
+ check(due ~= nil and stale_in(due) == 1, "the rebased claim gates N minutes after the rebase")
+ -- A timestamped claim across a host restart (new epoch) is rebased, then gates N minutes later.
+ local e, eclock, eaid = claimed(1)
+ local old = api.clone(e:action(eaid).claim.claimed_at)
+ eclock.epoch = "stale-host-restarted"; eclock.mono_ms = 5
+ local reloaded = api.state.rehydrate(api.clone(e.authority.registry))
+ local rebased = api.dispatch.tick(reloaded, { kind = "workflow_tick" }, api.clone(eclock))
+ check(old.epoch == "stale-host" and rebased ~= nil and rebased.dispatch.actions[eaid].claim.claimed_at.epoch == "stale-host-restarted"
+  and rebased.dispatch.actions[eaid].claim.claimed_at.mono_ms == 5 and stale_in(rebased) == 0, "a claim from the previous host epoch is rebased on the first tick, not gated")
+ eclock.mono_ms += MIN - 1
+ check(stale_in(api.dispatch.tick(rebased, { kind = "workflow_tick" }, api.clone(eclock)) or rebased) == 0, "the cross-epoch claim does not gate before N minutes on the new epoch")
+ eclock.mono_ms += 1
+ local later = api.dispatch.tick(rebased, { kind = "workflow_tick" }, api.clone(eclock))
+ check(later ~= nil and stale_in(later) == 1, "the cross-epoch claim gates N minutes after its rebase")
+end
+-- Checkpoint 5 invariant sweep (D8/D9). Every fixture command in every group already runs
+-- f:autonomy_sweep (tests/dispatch.luau): no policy answer without enabled auto_approve_kinds, and
+-- never on manual work. This section adds pause, manual-source and restore-idempotence cases.
+if section == nil or section == "autonomy" then
+ local W = load_test("workflow", "workflow-helpers", "helpers", api)
+ local wapi = W.api()
+ local function new_gate(f, before)
+  for key, g in f.authority.registry.dispatch.gates or {} do if not before[key] then return g end end
+  error("no new gate")
+ end
+ local function ids(f) local out = {}; for key in f.authority.registry.dispatch.gates or {} do out[key] = true end; return out end
+ local function propose(f, cid, kind, b, extra)
+  local before = ids(f); local sent = W.propose(f, cid, kind, W.worker(f, b).work_id, extra); assert(sent.ok, sent.message)
+  return new_gate(f, before)
+ end
+ local PLANNED = { source = W.PLAN, files = W.arr({ "src/feature.luau" }) }
+ -- Default policy: an in-scope proposal is never answered by policy.
+ do
+  local f = W.fixture({ reviewer_records = W.arr({ "codex" }) })
+  local b = W.builder(f, "builder", PLANNED); W.settle(f, b); assert(W.send(f, b, "CHECKPOINT", W.cp("cp-1", "rev-1")).ok)
+  local cid = W.coordinator(f)
+  for _, kind in { "report", "review", "dispatch" } do
+   local g = propose(f, cid, kind, b, if kind == "dispatch" then { record_id = "claude2", record_revision = 0, prompt = "Next task." } elseif kind == "review" then { checkpoint_id = "cp-1" } else nil)
+   check(g.phase == "pending" and g.answer == nil and g.execution == nil, "auto_approve_kinds=[]: in-scope " .. kind .. " proposal waits for the owner")
+  end
+  check(f.autonomous ~= true, "the default-policy fixture never enabled auto-approval (sweep asserted no policy answers)")
+ end
+ -- Manual-source work never auto-approves, even with every kind enabled.
+ do
+  local f = W.fixture({ reviewer_records = W.arr({ "codex" }), auto_approve_kinds = W.arr({ "dispatch", "report", "review", "landing" }) })
+  local b = W.builder(f, "builder", { source = { kind = "manual" }, files = W.arr({ "src/feature.luau" }) })
+  W.round(f, b, "cp-1", "rev-1", "approved"); local lid = W.request(f, b, "cp-1", "rev-1"); W.rm(f)
+  local lg = f.authority.registry.dispatch.gates[W.item(f, lid).gate_id]
+  check(lg.answer == nil and W.item(f, lid).approval == nil and #W.item(f, lid).grants == 0, "manual work: the proven landing approval still waits for the owner")
+  local cid = W.coordinator(f)
+  for _, kind in { "report", "review", "dispatch", "landing" } do
+   local g = propose(f, cid, kind, b, if kind == "dispatch" then { record_id = "claude2", record_revision = 0, prompt = "Next task." } elseif kind == "report" then nil else { checkpoint_id = "cp-1" })
+   check(g.phase == "pending" and g.answer == nil and g.execution == nil and table.find(g.evidence, "scope:source_not_planned") ~= nil,
+    "manual work: " .. kind .. " proposal is out of scope and never auto-approved")
+  end
+  check(W.restores(f), "manual-source proposals restore")
+ end
+ -- Pause executes nothing: an owner-approved proposal records pending session_paused through tick and
+ -- restore; enabling landing auto-approval while paused answers nothing; resume executes once.
+ do
+  local f = W.fixture({ reviewer_records = W.arr({ "codex" }) })
+  local b = W.builder(f, "builder", PLANNED)
+  W.round(f, b, "cp-1", "rev-1", "approved"); local lid = W.request(f, b, "cp-1", "rev-1"); W.rm(f)
+  local b2 = W.builder(f, "claude2", { source = W.PLAN, files = W.arr({ "src/other.luau" }) }); W.settle(f, b2); assert(W.send(f, b2, "CHECKPOINT", W.cp("cp-2", "rev-2")).ok)
+  local cid = W.coordinator(f)
+  local g = propose(f, cid, "review", b2, { checkpoint_id = "cp-2" })
+  assert(f:apply("pause").ok)
+  check(W.propose(f, cid, "report", W.worker(f, b2).work_id).code == "session_paused", "pause refuses new proposals")
+  local before = W.effects(f)
+  local answered = f:apply("answer", { gate_id = g.id, gate_revision = g.revision, choice_id = "approve", answer = "Owner approves." })
+  local e = f.authority.registry.dispatch.gates[g.id].execution
+  check(answered.ok and e ~= nil and e.state == "pending" and e.effect_ref == "session_paused" and W.effects(f) == before, "paused: the owner answer records a pending execution and executes nothing")
+  assert(f:apply("policy", { policy = { auto_approve_kinds = W.arr({ "landing" }) } }).ok)
+  assert(f.authority:apply({ kind = "workflow_tick" }))
+  local lg = f.authority.registry.dispatch.gates[W.item(f, lid).gate_id]
+  check(lg.answer == nil and W.item(f, lid).approval == nil and #W.item(f, lid).grants == 0 and W.effects(f) == before, "paused: landing auto-approval answers nothing and nothing executes on tick")
+  local restored = assert(wapi.state.rehydrate(wapi.clone(f.authority.registry)))
+  local twin = wapi.dispatch.tick(restored, { kind = "workflow_tick" }, { now_ms = 1, mono_ms = 1, epoch = "paused-twin" }) or restored
+  check(W.effects({ authority = { registry = twin } }) == before and twin.dispatch.gates[g.id].execution.state == "pending", "paused: a restored twin executes nothing")
+  assert(f:apply("resume").ok)
+  e = f.authority.registry.dispatch.gates[g.id].execution
+  local r = W.review(f, b2)
+  check(e.state == "done" and r ~= nil and e.effect_ref == "review:" .. r.review_id, "resume executes the pending approved proposal once")
+  W.rm(f)
+  lg = f.authority.registry.dispatch.gates[W.item(f, lid).gate_id]
+  check(lg.answer ~= nil and lg.answer.source.kind == "policy" and lg.answer.source.rule == "auto_approve:landing" and #W.item(f, lid).grants == 1,
+   "after resume the proven in-scope landing approval is answered by policy and granted once")
+  W.idempotent(f, "paused then resumed review", g.id, nil)
+  check(W.restores(f), "the resumed session restores")
+ end
+ -- Restore migration: an untagged owner answer becomes kind="owner"; a pre-CP5 approved proposal
+ -- without an execution record restores as decision-only and never executes.
+ do
+  local f = W.fixture({ reviewer_records = W.arr({ "codex" }) })
+  local b = W.builder(f, "builder", PLANNED); W.settle(f, b); assert(W.send(f, b, "CHECKPOINT", W.cp("cp-1", "rev-1")).ok)
+  local cid = W.coordinator(f)
+  local g = propose(f, cid, "report", b)
+  local stored = wapi.clone(f.memory.value)
+  local raw = stored.dispatch.gates[g.id]
+  raw.answer = { choice_id = "approve", answer = "Approved before 0.4.0.", source = wapi.clone(f.origin), at_ms = 0 }
+  raw.phase = "answered"
+  stored.dispatch.gates[g.id] = raw
+  local before = W.effects(f)
+  f.memory.value = stored; f.authority = wapi.host.new_authority(f.memory)
+  local loaded = f.authority:load()
+  check(loaded.ok, "a store with an untagged pre-0.4.0 answer loads (" .. tostring(loaded.code) .. ")")
+  local mg = f.authority.registry.dispatch.gates[g.id]
+  check(mg.answer.source.kind == "owner" and mg.answer.source.owner_id == f.origin.owner_id, "restore tags the existing answer source kind=owner")
+  check(mg.execution ~= nil and mg.execution.state == "refused" and mg.execution.effect_ref == "legacy_decision_only", "a pre-0.4.0 approved proposal restores decision-only")
+  assert(f.authority:apply({ kind = "workflow_tick" })); f:autonomy_sweep()
+  check(W.effects(f) == before and W.worker(f, b).workflow.report_request == nil, "the migrated decision never executes")
+ end
+end
+assert(section == nil or table.find({ "lifecycle", "cancel", "native", "capacity", "settled_history", "stale_claim", "autonomy" }, section), "unknown gates section")
 return "gates/" .. tostring(section or "all") .. ": " .. tostring(checks) .. " checks passed"

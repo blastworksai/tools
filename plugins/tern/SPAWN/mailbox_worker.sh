@@ -35,21 +35,42 @@ strict "$box/provision.json" 2048
 [ "$(jq -r '.handle' "$box/provision.json")" = "$handle" ] || fail binding_mismatch
 binding=$(jq -c '.binding' "$box/provision.json")
 lock=$box/producer/lock
-# A crashed mkdir lock is a recovery gate. Never auto-remove it or infer that an
-# old producer is stopped from a timeout/PID. Owner performs explicit recovery.
+# A crashed mkdir lock is a recovery gate. Never auto-remove another invocation's
+# lock or infer that an old producer is stopped from a timeout/PID. Owner performs
+# explicit recovery.
 work=$box/staging/worker-$owner
 admission=$box/capacity.lock
 admitted=0 locked=0 workspace=0
+# Re-admission inside one invocation (a later wait poll, or exit cleanup) waits
+# out a busy gate for at most gate_wait seconds: every holder releases it before
+# sleep or stdio. This only ever creates the gate; it never takes a held one.
+gate_wait=10
+admit() {
+ gate_deadline=$(( $(date +%s) + gate_wait ))
+ until mkdir "$admission" 2>/dev/null; do
+  # A gate that stayed busy for the whole bound is not waited for twice.
+  [ "$(date +%s)" -lt "$gate_deadline" ] || { gate_wait=0; return 1; }
+  sleep 0.1 2>/dev/null || sleep 1
+ done
+ admitted=1
+}
 clear_work() {
  for file in "$work/"*; do [ ! -e "$file" ] || { [ -f "$file" ] && [ ! -L "$file" ] && rm "$file"; }; done
 }
 cleanup() {
  [ "$admitted" != 0 ] || [ "$locked" != 0 ] || return 0
  if [ "$admitted" = 0 ]; then
-  # Interrupted waits may be between transactions. Never remove inventory
-  # under another helper's scan, or steal its gate to force cleanup.
-  mkdir "$admission" 2>/dev/null || { printf 'producer_locked\n' >&2; return 1; }
-  admitted=1
+  # Only an exit between wait polls gets here. Each poll committed under the
+  # gate and emptied the workspace, so this lock carries no recovery state.
+  # A repeated signal cannot abandon this bounded cleanup.
+  trap '' HUP INT TERM
+  if ! admit; then
+   # Never take or remove a gate another holder still has. Release only this
+   # invocation's own empty workspace, then its lock, so the next call is not
+   # refused producer_locked forever.
+   { [ "$workspace" = 0 ] || rmdir "$work"; } && rmdir "$lock" && { workspace=0 locked=0; return 0; }
+   printf 'producer_locked\n' >&2; return 1
+  fi
  fi
  if [ "$workspace" != 0 ]; then clear_work; rmdir "$work"; workspace=0; fi
  if [ "$locked" != 0 ]; then rmdir "$lock"; locked=0; fi
@@ -104,10 +125,8 @@ capacity() {
  esac
 }
 begin() {
- if [ "$admitted" = 0 ]; then
-  mkdir "$admission" 2>/dev/null || fail producer_locked
-  admitted=1
- fi
+ # Only a later wait poll re-admits; a target's short commit is not a refusal.
+ if [ "$admitted" = 0 ]; then admit || fail producer_locked; fi
  # Real peak space: a 1.5MiB replacement plus 256KiB/16 workspace files.
  # Ordinary durable writes leave a further 256KiB/112 files for settlement.
  capacity 1835008 16
@@ -296,6 +315,8 @@ consume() {
  strict "$work/reply" 65536; bind_check "$work/reply"
  jq -e --argjson seq "$reply_seq" --arg message "$(jq -r '.message_id' "$manifest")" '.reply_seq==$seq and .message_id==$message' "$work/reply" >/dev/null || fail binding_mismatch
  jq -e -f "$reply_validator" "$work/reply" >/dev/null || fail invalid_schema
+ # Grants authorize landing/deploy effects: only a release-manager record may receive them.
+ if jq -e '.kind|IN("landing_grant","deploy_grant")' "$work/reply" >/dev/null; then has_capability release-manager-v1; fi
  retained_count=$(jq '.consumed|length' "$journal")
  [ "$retained_count" -lt 8 ] || full retained_executions "$retained_count" 8
  length=$(wc -c < "$work/reply")
@@ -316,6 +337,89 @@ publication_tier=settlement
 # admission. All producer lock/workspace creation and removal is serialized
 # with the target's complete inventory scan.
 if [ "$mode" = report ]; then report_input=$(dd bs=1 count=65537 2>/dev/null | base64 | tr -d '\r\n'); fi
+# Helper-only reports are computed from the code path, never from stdin, and
+# before either gate: a long check must not hold shared admission.
+hash_stdin() { if command -v sha256sum >/dev/null 2>&1; then sha256sum | cut -d ' ' -f 1; elif command -v shasum >/dev/null 2>&1; then shasum -a 256 | cut -d ' ' -f 1; else fail unsupported_capability; fi; }
+has_capability() { jq -e --arg name "$1" '(.capabilities // [])|type=="array" and index($name)!=null' "$box/provision.json" >/dev/null || fail capability_missing; }
+manifest_verify() {
+ has_capability check-runner-v1
+ bound=$(jq -r 'if has("manifest_sha256") then .manifest_sha256 else "" end' "$box/provision.json")
+ [ -n "$bound" ] || fail manifest_missing
+ manifest=$box/manifest.json
+ [ -f "$manifest" ] && [ ! -L "$manifest" ] && [ "$(wc -c < "$manifest")" -le 4096 ] || fail manifest_mismatch
+ [ "$(hash "$manifest")" = "$bound" ] || fail manifest_mismatch
+ strict "$manifest" 4096
+}
+git_head() {
+ command -v git >/dev/null 2>&1 || fail git_unavailable
+ head=$(git rev-parse --verify -q HEAD 2>/dev/null) || fail 'git_unavailable: not a git worktree'
+ case "$head" in *[!0-9a-f]*|'') fail 'git_unavailable: not a git worktree';; esac
+}
+# The argv comes only from the authenticated manifest. Each element is taken
+# verbatim (sentinel keeps trailing newlines) and executed directly: no shell.
+run_check() {
+ argc=$(jq -r --arg id "$message" '.checks[]|select(.check_id==$id)|.argv|length' "$manifest")
+ set --
+ index=0
+ while [ "$index" -lt "$argc" ]; do
+  arg=$(jq -j --arg id "$message" --argjson i "$index" '(.checks[]|select(.check_id==$id)|.argv[$i])+"x"' "$manifest"); arg=${arg%x}
+  set -- "$@" "$arg"; index=$((index+1))
+ done
+ # fd 3 carries only the exit code; the child never sees it. The first 64 KiB
+ # of combined output are hashed, the rest drained so the child is not killed.
+ checked=$( { { rc=0; "$@" </dev/null 2>&1 3>&- || rc=$?; printf '%s\n' "$rc" >&3; } | { dd bs=1 count=65536 2>/dev/null | hash_stdin; cat >/dev/null; }; } 3>&1 )
+ exit_code=${checked%%"$nl"*}; output_sha256=${checked#*"$nl"}
+}
+nl='
+'
+case "$mode" in
+ run-checks)
+  manifest_verify
+  case "$message" in ''|*[!A-Za-z0-9_-]*) fail check_undeclared;; esac
+  [ "${#message}" -le 96 ] || fail check_undeclared
+  jq -e --arg id "$message" '[.checks[]|select(.check_id==$id)]|length==1' "$manifest" >/dev/null || fail check_undeclared
+  jq -e --arg id "$message" '.checks[]|select(.check_id==$id)|.argv|type=="array" and length>=1 and length<=16 and all(.[]; type=="string" and length>=1)' "$manifest" >/dev/null || fail manifest_mismatch
+  git_head
+  argv_sha256=$(jq -j -c --arg id "$message" '.checks[]|select(.check_id==$id)|.argv' "$manifest" | hash_stdin)
+  ran_at_ms=$(( $(date +%s) * 1000 ))
+  run_check
+  git_head
+  report_input=$(jq -cn --arg id "$message" --arg argv "$argv_sha256" --argjson code "$exit_code" --arg output "$output_sha256" --arg head "$head" --argjson at "$ran_at_ms" '{kind:"CHECK_RESULT",payload:{check_id:$id,argv_sha256:$argv,exit_code:$code,output_sha256:$output,head:$head,ran_at_ms:$at}}' | base64 | tr -d '\r\n');;
+ checkout)
+  manifest_verify
+  git_head
+  top=$(git rev-parse --show-toplevel) || fail 'git_unavailable: not a git worktree'
+  worktree_path=$(cd "$top" && pwd -P) || fail 'git_unavailable: not a git worktree'
+  common_dir=$(git rev-parse --path-format=absolute --git-common-dir) || fail 'git_unavailable: git lacks --path-format'
+  branch=$(git symbolic-ref --short -q HEAD) || branch=HEAD
+  base_ref=$(jq -r '.base_ref // ""' "$manifest") base=
+  case "$base_ref" in -*) base_ref=;; esac
+  if [ -n "$base_ref" ]; then base=$(git merge-base "$base_ref" HEAD 2>/dev/null) || base=
+  elif [ "$(jq -r '.base_ref // ""' "$manifest")" = "" ]; then
+   # No manifest base_ref: the first checkout pins HEAD as the launch base, so later
+   # checkouts still report committed work (including out-of-scope files).
+   pin=$box/checkout-base
+   if [ ! -e "$pin" ] && [ ! -L "$pin" ]; then
+    printf '%s\n' "$head" > "$pin.$$.tmp" || fail storage_error
+    ln "$pin.$$.tmp" "$pin" 2>/dev/null || :
+    rm -f "$pin.$$.tmp"
+   fi
+   [ -f "$pin" ] && [ ! -L "$pin" ] && [ "$(wc -c < "$pin")" -le 66 ] || fail storage_error
+   launch=$(cat "$pin")
+   printf '%s' "$launch" | grep -Eqx '[0-9a-f]{40}|[0-9a-f]{64}' || fail storage_error
+   base=$(git merge-base "$launch" HEAD 2>/dev/null) || base=
+  fi
+  if [ -n "$base" ]; then committed=$(git diff --name-only -z "$base...HEAD" | jq -Rsc 'split("\u0000")|map(select(.!=""))') || fail 'git_unavailable: diff failed'
+  else committed='[]'; fi
+  # Porcelain v1 -z: "XY path", renames/copies followed by their origin path.
+  status=$(git status --porcelain=v1 -z --untracked-files=all | jq -Rsc 'split("\u0000")|reduce .[] as $e ({skip:false,out:[]}; if .skip then .skip=false|.out+=[$e] elif ($e|length)<4 then . else .out+=[$e[3:]]|.skip=($e[0:2]|test("[RC]")) end)|.out') || fail 'git_unavailable: status failed'
+  report_input=$(jq -cn --arg path "$worktree_path" --arg common "$common_dir" --arg branch "$branch" --arg head "$head" --arg base "$base" --argjson committed "$committed" --argjson status "$status" '
+   ($committed+$status|unique|map(select(.!=""))) as $all |
+   # At most 512 sorted paths; drop trailing ones until the report fits 64000 bytes.
+   {kind:"CHECKOUT",payload:({worktree_path:$path,common_dir:$common,branch:$branch,head:$head,changed_files:$all[0:512],changed_total:($all|length),dirty:(($status|length)>0)} + (if $base=="" then {} else {base:$base} end))} |
+   until((tojson|utf8bytelength)<=64000 or (.payload.changed_files|length)==0; .payload.changed_files|=.[0:-1]) |
+   .payload.changed_overflow=(.payload.changed_total>(.payload.changed_files|length))' | base64 | tr -d '\r\n');;
+esac
 # init takes no input. A report piped here would otherwise vanish silently, so
 # probe one byte; an empty pipe held open by its writer settles after 1s.
 stdin_bytes() {
@@ -364,7 +468,12 @@ if [ "$mode" = wait ]; then
 else
  begin
  case "$mode" in
-  report) printf '%s' "$report_input" | un64 > "$work/input"; allocate "$work/input";;
+  report)
+   printf '%s' "$report_input" | un64 > "$work/input"
+   jq -e '.kind|IN("CHECK_RESULT","CHECKOUT")|not' "$work/input" >/dev/null 2>&1 || { strict "$work/input" 65536; fail helper_only_kind; }
+   if jq -e '.kind=="DEPLOY_RESULT"' "$work/input" >/dev/null 2>&1; then has_capability release-manager-v1; fi
+   allocate "$work/input";;
+  run-checks|checkout) printf '%s' "$report_input" | un64 > "$work/input"; allocate "$work/input";;
   replay)
    jq -r '.pending[].seq' "$journal" > "$work/seqs"
    while IFS= read -r seq; do publish_pending "$seq"; done < "$work/seqs"

@@ -1,8 +1,13 @@
 -- Deterministic real reducer/host/window coverage. Run bounded sections in native host callbacks.
 local root, section = ...
-assert(section == nil or table.find({ "clock", "native", "controls", "timer", "driver_controls", "epoch_window", "epoch_host", "finish", "continuation", "alias_recovery", "held_report", "sweep_schedule", "readable_views", "guided_recovery", "guided_recovery_empty", "guided_recovery_host_restart", "stopped_worker_view", "expired_wake", "revoked_authorization", "observe_retention", "uncertain_read", "quota_reader", "bridge_lifecycle", "withdraw_fenced" }, section), "unknown health section")
+assert(section == nil or table.find({ "clock", "native", "controls", "timer", "driver_controls", "epoch_window", "epoch_host", "finish", "continuation", "alias_recovery", "held_report", "sweep_schedule", "readable_views", "cp2_controls", "guided_recovery", "guided_recovery_empty", "guided_recovery_host_restart", "stopped_worker_view", "expired_wake", "revoked_authorization", "observe_retention", "uncertain_read", "quota_reader", "bridge_lifecycle", "withdraw_fenced", "config_cards", "work_picker", "inbox_window", "usage_row",
+	"template_start", "role_pickers", "landing_row", "plans_view", "idle_wake", "gate_refusal", "finish_refusal" }, section), "unknown health section")
 local runtime, environment = tern, getfenv()
-local shared = assert(loadstring(runtime.fs.read(root .. "/tests/dispatch.luau"), "health-fixture"))(root, "fixture")
+-- The fixture runs in this group's environment (as tests/run.luau loads groups), so its tern.json calls are
+-- the stepped runner's yield points and a long section spans many native slices.
+local fixture_chunk = assert(loadstring(runtime.fs.read(root .. "/tests/dispatch.luau"), "health-fixture"))
+setfenv(fixture_chunk, setmetatable({}, { __index = environment }))
+local shared = fixture_chunk(root, "fixture")
 local clone, state, dispatch = shared.clone, shared.state, shared.dispatch
 local checks = 0
 local function check(ok, message) assert(ok, message); checks += 1 end
@@ -99,7 +104,7 @@ if section == nil or section == "clock" then
 	check(atomic.authority.uncommitted_observation, "failed native safety evidence fences further effects")
 end
 
-local function window_fixture()
+local function window_fixture(options: any?)
 	local now = 1000
 	local f = shared.fixture(function() return { now_ms = 1700000000000, mono_ms = now, epoch = "health-host" } end)
 	local id
@@ -120,6 +125,7 @@ local function window_fixture()
 	local owner_answer, recovery_steps, ran_actions = "current", nil, {}
 	-- USAGE capacity export: a fixture server answering the reader's correlated requests.
 	local usage = nil
+	local board_opened = {}
 	local host = { id = "local", state = "connected", panes = { 9001, 9002, 9004 } }
 	local panes = { [9001] = { pane = 9001, block = "orchplus.orchestrator", tab = 1 }, [9002] = { pane = 9002, tab = 1 }, [9004] = { pane = 9004, tab = 1 } }
 	local agents = { { pane = 9002, state = "idle" }, { pane = 9004, state = "working" } }
@@ -128,6 +134,14 @@ local function window_fixture()
 	ftern.now = function() return now end
 	ftern.timer = function(_, callback) local token = { callback = callback }; function token:cancel() self.cancelled = true end; table.insert(timers, token); return token end
 	ftern.on = function(name, callback) hooks[name] = callback end
+	-- A window VM by default: the idle-wake helper runs against this recorded stub, never a real child.
+	local processes, wake_events, idle_wake = {}, {}, nil
+	ftern.context = if options and options.context then options.context else "window"
+	if options and options.os then ftern.runtime = { os = options.os, jit = false } end
+	ftern.process = { run = function(argv, callback)
+		if options and options.process_error then error(options.process_error) end
+		table.insert(processes, { argv = clone(argv), callback = callback })
+	end }
 	local palette = {}
 	ftern.command = function(def) palette[def.id] = def end; ftern.files = { button = function() end }
 	ftern.route = { link = function() error("ORCH+ must not claim links; controls are native buttons") end }
@@ -141,7 +155,7 @@ local function window_fixture()
 		projection.dispatch = dispatch.project(f.authority.registry, f.origin.logical_session_id, f.origin.alias_nonce, selected)
 		return shared.load("views").render({ pane = 42, alias_nonce = f.origin.alias_nonce, orch_session_id = f.origin.logical_session_id,
 			action_serial = 0, dispatch_action = selected, dispatch_result = result, dispatch_command_result = command_result,
-			dispatch_driver_result = driver_result, workflow_worker = selected_worker, operator_intent = intent }, projection, "ready")
+			dispatch_driver_result = driver_result, workflow_worker = selected_worker, operator_intent = intent, idle_wake = idle_wake }, projection, "ready")
 	end
 	local cx = { hosts = { current = function() return host end, list = function() return { host } end },
 		sessions = { current = function() return current end }, window_key = function() return "" end,
@@ -184,6 +198,9 @@ local function window_fixture()
 		pick = function(_, spec) picker_spec = clone(spec); return { next = function(_, callback) pick_callback = callback end } end,
 		prompt = function(_, spec) prompt_spec = clone(spec); return { next = function(_, callback) prompt_callback = callback end } end,
 		actions = { run = function(_, label) table.insert(ran_actions, label); return label end },
+		-- Desktop board cx: opens are recorded; reads never answer (no board fixture is polled).
+		board = { open = function(_, path) table.insert(board_opened, path) end,
+			read = function() return { next = function() end } end, move = function() return { next = function() end } end },
 		session = {} }
 	function cx.session:pane(pane) return panes[pane] end
 	function cx.session:panes() local rows = {}; for _, pane in panes do table.insert(rows, pane) end; return rows end
@@ -229,6 +246,14 @@ local function window_fixture()
 			if intent and input.serial == intent.serial then intent = nil end
 			return
 		end
+		if event.act == "idle-wake" then
+			-- As host.luau: display-only helper state for this exact controller alias.
+			local input = runtime.json.decode(event.value)
+			assert(input.source_nonce == f.origin.alias_nonce, "idle-wake state names this controller's alias")
+			table.insert(wake_events, input)
+			idle_wake = if input.state == "idle" then nil else { state = input.state, detail = input.detail }
+			return
+		end
 		if event.act == "dispatch-notice" then return end
 		if event.act == "recovery-steps" then recovery_steps = runtime.json.decode(event.value); return end
 		local input = runtime.json.decode(event.value)
@@ -251,7 +276,9 @@ local function window_fixture()
 	local fixed_os = table.clone(os); fixed_os.time = function(spec: any?) if spec ~= nil then return os.time(spec) end return wall end
 	setfenv(module, setmetatable({ tern = ftern, require = shared.load, os = fixed_os }, { __index = environment }))
 	local api = module()
-	local w = { f = f, id = id, cx = cx, api = api, timers = timers, hooks = hooks, events = events, agents = agents, panes = panes, current = current, notices = notices, toasts = toasts }
+	local w = { f = f, id = id, cx = cx, api = api, timers = timers, hooks = hooks, events = events, agents = agents, panes = panes, current = current, notices = notices, board_opened = board_opened,
+		processes = processes, wake_events = wake_events, toasts = toasts }
+	function w:rendered() return runtime.json.encode(tree()) end
 	-- The owner clicks a dispatch button: its host block publishes the exact request as a one-shot
 	-- intent, which the window's observation consumer runs at most once.
 	function w:click(command, fields)
@@ -318,7 +345,7 @@ local function window_fixture()
 	f.origin = clone(events[1].origin)
 	w:click("resume")
 	table.clear(events)
-	id = f:accepted(false); w.id = id
+	if not (options and options.no_worker) then id = f:accepted(false); w.id = id end
 	return w
 end
 if section == nil or section == "epoch_window" then
@@ -385,7 +412,7 @@ if section == nil or section == "controls" then
 	check(flow(w.f).policy.paused, "actual pause button invokes concrete admitted reducer command")
 	w:click("resume")
 	check(not flow(w.f).policy.paused, "actual resume button preserves session policy")
-	local function edit(field) w:click("policy", { field = field, expected = flow(w.f).policy }) end
+	local function edit(field) w:click("policy", { field = field, expected_sha256 = shared.quota.digest(flow(w.f).policy) }) end
 	edit("poll_ms")
 	w:answer("2000")
 	check(flow(w.f).policy.poll_ms == 2000, "policy prompt saves bounded concrete policy")
@@ -401,9 +428,9 @@ if section == nil or section == "controls" then
 	edit("rollover_threshold_pct"); w:answer(" 95 ")
 	check(flow(w.f).policy.rollover_threshold_pct == 95, "whole-number threshold entry saves through the policy command")
 	local displayed = flow(w.f).policy
-	w:click("policy", { policy = { auto_rollover = true, quota_routing = true }, expected = displayed })
+	w:click("policy", { policy = { auto_rollover = true, quota_routing = true }, expected_sha256 = shared.quota.digest(displayed) })
 	check(flow(w.f).policy.auto_rollover and flow(w.f).policy.quota_routing and flow(w.f).policy.poll_ms == 2000, "Config draft save commits only its changed settings")
-	w:click("policy", { policy = { auto_rollover = false }, expected = displayed })
+	w:click("policy", { policy = { auto_rollover = false }, expected_sha256 = shared.quota.digest(displayed) })
 	check(flow(w.f).policy.auto_rollover, "draft displayed before a newer save cannot overwrite it")
 	edit("poll_ms")
 	w:click("pause")
@@ -437,7 +464,7 @@ if section == nil or section == "controls" then
 	local answered
 	for _, candidate in flow(w.f).gates do if candidate.id == gate.id then answered = candidate end end
 	check(answered.answer and answered.answer.choice_id == "safe" and answered.phase == "answered", "actual answer route commits one exact recipient-bound decision before publication")
-	w:click("policy", { field = "poll_ms", expected = flow(w.f).policy }); w:answer(nil)
+	w:click("policy", { field = "poll_ms", expected_sha256 = shared.quota.digest(flow(w.f).policy) }); w:answer(nil)
 	local preserved
 	for _, candidate in flow(w.f).gates do if candidate.id == gate.id then preserved = candidate end end
 	check(preserved.answer and preserved.answer.choice_id == "safe" and preserved.phase == "answered",
@@ -551,14 +578,23 @@ if section == nil or section == "timer" then
 	table.remove(timers, 1)()
 	check(#timers == 1, "host rearmed after missing store and vanished block without inventing authority")
 end
+-- An owner's Finish choice is either sent (the reducer would accept it) or refused with a notice
+-- naming the reason: by the window's pre-check, or by the host refusal the driver reads.
+local function press_finish(w)
+	local before = w:picker()
+	w:click("finish", { worker_id = w.id })
+	if w:picker() ~= before then w:pick({ finish = true }) end
+	for _ = 1, 3 do w:tick() end
+end
+local function noticed(w, text) for _, message in w.notices do if message:find(text, 1, true) then return true end end return false end
 if section == nil or section == "finish" then
 	local held = window_fixture()
 	assert(held.f:apply("intake", { worker_id = held.id, bytes = held.f:report(held.id, 2, "ASK", {
 		question = "Do not abandon this gate", options = runtime.json.array({ { id = "hold", label = "Hold" } }),
 	}) }).ok)
-	held:click("finish", { worker_id = held.id }); held:pick({ finish = true })
-	check(not held:outcome().ok and not held:worker().finish_requested and #flow(held.f).gates == 1,
-		"actual Finish confirmation refuses pending gates without dropping their evidence")
+	press_finish(held)
+	check(not held:worker().finish_requested and #flow(held.f).gates == 1 and noticed(held, "inish"),
+		"actual Finish confirmation refuses pending gates visibly without dropping their evidence")
 	local w = window_fixture()
 	w:click("finish", { worker_id = w.id }); w:pick({ finish = false })
 	check(not w:worker().finish_requested, "cancelled Finish never requests a native stop")
@@ -581,6 +617,61 @@ if section == nil or section == "finish" then
 	assert(w.f:queue(false).ok)
 	check(w.f.authority.registry.dispatch.workers[w.id] == nil, "settled ordinary worker capacity is reclaimed only after retirement")
 end
+-- Final smoke finish-defect: Finish on reattached workers held target_unavailable, or holding
+-- uncertain old effects, sent nothing visible — the refusal was dropped without a notice.
+if section == nil or section == "finish_refusal" then
+	local function uncertain_read(w)
+		local read = w.f:apply("poll", { worker_id = w.id, bytes = "watermark" }); assert(read.ok and read.action_id, read.message)
+		assert(w.f:apply("claim", { action_id = read.action_id, executor = w.f.origin.window_epoch }).ok)
+		local grant = w.f:action(read.action_id).claim
+		assert(w.f:apply("lost", { action_id = read.action_id, executor = grant.executor, grant_id = grant.grant_id }).ok)
+		assert(w.f:action(read.action_id).phase == "uncertain")
+		return read.action_id
+	end
+	local held = window_fixture()
+	uncertain_read(held)
+	local stored = held.f.authority.registry.dispatch.workers[held.id]
+	stored.phase = "held"; stored.reason = { code = "target_unavailable", message = "Native effect outcome uncertain; do not retry" }
+	press_finish(held)
+	check(noticed(held, "target_unavailable") and noticed(held, "Nothing was stopped") and not held:worker().finish_requested,
+		"Finish of a held target_unavailable worker is refused with a notice naming its hold")
+	local busy = window_fixture()
+	local action_id = uncertain_read(busy)
+	press_finish(busy)
+	check(noticed(busy, "unsettled effect " .. action_id) and not busy:worker().finish_requested,
+		"Finish of an accepted worker with an uncertain old effect is refused with a notice naming the effect")
+	-- A refusal only the reducer sees (not in the projection): the driver notices the host's reason.
+	local pending = window_fixture()
+	pending.f.authority.registry.dispatch.workers[pending.id].accept_pending = true
+	local sent = 0
+	press_finish(pending)
+	for _, e in pending.events do if e.command == "finish" then sent += 1 end end
+	check(sent == 1 and not pending:outcome().ok and pending:outcome().code == "workflow_unsettled"
+		and noticed(pending, "Refused finish: Finish cannot discard unresolved effects"),
+		"a host Finish refusal is noticed with the reducer's reason")
+	-- The reducer accepts Finish again after SPAWN's pre-effect retirement refusal: the window sends it.
+	local w = window_fixture()
+	w:click("finish", { worker_id = w.id }); w:pick({ finish = true })
+	assert(w:outcome().ok and w:worker().finish_requested)
+	local worker = w.f.authority.registry.dispatch.workers[w.id]
+	local mark = { version = 1, type = "receipt_watermark", mailbox_handle = worker.mailbox_handle,
+		through_seq = worker.accepted_seq, receipt_chain_sha256 = worker.receipt_chain }
+	for _, key in { "logical_session_id", "worker_id", "worker_generation", "launch_request_id", "work_id", "enrolment_token" } do mark[key] = worker[key] end
+	local read = w.f:apply("poll", { worker_id = w.id, bytes = "watermark" }); assert(read.ok)
+	local page = assert(shared.codec.project_page(runtime.json.encode(mark), w.f:action(read.action_id).request.selector))
+	assert(w.f:finish(read.action_id, "complete", runtime.json.decode(page)).ok)
+	local stop = w.f:apply("poll", { worker_id = w.id }); local request = w.f:action(stop.action_id).request
+	assert(w.f:finish(stop.action_id, "stopped", { pane_binding = request.pane_binding, observation = "exited" }).ok)
+	local retire = w.f:apply("poll", { worker_id = w.id }); assert(w.f:action(retire.action_id).request.op == "mailbox_retire")
+	assert(w.f:apply("claim", { action_id = retire.action_id, executor = w.f.origin.window_epoch }).ok)
+	assert(w.f:apply("result", { action_id = retire.action_id, executor = w.f.origin.window_epoch, grant_id = w.f:action(retire.action_id).claim.grant_id,
+		response_bytes = shared.frame(w.f:action(retire.action_id).request, "rejected", nil, { code = "producer_unsettled", message = "The stopped producer journal is not settled; nothing was retired" }) }).code == "retirement_refused")
+	w:click("finish", { worker_id = w.id })
+	local picker = w:picker()
+	check(picker and picker.items[2].label == "Retry mailbox retirement once", "a refused retirement offers the owner one Finish retry")
+	w:pick({ finish = true })
+	check(w:outcome().ok and w:outcome().code == "retirement_rearmed", "the window sends the Finish retry the reducer accepts")
+end
 if section == nil or section == "continuation" then
 	local w = window_fixture()
 	w:select_worker(w.id) -- Keep the original recipient selected when another worker is added.
@@ -589,7 +680,7 @@ if section == nil or section == "continuation" then
 	}) }).ok)
 	local old_api, old_origin = w.api, clone(w.f.origin)
 	local old_worker = clone(w:worker())
-	w:click("policy", { field = "poll_ms", expected = flow(w.f).policy }) -- Keep its old callback to prove a delayed old-VM editor cannot save.
+	w:click("policy", { field = "poll_ms", expected_sha256 = shared.quota.digest(flow(w.f).policy) }) -- Keep its old callback to prove a delayed old-VM editor cannot save.
 	w:reload()
 	w:palette("continue_controller"); w:pick({ continue_controller = false })
 	check(#w.events == 0, "cancelled controller continuation changes no origin")
@@ -661,7 +752,7 @@ if section == nil or section == "held_report" then
 	local f, id = w.f, w.id
 	local outcome = f:read_report(id, f:report(id, 2, "DONE", { checkpoint_id = "absent", artifact_revision = "rev", summary = "Invalid checkpoint reference" }))
 	assert(outcome.code == "report_rejected" and f.authority.registry.dispatch.workers[id].rejected_report ~= nil, "fixture must hold a rejected report")
-	w:click("policy", { policy = { automatic_reports = true }, expected = flow(f).policy })
+	w:click("policy", { policy = { automatic_reports = true }, expected_sha256 = shared.quota.digest(flow(f).policy) })
 	assert(flow(f).policy.automatic_reports, "fixture must enable automatic progress requests")
 	local function sent(command) local n = 0; for _, event in w.events do if event.command == command then n += 1 end end; return n end
 	local actions = 0
@@ -744,6 +835,140 @@ if section == nil or section == "readable_views" then
 		check(all ~= "" and all:find("%f[%a]null%f[%A]") == nil and all:find("%f[%a]nil%f[%A]") == nil, case[3] .. " never renders raw null/nil")
 		if case[1] then check(all:find("Last sweep: none yet.", 1, true) ~= nil, "Config shows a readable empty sweep history") end
 	end
+end
+-- CP2 live smoke: host-consumed gates are answered by the chosen option alone; the worker gate list
+-- shows open questions first in numeric order; continuation is offered only where it is needed.
+if section == nil or section == "cp2_controls" then
+	for _, kind in { "quota_fallback", "loop_cap", "stale_claim", "shared_checkout", "file_overlap", "scope", "reviewer_unavailable", "family_unknown", "legacy_grant_outstanding" } do
+		check(dispatch.HOST_GATES[kind] == true, kind .. " is a host-consumed gate kind the window answers by choice alone")
+	end
+	local w = window_fixture()
+	assert(w.f:apply("policy", { policy = { checkout_roots = runtime.json.array({ "/fixture" }) } }).ok)
+	local gated = w.f:queue(false)
+	assert(gated.ok and gated.code == "task_gated", gated.message)
+	local gate
+	for _, candidate in flow(w.f).gates do if candidate.worker_id == gated.worker_id and candidate.kind == "shared_checkout" then gate = candidate end end
+	assert(gate, "queue-time shared_checkout gate")
+	w:select_worker(gated.worker_id)
+	w:click("answer", { gate_id = gate.id, gate_revision = gate.revision, worker_id = gate.worker_id })
+	local picker = assert(w:picker())
+	check(picker.placeholder == gate.question, "the shared_checkout answer picker presents the exact question")
+	w:pick({ choice_id = "launch_anyway", label = "Launch anyway" })
+	check(w:editor() == nil, "a host-consumed shared_checkout answer opens no free-text prompt")
+	local sent = w.events[#w.events]
+	check(sent.command == "answer" and sent.choice_id == "launch_anyway" and sent.answer == "Launch anyway" and w:outcome().code == "launch_released",
+		"the chosen option alone is the committed answer and releases the held launch")
+	local views = shared.load("views")
+	local function texts(node, out)
+		if type(node) ~= "table" then return out end
+		if type(node.p) == "table" and type(node.p.role) == "string" and node.p.role:sub(1, 9) == "orchplus." then return out end
+		for key, value in node do
+			if type(value) == "string" then
+				if key == "t" or key == "text" or key == "label" or type(key) == "number" then table.insert(out, value) end
+			elseif key ~= "actions" then texts(value, out) end
+		end
+		return out
+	end
+	local function render(f, worker_id, mutate)
+		local projection = state.project(f.authority.registry)
+		projection.dispatch = dispatch.project(f.authority.registry, f.origin.logical_session_id, f.origin.alias_nonce)
+		if mutate then mutate(projection.dispatch.workflow) end
+		return table.concat(texts(views.render({ pane = 42, alias_nonce = f.origin.alias_nonce, orch_session_id = f.origin.logical_session_id, action_serial = 0,
+			workflow_worker = worker_id }, projection, "ready"), {}), "\n")
+	end
+	-- Gate order: gate-7/8 settled, gate-9/10 pending. Open first, numeric order (not "gate-10" < "gate-7").
+	local owner = w:worker()
+	local all = render(w.f, w.id, function(workflow)
+		for index = #workflow.gates, 1, -1 do if workflow.gates[index].worker_id == w.id then table.remove(workflow.gates, index) end end
+		for _, row in { { 7, "resolved" }, { 8, "superseded" }, { 9, "pending" }, { 10, "pending" } } do
+			table.insert(workflow.gates, { id = "gate-" .. row[1], revision = 1, worker_id = w.id, worker_generation = owner.worker_generation, work_id = owner.work_id,
+				kind = "shared_checkout", phase = row[2], question = "Fixture question " .. row[1], options = { { id = "acknowledge", label = "Understood" } }, evidence = {} })
+		end
+		table.sort(workflow.gates, function(a, b) return a.id < b.id end)
+	end)
+	local nine, ten = all:find("gate-9 / revision 1", 1, true), all:find("gate-10 / revision 1", 1, true)
+	check(nine ~= nil and ten ~= nil and nine < ten and all:find("gate-7 / revision", 1, true) == nil and all:find("gate-8 / revision", 1, true) == nil,
+		"the first gate page shows the pending gates, oldest first by number, before settled ones")
+	-- Continuation is offered only for a generation launched before a reload.
+	local CONTINUE = "Continue after reload / reattach explicitly…"
+	check(render(w.f, w.id):find(CONTINUE, 1, true) == nil, "a freshly launched worker offers no continuation")
+	check(render(w.f, gated.worker_id):find(CONTINUE, 1, true) == nil, "never-launched work offers no continuation")
+	w:reload(); w:palette("continue_controller"); w:pick({ continue_controller = true }); assert(w:outcome().ok)
+	w.f.origin = clone(w.events[#w.events].origin)
+	check(render(w.f, w.id):find(CONTINUE, 1, true) ~= nil, "a worker launched before the reload offers explicit continuation")
+	-- CP2 live smoke stall: a worker's backpressured action waited ~10 min while the source's command
+	-- driver held another lane. Its code-only recheck needs only its own lane free.
+	local r = window_fixture()
+	local read = r.f:apply("poll", { worker_id = r.id }); assert(read.ok and read.action_id, read.message)
+	check(r.f:finish(read.action_id, "full", { resource = "capacity_admission", current = 1, limit = 1, retryable = true, effect_started = false }).code == "backpressure",
+		"SPAWN's capacity_admission refusal backpressures the worker's read")
+	local cat = r.f:apply("catalog"); assert(cat.ok and cat.action_id, cat.message)
+	assert(r.f:apply("claim", { action_id = cat.action_id, executor = r.f.origin.window_epoch }).ok)
+	local held = r.f:action(cat.action_id)
+	assert(r.f:apply("lost", { action_id = cat.action_id, executor = held.claim.executor, grant_id = held.claim.grant_id }).ok)
+	r:bridge({ schema = 1, op = "catalog", request_id = held.request.request_id, action_id = cat.action_id, origin_binding = held.request.origin_binding,
+		controller_generation = held.request.controller_generation, status = "pending", payload = {} })
+	r:click("reconcile", { action_id = cat.action_id }) -- The owner's read holds the source's command driver (catalog lane).
+	local retried = nil
+	for tick = 1, 30 do
+		r:tick()
+		for _, e in r.events do if e.command == "retry" and e.action_id == read.action_id then retried = retried or tick end end
+		if retried then break end
+	end
+	check(retried ~= nil and r.f:action(cat.action_id).phase == "uncertain",
+		"the worker's capacity recheck is sent after its backoff while the command driver still holds the catalog read")
+end
+-- Checkpoint 7 (D17): the selected worker's health card shows the account USAGE delta row from the
+-- projected usage_before/usage_after/usage_shared_with — pending, a delta, or "not comparable".
+if section == nil or section == "usage_row" then
+	local f = shared.fixture(function() return { now_ms = 1700000000000, mono_ms = 1000, epoch = "usage-host" } end)
+	local id = f:accepted(false)
+	local views = shared.load("views")
+	local NOW = 1700000000000
+	local function reading(at, five, opts)
+		opts = opts or {}
+		return { account = { canonical_ids = opts.ids or { "claude:native" }, generation = opts.generation or 2 }, observed_at_ms = at,
+			windows = { { key = "five_hour", pool = "default", remaining = five, observed_at_ms = at, resets_at_ms = opts.reset or NOW + 3600000 } } }
+	end
+	local function card(patch)
+		local w = f.authority.registry.dispatch.workers[id]
+		w.usage_before, w.usage_after = patch.before, patch.after
+		local projection = state.project(f.authority.registry)
+		projection.dispatch = dispatch.project(f.authority.registry, f.origin.logical_session_id, f.origin.alias_nonce)
+		if patch.shared ~= nil then for _, pw in projection.dispatch.workflow.workers do if pw.worker_id == id then pw.usage_shared_with = patch.shared end end end
+		local out = {}
+		local function walk(node)
+			if type(node) ~= "table" then return end
+			for key, value in node do
+				if type(value) == "string" and (key == "t" or key == "text" or type(key) == "number") then table.insert(out, value) elseif key ~= "actions" then walk(value) end
+			end
+		end
+		walk(views.render({ pane = 42, alias_nonce = f.origin.alias_nonce, orch_session_id = f.origin.logical_session_id, action_serial = 0, workflow_worker = id, config_open = false },
+			projection, "ready"))
+		return table.concat(out, "\n")
+	end
+	local function has(all, text) return all:find(text, 1, true) ~= nil end
+	local projected
+	card({ before = reading(NOW, 70) })
+	for _, pw in dispatch.project(f.authority.registry, f.origin.logical_session_id, f.origin.alias_nonce).workflow.workers do if pw.worker_id == id then projected = pw end end
+	check(projected and projected.usage_before and projected.usage_before.observed_at_ms == NOW and projected.usage_after == nil and type(projected.usage_shared_with) == "number",
+		"the projection carries usage_before, no usage_after while running, and an integer usage_shared_with")
+	local none = card({})
+	check(not has(none, "Account delta while this worker ran"), "no usage_before → no usage row")
+	local pending = card({ before = reading(NOW, 70), shared = 0 })
+	check(has(pending, "Account delta while this worker ran") and has(pending, "pending until the worker finishes") and has(pending, "account-wide, not this worker's exact use"),
+		"running worker: the row says pending and account-wide")
+	local delta = card({ before = reading(NOW, 70), after = reading(NOW + 60000, 55), shared = 2 })
+	check(has(delta, "five_hour|default: +15 pts used") and has(delta, "shared with 2 other workers on this account"), "comparable: delta in points, shared with N others")
+	local one = card({ before = reading(NOW, 70), after = reading(NOW + 60000, 55), shared = 1 })
+	check(has(one, "shared with 1 other worker on this account"), "one other worker is singular")
+	local crossed = card({ before = reading(NOW, 70), after = reading(NOW + 60000, 95, { reset = NOW + 7200000 }), shared = 0 })
+	check(has(crossed, "not comparable (a quota reset happened in between)") and not has(crossed, "pts used"), "reset crossed: not comparable with the reason")
+	local other = card({ before = reading(NOW, 70), after = reading(NOW + 60000, 55, { ids = { "claude:other" } }) })
+	check(has(other, "not comparable (the readings are from different accounts)"), "different account: not comparable with the reason")
+	local stale = card({ before = reading(NOW, 70), after = reading(NOW, 55) })
+	check(has(stale, "not comparable (a reading is stale or missing)"), "stale after-reading: not comparable with the reason")
+	for _, all in { pending, delta, crossed } do check(all:find("%f[%a]nil%f[%A]") == nil and all:find("%f[%a]null%f[%A]") == nil, "the usage row never renders raw nil/null") end
 end
 if section == nil or section == "guided_recovery" then
 	local w = window_fixture()
@@ -1431,5 +1656,441 @@ if section == nil or section == "withdraw_fenced" then
 			.. " reason=" .. tostring(retired_worker and retired_worker.reason and retired_worker.reason.code))
 	assert(f:queue(false).ok)
 	check(f.authority.registry.dispatch.workers[wid] == nil, "the retired never-launched worker is reclaimed")
+end
+-- Config v4 cards (CP1): every new card renders; outside the admitted controller each is read-only
+-- with the reason first, checkboxes disabled and no step buttons or field links.
+if section == nil or section == "config_cards" then
+	local f = shared.fixture(function() return { now_ms = 1700000000000, mono_ms = 1000, epoch = "cards-host" } end)
+	local views = shared.load("views")
+	local function render(nonce, policy_patch)
+		local projection = state.project(f.authority.registry)
+		projection.dispatch = dispatch.project(f.authority.registry, f.origin.logical_session_id, f.origin.alias_nonce)
+		for k, v in policy_patch or {} do projection.dispatch.workflow.policy[k] = v end
+		return views.render({ pane = 42, alias_nonce = nonce, orch_session_id = f.origin.logical_session_id, action_serial = 0, config_open = true }, projection, "ready")
+	end
+	local function texts(node, out)
+		if type(node) ~= "table" then return out end
+		if type(node.p) == "table" and type(node.p.role) == "string" and node.p.role:sub(1, 9) == "orchplus." then return out end
+		for key, value in node do
+			if type(value) == "string" then
+				if key == "t" or key == "text" or key == "label" or key == "title" or type(key) == "number" then table.insert(out, value) end
+			elseif key ~= "actions" then texts(value, out) end
+		end
+		return out
+	end
+	-- The card is the smallest subtree that names the title and holds more than the title itself.
+	local function card(node, title)
+		if type(node) ~= "table" then return nil end
+		for _, child in node.c or {} do local found = card(child, title); if found then return found end end
+		local all = texts(node, {})
+		if #all > 1 and table.find(all, title) then return node end
+		return nil
+	end
+	-- Nodes are { p = props, c = children }; each node's props are visited exactly once.
+	local function walk(node, visit)
+		if type(node) ~= "table" then return end
+		if type(node.p) == "table" then visit(node.p) end
+		for _, child in node.c or {} do walk(child, visit) end
+	end
+	local function controls(node)
+		local out = { checkboxes = 0, disabled = 0, buttons = 0 }
+		walk(node, function(p)
+			if p.type == "checkbox" then out.checkboxes += 1; if p.disabled == true then out.disabled += 1 end end
+			if type(p.actions) == "table" and p.actions.click then out.buttons += 1 end
+		end)
+		return out
+	end
+	local titles = { "Loops", "Review & proof", "Release", "Checkouts", "Autonomy", "Work sources", "Routing", "Role guidance", "Templates" }
+	local admitted, foreign = render(f.origin.alias_nonce), render("someone-else-nonce")
+	for _, title in titles do
+		local own, other = card(admitted, title), card(foreign, title)
+		check(own ~= nil and other ~= nil, "Config renders the " .. title .. " card for the controller and for other views")
+		local own_text, other_text = texts(own, {}), texts(other, {})
+		local function first_row(list) for _, t in list do if t ~= title then return t end end return "" end
+		check(first_row(other_text):sub(1, 11) == "Read-only: " and first_row(other_text):find("not the session's controller", 1, true) ~= nil,
+			title .. " card outside the controller starts with the read-only reason")
+		check(first_row(own_text):sub(1, 11) ~= "Read-only: ", title .. " card in the admitted controller is not marked read-only")
+		local mine, theirs = controls(own), controls(other)
+		check(theirs.buttons == 0 and theirs.disabled == theirs.checkboxes, title .. " card outside the controller has no buttons and only disabled checkboxes")
+		check(mine.buttons > 0 or (mine.checkboxes > 0 and mine.disabled == 0), title .. " card in the controller offers its editing controls")
+	end
+	local function joined(node) return table.concat(texts(node, {}), "\n") end
+	local review = joined(card(admitted, "Review & proof"))
+	check(review:find("Enforce cross-family review — a green review from a different provider family is the landing proof; off: checks run by the SPAWN helper are the proof", 1, true) ~= nil,
+		"Review & proof labels the cross-family switch with both proof rules")
+	check(joined(card(admitted, "Role guidance")):find("guidance only — restrict tools in the SPAWN record's own CLI flags", 1, true) ~= nil,
+		"Role guidance says it does not restrict tools")
+	local loops = joined(card(admitted, "Loops"))
+	local loop_lines = texts(card(admitted, "Loops"), {})
+	check(table.find(loop_lines, "Loop cap: 3 attempts per loop (1–10)") ~= nil and table.find(loop_lines, "Review rounds: 2 per piece of work (1–2)") ~= nil
+		and table.find(loop_lines, "Stale-claim alert after: 30 minutes (0 = off; 0–1440)") ~= nil, "Loops card shows the saved loop_cap, review_rounds and stale_claim_min defaults")
+	local changed = texts(card(render(f.origin.alias_nonce, { loop_cap = 7, stale_claim_min = 0 }), "Loops"), {})
+	check(table.find(changed, "Loop cap: 7 attempts per loop (1–10)") ~= nil and table.find(changed, "Stale-claim alert after: 0 minutes (0 = off; 0–1440)") ~= nil
+		and table.find(changed, "Loop cap: 3 attempts per loop (1–10)") == nil, "Loops card renders the saved values, not fixed text")
+	check(loops ~= "", "Loops card has readable text")
+	local radios = 0
+	walk(card(admitted, "Work sources"), function(p) if type(p.name) == "string" and p.name:sub(1, 12) == "work_source:" then radios += 1 end end)
+	check(radios == 2, "default work source choices render while Glitch integration is on")
+	radios = 0
+	walk(card(render(f.origin.alias_nonce, { glitch_integration = false }), "Work sources"), function(p) if type(p.name) == "string" and p.name:sub(1, 12) == "work_source:" then radios += 1 end end)
+	check(radios == 0, "default work source choices are hidden while Glitch integration is off")
+	local approvals = 0
+	walk(card(admitted, "Autonomy"), function(p) if type(p.name) == "string" and p.name:sub(1, 8) == "approve:" then approvals += 1 end end)
+	check(approvals == 4, "Autonomy offers exactly the four auto-approve kinds")
+end
+-- Checkpoint 6 (D10): the Start work… picker. Glitch off → board flow directly, no picker;
+-- otherwise the Config default work source is first and marked "(Recommended)".
+if section == nil or section == "work_picker" then
+	local function set(w, patch) local saved = w.f:apply("policy", { policy = patch }); assert(saved.ok, saved.message) end
+	local w = window_fixture()
+	set(w, { glitch_integration = false, board_path = "" })
+	local before = w:picker()
+	w:click("start_work")
+	check(w:picker() == before and #w.board_opened == 0, "Glitch off without a board file: no picker opens and nothing is started")
+	check(w.notices[#w.notices]:find("Set the Board file", 1, true) ~= nil, "the owner is told to set the board file")
+	set(w, { glitch_integration = false, board_path = "/tmp/fixture-board.tern" })
+	w:click("start_work")
+	check(w:picker() == before, "Glitch off: Start work never opens the source picker")
+	check(#w.board_opened == 1 and w.board_opened[1] == "/tmp/fixture-board.tern", "Glitch off: Start work goes straight to the board flow and opens the Config board")
+	for _, default in { "glitch_plan", "board" } do
+		set(w, { glitch_integration = true, default_work_source = default })
+		w:click("start_work")
+		local picker = assert(w:picker())
+		check(picker ~= before and #picker.items == 2, "Glitch on (" .. default .. "): the native picker offers both sources")
+		local first, second = picker.items[1], picker.items[2]
+		check(first.source == (if default == "board" then "board" else "plan") and first.label:find("(Recommended)", 1, true) ~= nil,
+			"default " .. default .. ": its option is first and marked (Recommended)")
+		check(second.label:find("Recommended", 1, true) == nil, "default " .. default .. ": the other option is not marked")
+		before = picker
+	end
+	-- The plan option prompts for a path the execution host reads; the window sends only the path.
+	set(w, { glitch_integration = true, default_work_source = "glitch_plan" })
+	w:click("start_work")
+	local items = w:picker().items
+	w:pick(items[1])
+	check(w:editor() ~= nil, "the plan option prompts for the plan path")
+	local sent = #w.events
+	w:answer("relative/plan.md")
+	check(#w.events == sent, "a relative plan path is refused in the window; nothing is sent")
+	w:click("start_work"); w:pick(w:picker().items[1])
+	w:answer("/tmp/orch-cp6d-absent/plan.md")
+	local last = w.events[#w.events]
+	check(#w.events == sent + 1 and last.command == "plan_import" and last.path == "/tmp/orch-cp6d-absent/plan.md" and last.bytes == nil,
+		"an absolute path is sent as plan_import {path}; plan bytes never cross the bridge")
+end
+
+-- Checkpoint 6 (D12, Contract K): the window's inbox poller archives a file only after its intake
+-- is accepted; a window restart before the archive re-scans and archives without a second intake.
+if section == nil or section == "inbox_window" then
+	local w = window_fixture()
+	local dir = "/tmp/orch-cp6d-" .. shared.codec.sha256(tostring(os.clock()) .. ":" .. tostring(math.random())):sub(1, 16)
+	runtime.fs.mkdir(dir)
+	local saved = w.f:apply("policy", { policy = { inbox_folder = dir, auto_launch_intake = true, poll_ms = 1000,
+		routes = runtime.json.array({ { class = "build", record_id = "native" } }) } })
+	assert(saved.ok, saved.message)
+	local body = "**CLASS**: build\n\nImplement the inbox window fixture.\n"
+	runtime.fs.write(dir .. "/task.md", body)
+	local id = shared.quota.digest({ kind = "inbox", path = dir .. "/task.md", sha256 = shared.codec.sha256(body) })
+	local function intakes() local n, last = 0, nil; for _, e in w.events do if e.command == "inbox_intake" then n += 1; last = e end end; return n, last end
+	for _ = 1, 8 do if intakes() > 0 then break end; w:tick() end
+	local count, sent = intakes()
+	check(count == 1 and sent.name == "task.md" and sent.content_sha256 == shared.codec.sha256(body), "the poller sends one inbox_intake {name, content_sha256}")
+	local rec = w.f.authority.registry.dispatch.intakes[id]
+	check(rec and rec.state == "accepted", "the host accepted the intake under the window's intake_id")
+	check(runtime.fs.exists(dir .. "/task.md"), "the file is not archived in the tick that sent the intake")
+	-- Window restart before the archive: in-memory poller state is lost.
+	w:reload()
+	local taken = dir .. "/.orchplus-taken/" .. id .. "-task.md"
+	for _ = 1, 12 do if runtime.fs.exists(taken) then break end; w:tick() end
+	check(runtime.fs.exists(taken) and runtime.fs.read(taken, 65536) == body and not runtime.fs.exists(dir .. "/task.md"),
+		"after a restart the re-scan archives the accepted file to .orchplus-taken/<intake_id>-<name>")
+	check(intakes() == 1, "the restarted window archives without re-intake")
+	-- Other way: a received (not accepted) intake is never archived.
+	local g = window_fixture()
+	local dir2 = dir .. "-held"; runtime.fs.mkdir(dir2)
+	assert(g.f:apply("policy", { policy = { inbox_folder = dir2, auto_launch_intake = true, poll_ms = 1000, routes = runtime.json.array() } }).ok)
+	runtime.fs.write(dir2 .. "/task.md", body)
+	for _ = 1, 12 do g:tick() end
+	local held = g.f.authority.registry.dispatch.intakes[shared.quota.digest({ kind = "inbox", path = dir2 .. "/task.md", sha256 = shared.codec.sha256(body) })]
+	check(held and held.state == "received" and runtime.fs.exists(dir2 .. "/task.md") and not runtime.fs.exists(dir2 .. "/.orchplus-taken"),
+		"an intake that is only received (no route) leaves the file in the inbox")
+end
+-- Strings of a rendered view tree, in order (machine nodes included; callers match by prefix).
+local function strings(node, out)
+	if type(node) ~= "table" then return out end
+	for key, value in node do
+		if type(value) == "string" then table.insert(out, value) elseif key ~= "actions" then strings(value, out) end
+	end
+	return out
+end
+local function render_view(f, extra)
+	local projection = state.project(f.authority.registry)
+	projection.dispatch = dispatch.project(f.authority.registry, f.origin.logical_session_id, f.origin.alias_nonce)
+	local view = { pane = 42, alias_nonce = f.origin.alias_nonce, orch_session_id = f.origin.logical_session_id, action_serial = 0 }
+	for key, value in extra or {} do view[key] = value end
+	return view, projection
+end
+-- 8C (D16): a saved template starts from Start work… → From a template, and from its Config →
+-- Templates "Start…" row; the window sends template_start {template_id, input}.
+if section == nil or section == "template_start" then
+	local w = window_fixture()
+	local saved = w.f:apply("policy", { policy = { routes = runtime.json.array({ { class = "build", record_id = "native" } }),
+		templates = runtime.json.array({ { id = "draft", title = "Draft notes", prompt = "Draft from {input}.", output = "out/draft.md", next = "", class = "build" } }) } })
+	assert(saved.ok, saved.message)
+	w:click("start_work")
+	local items = assert(w:picker()).items
+	check(#items == 3 and items[3].source == "template" and items[3].label == "From a template" and items[1].label:find("(Recommended)", 1, true) ~= nil,
+		"with a saved template, Start work offers From a template after the two work sources")
+	w:pick(items[3])
+	local list = w:picker().items
+	check(#list == 1 and list[1].template_id == "draft" and list[1].label:find("Draft notes", 1, true) ~= nil, "From a template lists the saved policy.templates")
+	w:pick(list[1])
+	check(w:editor() ~= nil and w:editor().placeholder:find("{input}", 1, true) ~= nil, "picking a template prompts for its {input}")
+	local sent = #w.events
+	w:answer("   ")
+	check(#w.events == sent, "a blank template input is refused in the window; nothing is sent")
+	-- Config → Templates "Start…" names the template: the window prompts for the input directly.
+	local views = shared.load("views")
+	local function starts(nonce)
+		local view, projection = render_view(w.f, { alias_nonce = nonce, config_open = true })
+		views.render(view, projection, "ready")
+		local out = {}
+		for _, entry in view.actions do
+			if entry.kind == "operator-intent" and entry.request.command == "start_work" and entry.request.template_id then table.insert(out, entry.request.template_id) end
+		end
+		return out
+	end
+	local row = starts(w.f.origin.alias_nonce)
+	check(#row == 1 and row[1] == "draft", "Config → Templates offers Start… for each saved template")
+	check(#starts("someone-else-nonce") == 0, "Start… is not offered outside the admitted controller")
+	w:click("start_work", { template_id = row[1] })
+	w:answer("notes/brief.md")
+	local last = w.events[#w.events]
+	check(#w.events == sent + 1 and last.command == "template_start" and last.template_id == "draft" and last.input == "notes/brief.md",
+		"the input is sent as template_start {template_id, input}")
+	local chains = w.f.authority.registry.dispatch.chains
+	check(chains ~= nil and next(chains) ~= nil, "the host starts the template chain")
+	w:click("start_work", { template_id = "gone" })
+	check(#w.events == sent + 1 and w.notices[#w.notices]:find("not saved", 1, true) ~= nil, "a template no longer saved is refused in the window; nothing is sent")
+end
+-- 8C (D5): Config record pickers list only records that can hold the role.
+if section == nil or section == "role_pickers" then
+	local w = window_fixture()
+	local records = {}
+	for _, row in { { "native", false, true }, { "release", true, true }, { "reviewer", true, true }, { "spare", true, false } } do
+		local caps = { "report-files-v1", "native-ask-v1" }
+		if row[2] then table.insert(caps, "release-manager-v1") end
+		table.insert(records, { id = row[1], revision = 0, provider = "omp", account_label = "configured, not verified", backend = "native-agent", enabled = true, eligible = row[3],
+			capability_evidence = "configured_operator_attestation_not_runtime_proof", effective_identity = { provider = "omp", evidence = "configured" },
+			capabilities = runtime.json.array(caps), unsupported = runtime.json.array(), cwd = "/fixture", placement = "split" })
+	end
+	local r = w.f:apply("catalog"); assert(r.ok, r.message)
+	assert(w.f:finish(r.action_id, "catalog", { namespace = "fixture-spawn", host_key = "fixture-host", config_revision = 0, revision = 0, records = runtime.json.array(records) }).ok)
+	assert(w.f:apply("policy", { policy = { reviewer_records = runtime.json.array({ "reviewer" }) } }).ok)
+	local function offered(field)
+		w:click("policy", { field = field, expected_sha256 = shared.quota.digest(flow(w.f).policy) })
+		local out = {}
+		for _, item in assert(w:picker()).items do if type(item.value) == "string" and item.value ~= "" then table.insert(out, item.value) end end
+		table.sort(out)
+		return table.concat(out, ",")
+	end
+	check(offered("release_manager_record") == "release", "the release-manager picker lists only eligible release-manager-v1 records that are not reviewer records")
+	check(offered("labeller_record") == "native,release,reviewer", "the labeller picker lists every eligible, enabled record and no ineligible one")
+	assert(w.f:apply("policy", { policy = { release_manager_record = "release" } }).ok)
+	check(offered("reviewer_records") == "native", "the reviewer picker lists only eligible records that are neither listed reviewers nor the release manager")
+end
+-- 8C (CP4 smoke): a landing row never says "owner approved" once a refresh voided the approval.
+if section == nil or section == "landing_row" then
+	local f = shared.fixture(function() return { now_ms = 1700000000000, mono_ms = 1000, epoch = "landing-row" } end)
+	local views = shared.load("views")
+	local function row(patch)
+		local view, projection = render_view(f)
+		local item = { id = "landing-1", revision = 1, status = "blocked", position = 1, work_id = "work-1", worker_id = "worker-1", gate_id = "gate-1", approved = true,
+			refresh_required = false, request = { source_ref = "refs/heads/work", source_revision = string.rep("a", 40), target_revision = string.rep("b", 40) } }
+		for key, value in patch do item[key] = value end
+		projection.dispatch.workflow.landing = { { id = "queue-1", repo_ref = "/repo", target_ref = "refs/heads/main", project_id = "p", items = { item } } }
+		for _, text in strings(views.render(view, projection, "ready"), {}) do if text:sub(1, 13) == "#1 landing-1 " then return text end end
+		error("landing row missing")
+	end
+	local held = { code = "refresh_required", message = "The previous grant was released without landing." }
+	local smoke = row({ refresh_required = true, hold = held })
+	check(smoke:find("owner approved", 1, true) == nil and smoke:find("approval void — awaiting fresh review/request", 1, true) ~= nil,
+		"refresh_required with a retained approval shows the approval as void, not owner approved")
+	check(row({ refresh_required = true, approved = false, hold = held }):find("approval void — awaiting fresh review/request", 1, true) ~= nil,
+		"refresh_required without an approval says a fresh review and request are awaited")
+	check(row({ hold = { code = "target_moved", message = "Target moved." } }):find("approval void", 1, true) ~= nil, "target_moved voids the shown approval too")
+	check(row({ status = "ready" }):find("owner approved", 1, true) ~= nil, "an approved item without a refresh still says owner approved")
+end
+-- 8C (item 9): a coordinator proposal ORCH+ refused itself (sent before its checkpoint) reads as
+-- ORCH+'s refusal, never as an owner answer.
+if section == nil or section == "gate_refusal" then
+	local f = shared.fixture(function() return { now_ms = 1700000000000, mono_ms = 1000, epoch = "gate-refusal" } end)
+	local id = f:accepted(true)
+	local views = shared.load("views")
+	local function rendered(answer)
+		local view, projection = render_view(f)
+		local w = projection.dispatch.workflow.workers[1]
+		projection.dispatch.workflow.gates = { { id = "gate-9", revision = 2, worker_id = id, worker_generation = w.worker_generation, work_id = w.work_id, kind = "coordinator_proposal",
+			phase = "answered", question = "Dispatch 2A?", options = { { id = "approve", label = "Approve" }, { id = "reject", label = "Reject" } }, answer = answer } }
+		return table.concat(strings(views.render(view, projection, "ready"), {}), "\n")
+	end
+	local text = rendered({ choice_id = "reject", answer = "Checkpoint 2 has not started; proposal refused.", source = { kind = "refusal", code = "scope_mismatch" } })
+	check(text:find("Refused by ORCH+ (scope_mismatch), not an owner answer: Checkpoint 2 has not started; proposal refused.", 1, true) ~= nil
+		and text:find("Owner answer:", 1, true) == nil, "an ORCH+ refusal is shown as ORCH+'s, with its code and reason, never as an owner answer")
+	check(rendered({ choice_id = "approve", source = { kind = "owner" } }):find("Owner answer:", 1, true) ~= nil, "an owner answer still reads as the owner's")
+end
+-- 8C (D10): imported plans render on the controller surface: title, revision, checkpoints and
+-- tasks with states and flags, eight rows per page.
+if section == nil or section == "plans_view" then
+	local f = shared.fixture(function() return { now_ms = 1700000000000, mono_ms = 1000, epoch = "plans-view" } end)
+	f:catalog(0)
+	local path = "/tmp/orch-8c-plan-" .. shared.codec.sha256(tostring(os.clock()) .. ":" .. tostring(math.random())):sub(1, 16) .. ".md"
+	runtime.fs.write(path, runtime.fs.read(root .. "/tests/fixtures/plan-modern.md", 1048576))
+	local imported = f:apply("plan_import", { path = path }); assert(imported.ok, imported.message)
+	local views = shared.load("views")
+	local function page(n)
+		local view, projection = render_view(f, { workflow_plans = if n then { [imported.plan_id] = n } else nil })
+		return strings(views.render(view, projection, "ready"), {}), view, projection.dispatch.workflow.plans[1]
+	end
+	local shown, view, plan = page(nil)
+	check(table.find(shown, "Imported plan · " .. plan.title) ~= nil, "each imported plan renders a card titled with the plan title")
+	local header = plan.plan_id .. " · revision " .. plan.plan_revision:sub(1, 12) .. " · " .. plan.status .. " · " .. path
+	local found = false
+	for _, text in shown do if text:sub(1, #header) == header then found = true end end
+	check(found, "the plan card names the plan, its short revision, status and path")
+	local expected, total = {}, 0
+	for _, cp in plan.checkpoints do
+		total += 1; table.insert(expected, { prefix = "Checkpoint " .. tostring(cp.n) .. " — " .. cp.title, flags = cp.flags })
+		for _, t in cp.tasks do total += 1; table.insert(expected, { prefix = "Task " .. t.id .. " — " .. t.title .. " · " .. t.state, flags = t.flags }) end
+	end
+	check(total > 8, "the fixture plan needs more than one page")
+	local next_page
+	for _, entry in view.actions do if entry.kind == "workflow-page" and entry.name == "plan " .. plan.plan_id then next_page = entry end end
+	check(next_page ~= nil and next_page.page == 1, "a plan longer than one page offers its next page")
+	local seen, flagged = 0, 0
+	for p = 0, math.ceil(total / 8) - 1 do
+		local rows = page(p)
+		local on_page = 0
+		for index = p * 8 + 1, math.min(total, p * 8 + 8) do
+			local want = expected[index]
+			for _, text in rows do
+				if text:sub(1, #want.prefix) == want.prefix then
+					on_page += 1
+					if #want.flags > 0 then
+						check(text:find("flags " .. table.concat(want.flags, ", "), 1, true) ~= nil, "a flagged row shows its parser flags: " .. want.prefix); flagged += 1
+					end
+					break
+				end
+			end
+		end
+		check(on_page == math.min(8, total - p * 8), "page " .. tostring(p + 1) .. " shows its checkpoint and task rows in plan order")
+		seen += on_page
+	end
+	check(seen == total and flagged > 0, "every checkpoint and task row renders exactly on its page, flags included")
+	runtime.fs.remove(path)
+end
+-- Tern does not wake an untouched window for a due tern.timer, but a finished child process does.
+-- The idle-wake helper keeps one short argv-only wait child in flight only while this window
+-- drives a live controller with timed work, and that controller's Health card shows it.
+if section == nil or section == "idle_wake" then
+	local OK = { status = 0, stdout = "", stderr = "", timed_out = false }
+	local function finish(w, outcome) w.processes[#w.processes].callback(outcome or OK, table.clone(w.cx)) end
+	local function last_state(w) local event = w.wake_events[#w.wake_events]; return if event then event.state else nil end
+	local w = window_fixture()
+	check(#w.processes == 0 and #w.wake_events == 0, "no helper before the window has scheduled a controller")
+	w:tick()
+	local argv = w.processes[1] and w.processes[1].argv
+	check(#w.processes == 1 and argv[1] == "sleep" and argv[2] == "2" and #argv == 2,
+		"a live controller polling a worker starts one argv-only 2 s wait child, below the 5 s suspension gap")
+	check(last_state(w) == "active" and w.wake_events[1].detail == "polling 1 worker"
+		and w:rendered():find("Idle-wake helper active: polling 1 worker", 1, true) ~= nil, "Health shows the active helper and its timed work")
+	local published = #w.wake_events
+	for _ = 1, 3 do w:tick() end
+	check(#w.processes == 1 and #w.timers == 1 and #w.wake_events == published, "ticks never stack wait children or timers, nor republish an unchanged state")
+	finish(w)
+	check(#w.processes == 2 and #w.timers == 1, "a finished wait child starts exactly the next one")
+	w.current.id = 8 -- The controller's session is no longer current: this window drives nothing.
+	for _ = 1, 3 do w:tick() end
+	check(last_state(w) == "idle" and #w.wake_events == published + 1 and w:rendered():find("Idle-wake helper", 1, true) == nil,
+		"the controller that left this window is told once that the helper stopped")
+	finish(w)
+	check(#w.processes == 2, "no wait child follows the in-flight one once no controller has timed work")
+	w.current.id = 7
+	w:tick()
+	check(#w.processes == 3 and last_state(w) == "active", "the helper resumes when the controller is driven again")
+	local bare = window_fixture({ no_worker = true })
+	for _ = 1, 3 do bare:tick() end
+	check(#bare.processes == 0 and last_state(bare) == "idle", "a live controller with no worker, effect, backoff or read runs no helper")
+	bare.f:accepted(false)
+	bare:tick()
+	check(#bare.processes == 1 and last_state(bare) == "active", "registering a worker gives the controller timed work and starts the helper")
+	-- Inbox or board polling alone is timed work (final smoke: a file dropped into an untouched
+	-- window with no workers was first seen after 288–560 s).
+	local dir = "/tmp/orch-idle-wake-" .. shared.codec.sha256(tostring(os.clock()) .. ":" .. tostring(math.random())):sub(1, 16)
+	runtime.fs.mkdir(dir)
+	local inbox = window_fixture({ no_worker = true })
+	assert(inbox.f:apply("policy", { policy = { inbox_folder = dir } }).ok)
+	inbox:tick()
+	check(#inbox.processes == 1 and last_state(inbox) == "active" and inbox.wake_events[#inbox.wake_events].detail == "polling the intake inbox"
+		and inbox:rendered():find("Idle-wake helper active: polling the intake inbox", 1, true) ~= nil,
+		"inbox polling alone, with no worker, starts the helper and Health shows it")
+	inbox.cx.hosts:current().kind = "remote" -- A remote host's inbox is never polled from this desktop.
+	inbox:tick(); finish(inbox); inbox:tick()
+	check(#inbox.processes == 1 and last_state(inbox) == "idle", "an inbox this window does not poll is not timed work")
+	inbox.cx.hosts:current().kind = nil
+	assert(inbox.f:apply("policy", { policy = { inbox_folder = "" } }).ok)
+	inbox:tick()
+	check(#inbox.processes == 1 and last_state(inbox) == "idle", "clearing the inbox folder stops the helper")
+	local board = window_fixture({ no_worker = true })
+	assert(board.f:apply("policy", { policy = { board_path = "/tmp/fixture-board.tern" } }).ok)
+	board:tick()
+	check(#board.processes == 1 and last_state(board) == "active" and board.wake_events[#board.wake_events].detail == "polling the board"
+		and board:rendered():find("Idle-wake helper active: polling the board", 1, true) ~= nil,
+		"board polling alone, with no worker, starts the helper and Health shows it")
+	local both = window_fixture({ no_worker = true })
+	assert(both.f:apply("policy", { policy = { board_path = "/tmp/fixture-board.tern", inbox_folder = dir } }).ok)
+	both:tick()
+	check(last_state(both) == "active" and both.wake_events[#both.wake_events].detail == "polling the intake inbox and board", "Health names both polled sources")
+	local unbound = window_fixture({ no_worker = true }) -- Host restart: polling configured, controller awaiting continuation.
+	assert(unbound.f:apply("policy", { policy = { inbox_folder = dir } }).ok)
+	unbound.f.authority = shared.host.new_authority(unbound.f.memory, function() return { now_ms = 1700000000000, mono_ms = 5000, epoch = "health-host-restarted" } end)
+	assert(unbound.f.authority:load().ok)
+	for _ = 1, 3 do unbound:tick() end
+	check(#unbound.processes == 0 and last_state(unbound) == "idle", "a controller awaiting explicit continuation runs no helper, even while its inbox is configured")
+	local hosted_inbox = window_fixture({ context = "host", no_worker = true })
+	assert(hosted_inbox.f:apply("policy", { policy = { inbox_folder = dir } }).ok)
+	for _ = 1, 3 do hosted_inbox:tick() end
+	check(#hosted_inbox.processes == 0 and #hosted_inbox.wake_events == 0, "a host VM never runs the helper for inbox polling")
+	pcall(runtime.fs.remove, dir)
+	local restarted = window_fixture() -- Host restart: the controller is restored uncertain until continued.
+	restarted.f.authority = shared.host.new_authority(restarted.f.memory, function() return { now_ms = 1700000000000, mono_ms = 5000, epoch = "health-host-restarted" } end)
+	assert(restarted.f.authority:load().ok)
+	for _ = 1, 3 do restarted:tick() end
+	check(#restarted.processes == 0 and last_state(restarted) == "idle", "a controller awaiting explicit continuation runs no helper, even with workers")
+	local elsewhere = window_fixture()
+	elsewhere.current.id = 8
+	for _ = 1, 3 do elsewhere:tick() end
+	check(#elsewhere.processes == 0 and #elsewhere.wake_events == 0, "a window that drives no controller runs no helper")
+	local hosted = window_fixture({ context = "host" })
+	for _ = 1, 3 do hosted:tick() end
+	check(#hosted.processes == 0 and #hosted.wake_events == 0 and #hosted.timers == 1, "a host VM (native tests) never runs the helper")
+	local windows = window_fixture({ os = "windows" })
+	windows:tick()
+	local pings = windows.processes[1] and windows.processes[1].argv
+	check(pings ~= nil and table.concat(pings, " ") == "ping -n 3 127.0.0.1" and #pings == 4, "Windows waits with argv-only loopback pings, never a shell string")
+	local refused = window_fixture({ process_error = "tern.process is not available on iOS" })
+	for _ = 1, 3 do refused:tick() end
+	local reason = refused.wake_events[#refused.wake_events]
+	check(#refused.processes == 0 and last_state(refused) == "unavailable" and reason.detail:find("not available on iOS", 1, true) ~= nil and #refused.wake_events == 1
+		and #refused.timers == 1 and refused:rendered():find("Idle-wake helper unavailable", 1, true) ~= nil,
+		"an unavailable helper shows in Health once and observation continues on the plain timer")
+	for _, outcome in { { status = 1, stdout = "", stderr = "", timed_out = false }, OK } do
+		local stopped = window_fixture()
+		stopped:tick()
+		if outcome ~= OK then stopped:tick(); stopped:tick() end -- A failure after a full wait; OK below exits at once.
+		finish(stopped, outcome)
+		stopped:tick(); stopped:tick()
+		check(#stopped.processes == 1 and last_state(stopped) == "unavailable", "a failed or early-exiting wait child stops the helper instead of spinning")
+	end
 end
 return "health/" .. tostring(section or "all") .. ": " .. tostring(checks) .. " checks passed"

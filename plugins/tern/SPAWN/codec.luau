@@ -4,10 +4,12 @@
 -- SPAWN owns files; the later workflow reducer owns sequence cursors and committed receipts.
 local M = {}
 local MAX_INTEGER = 9007199254740991
+-- `array_parse` bounds any JSON array the parser admits (CHECKOUT changed_files reaches 512);
+-- `array_entries` stays the default bound for a schema array that names no explicit maximum.
 local LIMITS = table.freeze({ wire = 8192, chunk = 4096, control = 2048, bridge = 8192,
 	logical = 65536, slice = 2048, chunks = 32, depth = 12, values = 2048,
-	array_entries = 256, object_fields = 64, payload_string = 32768,
-	assemblies = 4, reassembly_bytes = 262144 })
+	array_entries = 256, array_parse = 512, object_fields = 64, payload_string = 32768,
+	assemblies = 4, reassembly_bytes = 262144, manifest = 4096 })
 M.LIMITS = LIMITS
 
 local function failure(code: string, message: string): any
@@ -128,7 +130,7 @@ function M.strict_decode(bytes: any, maximum: number?): (any?, any?, any?)
 			local entries = 0
 			while true do
 				entries += 1
-				if entries > (if object then LIMITS.object_fields else LIMITS.array_entries) then bad() end
+				if entries > (if object then LIMITS.object_fields else LIMITS.array_parse) then bad() end
 				if object then
 					local key = string_value()
 					if #key > 64 or result[key] ~= nil then bad() end
@@ -256,8 +258,45 @@ local function binding_matches(raw: any, expected: any, enrolment: boolean): boo
 	for key, validate in B do if not validate(expected[key]) or raw[key] ~= expected[key] then return false end end
 	return not enrolment or (token(expected.enrolment_token) and raw.enrolment_token == expected.enrolment_token)
 end
-local REPORT_KINDS = enum("REGISTER", "READY", "ACCEPTED", "HEARTBEAT", "WAITING", "BLOCKED", "ASK", "CHECKPOINT", "REVIEW_READY", "REVIEW_RESULT", "DONE", "ROLLOVER_REQUEST", "LANDING_REQUEST", "LANDING_RESULT", "COORDINATOR_RELEASE", "reply_ack", "COORDINATOR_PROPOSAL")
-local CAPABILITIES = enum("report-files-v1", "native-ask-v1", "worker-poll-v1", "argv-v1", "coordinator-control-v1")
+local REPORT_KINDS = enum("REGISTER", "READY", "ACCEPTED", "HEARTBEAT", "WAITING", "BLOCKED", "ASK", "CHECKPOINT", "REVIEW_READY", "REVIEW_RESULT", "DONE", "ROLLOVER_REQUEST", "LANDING_REQUEST", "LANDING_RESULT", "COORDINATOR_RELEASE", "reply_ack", "COORDINATOR_PROPOSAL",
+	"CHECK_RESULT", "CHECKOUT", "LABEL", "DEPLOY_RESULT")
+local CAPABILITIES = enum("report-files-v1", "native-ask-v1", "worker-poll-v1", "argv-v1", "coordinator-control-v1", "check-runner-v1", "release-manager-v1")
+-- Kinds a provisioned capability must authorize, in both directions.
+local REQUIRES = { COORDINATOR_RELEASE = "coordinator-control-v1", COORDINATOR_PROPOSAL = "coordinator-control-v1",
+	CHECK_RESULT = "check-runner-v1", CHECKOUT = "check-runner-v1", DEPLOY_RESULT = "release-manager-v1",
+	coordinator_activation = "coordinator-control-v1", coordinator_retirement = "coordinator-control-v1",
+	landing_grant = "release-manager-v1", deploy_grant = "release-manager-v1" }
+local function authorized(kind: string, expected: any): boolean
+	local capability = REQUIRES[kind]
+	return capability == nil or (type(expected.capabilities) == "table" and table.find(expected.capabilities, capability) ~= nil)
+end
+-- Git object names (SHA-1 or SHA-256 repositories), class/family names and exit codes shared by both directions.
+local function revision(v: any): boolean return type(v) == "string" and (#v == 40 or #v == 64) and v:match("^[0-9a-f]+$") ~= nil end
+local function class_name(v: any): boolean return type(v) == "string" and #v <= 32 and v:match("^[a-z][a-z0-9-]*$") ~= nil end
+local function family(v: any): boolean return type(v) == "string" and #v <= 24 and v:match("^[a-z][a-z0-9-]*$") ~= nil end
+local function exit_code(v: any): boolean return integer(v, -2147483648, 4294967295) end
+local function absolute(v: any): boolean
+	return text(v, 4096) and v:find("%z") == nil and (v:sub(1, 1) == "/" or v:match("^%a:[/\\]") ~= nil or v:sub(1, 2) == "\\\\")
+end
+local function relative(v: any): boolean
+	if not text(v, 256) or v:find("[%z\\]") ~= nil or v:sub(1, 1) == "/" or v:match("^%a:") ~= nil then return false end
+	for segment in (v .. "/"):gmatch("([^/]*)/") do if segment == ".." then return false end end
+	return true
+end
+local function unique(list: any, key: string?): boolean
+	local seen = {}
+	for _, entry in list do
+		local value = if key then entry[key] else entry
+		if seen[value] then return false end
+		seen[value] = true
+	end
+	return true
+end
+local function findings(v: any, shapes: any): boolean
+	local finding = function(f: any): boolean return object(f, { finding_id = id, path = short, summary = function(s: any): boolean return text(s, 400) end },
+		{ line = positive }, shapes) end
+	return array(v, finding, shapes, 0, 32) and unique(v, "finding_id")
+end
 local function report_payload(report: any, shapes: any): boolean
 	local p, kind = report.payload, report.kind
 	local references = function(v: any): boolean return array(v, short, shapes) end
@@ -265,7 +304,7 @@ local function report_payload(report: any, shapes: any): boolean
 	local context = function(v: any): boolean return integer(v, 0, 100) end
 	local texts = function(v: any): boolean return array(v, long, shapes) end
 	if kind == "REGISTER" then
-		if not object(p, { capabilities = function(v: any): boolean return array(v, CAPABILITIES, shapes, 1, 5) end }, {}, shapes) then return false end
+		if not object(p, { capabilities = function(v: any): boolean return array(v, CAPABILITIES, shapes, 1, 7) end }, {}, shapes) then return false end
 		local seen = {}
 		for _, capability in p.capabilities do if seen[capability] then return false end seen[capability] = true end
 		return seen["report-files-v1"] == true
@@ -287,8 +326,25 @@ local function report_payload(report: any, shapes: any): boolean
 			completed = texts, remaining = texts, holds = texts, checks = function(v: any): boolean return array(v, check, shapes) end },
 			{ plan_ref = short, plan_revision = short, request_id = id }, shapes) and ((p.plan_ref == nil) == (p.plan_revision == nil))
 	elseif kind == "REVIEW_READY" then return object(p, { checkpoint_id = id, artifact_revision = short }, { summary = short }, shapes)
-	elseif kind == "REVIEW_RESULT" then return object(p, { artifact_revision = short, outcome = enum("approved", "changes_required"), evidence = references }, { summary = short }, shapes)
-	elseif kind == "DONE" then return object(p, { checkpoint_id = id, artifact_revision = short, summary = long }, {}, shapes)
+	elseif kind == "REVIEW_RESULT" then
+		return object(p, { review_id = id, round = positive, artifact_revision = short, outcome = enum("approved", "changes_required"),
+			findings = function(v: any): boolean return findings(v, shapes) end }, { summary = short }, shapes)
+	elseif kind == "DONE" then return object(p, { checkpoint_id = id, artifact_revision = short, summary = long }, { output_ref = relative }, shapes)
+	elseif kind == "CHECK_RESULT" then
+		return object(p, { check_id = id, argv_sha256 = digest, exit_code = exit_code, output_sha256 = digest, head = revision,
+			ran_at_ms = function(v: any): boolean return integer(v, 0) end }, {}, shapes)
+	elseif kind == "CHECKOUT" then
+		local path = function(v: any): boolean return text(v, 4096) and v:find("%z") == nil end
+		if not object(p, { worktree_path = absolute, common_dir = absolute, branch = function(v: any): boolean return text(v, 256) end, head = revision,
+			changed_files = function(v: any): boolean return array(v, path, shapes, 0, 512) and unique(v) end,
+			changed_overflow = function(v: any): boolean return type(v) == "boolean" end, changed_total = function(v: any): boolean return integer(v, 0) end,
+			dirty = function(v: any): boolean return type(v) == "boolean" end }, { base = revision }, shapes) then return false end
+		-- A sorted prefix may be shorter than 512 when the full list would exceed the logical report bound.
+		return p.changed_total >= #p.changed_files and p.changed_overflow == (p.changed_total > #p.changed_files)
+	elseif kind == "LABEL" then return object(p, { work_ref = short, class = class_name }, { reason = short }, shapes)
+	elseif kind == "DEPLOY_RESULT" then
+		return object(p, { deploy_id = id, attempt_id = id, landing_id = id, outcome = enum("deployed", "held", "not_applicable", "failed"),
+			revision = short, evidence = function(v: any): boolean return array(v, short, shapes, 0, 16) end }, { reason = short }, shapes)
 	elseif kind == "ROLLOVER_REQUEST" then return object(p, { checkpoint_id = id, reason = short }, {}, shapes)
 	elseif kind == "LANDING_REQUEST" then
 		return object(p, { checkpoint_id = id, project_id = id, repo_ref = short, target_ref = short, target_revision = short,
@@ -321,6 +377,7 @@ function M.decode_report(bytes: any, expected: any): (any?, any?)
 	if not object(raw, required, { action_id = id, action_revision = positive, handover_id = id, handover_token = token }, shapes)
 		or not report_payload(raw, shapes) then return nil, failure("invalid_schema", "Invalid closed report schema.") end
 	local action_required = raw.kind == "REVIEW_RESULT" or raw.kind == "LANDING_RESULT" or raw.kind == "reply_ack" or raw.kind == "COORDINATOR_RELEASE"
+		or raw.kind == "LABEL" or raw.kind == "DEPLOY_RESULT"
 	local action_optional = raw.kind == "CHECKPOINT" or raw.kind == "DONE" or raw.kind == "WAITING" or raw.kind == "BLOCKED"
 	if (raw.action_id == nil) ~= (raw.action_revision == nil) or (action_required and raw.action_id == nil)
 		or (not action_required and not action_optional and raw.action_id ~= nil) then return nil, failure("invalid_schema", "Invalid action correlation fields.") end
@@ -329,9 +386,8 @@ function M.decode_report(bytes: any, expected: any): (any?, any?)
 	end
 	if raw.kind == "reply_ack" and #bytes > LIMITS.control then return nil, failure("oversize", "Reserved reply acknowledgement exceeds its control limit.") end
 	if not binding_matches(raw, expected, true) or not id(expected.mailbox_handle) then return nil, failure("binding_mismatch", "Report differs from the provisioned enrolment.") end
-	if (raw.kind == "COORDINATOR_RELEASE" or raw.kind == "COORDINATOR_PROPOSAL") and (type(expected.capabilities) ~= "table"
-		or table.find(expected.capabilities, "coordinator-control-v1") == nil) then
-		return nil, failure("binding_mismatch", "Coordinator control requires its provisioned capability.")
+	if not authorized(raw.kind, expected) then
+		return nil, failure("binding_mismatch", raw.kind .. " requires its provisioned capability " .. REQUIRES[raw.kind] .. ".")
 	end
 	if raw.event_id ~= M.sha256(expected.mailbox_handle .. ":report:" .. string.format("%.0f", raw.seq)) then return nil, failure("binding_mismatch", "Report event ID does not match its mailbox sequence.") end
 	if raw.kind == "ACCEPTED" and (raw.handover_id ~= expected.handover_id or raw.handover_token ~= expected.handover_token
@@ -350,25 +406,56 @@ function M.decode_reply(bytes: any, expected: any): (any?, any?)
 	local raw, diagnostic, shapes = M.strict_decode(bytes)
 	if diagnostic ~= nil then return nil, diagnostic end
 	if not object(raw, schema({ version = function(v: any): boolean return v == 1 end, message_id = id, reply_seq = positive,
-		action_id = id, action_revision = positive, kind = enum("assignment", "report_request", "owner_decision", "landing_grant", "landing_refresh", "coordinator_activation", "coordinator_retirement"), payload = any_table }),
+		action_id = id, action_revision = positive, kind = enum("assignment", "report_request", "owner_decision", "landing_grant", "landing_refresh", "coordinator_activation", "coordinator_retirement",
+			"review_request", "rework", "deploy_grant", "label_request"), payload = any_table }),
 		{ gate_id = id, gate_revision = positive }, shapes) then return nil, failure("invalid_schema", "Invalid reply envelope.") end
 	local p, valid = raw.payload, false
 	if raw.kind == "assignment" then valid = object(p, { assignment_ref = short, assignment_sha256 = digest, instructions = long }, {}, shapes)
 	elseif raw.kind == "report_request" then valid = object(p, { request_id = id, requested_kind = enum("HEARTBEAT", "CHECKPOINT"), reason = short }, {}, shapes)
 	elseif raw.kind == "owner_decision" then valid = object(p, { choice_id = id, answer = long }, {}, shapes)
 	elseif raw.kind == "landing_grant" then valid = object(p, { landing_id = id, grant_id = id, project_id = id, checkpoint_id = id, repo_ref = short,
-		target_ref = short, target_revision = short, source_ref = short, source_revision = short }, {}, shapes)
+		target_ref = short, target_revision = short, source_ref = short, source_revision = short, builder_work_id = id, review_id = id, reviewer_family = family,
+		proof = function(v: any): boolean return object(v, { mode = enum("cross_family_review", "helper_checks"), artifact_revision = short, review_id = id,
+			check_refs = function(r: any): boolean return array(r, short, shapes, 0, 16) end }, {}, shapes) end }, {}, shapes)
 	elseif raw.kind == "landing_refresh" then valid = object(p, { landing_id = id, project_id = id, repo_ref = short, target_ref = short,
 		expected_revision = short, current_revision = short, reason = short }, {}, shapes)
+	elseif raw.kind == "review_request" then
+		valid = object(p, { review_id = id, round = positive, question_id = enum("implements_task_v1"), builder_work_id = id, task_ref = short,
+			source_ref = short, artifact_revision = short, scope_paths = function(v: any): boolean return array(v, function(s: any): boolean return text(s, 256) end, shapes, 0, 64) end,
+			findings_prev = function(v: any): boolean return findings(v, shapes) end }, { plan_ref = short, plan_revision = short }, shapes)
+			and ((p.plan_ref == nil) == (p.plan_revision == nil))
+	elseif raw.kind == "rework" then
+		local failed = function(v: any): boolean return object(v, { check_id = id, exit_code = exit_code }, {}, shapes) end
+		valid = object(p, { round = positive, artifact_revision = short, failed_checks = function(v: any): boolean return array(v, failed, shapes, 0, 16) end,
+			findings = function(v: any): boolean return findings(v, shapes) end }, { review_id = id }, shapes)
+	elseif raw.kind == "deploy_grant" then valid = object(p, { deploy_id = id, attempt_id = id, landing_id = id, revision = short, target_ref = short }, {}, shapes)
+	elseif raw.kind == "label_request" then
+		valid = object(p, { work_ref = short, classes = function(v: any): boolean return array(v, class_name, shapes, 1, 32) and unique(v) end, text = long }, {}, shapes)
 	elseif raw.kind == "coordinator_activation" then valid = object(p, { owner_id = id, owner_generation = positive, activation_token = digest, instructions = long }, {}, shapes)
 	elseif raw.kind == "coordinator_retirement" then valid = object(p, { owner_id = id, owner_generation = positive, activation_token = digest, reason = short }, {}, shapes) end
 	if not valid or (raw.kind == "owner_decision" and (raw.gate_id == nil or raw.gate_revision == nil))
 		or (raw.kind ~= "owner_decision" and (raw.gate_id ~= nil or raw.gate_revision ~= nil)) then return nil, failure("invalid_schema", "Invalid closed reply payload or gate fields.") end
 	if raw.kind == "report_request" and #bytes > LIMITS.control then return nil, failure("oversize", "Report-request reply exceeds its control limit.") end
 	if not binding_matches(raw, expected, false) then return nil, failure("binding_mismatch", "Reply differs from its recipient binding.") end
-	if (raw.kind == "coordinator_activation" or raw.kind == "coordinator_retirement")
-		and (type(expected.capabilities) ~= "table" or table.find(expected.capabilities, "coordinator-control-v1") == nil) then
-		return nil, failure("binding_mismatch", "Coordinator control requires its provisioned capability.")
+	if not authorized(raw.kind, expected) then
+		return nil, failure("binding_mismatch", raw.kind .. " requires its provisioned capability " .. REQUIRES[raw.kind] .. ".")
+	end
+	return raw, nil
+end
+
+-- Authenticated assignment manifest (ORCH+ Contract G) carried by mailbox_provision. The exact
+-- bytes are hashed and written verbatim by the target helper; worker helpers run only these argv.
+function M.decode_manifest(bytes: any): (any?, any?)
+	if type(bytes) == "string" and #bytes > LIMITS.manifest then return nil, failure("manifest_too_large", "Assignment manifest exceeds 4096 bytes.") end
+	local raw, diagnostic, shapes = M.strict_decode(bytes, LIMITS.manifest)
+	if diagnostic ~= nil then return nil, diagnostic end
+	local bounded = function(n: number): (any) -> boolean return function(v: any): boolean return text(v, n) and v:find("%z") == nil end end
+	local check = function(v: any): boolean return object(v, { check_id = id, argv = function(a: any): boolean return array(a, bounded(512), shapes, 1, 16) end }, {}, shapes) end
+	local scope = function(v: any): boolean return object(v, { paths = function(a: any): boolean return array(a, bounded(256), shapes, 0, 64) end,
+		systems = function(a: any): boolean return array(a, bounded(80), shapes, 0, 16) end }, {}, shapes) end
+	if not object(raw, { checks = function(v: any): boolean return array(v, check, shapes, 0, 16) and unique(v, "check_id") end,
+		files = function(v: any): boolean return array(v, bounded(256), shapes, 0, 64) end, scope = scope }, { base_ref = bounded(256) }, shapes) then
+		return nil, failure("invalid_schema", "Invalid closed assignment manifest.")
 	end
 	return raw, nil
 end

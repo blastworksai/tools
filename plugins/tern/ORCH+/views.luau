@@ -9,6 +9,44 @@ local function shown(value: any, empty: string): string
 	if type(value) == "table" then return if next(value) == nil then empty else tern.json.encode(value) end
 	return tostring(value)
 end
+-- Bounded one-line preview of stored text (UTF-8 safe; stored text is validated UTF-8).
+local function preview(text: any, limit: number): string
+	if type(text) ~= "string" or text == "" then return "(none)" end
+	local cut = utf8.offset(text, limit + 1)
+	local line = if cut and cut <= #text then text:sub(1, cut - 1) .. "…" else text
+	return (line:gsub("[\r\n\t]+", " "))
+end
+-- Copies the named fields (space-separated, like dispatch's *_KEYS lists) into `into` or a fresh table.
+local function pick(source: any, keys: string, into: any?): any
+	local out = into or {}
+	for key in keys:gmatch("%S+") do out[key] = source[key] end
+	return out
+end
+-- A keyed contract node: the window locates these by key and role, never by position.
+local function keyed(text: string, key: string, role: string): any
+	local node = ui.text(text)
+	node.p.key = key
+	node.p.role = role
+	return node
+end
+-- Bound: the recorded controller pane binding is this exact pane and alias. Admitted: bound and active.
+local function controller(view: any, selected: any): (any, boolean, boolean)
+	local owner = selected.controller
+	local bound = owner ~= nil and owner.pane_binding ~= nil
+		and owner.pane_binding.host_pane_id == tostring(view.pane) and owner.pane_binding.alias_nonce == view.alias_nonce
+	return owner, bound, bound and owner.phase == "active"
+end
+-- Eligible, enabled records of the loaded catalog page: first occurrence of each ID, in catalog order.
+local function enabled_records(catalog: any): { any }
+	local list, seen = {}, {}
+	for _, record in (if catalog then catalog.records else {}) do
+		if record.eligible and record.enabled == true and not seen[record.id] then
+			seen[record.id] = true
+			table.insert(list, record)
+		end
+	end
+	return list
+end
 -- A worker's shown state: retirement and a verified native stop outrank the last recorded phase.
 local function worker_state(worker: any): string
 	if worker.mailbox_status == "retired" then return "retired" end
@@ -64,6 +102,14 @@ local function button(view: any, label: string, entry: any, attrs: any?): any
 	view.actions[token] = entry
 	return ui.el("button", { text = label, actions = { click = "control=" .. token }, attrs = attrs })
 end
+-- An unacknowledged command refusal (dispatch card and Config share it).
+local function refusal_rows(view: any, rows: { any }, result: any)
+	table.insert(rows, ui.text(ui.span("REFUSED: " .. tostring(result.message or result.code), "error")))
+	table.insert(rows, button(view, "Acknowledge command refusal", { kind = "dispatch-acknowledge", request_id = result.request_id }))
+end
+-- Dispatch machine-node fields copied from a projected action and from a command outcome.
+local ACTION_KEYS = "phase claim worker_id retry_count wake_status execution_origin execution_pane_binding execution_controller_pane reconciliation_only"
+local RESULT_KEYS = "ok code request_id grant_id worker_id work_id wake_status"
 local function owner_entry(kind: string, target: string, owner: any, revision: number): any
 	return { kind = kind, target = target, owner_id = owner.owner_id, generation = owner.generation, revision = revision }
 end
@@ -129,6 +175,21 @@ local function dispatch_link(view: any, command: string, label: string, extra: a
 	if type(request.worker_id) == "string" then attrs["data-orchplus-worker"] = request.worker_id end
 	return button(view, label, { kind = "operator-intent", request = request }, attrs)
 end
+local function pause_link(view: any, policy: any): any
+	return dispatch_link(view, if policy.paused then "resume" else "pause", if policy.paused then "Resume scheduling" else "Pause new work")
+end
+-- `orchplus.worker` node fields copied verbatim from the projected workflow worker.
+local WORKER_KEYS = "worker_id work_id worker_generation origin_binding pane_binding due_poll due_report report_request_pending active_action_id"
+	.. " finish_requested coordinator_owner_id launch_origin_binding launch_pane_binding continuation_required continuation_proof"
+	.. " orchestration_excluded context_used_pct phase due_rollover rollover restored adopt_pane_binding withdrawal role family review_id"
+-- Why an account USAGE delta (or one of its windows) is not comparable.
+local USAGE_WHY = { reset_crossed = "a quota reset happened in between", stale = "a reading is stale or missing",
+	unbound = "a reading has no bound account", different_account = "the readings are from different accounts" }
+-- Rule H proof wording by current (non-voided) review status, with and without cross-family enforcement.
+local ENFORCED_PROOF = { approved = "cross-family review approved", changes_required = "changes required — rework round pending", capped = "review rounds capped — owner decision" }
+local PLAIN_PROOF = { approved = "review approved", capped = "review rounds capped" }
+-- Gate phases that are settled history: no cancel control, sorted after open questions.
+local GATE_SETTLED = { acknowledged = true, cancelled = true, superseded = true, resolved = true }
 -- Quota evidence display (USAGE capacity v1, normalized by quota.luau). Unknown is never "plenty".
 local function when(ms: any): string
 	if type(ms) ~= "number" then return "unknown" end
@@ -184,13 +245,12 @@ local function routing_rows(view: any, rows: any, worker: any, admitted: boolean
 end
 local function dispatch_view(view: any, projection: any, selected: any): (any, any, any?, any)
 	local d = projection.dispatch or { actions = {}, workers = {} }
-	local owner = selected.controller
-	local bound = owner ~= nil and owner.pane_binding ~= nil
-		and owner.pane_binding.host_pane_id == tostring(view.pane) and owner.pane_binding.alias_nonce == view.alias_nonce
-	local admitted = bound and owner.phase == "active"
+	local owner, bound, admitted = controller(view, selected)
 	local rows = { ui.text("SPAWN owns launch/configuration and mailbox target access. Display identity is configured metadata, not verified account isolation.") }
 	table.insert(rows, ui.text("Host scope: local workers use local ORCH+. For remote workers, open ORCH+ on that attached remote Tern host. Controller, workers, mailbox and SPAWN authority stay on the same execution host; managed SSH hops are not supported. Ordinary SPAWN SSH launches are unchanged."))
-	if admitted then table.insert(rows, dispatch_link(view, "catalog", "Load configured SPAWN catalog"))
+	if admitted then
+		table.insert(rows, ui.row({ dispatch_link(view, "catalog", "Load configured SPAWN catalog"), dispatch_link(view, "start_work", "Start work…") }))
+		table.insert(rows, ui.text("Start work imports a /glitch-plan file (read by the execution host), uses the Tern board in Config, or starts a saved template with your input. The board and the intake inbox are polled by this desktop window; inbox files are archived to .orchplus-taken/ only after their intake is accepted."))
 	else table.insert(rows, ui.text("This panel is inert for dispatch: only this registration's admitted active controller can claim effects.")) end
 	if bound then
 		table.insert(rows, dispatch_link(view, "continue_controller", "Continue controller after reload…", { expected_revision = projection.revision }))
@@ -219,8 +279,7 @@ local function dispatch_view(view: any, projection: any, selected: any): (any, a
 	if d.catalog then
 		table.insert(rows, ui.text("Catalog revision " .. tostring(d.catalog.revision) .. " · this page only"))
 		for _, record in d.catalog.records do
-			local detail = record.id .. " · " .. tostring(record.provider or "") .. " · " .. tostring(record.account_label or "") .. " · " .. tostring(record.backend or "")
-			table.insert(rows, ui.text(detail))
+			table.insert(rows, ui.text(record.id .. " · " .. tostring(record.provider or "") .. " · " .. tostring(record.account_label or "") .. " · " .. tostring(record.backend or "")))
 			table.insert(rows, ui.text("Capabilities: " .. tern.json.encode(record.capabilities) .. " · prerequisites: " .. tern.json.encode(record.unsupported)))
 			if record.capability_evidence then table.insert(rows, ui.text("Capability evidence: " .. tostring(record.capability_evidence))) end
 			if record.effective_identity then table.insert(rows, ui.text("Catalog identity facts: " .. tern.json.encode(record.effective_identity))) end
@@ -347,7 +406,11 @@ local function dispatch_view(view: any, projection: any, selected: any): (any, a
 		if admitted and a.phase == "ready" then
 			table.insert(rows, dispatch_link(view, "execute", "Run queued " .. a.request.op .. " in its original window", { action_id = id }))
 		end
-		if admitted and a.phase == "backpressure" then
+		-- An owner-stopped retry loop (loop_cap "Keep it stopped") is final: no retry control.
+		local retry_stopped = a.retry_loop ~= nil and a.retry_loop.state == "stopped"
+		if a.phase == "backpressure" and retry_stopped then
+			table.insert(rows, ui.text(ui.span("Retries of " .. a.request.op .. " / " .. id .. " stopped by the owner (loop cap). It stays unexecuted; cancel the work to end it.", "warning")))
+		elseif admitted and a.phase == "backpressure" then
 			table.insert(rows, dispatch_link(view, "retry", "Recheck unexecuted capacity refusal: " .. a.request.op, { action_id = id }))
 		end
 		if a.phase == "claimed" or a.phase == "uncertain" then
@@ -374,10 +437,7 @@ local function dispatch_view(view: any, projection: any, selected: any): (any, a
 	local outcome = view.dispatch_result
 	local command_result = view.dispatch_command_result
 	local driver_result = view.dispatch_driver_result
-	if command_result and command_result.ok == false and not command_result.acknowledged then
-		table.insert(rows, ui.text(ui.span("REFUSED: " .. tostring(command_result.message or command_result.code), "error")))
-		table.insert(rows, button(view, "Acknowledge command refusal", { kind = "dispatch-acknowledge", request_id = command_result.request_id }))
-	end
+	if command_result and command_result.ok == false and not command_result.acknowledged then refusal_rows(view, rows, command_result) end
 	-- Every uncertain retained action (bounded): the window's read-only reconciliation covers each
 	-- one, independent of selection or which worker is active.
 	local uncertain_ids = {}
@@ -387,54 +447,37 @@ local function dispatch_view(view: any, projection: any, selected: any): (any, a
 	local machine = { version = 1, source_nonce = view.alias_nonce, host_pane_id = tostring(view.pane), orch_session_id = view.orch_session_id,
 		owner_id = if bound then owner.owner_id else nil, owner_generation = if bound then owner.generation else nil,
 		controller_phase = if bound then owner.phase else nil, revision = projection.revision, command_cursor = d.command_cursor,
-		action = if active then { action_id = active.request.action_id, phase = active.phase, claim = active.claim, worker_id = active.worker_id,
-			retry_count = active.retry_count, wake_status = active.wake_status, execution_origin = active.execution_origin,
-			execution_pane_binding = active.execution_pane_binding, execution_controller_pane = active.execution_controller_pane,
-			reconciliation_only = active.reconciliation_only } else nil,
-		result = if outcome then { ok = outcome.ok, code = outcome.code, request_id = outcome.request_id, action_id = outcome.action_id, grant_id = outcome.grant_id,
-			worker_id = outcome.worker_id, work_id = outcome.work_id, wake_status = outcome.wake_status } else nil,
-		command_result = if command_result then { request_id = command_result.request_id, command = command_result.command, action_id = command_result.action_id,
-			ok = command_result.ok, code = command_result.code, message = command_result.message, acknowledged = command_result.acknowledged } else nil,
-		driver_result = if driver_result then { request_id = driver_result.request_id, command = driver_result.command,
-			action_id = driver_result.action_id, ok = driver_result.ok, code = driver_result.code } else nil,
+		action = if active then pick(active, ACTION_KEYS, { action_id = active.request.action_id }) else nil,
+		result = if outcome then pick(outcome, RESULT_KEYS, { action_id = outcome.action_id }) else nil,
+		command_result = if command_result then pick(command_result, "request_id command action_id ok code message acknowledged") else nil,
+		driver_result = if driver_result then pick(driver_result, "request_id command action_id ok code message") else nil,
 		receipt = view.dispatch_receipt, uncertain_actions = uncertain_ids }
-	local request_node = nil
-	if active then
-		request_node = ui.text(active.request_bytes); request_node.p.key = "dispatch-request"; request_node.p.role = "orchplus.request"
-	end
+	local request_node = if active then keyed(active.request_bytes, "dispatch-request", "orchplus.request") else nil
 	local bytes = tern.json.encode(machine)
 	if #bytes > 8192 then
 		bytes = tern.json.encode({ version = 1, source_nonce = view.alias_nonce, error = "Dispatch projection exceeds 8192 bytes; no grant exposed." })
 	end
-	local bridge = ui.text(bytes); bridge.p.key = "dispatch-state"; bridge.p.role = "orchplus.dispatch"
+	local bridge = keyed(bytes, "dispatch-state", "orchplus.dispatch")
 	local scoped_nodes = {}
 	for id, a in d.actions do
 		local scoped = table.clone(machine)
-		scoped.action = { action_id = id, phase = a.phase, claim = a.claim, worker_id = a.worker_id, retry_count = a.retry_count, wake_status = a.wake_status,
-			execution_origin = a.execution_origin, execution_pane_binding = a.execution_pane_binding,
-			execution_controller_pane = a.execution_controller_pane, reconciliation_only = a.reconciliation_only }
+		scoped.action = pick(a, ACTION_KEYS, { action_id = id })
 		local retained = if view.scoped_results then view.scoped_results[id] else nil
 		local response = if retained then retained.result elseif outcome and outcome.action_id == id then outcome else nil
-		scoped.result = if response then { ok = response.ok, code = response.code, request_id = response.request_id, action_id = id,
-			grant_id = response.grant_id, worker_id = response.worker_id, work_id = response.work_id, wake_status = response.wake_status } else nil
+		scoped.result = if response then pick(response, RESULT_KEYS, { action_id = id }) else nil
 		scoped.receipt = if retained then retained.receipt elseif view.dispatch_receipt and view.dispatch_receipt.action_id == id then view.dispatch_receipt else nil
 		scoped.command_result = nil
 		local encoded = tern.json.encode(scoped)
 		if #encoded <= 8192 then
-			local node = ui.text(encoded); node.p.key = "dispatch-action-" .. id; node.p.role = "orchplus.dispatch"
-			table.insert(scoped_nodes, node)
-			local request = ui.text(a.request_bytes); request.p.key = "dispatch-request-" .. id; request.p.role = "orchplus.request"
-			table.insert(scoped_nodes, request)
+			table.insert(scoped_nodes, keyed(encoded, "dispatch-action-" .. id, "orchplus.dispatch"))
+			table.insert(scoped_nodes, keyed(a.request_bytes, "dispatch-request-" .. id, "orchplus.request"))
 		else table.insert(rows, ui.text(ui.span("Exact action surface unavailable: " .. id .. " exceeds 8192 bytes. No grant exposed.", "error"))) end
 	end
 	return ui.card("Managed dispatch", rows), bridge, request_node, scoped_nodes
 end
 local function workflow_view(view: any, projection: any, selected: any): (any, any)
 	local flow = if projection.dispatch then projection.dispatch.workflow else nil
-	local owner = selected.controller
-	local bound = owner and owner.pane_binding
-		and owner.pane_binding.host_pane_id == tostring(view.pane) and owner.pane_binding.alias_nonce == view.alias_nonce
-	local admitted = bound and owner.phase == "active"
+	local _, bound, admitted = controller(view, selected)
 	local rows, nodes, ids = {}, {}, {}
 	if not flow then return ui.card("Workflow", { ui.text("Workflow unavailable; no scheduling authority exposed.") }), nodes end
 	local function machine(key: string, role: string, value: any, limit: number?)
@@ -443,16 +486,21 @@ local function workflow_view(view: any, projection: any, selected: any): (any, a
 			table.insert(rows, ui.text(ui.span("Workflow surface unavailable: " .. key .. " exceeds the native bounded projection.", "error")))
 			return
 		end
-		local node = ui.text(bytes); node.p.key = key; node.p.role = role
-		table.insert(nodes, node)
+		table.insert(nodes, keyed(bytes, key, role))
 	end
 	local policy = flow.policy
 	table.insert(rows, ui.text((if policy.paused then "Paused — new work held; receipts, reports and answers still settle." else "Scheduling enabled")
 		.. " · poll " .. tostring(policy.poll_ms) .. "ms · heartbeat " .. tostring(policy.heartbeat_ms) .. "ms · stale " .. tostring(policy.stale_ms) .. "ms"
 		.. " · automatic reports " .. (if policy.automatic_reports then "enabled" else "off")))
-	if admitted then
-		table.insert(rows, dispatch_link(view, if policy.paused then "resume" else "pause", if policy.paused then "Resume scheduling" else "Pause new work"))
+	local wake = view.idle_wake
+	if type(wake) == "table" and wake.state == "active" then
+		table.insert(rows, ui.text("Idle-wake helper active: " .. shown(wake.detail, "timed work pending")
+			.. ". Tern does not run window timers while a window is untouched, so one short wait process at a time keeps this window observing."))
+	elseif type(wake) == "table" and wake.state == "unavailable" then
+		table.insert(rows, ui.text(ui.span("Idle-wake helper unavailable: " .. shown(wake.detail, "unknown reason")
+			.. ". While this window is untouched, orchestration may pause until it is used again.", "error")))
 	end
+	if admitted then table.insert(rows, pause_link(view, policy)) end
 	local chosen = nil
 	for _, worker in flow.workers do if worker.worker_id == view.workflow_worker then chosen = worker end end
 	chosen = chosen or flow.workers[1]
@@ -464,22 +512,18 @@ local function workflow_view(view: any, projection: any, selected: any): (any, a
 	end
 	for _, worker in flow.workers do
 		table.insert(ids, worker.worker_id)
-		machine("workflow-worker-" .. worker.worker_id, "orchplus.worker", {
-			worker_id = worker.worker_id, work_id = worker.work_id, worker_generation = worker.worker_generation,
-			origin_binding = worker.origin_binding, pane_binding = worker.pane_binding,
-			due_poll = worker.due_poll, due_report = worker.due_report, report_request_pending = worker.report_request_pending,
+		-- Fenced never-launched work only carries `withdrawal`: the exact request the window reads
+		-- SPAWN status for before cancel_work. Only routed work carries `routing`; it is absent for
+		-- explicit (unrouted) dispatch so its claim path is unchanged.
+		-- held_reason and retirement_refused let the window pre-check Finish and name its refusal.
+		local projected = if projection.dispatch.workers then projection.dispatch.workers[worker.worker_id] else nil
+		machine("workflow-worker-" .. worker.worker_id, "orchplus.worker", pick(worker, WORKER_KEYS, {
 			report_held = worker.rejected_report ~= nil, reattach_needed = worker.reattach_needed == true,
-			active_action_id = worker.active_action_id,
-			finish_requested = worker.finish_requested, coordinator_owner_id = worker.coordinator_owner_id,
-			launch_origin_binding = worker.launch_origin_binding, launch_pane_binding = worker.launch_pane_binding,
-			continuation_required = worker.continuation_required, continuation_proof = worker.continuation_proof,
-			orchestration_excluded = worker.orchestration_excluded, context_used_pct = worker.context_used_pct,
-			phase = worker.phase, due_rollover = worker.due_rollover, rollover = worker.rollover, restored = worker.restored, adopt_pane_binding = worker.adopt_pane_binding,
-			-- Fenced never-launched work only: the exact request the window reads SPAWN status for before cancel_work.
-			withdrawal = worker.withdrawal,
-			-- Routed work only; absent for explicit (unrouted) dispatch so its claim path is unchanged.
-			routing = if worker.routing then { phase = worker.routing.phase, mode = worker.routing.mode, evidence_revision = worker.routing.evidence_revision } else nil,
-		})
+			routing = if worker.routing then pick(worker.routing, "phase mode evidence_revision") else nil,
+			review = if worker.review then pick(worker.review, "review_id round status findings_count reviewer_family") else nil,
+			held_reason = if projected and projected.reason and worker.phase ~= "accepted" then pick(projected.reason, "code message") else nil,
+			retirement_refused = projected ~= nil and projected.mailbox_status == "refused",
+		}))
 		local health = worker.health
 		table.insert(rows, button(view, worker.work_id .. " · " .. health.status .. " · " .. health.freshness .. (if worker == chosen then " · selected" else ""),
 			{ kind = "workflow-select", worker_id = worker.worker_id }))
@@ -491,7 +535,9 @@ local function workflow_view(view: any, projection: any, selected: any): (any, a
 				{ "Latest native evidence", shown(health.latest_native, "none yet") }, { "Latest accepted report", shown(health.latest_report, "none yet") },
 				{ "Durable native exit evidence", shown(health.latest_exit, "none (no exit observed)") },
 				{ "Window", if health.awaiting_window then "Awaiting exact authorized window binding; use explicit reload continuation, never guessed pane adoption." else "Observation available" },
-				{ "Report request", if worker.report_request_pending then "Pending worker response; not duplicated" elseif worker.due_report then "Due; safe delivery required" else "Not due" },
+				{ "Report request", if worker.report_request_pending then "Pending worker response; not duplicated"
+					elseif worker.report_loop and worker.report_loop.state == "stopped" then "Automatic requests stopped by the owner (loop cap); a new report from the worker resumes them"
+					elseif worker.due_report then "Due; safe delivery required" else "Not due" },
 				{ "Context", if worker.context_used_pct ~= nil then "context " .. tostring(worker.context_used_pct) .. "% (worker-reported) · report seq " .. shown(worker.context_seq, "unknown") else "not reported" },
 				{ "Orchestration", if worker.orchestration_excluded then "Excluded in Config — skipped by automatic reports and automatic rollover; not stopped" else "Eligible" } }),
 		}
@@ -500,11 +546,68 @@ local function workflow_view(view: any, projection: any, selected: any): (any, a
 				.. " pending · " .. tostring(worker.wake_unstarted_count or 0) .. " not started (no native effect begun)"
 				.. " · " .. tostring(worker.wake_uncertain_count or 0) .. " claimed/uncertain (remain occupied). Only fresh safe-idle workers are woken; publication is not consumption."))
 		end
+		-- D17: account-level USAGE delta (percent, account-wide); never a per-worker exact figure.
+		if worker.usage_before ~= nil then
+			local shared = if type(worker.usage_shared_with) == "number" then math.max(0, math.floor(worker.usage_shared_with)) else 0
+			local scope = if shared > 0 then " — shared with " .. tostring(shared) .. " other worker" .. (if shared == 1 then "" else "s") .. " on this account" else " — account-wide, not this worker's exact use"
+			if worker.usage_after == nil then
+				table.insert(details, ui.text("Account delta while this worker ran" .. scope .. ": pending until the worker finishes."))
+			else
+				local delta = quota.usage_delta(worker.usage_before, worker.usage_after)
+				if not delta.comparable then
+					table.insert(details, ui.text("Account delta while this worker ran: not comparable (" .. (USAGE_WHY[delta.reason] or "unknown reason") .. ")."))
+				else
+					local parts = {}
+					for i, w in delta.windows do
+						if i > 8 then table.insert(parts, "…"); break end
+						table.insert(parts, tostring(w.key) .. ": " .. (if w.delta ~= nil then (if w.delta >= 0 then "+" else "") .. tostring(w.delta) .. " pts used"
+							else "not comparable (" .. (USAGE_WHY[w.reason] or "unknown reason") .. ")"))
+					end
+					table.insert(details, ui.text("Account delta while this worker ran" .. scope .. ": " .. table.concat(parts, " · ")))
+				end
+			end
+		end
+		-- Task 3B: role, declared family, review round/status, findings and Rule H proof status.
+		do
+			local enforce = flow.policy and flow.policy.enforce_cross_family == true
+			local review = worker.review
+			local facts = { { "Role", shown(worker.role, "builder") },
+				{ "Family", (if worker.family then tostring(worker.family) else "unknown") .. " (declared, not verified)" } }
+			if worker.role == "reviewer" then table.insert(facts, { "Reviewing", shown(worker.review_id, "unbound") }) end
+			if review then
+				local cap = if flow.policy and flow.policy.review_rounds then " of " .. tostring(flow.policy.review_rounds) else ""
+				table.insert(facts, { "Review", "round " .. tostring(review.round) .. cap .. " · " .. review.status
+					.. (if review.reviewer_family then " · reviewer family " .. tostring(review.reviewer_family) .. " (declared)" else " · reviewer not chosen") })
+				table.insert(facts, { "Latest findings", tostring(review.findings_count or 0) })
+				if review.voided then table.insert(facts, { "Approval", "voided — a newer revision needs a fresh review" }) end
+				if review.refusal then table.insert(facts, { "Refused result", tostring(review.refusal.code) .. ": " .. tostring(review.refusal.message) }) end
+				if review.hold then table.insert(facts, { "Review held", tostring(review.hold.code) .. ": " .. tostring(review.hold.message) }) end
+			end
+			if worker.check_rework then
+				table.insert(facts, { "Check rework", tostring(worker.check_rework.count) .. " · " .. tostring(worker.check_rework.state) })
+			end
+			if worker.role == nil or worker.role == "builder" then
+				local total, passed = worker.checks_count or 0, 0
+				local revision = if review then review.artifact_revision else nil
+				for _, r in worker.check_results or {} do
+					if r.exit_code == 0 and (revision == nil or r.head == revision) then passed += 1 end
+				end
+				local checks = "checks " .. tostring(passed) .. "/" .. tostring(total) .. " helper-run"
+				local status = if review and not review.voided then review.status else nil
+				local proof = if enforce then (ENFORCED_PROOF[status] or "awaiting cross-family review") .. " · " .. checks .. " (evidence only)"
+					else checks .. (if total > 0 and passed == total then "" else " — landing waits for every declared check")
+						.. " · " .. (PLAIN_PROOF[status] or "awaiting review")
+				table.insert(facts, { "Proof (Rule H)", proof })
+			end
+			table.insert(details, ui.kv(facts))
+		end
 		if admitted then
 			table.insert(details, ui.row({ dispatch_link(view, "inspect_worker", "Inspect native facts", { worker_id = worker.worker_id }),
 				dispatch_link(view, "open_worker", "Open exact relevant pane", { worker_id = worker.worker_id }) }))
 		end
-		if bound then
+		-- Only a launched generation left without the continued route needs continuation; a
+		-- never-launched or freshly launched worker has nothing to reattach.
+		if bound and worker.pane_binding ~= nil and (worker.continuation_required or worker.reattach_needed) then
 			table.insert(details, dispatch_link(view, "continue_worker", "Continue after reload / reattach explicitly…", { worker_id = worker.worker_id }))
 			table.insert(details, ui.text("Continuation requires selecting the exact existing worker and independently verifying old executors stopped or retired. Pane numbers and titles are not identity proof. Pending decisions and uncertain outcomes remain retained."))
 		end
@@ -518,12 +621,16 @@ local function workflow_view(view: any, projection: any, selected: any): (any, a
 			table.insert(details, ui.text("Rollover " .. rollover.id .. " · " .. worker.rollover.role .. " · " .. rollover.phase .. " · trigger " .. rollover.trigger
 				.. " · predecessor " .. rollover.predecessor_worker_id .. " · successor " .. tostring(rollover.successor_worker_id or "not granted")))
 			table.insert(details, ui.text("Durable edges: " .. table.concat(phases, " → ")))
-			if rollover.hold then table.insert(details, ui.text(ui.span("Held: " .. rollover.hold.code .. " · " .. rollover.hold.message, "warning"))) end
+			-- An owner-stopped checkpoint loop (loop_cap "Keep it stopped") offers no re-request.
+			local checkpoint_stopped = rollover.checkpoint_loop ~= nil and rollover.checkpoint_loop.state == "stopped"
+			if checkpoint_stopped then
+				table.insert(details, ui.text(ui.span("Checkpoint re-requests stopped by the owner (loop cap). Cancel the rollover to end it.", "warning")))
+			elseif rollover.hold then table.insert(details, ui.text(ui.span("Held: " .. rollover.hold.code .. " · " .. rollover.hold.message, "warning"))) end
 			if rollover.checkpoint then
 				table.insert(details, ui.text("Checkpoint " .. rollover.checkpoint.checkpoint_id .. " @ " .. rollover.checkpoint.artifact_revision
 					.. " · checks " .. tern.json.encode(rollover.checkpoint.checks) .. " — worker-attested, not independent verification"))
 			end
-			if admitted and rollover.rerequestable and worker.rollover.role == "predecessor" then
+			if admitted and rollover.rerequestable and not checkpoint_stopped and worker.rollover.role == "predecessor" then
 				table.insert(details, dispatch_link(view, "rollover", "Request the checkpoint again…", { worker_id = worker.worker_id }))
 			end
 			if admitted and rollover.cancellable and worker.rollover.role == "predecessor" then
@@ -551,25 +658,41 @@ local function workflow_view(view: any, projection: any, selected: any): (any, a
 	end
 	local gates = {}
 	for _, gate in flow.gates do if chosen and gate.worker_id == chosen.worker_id then table.insert(gates, gate) end end
+	-- Open questions first, then settled history; each group in creation order (numeric gate serial).
+	local function open_gate(gate: any): boolean return not GATE_SETTLED[gate.phase] end
+	local function serial(gate: any): number return tonumber(gate.id:match("(%d+)$")) or 0 end
+	table.sort(gates, function(a, b)
+		if open_gate(a) ~= open_gate(b) then return open_gate(a) end
+		return serial(a) < serial(b) or (serial(a) == serial(b) and a.id < b.id)
+	end)
 	local gate_page = math.min(view.workflow_gates or 0, math.max(0, math.ceil(#gates / 2) - 1))
 	page_controls(rows, "gates", gate_page, #gates, 2)
 	for index = gate_page * 2 + 1, math.min(#gates, gate_page * 2 + 2) do
 		local gate = gates[index]
-		machine("workflow-gate-" .. gate.id, "orchplus.gate", {
-			id = gate.id, revision = gate.revision, worker_id = gate.worker_id, worker_generation = gate.worker_generation,
-			kind = gate.kind, phase = gate.phase,
-		})
-		machine("workflow-gate-content-" .. gate.id, "orchplus.gate-content", {
-			version = 1, id = gate.id, revision = gate.revision, worker_id = gate.worker_id, worker_generation = gate.worker_generation,
-			question = gate.question, options = gate.options,
-		}, 65536)
+		machine("workflow-gate-" .. gate.id, "orchplus.gate", pick(gate, "id revision worker_id worker_generation kind phase"))
+		machine("workflow-gate-content-" .. gate.id, "orchplus.gate-content", pick(gate, "id revision worker_id worker_generation question options", { version = 1 }), 65536)
 		local fields = { gate_id = gate.id, gate_revision = gate.revision, worker_id = gate.worker_id }
 		local details = { ui.text(gate.id .. " / revision " .. tostring(gate.revision) .. " · " .. gate.kind .. " · " .. gate.phase),
 			ui.text(gate.question), ui.text("Evidence: " .. shown(gate.evidence, "none supplied")) }
 		for _, option in gate.options do table.insert(details, ui.text(option.id .. " · " .. option.label)) end
-		if gate.answer then table.insert(details, ui.text("Owner answer: " .. tern.json.encode(gate.answer))) end
+		if gate.answer then
+			local source = gate.answer.source
+			if type(source) == "table" and source.kind == "policy" then
+				table.insert(details, ui.text(ui.span("Policy answer (" .. tostring(source.rule) .. ", policy " .. tostring(source.policy_revision):sub(1, 12) .. "), not yours: " .. tostring(gate.answer.choice_id), "warning")))
+			elseif type(source) == "table" and source.kind == "refusal" then
+				table.insert(details, ui.text(ui.span("Refused by ORCH+ (" .. tostring(source.code) .. "), not an owner answer: " .. shown(gate.answer.answer, tostring(gate.answer.choice_id)), "warning")))
+			else
+				table.insert(details, ui.text("Owner answer: " .. tern.json.encode(gate.answer)))
+			end
+		end
+		if gate.execution then table.insert(details, ui.text("Execution: " .. gate.execution.state .. " · " .. gate.execution.effect_ref)) end
+		if gate.kind == "deploy_hold" then
+			local cause = if type(gate.evidence) == "table" and table.find(gate.evidence, "cause:failed") then "failed" else "held"
+			table.insert(details, ui.text(ui.span(if cause == "failed"
+				then "Deploy attempt failed: retry starts a new attempt for the same revision; stop ends the deploy. The release manager receives your decision; ORCH+ never deploys."
+				else "The release manager held this deploy: proceed relays your go-ahead for the same revision; stop ends the deploy. ORCH+ never deploys.", "warning")))
+		end
 		if gate.delivery then table.insert(details, ui.text("Immutable delivery: " .. tern.json.encode(gate.delivery))) end
-		if gate.result then table.insert(details, ui.text("Correlated worker result (not native effect proof): " .. tern.json.encode(gate.result))) end
 		if gate.delivery_uncertain then table.insert(details, ui.text("Possible delivery retained. Cancellation cannot retract bytes already published or consumed.")) end
 		if admitted then
 			if gate.kind ~= "quota_fallback" then
@@ -581,9 +704,7 @@ local function workflow_view(view: any, projection: any, selected: any): (any, a
 			if gate.phase == "pending" and gate.kind ~= "native_input" then
 				table.insert(details, dispatch_link(view, "answer", "Answer exact question…", fields))
 			end
-			if gate.phase ~= "cancelled" and gate.phase ~= "superseded" and gate.phase ~= "acknowledged" and gate.phase ~= "resolved" then
-				table.insert(details, dispatch_link(view, "cancel_gate", "Cancel this gate…", fields))
-			end
+			if open_gate(gate) then table.insert(details, dispatch_link(view, "cancel_gate", "Cancel this gate…", fields)) end
 			table.insert(details, dispatch_link(view, "recheck_gate", if gate.kind == "native_input" then "I resolved this in the pane — recheck only" else "Recheck gate evidence", fields))
 		end
 		table.insert(rows, ui.card("Owner gate · " .. gate.work_id, details))
@@ -608,16 +729,26 @@ local function workflow_view(view: any, projection: any, selected: any): (any, a
 			.. " · head " .. (if queue.head then queue.head.revision .. " (" .. queue.head.source .. ")" else "unknown until a recorded result")
 			.. " · slot " .. (queue.slot or "free")) }
 		for _, item in queue.items do
-			machine("workflow-landing-" .. item.id, "orchplus.landing", { id = item.id, revision = item.revision, status = item.status, queue_id = queue.id,
-				worker_id = item.worker_id, uncertain = item.uncertain, cancellable = item.cancellable, move_up = item.move_up, move_down = item.move_down,
-				markable_lost = item.markable_lost, reconcilable = item.reconcilable })
+			machine("workflow-landing-" .. item.id, "orchplus.landing",
+				pick(item, "id revision status worker_id uncertain cancellable move_up move_down markable_lost reconcilable", { queue_id = queue.id }))
+			machine("workflow-landing-roles-" .. item.id, "orchplus.landing-roles", pick(item, "id builder reviewer holder release_manager deploy_due", {
+				deploy = if item.deploy then pick(item.deploy, "deploy_id status revision attempts gate_id retry markable_lost reconcilable") else nil }))
 			local r, grant = item.request, item.grant
+			-- A refresh (target moved, or a grant released without landing) voids the review approval:
+			-- the rebased revision needs a fresh review and LANDING_REQUEST before any new approval.
+			local hold_code = if item.hold then item.hold.code else nil
+			local void = item.refresh_required or (item.approved and (hold_code == "refresh_required" or hold_code == "target_moved"))
 			table.insert(entries, ui.text((if item.position then "#" .. tostring(item.position) .. " " else "") .. item.id .. " · " .. item.status .. " · " .. item.work_id
 				.. " · " .. r.source_ref .. "@" .. r.source_revision .. " → expects " .. r.target_revision
-				.. (if item.approved then " · owner approved" elseif item.gate_id then " · approval gate " .. item.gate_id else "")))
+				.. (if void then " · approval void — awaiting fresh review/request"
+					elseif item.approved then " · owner approved" elseif item.gate_id then " · approval gate " .. item.gate_id else "")))
 			if item.hold then
 				table.insert(entries, ui.text(ui.span(item.hold.code .. " · " .. item.hold.message, if item.status == "blocked" then "warning" else "info")))
 			end
+			local b, rv, rm = item.builder, item.reviewer, item.release_manager
+			table.insert(entries, ui.text("Builder " .. (if b then shown(b.worker_id, "unknown") .. " (" .. shown(b.record_id, "record unknown") .. ", " .. shown(b.family, "family unknown") .. ")" else shown(item.worker_id, "unknown"))
+				.. " · reviewer " .. (if rv then shown(rv.worker_id, "unknown") .. " (" .. shown(rv.record_id, "record unknown") .. ", declared family " .. shown(rv.family, "unknown") .. ")" else "none yet")
+				.. " · release manager " .. (if rm then shown(rm.worker_id, "unknown") .. " (" .. shown(rm.record_id, "record unknown") .. ", " .. shown(rm.phase, "unknown") .. ")" else "none")))
 			if grant then
 				table.insert(entries, ui.text("Grant " .. grant.grant_id .. " · expects head " .. grant.target_revision .. " · "
 					.. (if grant.acknowledged then "consumed by worker" elseif grant.published then "published, awaiting worker ACK" else "issued")
@@ -628,8 +759,31 @@ local function workflow_view(view: any, projection: any, selected: any): (any, a
 				end
 				if grant.late_result then table.insert(entries, ui.text("Late worker result kept as evidence only: " .. grant.late_result.outcome)) end
 			end
+			local dep = item.deploy
+			if dep then
+				local cur = dep.current
+				table.insert(entries, ui.text("Deploy " .. dep.deploy_id .. " · " .. dep.status .. " · revision " .. shown(dep.revision, "unknown")
+					.. " · attempts " .. shown(dep.attempts, "0")
+					.. (if cur then " · attempt " .. cur.attempt_id .. " " .. cur.status
+						.. (if cur.acknowledged then " (consumed by release manager)" elseif cur.published then " (published, awaiting ACK)" else "")
+						.. (if cur.reconciliation then " · owner reconciled " .. shown(cur.reconciliation.outcome, "unknown") else "") else "")
+					.. (if dep.gate_id then " · gate " .. dep.gate_id else "")
+					.. (if dep.retry then " · new attempt pending" else "")))
+				if dep.hold then
+					table.insert(entries, ui.text(ui.span(dep.hold.code .. " · " .. dep.hold.message, if dep.status == "held" or dep.status == "failed" or dep.status == "uncertain" then "warning" else "info")))
+				end
+				if cur and cur.uncertain then table.insert(entries, ui.text(ui.span("Deploy uncertain · " .. shown(cur.uncertain.code, "") .. " · " .. shown(cur.uncertain.message, ""), "error"))) end
+			elseif item.deploy_due then
+				table.insert(entries, ui.text("Deploy due: a deploy grant for this landed revision goes to the release manager next."))
+			end
+			local fields = { landing_id = item.id, landing_revision = item.revision }
+			if admitted and dep and (dep.markable_lost or dep.reconcilable) then
+				local controls = {}
+				if dep.markable_lost then table.insert(controls, dispatch_link(view, "landing_lost", "Deploy result lost — hold…", fields)) end
+				if dep.reconcilable then table.insert(controls, dispatch_link(view, "reconcile_landing", "Reconcile observed deploy…", fields)) end
+				table.insert(entries, ui.row(controls))
+			end
 			if admitted and item.position then
-				local fields = { landing_id = item.id, landing_revision = item.revision }
 				local controls = {}
 				if item.move_up then table.insert(controls, dispatch_link(view, "move_landing", "Move up", { landing_id = item.id, landing_revision = item.revision, direction = "up" })) end
 				if item.move_down then table.insert(controls, dispatch_link(view, "move_landing", "Move down", { landing_id = item.id, landing_revision = item.revision, direction = "down" })) end
@@ -639,10 +793,30 @@ local function workflow_view(view: any, projection: any, selected: any): (any, a
 				if #controls > 0 then table.insert(entries, ui.row(controls)) end
 			end
 		end
-		table.insert(entries, ui.text("The project worker performs its own approved merge workflow; ORCH+ never runs git and never infers landing from REVIEW_READY, DONE or a closed pane."))
+		table.insert(entries, ui.text("The release manager performs the repository's approved merge and deploy workflow; ORCH+ never runs git or deploys and never infers landing from REVIEW_READY, DONE or a closed pane."))
 		table.insert(rows, ui.card("Landing queue · " .. queue.target_ref, entries))
 	end
-	machine("workflow-index", "orchplus.workflow", { policy = policy, worker_ids = ids, sweep_last_date = if type(flow.sweep) == "table" then flow.sweep.last_date else nil }, 65536)
+	-- Imported /glitch-plan files (D10): each checkpoint and task with its state and parser flags,
+	-- eight rows per page (per plan), in plan order.
+	local function flagged(flags: any): string return if type(flags) == "table" and #flags > 0 then " · flags " .. table.concat(flags, ", ") else "" end
+	for _, plan in flow.plans or {} do
+		local lines = {}
+		for _, cp in plan.checkpoints do
+			table.insert(lines, "Checkpoint " .. tostring(cp.n) .. " — " .. preview(cp.title, 120) .. " · " .. tostring(#cp.tasks) .. " task(s)" .. flagged(cp.flags))
+			for _, t in cp.tasks do
+				table.insert(lines, "Task " .. t.id .. " — " .. preview(t.title, 120) .. " · " .. t.state .. (if t.independent then " · independent" else "")
+					.. (if t.worker_id then " · " .. t.worker_id else "") .. (if t.hold then " · held " .. t.hold.code else "") .. flagged(t.flags))
+			end
+		end
+		local entries = { ui.text(plan.plan_id .. " · revision " .. plan.plan_revision:sub(1, 12) .. " · " .. plan.status .. " · " .. plan.path .. flagged(plan.flags)) }
+		local page = math.clamp((view.workflow_plans or {})[plan.plan_id] or 0, 0, math.max(0, math.ceil(#lines / 8) - 1))
+		page_controls(entries, "plan " .. plan.plan_id, page, #lines, 8)
+		for index = page * 8 + 1, math.min(#lines, page * 8 + 8) do table.insert(entries, ui.text(lines[index])) end
+		table.insert(rows, ui.card("Imported plan · " .. preview(plan.title, 80), entries))
+	end
+	machine("workflow-index", "orchplus.workflow", { policy = policy, policy_sha256 = flow.policy_sha256, worker_ids = ids, sweep_last_date = if type(flow.sweep) == "table" then flow.sweep.last_date else nil }, 65536)
+	-- Window contract for work sources (Contract K): newest intakes and the desired lane of each mapped board card.
+	machine("workflow-intake", "orchplus.intake", { intakes = flow.intakes or {}, board = flow.board or {} }, 65536)
 	table.insert(rows, ui.text(ui.span("Nightly mailbox sweep" .. (if policy.sweep_enabled then " at " .. shown(policy.sweep_time, "03:00") .. " local time" else " (off in Config)"), "strong")))
 	for _, row in sweep_rows(flow.sweep, 8) do table.insert(rows, row) end
 	-- Window contract for the USAGE capacity reader: catalog join, candidate records (pending
@@ -654,8 +828,7 @@ local function workflow_view(view: any, projection: any, selected: any): (any, a
 	for _, worker in flow.workers do
 		local r = worker.routing
 		if r and (worker.phase == "queued" or worker.phase == "provisioned") then
-			table.insert(routed, { worker_id = worker.worker_id, phase = r.phase, mode = r.mode, evidence_revision = r.evidence_revision,
-				auth_revision = r.auth_revision, launch_action_id = worker.launch_action_id })
+			table.insert(routed, pick(r, "phase mode evidence_revision auth_revision", { worker_id = worker.worker_id, launch_action_id = worker.launch_action_id }))
 			if r.phase ~= "selected" or r.policy_digest ~= quota.policy_digest(policy) then pending = true end
 			priority[r.requested.id] = 0
 			if r.selected then priority[r.selected.id] = 0 end
@@ -672,11 +845,9 @@ local function workflow_view(view: any, projection: any, selected: any): (any, a
 	for _, scope in quota.SCOPES do
 		for _, record_id in policy[scope .. "_records"] or {} do priority[record_id] = priority[record_id] or 1 end
 	end
-	local records, seen, ordered = {}, {}, {}
+	local records = {}
 	if catalog and catalog.namespace then
-		for _, record in catalog.records do
-			if record.eligible and record.enabled == true and not seen[record.id] then seen[record.id] = true; table.insert(ordered, record) end
-		end
+		local ordered = enabled_records(catalog)
 		table.sort(ordered, function(a, b)
 			local pa, pb = priority[a.id] or 2, priority[b.id] or 2
 			return pa < pb or (pa == pb and a.id < b.id)
@@ -687,16 +858,33 @@ local function workflow_view(view: any, projection: any, selected: any): (any, a
 	machine("routing-index", "orchplus.routing", { version = 1, quota_routing = policy.quota_routing,
 		namespace = if catalog then catalog.namespace else nil, host_key = if catalog then catalog.host_key else nil,
 		config_revision = if catalog then catalog.config_revision else nil, records = records,
-		evidence = if evidence then { revision = evidence.revision, auth_revision = evidence.auth_revision, expires_at_ms = evidence.expires_at_ms } else nil,
+		evidence = if evidence then pick(evidence, "revision auth_revision expires_at_ms") else nil,
 		refresh_due = policy.quota_routing and catalog ~= nil and catalog.namespace ~= nil and (evidence == nil or evidence.expires_at_ms <= now + 15000 or pending),
 		workers = routed }, 65536)
+	-- Config record pickers: every eligible, enabled record of the loaded catalog page, in catalog order,
+	-- with its capabilities (the release-manager picker lists only release-manager-v1 records).
+	local listed = {}
+	for _, record in enabled_records(catalog) do table.insert(listed, pick(record, "id revision provider account_label capabilities")) end
+	machine("catalog-index", "orchplus.catalog", { version = 1, revision = if catalog then catalog.revision else nil, records = listed }, 65536)
 	return ui.card("Health, owner inbox and durable threads", rows), nodes
 end
 local EDITABLE = { "poll_ms", "heartbeat_ms", "stale_ms", "automatic_reports", "auto_rollover", "rollover_threshold_pct",
 	"rollover_include_coordinator", "quota_routing", "excluded_workers", "quota_reserve_pct", "quota_max_age_ms",
 	"initial_dispatch_records", "initial_dispatch_provider", "initial_dispatch_account", "initial_dispatch_model", "sweep_enabled", "sweep_time",
 	"worker_rollover_records", "worker_rollover_provider", "worker_rollover_account", "worker_rollover_model",
-	"coordinator_rollover_records", "coordinator_rollover_provider", "coordinator_rollover_account", "coordinator_rollover_model", "concurrency_limit" }
+	"coordinator_rollover_records", "coordinator_rollover_provider", "coordinator_rollover_account", "coordinator_rollover_model", "concurrency_limit",
+	"loop_cap", "review_rounds", "stale_claim_min", "enforce_cross_family", "family_map", "reviewer_records", "release_manager_record",
+	"checkout_roots", "auto_approve_kinds", "glitch_integration", "default_work_source", "board_path", "board_lanes", "inbox_folder",
+	"auto_launch_intake", "routes", "labeller_record", "role_guidance", "templates" }
+-- Lists in Config show at most this many rows per page; the rest page explicitly.
+local CONFIG_PAGE = 8
+local APPROVE_KINDS = { "dispatch", "report", "review", "landing" }
+local GUIDANCE_ROLES = { { key = "builder", label = "Builder" }, { key = "reviewer", label = "Reviewer" },
+	{ key = "release_manager", label = "Release manager" }, { key = "labeller", label = "Labeller" }, { key = "coordinator", label = "Coordinator" } }
+local BOARD_LANES = { { key = "queued", label = "Queued lane" }, { key = "running", label = "Running lane" },
+	{ key = "review", label = "Review lane" }, { key = "done", label = "Done lane" } }
+-- Optional policy values: the reducer stores "none" as the empty string.
+local function present(value: any): boolean return type(value) == "string" and value ~= "" end
 local function same(left: any, right: any): boolean
 	if type(left) ~= type(right) then return false end
 	if type(left) ~= "table" then return left == right end
@@ -721,22 +909,24 @@ local function config_view(view: any, projection: any, selected: any): { any }
 		return finish()
 	end
 	table.insert(head, ui.text(ui.span(selected.name .. " · " .. selected.orch_session_id, "strong")))
-	local owner = selected.controller
-	local bound = owner ~= nil and owner.pane_binding ~= nil
-		and owner.pane_binding.host_pane_id == tostring(view.pane) and owner.pane_binding.alias_nonce == view.alias_nonce
-	local admitted = bound and owner.phase == "active"
+	local owner, bound, admitted = controller(view, selected)
 	if owner ~= nil and not bound then table.insert(head, assistance(view, "controller", owner, projection.revision, "reveal", "Reveal recorded controller pane")) end
-	if not admitted then
-		table.insert(head, ui.text(ui.span(if owner == nil then "Read-only: no controller is claimed for this session. Open the controller and claim it to edit settings."
-			elseif not bound then "Read-only: this view is not the session's controller (" .. tostring(owner.owner_id) .. "). Edit settings from that controller."
-			else "Read-only: this controller is " .. tostring(owner.phase) .. "; continue or recover it before editing.", "warning")))
-	end
+	local reason = if admitted then nil
+		elseif owner == nil then "Read-only: no controller is claimed for this session. Open the controller and claim it to edit settings."
+		elseif not bound then "Read-only: this view is not the session's controller (" .. tostring(owner.owner_id) .. "). Edit settings from that controller."
+		else "Read-only: this controller is " .. tostring(owner.phase) .. "; continue or recover it before editing."
+	if reason then table.insert(head, ui.text(ui.span(reason, "warning"))) end
+	-- A refused Config save (e.g. policy_too_large) uses the dispatch card's refusal display.
+	local command_result = view.dispatch_command_result
+	if command_result and command_result.command == "policy" and command_result.ok == false and not command_result.acknowledged then refusal_rows(view, head, command_result) end
 	local flow = if projection.dispatch then projection.dispatch.workflow else nil
 	if not flow then
 		table.insert(head, ui.text("Session policy unavailable; nothing can be edited."))
 		return finish()
 	end
-	local saved = flow.policy
+	local saved, catalog = flow.policy, projection.dispatch.catalog
+	-- Config links fence on the saved policy's digest, never a copy of the policy itself.
+	local saved_sha256 = if admitted then flow.policy_sha256 else nil
 	local draft = view.policy_draft
 	if draft and (draft.session ~= view.orch_session_id or not same(draft.base, saved)) then
 		local landed = true
@@ -754,7 +944,7 @@ local function config_view(view: any, projection: any, selected: any): { any }
 				table.insert(row, button(view, (if delta > 0 then "+" else "−") .. tostring(math.abs(delta)), { kind = "config-step", field = field, delta = delta }))
 			end
 			-- Exact entry saves one field immediately, so offer it only without an unsaved draft.
-			if not dirty then table.insert(row, dispatch_link(view, "policy", "Enter value…", { field = field, expected = saved })) end
+			if not dirty then table.insert(row, dispatch_link(view, "policy", "Enter value…", { field = field, expected_sha256 = saved_sha256 })) end
 		end
 		return ui.row(row)
 	end
@@ -771,30 +961,27 @@ local function config_view(view: any, projection: any, selected: any): { any }
 		stepper("concurrency_limit", "Concurrent routed launches", " per session (0 = no limit configured; 1–32)", { -1, 1 }),
 		ui.text("The concurrency limit counts this session's routed work from reservation until verified stop/retirement or a definitive launch failure (an uncertain launch keeps its slot). It serializes this session only, not other sessions' use of the same quota."),
 	}
-	local routing_catalog = if projection.dispatch then projection.dispatch.catalog else nil
+	local offered, offered_ids = enabled_records(catalog), {}
+	for _, record in offered do offered_ids[record.id] = true end
 	-- Strict routing schema: each scope has its own explicit allowlist and substitution permissions.
 	for _, scope in { { key = "initial_dispatch", prefix = "route", title = "initial dispatch (new tasks and coordinator starts)" },
 		{ key = "worker_rollover", prefix = "wroute", title = "worker rollover successors" },
 		{ key = "coordinator_rollover", prefix = "croute", title = "coordinator rollover successors" } } do
 		local list = values[scope.key .. "_records"]
 		table.insert(routing, ui.text(ui.span("Allowed alternatives for " .. scope.title .. " (explicit records; none by default)", "strong")))
-		local listed_records = {}
-		for _, record in (if routing_catalog then routing_catalog.records else {}) do
-			if record.eligible and record.enabled == true and not listed_records[record.id] then
-				listed_records[record.id] = true
-				table.insert(routing, checkbox(scope.prefix .. ":" .. record.id, table.find(list, record.id) ~= nil, admitted,
-					record.id .. " · provider " .. tostring(record.provider or "unset") .. " · account " .. tostring(record.account_label or "unset")
-						.. " · model " .. tostring(record.model_variant or "unset") .. " · selector unverified"))
-			end
+		for _, record in offered do
+			table.insert(routing, checkbox(scope.prefix .. ":" .. record.id, table.find(list, record.id) ~= nil, admitted,
+				record.id .. " · provider " .. tostring(record.provider or "unset") .. " · account " .. tostring(record.account_label or "unset")
+					.. " · model " .. tostring(record.model_variant or "unset") .. " · selector unverified"))
 		end
 		for _, record_id in list do
-			if not listed_records[record_id] then table.insert(routing, checkbox(scope.prefix .. ":" .. record_id, true, admitted, record_id .. " · not in the loaded catalog page (never used until it is)")) end
+			if not offered_ids[record_id] then table.insert(routing, checkbox(scope.prefix .. ":" .. record_id, true, admitted, record_id .. " · not in the loaded catalog page (never used until it is)")) end
 		end
 		table.insert(routing, checkbox(scope.key .. "_provider", values[scope.key .. "_provider"], admitted, "Allow switching to a different provider"))
 		table.insert(routing, checkbox(scope.key .. "_account", values[scope.key .. "_account"], admitted, "Allow switching to a different account/profile"))
 		table.insert(routing, checkbox(scope.key .. "_model", values[scope.key .. "_model"], admitted, "Allow switching to a different model"))
 	end
-	if not routing_catalog then table.insert(routing, ui.text("Load the SPAWN catalog in the controller to choose alternatives.")) end
+	if not catalog then table.insert(routing, ui.text("Load the SPAWN catalog in the controller to choose alternatives.")) end
 	table.insert(routing, ui.text("Unticked permissions turn an otherwise usable alternative into a one-action owner decision. A rollover successor prefers its predecessor's record; a switch needs that rollover kind's allowlist and permission or an owner decision on the predecessor, and the running predecessor never changes. Landing is unaffected. Model/profile selectors are reported unverified: SPAWN exposes no typed selector status, so ORCH+ does not claim enforcement. Quota is never reserved with the provider."))
 	table.insert(cards, ui.card("Task routing", routing))
 	local scheduling = {
@@ -805,15 +992,143 @@ local function config_view(view: any, projection: any, selected: any): { any }
 	}
 	if values.stale_ms < values.heartbeat_ms then table.insert(scheduling, ui.text(ui.span("Stale must be at least the heartbeat; Save will be refused.", "warning"))) end
 	table.insert(scheduling, ui.text(if saved.paused then "Scheduling paused — new work held; receipts, reports and answers still settle." else "Scheduling enabled."))
-	if admitted then table.insert(scheduling, dispatch_link(view, if saved.paused then "resume" else "pause", if saved.paused then "Resume scheduling" else "Pause new work")) end
+	if admitted then table.insert(scheduling, pause_link(view, saved)) end
 	table.insert(cards, ui.card("Scheduling and health", scheduling))
 	local sweep = { checkbox("sweep_enabled", values.sweep_enabled == true, admitted, "Nightly orphan mailbox sweep") }
 	local at = { ui.text("Runs once per local day at " .. shown(values.sweep_time, "03:00") .. " (24-hour, this window's local time)") }
-	if admitted and not dirty then table.insert(at, dispatch_link(view, "policy", "Enter time…", { field = "sweep_time", expected = saved })) end
+	if admitted and not dirty then table.insert(at, dispatch_link(view, "policy", "Enter time…", { field = "sweep_time", expected_sha256 = saved_sha256 })) end
 	table.insert(sweep, ui.row(at))
 	table.insert(sweep, ui.text("Each run checks every worker mailbox in this session. It queues the normal mailbox retirement only for a worker whose exact native stop was observed, whose receipts, replies and notifications are settled and that no rollover, landing or review references; queues pending compaction for live workers; and keeps everything else with its reason. It never stops a worker. A missed time (no window attached, host asleep) runs once on the next attach; one run per scheduled day, recorded durably."))
 	for _, row in sweep_rows(flow.sweep, 16) do table.insert(sweep, row) end
 	table.insert(cards, ui.card("Mailbox sweep", sweep))
+	do
+		-- Config v4 cards. Numeric/boolean keys edit the draft; list, text and record keys save one
+		-- field through the window's bounded prompt, offered only without an unsaved draft.
+		local pages = view.config_pages or {}
+		local function field_link(label: string, field: string, extra: any?): any?
+			if not admitted or dirty then return nil end
+			local request: any = { field = field, expected_sha256 = saved_sha256 }
+			for key, value in extra or {} do request[key] = value end
+			return dispatch_link(view, "policy", label, request)
+		end
+		local function add(rows: { any }, node: any?) if node then table.insert(rows, node) end end
+		local function line(text: string, ...: any): any
+			local row = { ui.text(text) }
+			for index = 1, select("#", ...) do
+				local node = select(index, ...)
+				if node then table.insert(row, node) end
+			end
+			return ui.row(row)
+		end
+		local function config_card(title: string, rows: { any }, single_field: boolean)
+			if reason then table.insert(rows, 1, ui.text(ui.span(reason, "warning")))
+			elseif single_field and dirty then table.insert(rows, 1, ui.text(ui.span("Save or discard unsaved changes first; this field saves on its own.", "warning"))) end
+			table.insert(cards, ui.card(title, rows))
+		end
+		local function paged(rows: { any }, name: string, total: number, each: (number) -> ())
+			local last = math.max(0, math.ceil(total / CONFIG_PAGE) - 1)
+			local page = math.clamp(pages[name] or 0, 0, last)
+			for index = page * CONFIG_PAGE + 1, math.min(total, (page + 1) * CONFIG_PAGE) do each(index) end
+			if total > CONFIG_PAGE then
+				table.insert(rows, ui.text(tostring(total) .. " entries · page " .. tostring(page + 1) .. "/" .. tostring(last + 1)))
+				if page > 0 then table.insert(rows, button(view, "Previous page", { kind = "config-page", name = name, page = page - 1 })) end
+				if page < last then table.insert(rows, button(view, "Next page", { kind = "config-page", name = name, page = page + 1 })) end
+			end
+		end
+		config_card("Loops", {
+			stepper("loop_cap", "Loop cap", " attempts per loop (1–10)", { -1, 1 }),
+			stepper("review_rounds", "Review rounds", " per piece of work (1–2)", { -1, 1 }),
+			stepper("stale_claim_min", "Stale-claim alert after", " minutes (0 = off; 0–1440)", { -30, -5, 5, 30 }),
+			ui.text("Every loop that re-engages a model or a worker stops at the cap with one loop_cap owner decision naming the loop; allowing more resets only that loop's counter. Code-only waits stay time-bounded. A claim older than the stale-claim limit raises one stale_claim decision; ORCH+ never takes over a claim."),
+		}, false)
+		local review = { checkbox("enforce_cross_family", values.enforce_cross_family == true, admitted,
+			"Enforce cross-family review — a green review from a different provider family is the landing proof; off: checks run by the SPAWN helper are the proof") }
+		table.insert(review, ui.text(ui.span("Family map (owner-declared, not verified)", "strong")))
+		local mapped = {}
+		for record_id in values.family_map do table.insert(mapped, record_id) end
+		table.sort(mapped)
+		paged(review, "family_map", #mapped, function(index: number)
+			local record_id = mapped[index]
+			table.insert(review, line(record_id .. " → " .. tostring(values.family_map[record_id]) .. " (declared)", field_link("Set family…", "family_map", { item = record_id })))
+		end)
+		table.insert(review, ui.text("Unmapped records use their provider: Claude → anthropic, Codex → openai, Kimi → moonshot, Agy → google, Grok → xai, Muse → muse. OMP and unknown providers have no family until mapped; cross-family checks on them raise family_unknown."))
+		if #mapped < 24 then add(review, field_link("Set family…", "family_map")) end
+		table.insert(review, ui.text(ui.span("Reviewer records (tried in order)", "strong")))
+		local reviewers = values.reviewer_records
+		paged(review, "reviewer_records", #reviewers, function(index: number)
+			table.insert(review, line(tostring(index) .. ". " .. reviewers[index],
+				if admitted and index > 1 then button(view, "Move up", { kind = "config-move", field = "reviewer_records", item = reviewers[index] }) else nil,
+				field_link("Remove", "reviewer_records", { op = "remove", item = reviewers[index] })))
+		end)
+		if #reviewers == 0 then table.insert(review, ui.text("No reviewer records: review requests hold as reviewer_unavailable.")) end
+		if #reviewers < 8 then add(review, field_link("Add reviewer record…", "reviewer_records", { op = "add" })) end
+		config_card("Review & proof", review, true)
+		local manager = values.release_manager_record
+		config_card("Release", {
+			line("Release manager record: " .. (if present(manager) then tostring(manager) else "none"), field_link("Choose release manager…", "release_manager_record")),
+			ui.text("The release manager is the only merging actor: landing and deploy grants go to it, never to builders. With none configured, landing items hold release_manager_missing."),
+		}, true)
+		local roots = values.checkout_roots
+		local checkouts = { ui.text("Absolute checkout roots (up to 8). Two same-session ORCH+ workers sharing a checkout at or under a root raise shared_checkout; other sessions' workers are not visible.") }
+		paged(checkouts, "checkout_roots", #roots, function(index: number)
+			table.insert(checkouts, line(roots[index], field_link("Remove", "checkout_roots", { op = "remove", item = roots[index] })))
+		end)
+		if #roots == 0 then table.insert(checkouts, ui.text("No roots: the shared-checkout gate is off.")) end
+		if table.find(roots, "/") then table.insert(checkouts, ui.text(ui.span("Root / covers every path: every worker checkout is gated.", "warning"))) end
+		if #roots < 8 then add(checkouts, field_link("Add root…", "checkout_roots", { op = "add" })) end
+		config_card("Checkouts", checkouts, true)
+		local AUTONOMY_LABELS = { dispatch = "Dispatch — start the proposed worker on the proposed record",
+			report = "Report — request a progress report", review = "Review — request a review",
+			landing = "Landing — queue the release manager's merge without asking you (proof rule still required)" }
+		local autonomy = { ui.text("Approve in-scope coordinator proposals by policy: work from a plan or board with declared scope paths and no open scope, file-overlap or shared-checkout gate. Policy approval never bypasses loop caps, proof, capacity or pause, and every policy answer is recorded and visible.") }
+		for _, kind in APPROVE_KINDS do
+			table.insert(autonomy, checkbox("approve:" .. kind, table.find(values.auto_approve_kinds, kind) ~= nil, admitted, AUTONOMY_LABELS[kind]))
+		end
+		config_card("Autonomy", autonomy, false)
+		local sources = { checkbox("glitch_integration", values.glitch_integration == true, admitted, "Glitch integration (offer /glitch-plan files as a work source)") }
+		if values.glitch_integration == true then
+			table.insert(sources, ui.text("Default work source (choose one):"))
+			table.insert(sources, checkbox("work_source:glitch_plan", values.default_work_source == "glitch_plan", admitted, "/glitch-plan file"))
+			table.insert(sources, checkbox("work_source:board", values.default_work_source == "board", admitted, "Tern board"))
+		end
+		table.insert(sources, line("Board: " .. (if present(values.board_path) then tostring(values.board_path) else "none"), field_link("Set board path…", "board_path")))
+		for _, lane in BOARD_LANES do
+			table.insert(sources, line(lane.label .. ": " .. tostring(values.board_lanes[lane.key]), field_link("Set title…", "board_lanes", { item = lane.key })))
+		end
+		table.insert(sources, line("Inbox folder: " .. (if present(values.inbox_folder) then tostring(values.inbox_folder) else "none"), field_link("Set inbox folder…", "inbox_folder")))
+		table.insert(sources, checkbox("auto_launch_intake", values.auto_launch_intake == true, admitted, "Launch new board cards and inbox files automatically (off: each waits for your intake decision)"))
+		table.insert(sources, ui.text("The board is read by the desktop window: when this window is attached to a remote host, the board path is on the desktop, not the execution host, and the board is not polled until you confirm it once via Start work…. The inbox folder is listed by the desktop window too, so it is polled only when this window runs on the execution host."))
+		config_card("Work sources", sources, true)
+		local routes = values.routes
+		local by_class = { ui.text("Work without a class is labelled by the labeller record; the label's class picks the route's record. Model and effort are whatever that SPAWN record runs; ORCH+ never sets CLI flags.") }
+		paged(by_class, "routes", #routes, function(index: number)
+			local route = routes[index]
+			table.insert(by_class, line(tostring(route.class) .. " → " .. tostring(route.record_id), field_link("Remove", "routes", { op = "remove", index = index })))
+		end)
+		if #routes == 0 then table.insert(by_class, ui.text("No routes configured.")) end
+		if #routes < 16 then add(by_class, field_link("Add route…", "routes", { op = "add" })) end
+		local labeller = values.labeller_record
+		table.insert(by_class, line("Labeller record: " .. (if present(labeller) then tostring(labeller) else "none"), field_link("Choose labeller…", "labeller_record")))
+		config_card("Routing", by_class, true)
+		local guidance = { ui.text("guidance only — restrict tools in the SPAWN record's own CLI flags") }
+		for _, role in GUIDANCE_ROLES do
+			table.insert(guidance, line(role.label .. ": " .. preview(values.role_guidance[role.key], 80), field_link("Edit…", "role_guidance", { item = role.key })))
+		end
+		config_card("Role guidance", guidance, true)
+		local templates = values.templates
+		local chain = { ui.text("Each template's prompt holds one {input}; its output file feeds the next template. A chain stops at its bound with a loop_cap decision.") }
+		paged(chain, "templates", #templates, function(index: number)
+			local template = templates[index]
+			table.insert(chain, line(tostring(template.id) .. " · " .. preview(template.title, 80) .. " → " .. tostring(template.output)
+				.. (if present(template.next) then " · then " .. tostring(template.next) else " · last")
+				.. (if present(template.class) then " · class " .. tostring(template.class) else ""),
+				if admitted then dispatch_link(view, "start_work", "Start…", { template_id = template.id }) else nil,
+				field_link("Edit…", "templates", { op = "edit", index = index }), field_link("Remove", "templates", { op = "remove", index = index })))
+		end)
+		if #templates == 0 then table.insert(chain, ui.text("No templates.")) end
+		if #templates < 16 then add(chain, field_link("Add template…", "templates", { op = "add" })) end
+		config_card("Templates", chain, true)
+	end
 	local panes = view.session_panes
 	local pane_for = {}
 	for _, row in (if panes then panes.panes else {}) do if row.worker_id then pane_for[row.worker_id] = row.pane end end
@@ -833,7 +1148,6 @@ local function config_view(view: any, projection: any, selected: any): { any }
 		table.insert(list, ui.text("Waiting for this window's agent-pane observation…"))
 	else
 		-- Explicit verified attach offers only eligible native-agent records with report-files-v1.
-		local catalog = if projection.dispatch then projection.dispatch.catalog else nil
 		local adoptable = {}
 		for _, record in (if catalog then catalog.records else {}) do
 			if record.eligible and record.enabled == true and record.backend == "native-agent" and table.find(record.capabilities or {}, "report-files-v1") and #adoptable < 8 then
@@ -866,7 +1180,7 @@ local function config_view(view: any, projection: any, selected: any): { any }
 	if admitted then
 		if dirty then
 			table.insert(cards, ui.card("Unsaved changes", {
-				dispatch_link(view, "policy", "Save session settings", { policy = changed, expected = saved }),
+				dispatch_link(view, "policy", "Save session settings", { policy = changed, expected_sha256 = saved_sha256 }),
 				button(view, "Discard unsaved changes", { kind = "config-discard" }),
 			}))
 		else
@@ -961,26 +1275,17 @@ function M.render(view: any, projection: any, status: string, diagnostic: string
 		for _, target in { "controller", "orchestrator" } do
 			local owner = selected[target]
 			if owner ~= nil then
-				owners[target] = { owner_id = owner.owner_id, generation = owner.generation,
-					alias_nonce = if owner.pane_binding ~= nil then owner.pane_binding.alias_nonce else nil }
+				owners[target] = pick(owner, "owner_id generation", { alias_nonce = if owner.pane_binding ~= nil then owner.pane_binding.alias_nonce else nil })
 			end
 		end
 	end
 	-- One-shot operator intent of the last clicked window-side control (host-bounded). The window
 	-- whose origin owns this controller consumes it once per (source_nonce, serial).
-	if type(view.operator_intent) == "table" then
-		local intent = ui.text(tern.json.encode(view.operator_intent))
-		intent.p.key = "operator-intent"
-		intent.p.role = "orchplus.intent"
-		table.insert(rows, intent)
-	end
+	if type(view.operator_intent) == "table" then table.insert(rows, keyed(tern.json.encode(view.operator_intent), "operator-intent", "orchplus.intent")) end
 	-- config_open only asks this window for the display-only session agent-pane list.
-	local bridge = ui.text(tern.json.encode({ version = 2, alias_nonce = view.alias_nonce,
-		orch_session_id = view.orch_session_id, revision = projection.revision, owners = owners, config_open = view.config_open == true }))
-	bridge.p.key = "ownership-alias"
-	bridge.p.role = "orchplus.alias"
 	table.insert(rows, ui.text("Window alias diagnostic (not identity or authorization)"))
-	table.insert(rows, bridge)
+	table.insert(rows, keyed(tern.json.encode({ version = 2, alias_nonce = view.alias_nonce, orch_session_id = view.orch_session_id,
+		revision = projection.revision, owners = owners, config_open = view.config_open == true }), "ownership-alias", "orchplus.alias"))
 	return ui.col(rows)
 end
 return M
