@@ -1,0 +1,1 @@
+-- Updater fixture host half: intentionally empty (the smoke harness may append the suite runner).
