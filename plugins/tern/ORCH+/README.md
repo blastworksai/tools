@@ -27,7 +27,7 @@ Optionally, [USAGE](../USAGE/README.md) 2.1.0 or later supplies remaining-quota 
 ## Requirements
 
 - Tern 0.9.10 or later.
-- [SPAWN](../SPAWN/README.md) 0.3.0 or later, installed on the same Tern host, with at least one record that declares the `report-files-v1` mailbox capability. A coordinator additionally needs a record provisioned with `coordinator-control-v1`.
+- [SPAWN](../SPAWN/README.md) 0.3.1 or later, installed on the same Tern host, with at least one record that declares the `report-files-v1` mailbox capability. A coordinator additionally needs a record provisioned with `coordinator-control-v1`.
 - Optional, for quota routing only: [USAGE](../USAGE/README.md) 2.1.0 or later, with its read-only capacity export enabled and each SPAWN account bound in USAGE Setup (**Bind SPAWN accounts…**; OMP records through **Associate OMP records…**).
 
 ## Install
@@ -162,7 +162,7 @@ ORCH+ reads uncertain effects back from SPAWN automatically, with read-only stat
 
 Work that was queued but had not launched yet moves to the continued window. Its launch then runs there, even when its mailbox provision finished only after you continued. A launch that had already started in the old window is never re-run; it stays uncertain until its outcome is read back.
 
-Some never-launched work cannot move: SPAWN already received its launch or provision (for example a launch whose window authorization expired and was rechecked), or it is an adoption whose ask was never sent. Continuation marks that request as never executed, and the worker shows **Cancel never-launched work…**. If SPAWN received the request, ORCH+ first reads SPAWN's retained status of it and cancels only when that request can never run: SPAWN has no record of it, rejected it, or reports that it was refused before any effect (an expired challenge counts). While SPAWN still holds a live challenge, wait 30 seconds and try again. Cancelling removes the worker and frees its reservations, including a coordinator start's slot. Nothing is stopped or re-sent, and a provisioned mailbox stays unused. Then queue the assignment again; it gets a new launch request.
+Some never-launched work cannot move: SPAWN already received its launch or provision (for example a launch whose window authorization expired and was rechecked), or it is an adoption whose ask was never sent. Continuation marks that request as never executed, and the worker shows **Cancel never-launched work…**. If SPAWN received the request, ORCH+ first reads SPAWN's retained status of it and cancels only when that request can never run: SPAWN has no record of it, rejected it, or reports that it was refused before any effect (an expired challenge counts). While SPAWN still holds a live challenge, wait 30 seconds and try again. Without a mailbox, cancelling removes the worker and frees its reservations at once. If its mailbox was already provisioned, cancelling retires that never-used mailbox through the exact retirement path and keeps the worker visible until SPAWN confirms retirement; the worker is then removed and its reservations, including a coordinator start's slot, are freed. If SPAWN refuses the retirement, cancel again to issue one fresh retirement; a pending or uncertain one is never repeated. Nothing is stopped or re-sent. Then queue the assignment again; it gets a new launch request.
 
 ### Quota routing via USAGE
 
