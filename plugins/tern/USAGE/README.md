@@ -235,6 +235,7 @@ A binding ends by itself, and must be confirmed again, when you edit that SPAWN 
 - **What a read touches.** Claude: the saved OAuth login file, then `https://api.anthropic.com/api/oauth/usage`. Codex, Grok, Kimi, Muse, Antigravity: the provider's own CLI, run with an empty working directory, no terminal and a minimal environment. Antigravity identity uses Google's userinfo endpoint. Kimi's local web server is bound to loopback and stopped after the read.
 - **What leaves the read.** Only normalized identity and quota fields. Raw responses, tokens and error text are never stored or logged.
 - **Other OS users.** If a SPAWN account names an OS `user`, USAGE reads it as that user with `sudo -n -u USER`, which only works if you already allow that without a password. The Python interpreter must be executable by that user, and the provider CLIs must be on `/usr/local/bin`, `/usr/bin`, `/bin`, or that user's `~/.local/bin` or `~/.bun/bin`. USAGE copies a small helper (code only, no credentials) to a temporary directory for the read and deletes it afterwards.
+- **Seat launchers.** A SPAWN account whose command is `/absolute/path/seat-agent-entry <user>`, with `<user>` the account's own OS `user` and no other arguments, is read as that user's default provider context. USAGE trusts the launcher only when root owns it and every directory above it and none of them is writable by group or others; any other shape is reported as "account context could not be verified".
 - **Stored data.** The companion database in `plugin-data/usage/companion/` keeps account labels, logins and readings. It is owner-only. USAGE writes nothing into the package directory.
 
 ## Troubleshooting
@@ -248,7 +249,7 @@ A binding ends by itself, and must be confirmed again, when you edit that SPAWN 
 | "usage credentials unavailable on source" | Sign in once with the provider's own CLI as the OS user SPAWN uses, then refresh. An env-token or API-key setup can work interactively without a saved subscription login. |
 | "provider login expired" | Open the provider's CLI normally once so it renews its login, then refresh. |
 | "signed in with an API key" | That login has no subscription quota to show. |
-| "account context could not be verified" | The SPAWN command passes a flag that can switch accounts or profiles (for example `--profile` or an auth override). USAGE won't guess which account that is. |
+| "account context could not be verified" | The SPAWN command passes a flag that can switch accounts or profiles (for example `--profile` or an auth override), or wraps the provider CLI in a launcher USAGE can't see into. USAGE won't guess which account that is. Point the command at the provider CLI itself, or use a root-controlled [seat launcher](#privacy-and-permissions). |
 | "runs on another machine over SSH" | Install USAGE on that machine (and share it, if you like). |
 | Muse "Awaiting usage after a turn" | Use Muse normally once; USAGE will not start a turn for you. |
 | Hub listener problem in Diagnostics | The saved sharing address is not available (for example after a network change). Choose **Share** again with a current address, or **Standalone**. Local use keeps working meanwhile. |
