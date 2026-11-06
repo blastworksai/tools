@@ -58,13 +58,23 @@ The reader returns only the validated checkpoint object, not whole plan prose, i
 
 ## Runtime and rollout
 
-**Tern 0.9.8 or later is the minimum supported runtime for both the session daemon and viewing client.** The same connected suite passes on 0.9.8 (`f21d9a3`) and 0.9.10 (`2ad447b`). Both runs observe initial local rendering and test later SSH/restore behavior through real native host callbacks; authenticated remote/restored client visuals remain a pilot check. Confirm the actual running binary/client versions; changing a symlink does not update a running daemon. This plugin does not update or restart Tern.
+**Tern 0.9.8 or later is the minimum supported runtime for both the session daemon and viewing client.** The same connected suite passes on 0.9.8 (`f21d9a3`) and 0.9.10 (`2ad447b`). Both runs observe initial local rendering and test later SSH/restore behavior through real native host callbacks; authenticated remote/restored client visuals remain a pilot check. Confirm the actual running binary/client versions; changing a symlink does not update a running daemon. This plugin does not update or restart Tern. It can update itself; see Update.
 
 Install the package with Tern's ordinary installer:
 
 ```sh
 tern plugin install github.com/blastworksai/tools/plugins/tern/TODO
 ```
+
+### Update
+
+Run **TODO: Check for updates** from the command palette. When a newer version is on GitHub, **TODO: Update** installs it in place: it checks the release's requirements and asks first, and can also update connected remote hosts. Tern then reloads all its plugins, and your settings carry over. If ORCH+ is running a controller, run **ORCH+ Reload recovery guide** afterwards.
+
+A copy installed before the updater existed needs one manual update:
+
+    tern plugin install --force github.com/blastworksai/tools/plugins/tern/TODO
+
+A linked development checkout (`tern plugin link`) is never updated by the plugin; `git pull` it yourself.
 
 Plugin ID is `todo`; displayed name is **TODO**. Install on the actual session host/client combination; do not run a deployed service/plugin from a group-writable development checkout. See [docs/RUNBOOK.md](docs/RUNBOOK.md).
 

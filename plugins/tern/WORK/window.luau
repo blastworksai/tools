@@ -282,3 +282,5 @@ tern.files.button({
 	end,
 })
 
+
+require("./updater/window").register({ name = "WORK", dir = "WORK", title_prefix = "WORK " })

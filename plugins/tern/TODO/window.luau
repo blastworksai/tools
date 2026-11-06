@@ -10,3 +10,5 @@ tern.command({id="show",title="TODO: attach to this panel",icon="list-checks",ru
 
 -- Files-pane entry shares the palette action's panel-aware attach controller.
 tern.files.button({id="todo",title="TODO",icon="list-checks",run=function(_files,cx) controller.chooseSession(cx) end})
+
+require("./updater/window").register({ name = "TODO", dir = "TODO", title_prefix = "TODO: " })

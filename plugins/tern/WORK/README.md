@@ -67,6 +67,16 @@ tern plugin reload tern-work --json
 
 Windows paths are supported; the plugin normalizes path separators before locating the Glitch root.
 
+### Update
+
+Run **WORK Check for updates** from the command palette. When a newer version is on GitHub, **WORK Update** installs it in place: it checks the release's requirements and asks first, and can also update connected remote hosts. Tern then reloads all its plugins, and your settings carry over. If ORCH+ is running a controller, run **ORCH+ Reload recovery guide** afterwards.
+
+A copy installed before the updater existed needs one manual update:
+
+    tern plugin install --force github.com/blastworksai/tools/plugins/tern/WORK
+
+A linked development checkout (`tern plugin link`) is never updated by the plugin; `git pull` it yourself.
+
 ## Registry contract
 
 The registry is expected to have this shape:

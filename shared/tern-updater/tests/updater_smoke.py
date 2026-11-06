@@ -145,8 +145,14 @@ class Sweep:
         out = {}
         for pid in found:
             try:
+                argv = Path('/proc/'+pid+'/cmdline').read_bytes().split(b'\0')
                 stat = Path('/proc/'+pid+'/stat').read_text()
             except OSError:
+                continue
+            # pgrep -f also matches any concurrent pgrep/shell quoting the pattern (e.g. a
+            # parallel harness run); only `<tern> daemon --socket /run/user/…` counts.
+            if not any(argv[i] == b'daemon' and argv[i+1] == b'--socket' and argv[i+2].startswith(b'/run/user/')
+                       for i in range(len(argv)-2)):
                 continue
             fields = stat.rsplit(')', 1)[1].split()
             out[pid] = fields[19]  # field 22: start time in clock ticks
@@ -569,7 +575,7 @@ def plugin_mode(base, evidence, processes, sweep, source):
     pub.mkdir()
     server = Server(pub)
     raw = 'http://127.0.0.1:%d/' % server.port
-    copy = base/'plugin'
+    copy = base/'package'/dir_name  # never inside the Tern env root (its sockets would be copied)
     shutil.copytree(source, copy, ignore=shutil.ignore_patterns('.git', '__pycache__', '*.local'))
     original_id = manifest_value(copy/'plugin.toml', 'id')
     test_id = original_id+'-test'
@@ -587,7 +593,7 @@ def plugin_mode(base, evidence, processes, sweep, source):
         shutil.copy2(source/'requires.json', pub/dir_name/'requires.json')
     checks = evidence['checks']
     try:
-        tern = Tern(base, 'plugin', evidence, processes)
+        tern = Tern(base, 'env', evidence, processes)
         tern.start()
         offset = tern.log_offset()
         tern.command('plugin', 'install', copy)
