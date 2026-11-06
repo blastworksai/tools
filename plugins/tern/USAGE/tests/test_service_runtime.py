@@ -173,7 +173,9 @@ class RuntimeBoundaryTests(unittest.TestCase):
         self.assertNotIn("shell", options)
         if os.name == "nt":
             self.assertTrue(options["creationflags"] & subprocess.CREATE_NO_WINDOW)
-            self.assertTrue(options["creationflags"] & subprocess.DETACHED_PROCESS)
+            self.assertTrue(options["creationflags"] & subprocess.CREATE_NEW_PROCESS_GROUP)
+            # Detached, the venv launcher's child interpreter would get a visible console.
+            self.assertFalse(options["creationflags"] & subprocess.DETACHED_PROCESS)
             self.assertNotIn("start_new_session", options)
         else:
             self.assertTrue(options["start_new_session"])
