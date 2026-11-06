@@ -300,10 +300,10 @@ local function current_origin(cx: WindowCx, source: number, origin: any): boolea
 	end
 	return true
 end
-local function notice(cx: WindowCx, source: number, nonce: string, message: string)
+local function notice(cx: WindowCx, source: number, nonce: string, message: string, level: string?, title: string?)
 	local _, node = snapshot(cx, source)
 	if node then cx.session:event(source, { ev = "action", id = node.id, act = "dispatch-notice", value = tern.json.encode({ source_nonce = nonce, message = message }) }) end
-	cx:toast("error", "ORCH+ dispatch", message)
+	cx:toast((level or "error") :: any, title or "ORCH+ dispatch", message)
 end
 local command_cursors: any = {}
 local function same_origin(left: any, right: any): boolean
@@ -1386,7 +1386,12 @@ local function open_guide(cx: WindowCx, source: number, origin: any)
 		end
 	end
 	if #items == 0 then
-		notice(cx, source, origin.alias_nonce, "Reload recovery: no controller, SPAWN owner or worker reattachment step remains." .. informational)
+		notice(cx, source, origin.alias_nonce, "Reload recovery: no controller, SPAWN owner or worker reattachment step remains." .. informational, "info", "ORCH+ Reload recovery guide")
+		-- Informational only: neither item has a kind, so choosing either does nothing.
+		cx:pick({ placeholder = "Reload recovery: nothing to do." .. informational, items = {
+			{ label = "No reload recovery step remains (controller, SPAWN owner and every worker are settled)" },
+			{ label = "Close" },
+		} })
 		return
 	end
 	table.insert(items, { label = "Close — nothing is done automatically" })
@@ -1462,7 +1467,8 @@ local function withdraw_step(cx: WindowCx)
 			local _, bytes = surface_node(cx, probe.bridge, "spawn.dispatch", "spawn.dispatch.response")
 			if bytes and dispatch.decode_response(bytes, probe.query) then
 				withdrawals[source] = nil
-				send_command(cx, source, probe.origin, "cancel_work", { worker_id = probe.worker_id, query_bytes = tern.json.encode(probe.query), response_bytes = bytes }, true)
+				local id = send_command(cx, source, probe.origin, "cancel_work", { worker_id = probe.worker_id, query_bytes = tern.json.encode(probe.query), response_bytes = bytes }, true)
+				if id and probe.fenced.mailbox_provisioned then start_driver(source, probe.origin, id, probe.worker_id) end
 				continue
 			end
 		end
@@ -2141,8 +2147,8 @@ local function dispatch_control(cx: WindowCx, source: number, request: any)
 			.. (if fenced.evidence == "spawn_rejected" then "SPAWN rejected its " .. tostring(fenced.op) .. " before any effect"
 				else "Continuation fenced its " .. tostring(fenced.op) .. " as unexecuted")
 			.. (if fenced.status_required then "; SPAWN's retained status of that request is read first and must prove it can never run" else "")
-			.. (if retires then ". Its unused mailbox is retired first; the worker stays visible until SPAWN confirms retirement."
-				else ". The worker and its assignment are discarded; a provisioned mailbox stays unused.")
+			.. (if retires then ". Its provisioned, never-used mailbox is retired through the exact retirement path; the worker stays visible until SPAWN confirms retirement. Nothing native is stopped."
+				else ". The worker and its assignment are discarded; nothing native is stopped or retired.")
 			else "Cancel held work " .. worker.work_id .. "? It was never provisioned or launched; its assignment is discarded."
 		cx:pick({ placeholder = placeholder, items = {
 			{ label = if fenced then "Keep it" else "Keep it held", confirm = false },

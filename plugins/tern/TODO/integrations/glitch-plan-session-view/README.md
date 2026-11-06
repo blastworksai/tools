@@ -7,7 +7,7 @@ When creating, resuming or revising an interactive canonical plan with `/glitch-
 Then run from that agent's own normal tool session:
 
 ```sh
-python3 -I /opt/glitch/_local/tern-todo/bin/todo.py publish --agent-pid 12345 --plan /absolute/canonical/PLAN.md
+python3 -I <glitch-root>/_local/tern-todo/bin/todo.py publish --agent-pid 12345 --plan /absolute/canonical/PLAN.md
 ```
 
 Use the actual local Glitch root on another machine; on Windows use its existing `py -3 -I` launcher. No pane number, SSH alias, socket, token or operator-entered path is required. The planning agent already knows its canonical record. The publisher verifies its live native Tern ancestry and records only the canonical path/id and process birth/owner identity. It does not copy or edit the plan.
@@ -17,7 +17,7 @@ Keep normal Progress, START HERE and checkpoint updates in the canonical plan. T
 Before ending or resetting the conversation (including /clear or /new where supported), closing the task, binning the plan or continuing without a plan, clear this session's binding:
 
 ```sh
-python3 -I /opt/glitch/_local/tern-todo/bin/todo.py clear --agent-pid 12345
+python3 -I <glitch-root>/_local/tern-todo/bin/todo.py clear --agent-pid 12345
 ```
 
 Clear never closes or prompts the agent. A dead or changed process invalidates its binding even if it could not clear before exiting. An existing TODO view never silently adopts a different plan: the operator attaches it explicitly.

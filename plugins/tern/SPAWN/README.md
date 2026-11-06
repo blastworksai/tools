@@ -13,7 +13,7 @@ SPAWN keeps one saved launch record per provider account (Claude, Codex, Kimi, M
 ## What it does
 
 - **One record per account.** Provider, account suffix (`Work`, `Personal`, …), command, arguments, working directory and placement. Optionally an OS user, an SSH destination and, for OMP, a startup prompt.
-- **Spawn all / Spawn specific.** Spawn all starts every enabled record you included, one after another. Spawn specific starts one account.
+- **Spawn all / Spawn specific.** Spawn all starts every enabled record you included, one after another, 5 seconds apart. Spawn specific starts one account.
 - **No accidental duplicates.** With the default duplicate policy (`skip`), an account that is already running, or whose last launch is still unresolved, is skipped rather than started twice. `allow` is an explicit per-record choice.
 - **Honest outcomes.** Every launch is reported as `Starting`, `Running`, `Waiting for input`, `Exited`, `Failed` or `Unknown`. A closed pane is never counted as a successful exit. `Unknown` stays visible until you resolve it.
 - **Output is kept.** Terminal launches run inside an ordinary shell, so a failing command leaves its error and exit status on screen.
@@ -49,9 +49,12 @@ Open SPAWN from the command palette (**SPAWN**, **SPAWN: Config**, **SPAWN: Guid
 
 1. **Set up the roster.** Run **Guided setup**, or open **Config** and add records on the Setup page. Every command and argument is shown for review before anything is saved; importing never launches anything.
 2. **Choose what Spawn all includes.** On **Configured agents**, mark records as enabled and included.
-3. **Spawn.** Pick **Spawn all** or **Spawn specific** from the SPAWN menu. Launches go into the Tern session you are in when you start the batch, and changing focus mid-batch cannot redirect them.
+3. **Spawn.** Pick **Spawn all** or **Spawn specific** from the SPAWN menu. Launches go into the Tern session you are in when you start the batch, and changing focus mid-batch cannot redirect them. Spawn all waits 5 seconds after each launch reaches the host before starting the next, so agent start-up memory spikes don't stack. Skipped, duplicate and disabled records don't wait, and the first launch (including Spawn specific) starts at once.
 4. **Watch.** **Running agents** lists this session's SPAWN launches, failed and exited history, and other Tern sessions (read-only). When a batch finishes cleanly, SPAWN hides its Config view; Config and the SPAWN menu bring it back.
 5. **Resolve.** If a launch ends up `Unknown`, inspect its pane first, then choose **Mark no longer running**. That releases the reservation only; it never closes or kills anything.
+6. **After a host restart.** If the execution host's Tern daemon restarted, SPAWN shows one notice ("Host restarted — N SPAWN agents were lost") instead of N separate problems. After checking, choose **Running agents → Host restart → Mark all lost agents no longer running** (or the same action on Config's Running agents page, which asks you to click twice). It releases exactly those reservations so the accounts can be spawned again; it never closes a pane or stops a program.
+
+If a window request was interrupted (for example by a host restart) and the host's saved reply is a refusal, nothing ran, so SPAWN acknowledges it for you with an info toast and carries on with your next request. Any other interrupted request still waits for you under **Running agents → Transport review**; acknowledge it there, then try again.
 
 ### Launch modes
 
@@ -132,6 +135,7 @@ The saved state has a 120,000-byte ceiling (about 1.6 KB per launch). SPAWN keep
 - Closing a provider pane can leave its launch shown as `Running` until the SPAWN host reloads, which then marks it `Unknown` for you to resolve.
 - After a client restart, Config opens a new view instead of reusing a previously hidden one. After a host reload, a hidden Config view stops updating until Config is reopened.
 - Native OMP needs a non-empty startup prompt; Tern's start API rejects blank ones ([tern-sdk#213](https://github.com/stencil-hq/tern-sdk/issues/213)).
+- The host-restart notice needs a host whose daemon identity can be read (Linux). On other hosts, or for a launch that never recorded its daemon identity, each lost attempt must be inspected and marked individually.
 - `Running` means the process is alive. It does not prove the provider is signed in or its model is ready.
 
 ## Managed dispatch bridge (for ORCH+)

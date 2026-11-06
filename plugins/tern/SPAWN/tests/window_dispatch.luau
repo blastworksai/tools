@@ -47,18 +47,32 @@ local function fixture()
   start=function()
    f.starts+=1
    if f.start_error then error('ambiguous native start')end
-   f.focus=55 -- Native start focuses the new agent pane.
-   return 55
+   local created=if f.start_panes then table.remove(f.start_panes,1) else 55
+   -- Native start focuses the new agent pane unless a test models late (macOS) focus.
+   if not f.start_keeps_focus then f.focus=created end
+   return created
   end,
   stop=function()close_target(true)end,
  }}
- cx.layout={close=function()close_target(false)end,focus=function(_,id)f.focus=id;f.refocused=(f.refocused or 0)+1 end}
+ cx.layout={close=function()close_target(false)end,focus=function(_,id)
+  f.focus_calls=(f.focus_calls or 0)+1
+  if f.focus_error then error('focus refused') end
+  f.focus=id;f.refocused=(f.refocused or 0)+1
+ end}
  cx.session={
   focused=function()return f.focus end,
-  pane=function(_,id)if id==55 and f.absent then return nil end return {block=if id==44 then 'orchplus.orchestrator' elseif id==45 then 'spawn.dispatch' else 'agent',tab=1,kind=if id==55 then f.pane_kind or 'agent' else 'plugin',exited=if id==55 then f.exit_status else nil}end,
+  pane=function(_,id)if id==55 and f.absent then return nil end return {block=if id==44 then 'orchplus.orchestrator' elseif id==45 or id==46 then 'spawn.dispatch' else 'agent',tab=1,kind=if id==55 then f.pane_kind or 'agent' else 'plugin',exited=if id==55 then f.exit_status else nil}end,
   tabs=function()return {{id=1,session=3}}end,
-  panes=function()return {{pane=45,block='spawn.dispatch'}}end,
+  panes=function()return if f.second then {{pane=45,block='spawn.dispatch'},{pane=46,block='spawn.dispatch'}} else {{pane=45,block='spawn.dispatch'}}end,
   surface=function(_,id,opts)
+   -- An optional second dispatch pane carries its own exact launch action and request.
+   local second=f.second
+   if second then
+    local key=second.request.action_id
+    if id==46 then return surface('spawn.dispatch','spawn-dispatch-execution','spawn.dispatch.execution','SPAWN_EXECUTION v1 '..runtime.json.encode(second.projection))end
+    if opts.root=='main.dispatch-action-'..key then return surface('orchplus.orchestrator','dispatch-action-'..key,'orchplus.dispatch',runtime.json.encode(second.state))end
+    if opts.root=='main.dispatch-request-'..key then return surface('orchplus.orchestrator','dispatch-request-'..key,'orchplus.request',runtime.json.encode(second.request))end
+   end
    if id==45 then return surface('spawn.dispatch','spawn-dispatch-execution','spawn.dispatch.execution','SPAWN_EXECUTION v1 '..runtime.json.encode(f.projection))end
    if opts.root=='main.dispatch-state'then return surface('orchplus.orchestrator','dispatch-state','orchplus.dispatch',runtime.json.encode(f.primary_state or state))end
    local action_key='dispatch-action-'..f.request.action_id
@@ -83,7 +97,9 @@ local function fixture()
    if f.event_error then error('ambiguous event submission')end
   end,
  }
- f.cx=cx
+ f.cx=cx;f.host=host
+ -- Injectable monotonic clock for the focus guard deadline; the real clock otherwise.
+ injected.now=function()return if f.clock then f.clock else runtime.now()end
  f.tick=function()if not scheduled then w.start()end scheduled(cx)end
  return f
 end
@@ -144,8 +160,42 @@ if section==nil then
  check(invalid.starts==1 and #invalid.events==3,'valid restored assignment invokes native launch exactly once')
  local ambiguous=launch_fixture();begin_effect(ambiguous);ambiguous.start_error=true;ambiguous.tick();ambiguous.tick()
  check(ambiguous.starts==1 and #ambiguous.events==3 and ambiguous.c.strict_decode(ambiguous.events[3].value,65536).result.status=='uncertain','throwing native launch remains marked and is never repeated')
+ local function result_of(f,n)return f.c.strict_decode(f.events[n].value,65536).result end
  local focused=launch_fixture();begin_effect(focused);focused.tick()
  check(focused.starts==1 and focused.focus==44 and focused.refocused==1,'a managed native launch returns focus to the previously focused controller pane')
+ focused.tick();focused.tick()
+ check(focused.focus==44 and focused.refocused==1 and focused.focus_calls==1,'a synchronous focus change is restored exactly once, with no second focus call')
+ focused.focus=55;focused.tick()
+ check(focused.focus==44 and focused.refocused==2,'after an immediate restore the guard still catches one late focus on the new pane')
+ focused.focus=55;focused.tick()
+ check(focused.focus==55 and focused.refocused==2 and #focused.events==3,'a guard restores at most once after the immediate restore and never touches the launch result')
+ -- Late focus (macOS): agents:start returns before the new agent tab takes focus.
+ local late=launch_fixture();begin_effect(late);late.start_keeps_focus=true;late.clock=1000;late.tick()
+ check(late.starts==1 and late.focus==44 and late.refocused==nil and result_of(late,3).status=='submitted','a launch that leaves focus alone needs no immediate restore and still submits')
+ late.tick();check(late.focus==44 and late.refocused==nil,'a guard acts only when focus sits on the created pane')
+ late.clock=5999;late.focus=55;late.tick()
+ check(late.focus==44 and late.refocused==1,'focus that lands on the new pane later is restored to the controller pane')
+ late.focus=55;late.tick()
+ check(late.focus==55 and late.refocused==1 and #late.events==3,'a late restore happens once and the guard is then dropped')
+ local operator=launch_fixture();begin_effect(operator);operator.start_keeps_focus=true;operator.tick()
+ operator.focus=66;operator.tick();operator.focus=55;operator.tick()
+ check(operator.focus==55 and operator.refocused==nil,'focus seen on a third pane drops the guard, so a later deliberate visit to the new pane is never stolen back')
+ local expired=launch_fixture();begin_effect(expired);expired.start_keeps_focus=true;expired.clock=1000;expired.tick()
+ expired.clock=6001;expired.focus=55;expired.tick()
+ check(expired.focus==55 and expired.refocused==nil,'focus that reaches the new pane after the 5 s guard is left alone')
+ -- Back to back: the second launch starts while focus still sits on the first new pane (its
+ -- restore threw); its guard inherits the first guard's controller pane, not the earlier worker.
+ local pair=launch_fixture();begin_effect(pair)
+ local second=copy(pair.request);second.request_id='launch-two';second.action_id='action-launch-two'
+ local second_state=copy(pair.state);second_state.action.action_id=second.action_id
+ local second_projection=copy(pair.projection);second_projection.request=copy(second)
+ pair.second={request=second,state=second_state,projection=second_projection};pair.host.panes={44,45,46,55,56}
+ pair.start_panes={55,56};pair.focus_error=true;pair.tick()
+ check(pair.starts==2 and pair.focus==56 and pair.focus_calls==2 and #pair.events==4 and result_of(pair,3).status=='submitted' and result_of(pair,4).pane_binding.pane_id=='56','two launches in one tick both submit although each immediate restore threw')
+ pair.focus_error=false;pair.tick()
+ check(pair.focus==44 and pair.refocused==1,'focus on the second new pane returns to the original controller pane, not the first worker')
+ pair.focus=55;pair.tick()
+ check(pair.focus==44 and pair.refocused==2 and #pair.events==4,'the first launch guard still restores its own late focus to the controller pane')
  local moved=launch_fixture();begin_effect(moved);moved.focus=45;moved.tick()
  check(moved.starts==1 and moved.focus==45 and moved.refocused==1,'focus returns to the pane the owner had focused, not a fixed controller pane')
  -- Bookkeeping: markers survive while the ORCH+ action is claimed, uncertain or unreadable, and
