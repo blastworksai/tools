@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, patch
 from usage_service import profiles
 from usage_service.protocol import ServiceError
 from usage_service.refresh import Refresh
+from usage_service import refresh as refresh_module
 from usage_service.server import Companion
 from usage_service.store import Store
 from usage_service import spawn_roster
@@ -247,6 +248,24 @@ class RefreshTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((spec["provider"], spec["source_uid"], spec["user"]), ("claude", "1000", "fixture"))
         self.assertEqual(spec["selectors"], {"CLAUDE_CONFIG_DIR": "/account-home"})
         self.assertEqual(self.spec_error(command="sudo -u another-account -H -- claude"), "source_context_ambiguous")
+
+    async def test_root_controlled_seat_launcher_reads_that_users_default_context(self):
+        launcher = "/usr/local/lib/seat/seat-agent-entry"
+        with patch.object(refresh_module, "_root_controlled", return_value=True):
+            for provider in ("Claude", "Codex", "Kimi"):
+                self.save([definition(1, provider, command=launcher, arguments=["fixture"])])
+                spec = self.refresh._spec(self.refresh.configuration()[3][0])
+                self.assertEqual((spec["user"], spec["selectors"]), ("fixture", {}))
+            for command, arguments in ((launcher, ["another-account"]), (launcher, []),
+                                       (launcher, ["fixture", "--config-dir", "/other"]),
+                                       ("seat-agent-entry", ["fixture"])):
+                with self.subTest(command=command, arguments=arguments):
+                    self.assertEqual(self.spec_error(command=command, arguments=arguments), "source_context_ambiguous")
+        # A launcher anyone but root can change is never trusted.
+        with tempfile.TemporaryDirectory() as directory:
+            owned = Path(directory) / "seat-agent-entry"
+            owned.write_text("#!/bin/sh\n")
+            self.assertEqual(self.spec_error(command=str(owned), arguments=["fixture"]), "source_context_ambiguous")
 
     async def test_continue_and_model_settings_do_not_change_account_context(self):
         for provider, command, arguments in (

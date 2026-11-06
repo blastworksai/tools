@@ -9,8 +9,10 @@ from __future__ import annotations
 import asyncio
 import copy
 import hashlib
+import os
 from pathlib import Path
 import shlex
+import stat
 import time
 
 import provider_metadata as helper
@@ -34,6 +36,41 @@ CONTEXT_FLAGS = {"--config-dir": "CLAUDE_CONFIG_DIR", "--codex-home": "CODEX_HOM
                  "--kimi-code-home": "KIMI_CODE_HOME"}
 DENIED_FLAGS = {"--profile", "--config", "--config-file", "--settings", "--settings-file", "--home",
                 "--agent-dir", "--api-key", "--auth-token", "--base-url"}
+# A seat launcher runs one OS user's own provider CLI in that user's default
+# context: `/abs/path/seat-agent-entry <user>`, nothing else. It is trusted only
+# when no one but root can change it or any directory above it.
+SEAT_LAUNCHER = "seat-agent-entry"
+
+
+def _root_controlled(path):
+    """True when root owns `path` and every directory above it, none writable by others."""
+    if os.name != "posix":
+        return False
+    try:
+        current = Path(path).resolve(strict=True)
+        info = current.stat()
+        if not stat.S_ISREG(info.st_mode):
+            return False
+        while True:
+            info = current.stat()
+            if info.st_uid != 0 or info.st_mode & 0o022:
+                return False
+            if current.parent == current:
+                return True
+            current = current.parent
+    except (OSError, RuntimeError):
+        return False
+
+
+def _seat_launch(words, arguments, user):
+    """None when `words` is not a seat launcher; True when it is a trusted one for `user`."""
+    program = words[0].replace("\\", "/")
+    if program.rsplit("/", 1)[-1] != SEAT_LAUNCHER:
+        return None
+    if (not program.startswith("/") or not user or words[1:] + arguments != [user]
+            or not _root_controlled(program)):
+        raise ValueError("Seat launcher does not select exactly this account's user")
+    return True
 
 
 def validate_preferences(payload):
@@ -246,9 +283,13 @@ class Refresh:
                     words = words[index:]
                 if not words:
                     raise ValueError("Missing provider command")
-                executable = words[0].replace("\\", "/").rsplit("/", 1)[-1]
-                helper.validate_request({"version": 1, "provider": provider, "kind": kind, "command": executable})
-                arguments = words[1:] + arguments
+                if _seat_launch(words, arguments, definition.get("user")):
+                    # The launcher's only argument is the verified OS user: its default context.
+                    arguments = []
+                else:
+                    executable = words[0].replace("\\", "/").rsplit("/", 1)[-1]
+                    helper.validate_request({"version": 1, "provider": provider, "kind": kind, "command": executable})
+                    arguments = words[1:] + arguments
             except (ValueError, helper.SafeError):
                 raise ServiceError("source_context_ambiguous") from None
         # Context-changing flags must map to a supported profile selector, never guessed.
