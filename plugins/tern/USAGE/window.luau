@@ -199,3 +199,5 @@ tern.command({ id = "show_summary", title = "USAGE Show Summary", icon = "gauge"
 tern.on("window_start", function(cx) poll(cx) end)
 render()
 schedule(0)
+
+require("./updater/window").register({ name = "USAGE", dir = "USAGE", title_prefix = "USAGE " })

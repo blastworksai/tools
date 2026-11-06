@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.0
+
+Requires Tern 0.9.10 (now declared in `requires.json`).
+
+### Added
+
+- Self-updater: **SPAWN: Check for updates** reports whether a newer SPAWN is on GitHub (a background check runs at most every 6 hours), and **SPAWN: Update** checks the release's `requires.json`, asks first, optionally updates connected remote hosts, then reinstalls with `tern plugin install --force`. Linked development checkouts are never updated. Copies installed before 0.5.0 need one manual `tern plugin install --force github.com/blastworksai/tools/plugins/tern/SPAWN`.
+
 ## 0.4.0
 
 For ORCH+ 0.4.0. The mailbox helpers changed: reinstall `mailbox_target.*`, `mailbox_worker.*`, `mailbox_json.awk` and `mailbox_reply.jq` on each execution target. Ordinary SPAWN launches are unchanged.

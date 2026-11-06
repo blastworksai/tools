@@ -31,11 +31,13 @@ fake.on = function() end
 -- Host and window modules rearm on load; this fixture owns no native timer.
 fake.timer = function() return { cancel = function() end } end
 local modules = {}
-local function load(name)
-	name = name:gsub("^%./", "")
+-- `./x` resolves against the requiring module's directory, as Tern's require does (updater/ modules).
+local function load(name, base)
+	name = (base or "") .. name:gsub("^%./", "")
 	if modules[name] ~= nil then return modules[name] end
 	local chunk = assert(loadstring(runtime.fs.read(root .. "/" .. name .. ".luau"), name))
-	setfenv(chunk, setmetatable({ require = load, tern = fake }, { __index = environment }))
+	local dir = name:match("^(.*/)")
+	setfenv(chunk, setmetatable({ require = function(n) return load(n, dir) end, tern = fake }, { __index = environment }))
 	local value = chunk()
 	modules[name] = value
 	return value

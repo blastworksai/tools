@@ -582,7 +582,12 @@ def plugin_mode(base, evidence, processes, sweep, source):
     set_manifest(copy/'plugin.toml', id=test_id)
     rewrite_base(copy/'updater/source.luau', 'RAW_BASE', raw)
     window_entry = manifest_value(copy/'plugin.toml', 'window') or 'window.luau'
-    titles = re.findall(r'tern\.command\(\s*\{[^}]*?\btitle\s*=\s*"([^"]+)"', (source/window_entry).read_text())
+    # Literal `{ id = "…", title = "…" }` tables: tern.command({...}) and command lists fed to
+    # tern.command in a loop (SPAWN); Files-pane buttons are not palette commands.
+    window_text = (source/window_entry).read_text()
+    titles = [m.group(1) for m in re.finditer(r'\{\s*id\s*=\s*"[^"]+"\s*,\s*title\s*=\s*"([^"]+)"', window_text)
+              if not window_text[max(0, m.start()-20):m.start()].endswith('files.button(')]
+    evidence['plugin_titles'] = titles
     version = manifest_value(copy/'plugin.toml', 'version')
     major, minor, patch = re.match(r'^(\d+)\.(\d+)\.(\d+)', version).groups()
     bumped = '%s.%s.%d' % (major, minor, int(patch)+1)
@@ -597,7 +602,14 @@ def plugin_mode(base, evidence, processes, sweep, source):
         tern.start()
         offset = tern.log_offset()
         tern.command('plugin', 'install', copy)
-        wait_for(lambda: tern.plugins_dir_lines(offset), 'plugin window VM load', 40)
+        def loaded():
+            for log in (tern.logs/'tern.log', tern.logs/'tern-daemon.log'):
+                text = log.read_text(errors='replace') if log.exists() else ''
+                failed = [line for line in text.splitlines() if 'failed to load plugin="%s"' % test_id in line]
+                if failed:
+                    raise AssertionError('%s failed to load: %s' % (test_id, failed[-1][-600:]))
+            return tern.plugins_dir_lines(offset)
+        wait_for(loaded, 'plugin window VM load', 40)
         tern.assert_scratch_plugins_dir()
         idle(1.5)
         offset = tern.log_offset()
@@ -609,8 +621,10 @@ def plugin_mode(base, evidence, processes, sweep, source):
             text = log.read_text(errors='replace') if log.exists() else ''
             bad = [line for line in text.splitlines() if test_id in line and ('ERROR' in line or 'failed' in line.lower())]
             assert not bad, bad
-        prefix = re.search(r'title_prefix\s*=\s*"([^"]*)"', (source/window_entry).read_text())
-        prefix = prefix.group(1) if prefix else re.search(r'register\(\{[^}]*name\s*=\s*"([^"]+)"', (source/window_entry).read_text()).group(1)+' '
+        register = re.search(r'require\("\./updater/window"\)\.register\(\{([^}]*)\}\)', window_text)
+        assert register, 'no updater register call in '+window_entry
+        prefix = re.search(r'\btitle_prefix\s*=\s*"([^"]*)"', register.group(1))
+        prefix = prefix.group(1) if prefix else re.search(r'\bname\s*=\s*"([^"]+)"', register.group(1)).group(1)+' '
         assert tern.shows(prefix+'Check for updates'), evidence['palette_rows'][-1]
         assert tern.shows(prefix+'Update'), evidence['palette_rows'][-1]
         missing = [t for t in titles if not tern.shows(t)]

@@ -1277,3 +1277,5 @@ tern.timer(1000, tick)
 
 -- Module initialization also runs after a VM reload; one executor timer per VM.
 require("./dispatch_window").start()
+
+require("./updater/window").register({ name = "SPAWN", dir = "SPAWN", title_prefix = "SPAWN: " })

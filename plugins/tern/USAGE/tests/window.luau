@@ -66,7 +66,7 @@ local function launch()
 		set_client = function() end, invalidate = function() end,
 		ensure = function(done) table.insert(state.requests, { operation = "ensure", callback = done }) end,
 		request = function(operation, payload, done) table.insert(state.requests, { operation = operation, payload = payload, callback = done }) end,
-	} }
+	}, ["updater/window"] = { register = function(cfg) state.updater = cfg end } }
 	local function load(name)
 		name = name:gsub("^%./", "")
 		if modules[name] then return modules[name] end
@@ -92,6 +92,10 @@ local function launch()
 end
 local state, load = launch()
 check(#state.created == 0 and state.focus == 11, "startup does not create or focus panes")
+local updater_keys = 0
+for _ in state.updater or {} do updater_keys += 1 end
+check(updater_keys == 3 and state.updater.name == "USAGE" and state.updater.dir == "USAGE" and state.updater.title_prefix == "USAGE ",
+	"window registers the updater with USAGE's name, dir and title prefix")
 local starting = runtime.json.encode(state.status({}))
 check(starting:find("USAGE loading", 1, true) ~= nil and starting:find("SPAWN", 1, true) == nil,
 	"before the companion answers, the status bar does not blame the SPAWN roster")

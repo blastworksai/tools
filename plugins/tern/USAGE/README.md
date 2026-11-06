@@ -74,11 +74,15 @@ Tern plugins run with your OS account's access and are not sandboxed. Read the c
 
 ### Update
 
-```sh
-tern plugin install --force github.com/blastworksai/tools/plugins/tern/USAGE
-```
+Run **USAGE Check for updates** from the command palette. When a newer version is on GitHub, **USAGE Update** installs it in place: it checks the release's requirements and asks first, and can also update connected remote hosts. Tern then reloads all its plugins, and your settings carry over. If ORCH+ is running a controller, run **ORCH+ Reload recovery guide** afterwards.
 
-Your settings, readings and pairings live in Tern's plugin data folder, not in the package, so they carry over. On its next start the companion notices the new release, backs up its database, migrates and removes the backup once the new version has started. If the start fails, it rolls back to the previous release. For a linked checkout (`tern plugin link`), `git pull` updates it.
+A copy installed before the updater existed needs one manual update:
+
+    tern plugin install --force github.com/blastworksai/tools/plugins/tern/USAGE
+
+A linked development checkout (`tern plugin link`) is never updated by the plugin; `git pull` it yourself.
+
+Your settings, readings and pairings live in Tern's plugin data folder, not in the package, so they carry over. On its next start the companion notices the new release, backs up its database, migrates and removes the backup once the new version has started. If the start fails, it rolls back to the previous release.
 
 ### Remove
 
@@ -110,6 +114,8 @@ Nothing is deleted. Tern keeps `plugin-data/tern-fleet-usage/` after removal, an
 | **USAGE Setup** | Private runtime, headless-read permission, summary, capacity export, account bindings and optional sharing. In a window attached to a remote Tern host, it configures that host (see [Configuring an attached remote host](#configuring-an-attached-remote-host)). |
 | **USAGE Show Summary** | Turns the status-bar summary on once. |
 | **USAGE Diagnostics** | Companion, refresh and sharing state. |
+| **USAGE Check for updates** | Checks GitHub for a newer USAGE release (see [Update](#update)). |
+| **USAGE Update** | Shown once a newer release is known; installs it after asking (see [Update](#update)). |
 
 The speedometer button in the Files pane header opens the same view:
 
@@ -295,6 +301,8 @@ All fixtures are synthetic. Keep runtime data, logs and screenshots out of the p
 - `usage_service.py`, `usage_service/`: the companion (lifecycle, storage, refresh, SPAWN roster and account bindings, provider readers, sharing, capacity export).
 - `provider_metadata.py`, `metadata_providers.py`: the read-only helper that runs as the account's OS user.
 - `requirements.lock`, `pyproject.toml`: locked Python dependencies.
+- `requires.json`: the minimum Tern version this release needs, checked by **USAGE Update**.
+- `updater/`: the updater modules, vendored by `shared/tern-updater/sync.py`; don't edit them here.
 - `tests/`, `tools/verify.py`: test suites and the Luau runner.
 - `assets/screenshots/`: the screenshots in this README (account labels blurred).
 

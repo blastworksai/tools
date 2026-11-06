@@ -3079,4 +3079,5 @@ local function bookkeeping(): any
 	return { executed = size(executed), auto_reconcile = size(auto_reconcile), auto_readback = size(auto_readback.values), held_actions = size(held_actions),
 		sweep_attempts = size(sweep_attempts), scan_workers = per_worker, watched = #settle_order }
 end
+require("./updater/window").register({ name = "ORCH+", dir = "ORCH+", title_prefix = "ORCH+ " })
 return { native_observation = native_observation, schedule = schedule, intents = consume_intents, bookkeeping = bookkeeping }

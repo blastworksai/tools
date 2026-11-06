@@ -39,6 +39,16 @@ tern plugin reload spawn --json
 
 Tern reloads plugins whenever a linked package directory changes. Edit a copy, not the linked directory, while agents are running.
 
+### Update
+
+Run **SPAWN: Check for updates** from the command palette. When a newer version is on GitHub, **SPAWN: Update** installs it in place: it checks the release's requirements and asks first, and can also update connected remote hosts. Tern then reloads all its plugins, and your settings carry over. If ORCH+ is running a controller, run **ORCH+ Reload recovery guide** afterwards.
+
+A copy installed before the updater existed needs one manual update:
+
+    tern plugin install --force github.com/blastworksai/tools/plugins/tern/SPAWN
+
+A linked development checkout (`tern plugin link`) is never updated by the plugin; `git pull` it yourself.
+
 ## Use
 
 Open SPAWN from the command palette (**SPAWN**, **SPAWN: Config**, **SPAWN: Guided setup**, **SPAWN: Running agents**) or from the SPAWN button in the Files pane header.
