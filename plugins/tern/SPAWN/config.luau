@@ -261,9 +261,9 @@ local function managed_fields(source: any, record: any): string?
 			end
 		end
 		if value.capabilities ~= nil then
-			local length, err = array_length(value.capabilities, 5)
+			local length, err = array_length(value.capabilities, 7)
 			if length == nil then return err end
-			local allowed = { ["report-files-v1"] = true, ["native-ask-v1"] = true, ["worker-poll-v1"] = true, ["argv-v1"] = true, ["coordinator-control-v1"] = true }
+			local allowed = { ["report-files-v1"] = true, ["native-ask-v1"] = true, ["worker-poll-v1"] = true, ["argv-v1"] = true, ["coordinator-control-v1"] = true, ["check-runner-v1"] = true, ["release-manager-v1"] = true }
 			local seen = {}
 			mailbox.capabilities = {}
 			for index = 1, length do

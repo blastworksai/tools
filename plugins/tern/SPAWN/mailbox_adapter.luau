@@ -135,8 +135,12 @@ function M.execute(op,callback)
   if remaining<=0 then done({status='uncertain'}); return end
   local argv,why=process_argv(op,mode,path)
   if not argv then done(rejected(if why=='oversize' then why else 'unsupported_capability')); return end
+  -- Provision input is one Base64 line of provision.json, then (only with an assignment
+  -- manifest) one Base64 line of the exact manifest bytes the target writes as manifest.json.
+  local input=if bytes then tern.base64.encode(bytes)..'\n' else ''
+  if op.manifest and (mode=='provision' or mode=='reconcile_provision') then input..=tern.base64.encode(op.manifest)..'\n' end
   local ok=pcall(function()
-   tern.process.run(argv,{stdin=if bytes then tern.base64.encode(bytes)..'\n' else '',timeout_ms=remaining},function(result)
+   tern.process.run(argv,{stdin=input,timeout_ms=remaining},function(result)
     if finished then return end
     if result.timed_out or result.status~=0 or type(result.stdout)~='string' or #result.stdout>6000 then done({status='uncertain'}); return end
     local status,payload=result.stdout:match('^([a-z_]+)\n(.*)$')

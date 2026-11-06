@@ -56,7 +56,9 @@ local specs={
  stop={required={target_request_id=M.id,target_action_id=M.id,pane_binding=M.pane,worker_id=M.id,worker_generation=positive,enrolment_token=M.token,work_id=M.id}},
  native_wake={required={target_request_id=M.id,target_action_id=M.id}},
  attach_worker={required={target_request_id=M.id,target_action_id=M.id,previous_origin_binding=M.binding,previous_pane_binding=M.pane,pane_binding=M.pane,worker_id=M.id,worker_generation=positive,enrolment_token=M.token,work_id=M.id,attestation=function(v)return v=='old_executors_stopped_or_retired'end}},
- mailbox_provision={required={record_id=record_id,record_revision=revision,capability=function(v)return v=='report-files-v1'end},optional={handover_id=M.id,handover_sha256=M.digest}},
+ -- `manifest`: exact canonical assignment-manifest bytes (Contract G). The mailbox planner owns its
+ -- 4096-byte bound (`manifest_too_large`) and closed shape; the whole request stays within LIMIT.
+ mailbox_provision={required={record_id=record_id,record_revision=revision,capability=function(v)return v=='report-files-v1'end},optional={handover_id=M.id,handover_sha256=M.digest,manifest=function(v)return type(v)=='string' and #v>0 end}},
  mailbox_read={required={handle=M.id,expected_generation=positive,selector=function(v)return type(v)=='table'end}},
  mailbox_publish_ack={required={handle=M.id,expected_generation=positive,receipt_revision=positive,ack_b64=opaque,ack_sha256=M.digest}},
  mailbox_publish_reply={required={handle=M.id,expected_generation=positive,message_id=M.id,reply_seq=positive,action_revision=positive,reply_sha256=M.digest,part=function(v)return v=='chunk' or v=='manifest'end,object_b64=opaque,object_sha256=M.digest},optional={index=positive}},

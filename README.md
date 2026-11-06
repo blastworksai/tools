@@ -26,7 +26,7 @@ The results are public for each skill: follow its Walkdown link in the table.
 | [WORK](plugins/tern/WORK/README.md) | Tern | Native pane listing active [Glitch](https://github.com/Glitch-Cat-Club) workspaces known to `/work-on`, with per-row GitHub links and a Work On button that opens an agent beside WORK. [SPAWN](plugins/tern/SPAWN/README.md) optional: with it, Work On shows a drop-down of available SPAWN agents; without SPAWN, Work On opens your default agent. |
 | [SPAWN](plugins/tern/SPAWN/README.md) | Tern | Define and SPAWN your (entire) agentic army. |
 | [USAGE](plugins/tern/USAGE/README.md) | Tern | Show your subscription usage across all agents. DEPENDENCY: NEEDS [SPAWN](plugins/tern/SPAWN/README.md). |
-| [ORCH+](plugins/tern/ORCH+/README.md) | Tern | Orchestration+ Basic Improvements to Native Tern Orchestration. DEPENDENCY: NEEDS [SPAWN](plugins/tern/SPAWN/README.md) 0.3.1+; [USAGE](plugins/tern/USAGE/README.md) 2.1.0+ optional for quota routing. |
+| [ORCH+](plugins/tern/ORCH+/README.md) | Tern | Orchestration+ Basic Improvements to Native Tern Orchestration. DEPENDENCY: NEEDS [SPAWN](plugins/tern/SPAWN/README.md) 0.4.0+; [USAGE](plugins/tern/USAGE/README.md) 2.1.0+ optional for quota routing. |
 | [GLITCH IDEA](skills/glitch-idea/glitch-idea/tern-plugin/README.md) | Tern | Opens the GLITCH IDEA page, already paired, in a pane above your focused pane. Part of the [GLITCH IDEA](skills/glitch-idea/README.md) skill. |
 
 ## Found a bug? Have an idea?

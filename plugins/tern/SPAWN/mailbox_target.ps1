@@ -3,6 +3,8 @@ param([string]$Root,[string]$Handle,[string]$Mode,[string]$Selected,[string]$Ope
 $ErrorActionPreference='Stop'
 $script:capacityHeld=$false
 $script:tempOwned=$false
+$script:manifestTemp=''
+$script:manifestBytes=$null
 function ReleaseCapacity {
  if ($script:capacityHeld) {
   [IO.Directory]::Delete((Join-Path $box 'capacity.lock'),$false)
@@ -11,6 +13,7 @@ function ReleaseCapacity {
 }
 function Finish([string]$Status) {
  if ($script:tempOwned) { [IO.File]::Delete($tmp); $script:tempOwned=$false }
+ if ($script:manifestTemp.Length -gt 0) { [IO.File]::Delete($script:manifestTemp); $script:manifestTemp='' }
  ReleaseCapacity
  [Console]::Out.Write($Status+"`n"); exit 0
 }
@@ -79,15 +82,44 @@ function Capacity([int]$ExtraBytes,[int]$ExtraFiles,[bool]$Drain) {
  if ($files+$ExtraFiles -gt $fileLimit) { Full 'mailbox_files' ($files+$ExtraFiles) $fileLimit }
  if ($total+$ExtraBytes -gt $byteLimit) { Full 'mailbox_bytes' ($total+$ExtraBytes) $byteLimit }
 }
-function InputBytes {
- $chars=New-Object char[] 5466; $length=0
- while ($length -lt 5466) { $n=[Console]::In.Read($chars,$length,5466-$length); if ($n -eq 0) { break }; $length+=$n }
- if ($length -eq 0) { Finish 'binding_mismatch' }
- $encoded=(-join $chars[0..($length-1)]).TrimEnd("`n")
- if ($encoded.Length -eq 0 -or $encoded.Length -gt 5464 -or $encoded -notmatch '^[A-Za-z0-9+/]*={0,2}$') { Finish 'binding_mismatch' }
- $bytes=[Convert]::FromBase64String($encoded)
- if ($bytes.Length -gt 4096 -or [Convert]::ToBase64String($bytes) -cne $encoded) { Finish 'binding_mismatch' }
+# One base64 line per object, each at most 4096 decoded bytes. Provision and its
+# reconciliation carry an optional second line: the exact ORCH+ check manifest.
+function Base64Line([string]$Encoded) {
+ if ($Encoded.Length -eq 0 -or $Encoded.Length -gt 5464 -or $Encoded -notmatch '^[A-Za-z0-9+/]*={0,2}$') { Finish 'binding_mismatch' }
+ $bytes=[Convert]::FromBase64String($Encoded)
+ if ($bytes.Length -gt 4096 -or [Convert]::ToBase64String($bytes) -cne $Encoded) { Finish 'binding_mismatch' }
  return ,$bytes
+}
+function InputBytes {
+ $chars=New-Object char[] 10931; $length=0
+ while ($length -lt 10931) { $n=[Console]::In.Read($chars,$length,10931-$length); if ($n -eq 0) { break }; $length+=$n }
+ if ($length -eq 0 -or $length -gt 10930) { Finish 'binding_mismatch' }
+ $lines=(-join $chars[0..($length-1)]).TrimEnd("`n").Split("`n")
+ $allowed=1; if ($Mode -in @('provision','reconcile_provision')) { $allowed=2 }
+ if ($lines.Length -gt $allowed) { Finish 'binding_mismatch' }
+ $bytes=Base64Line $lines[0]
+ if ($lines.Length -eq 2) { $script:manifestBytes=Base64Line $lines[1] }
+ return ,$bytes
+}
+function Sha([byte[]]$Bytes) {
+ $sha=[Security.Cryptography.SHA256]::Create()
+ try { return ([BitConverter]::ToString($sha.ComputeHash($Bytes))).Replace('-','').ToLowerInvariant() } finally { $sha.Dispose() }
+}
+# provision.json names manifest_sha256 exactly when a manifest was provisioned.
+function ProvisionedManifestDigest([byte[]]$Bytes) {
+ try { $document=(New-Object Text.UTF8Encoding($false,$true)).GetString($Bytes) | ConvertFrom-Json } catch { Finish 'binding_mismatch' }
+ if ($document -isnot [Management.Automation.PSCustomObject]) { Finish 'binding_mismatch' }
+ $property=@($document.PSObject.Properties | Where-Object { $_.Name -ceq 'manifest_sha256' })
+ if ($property.Count -eq 0) { return $null }
+ if ($property[0].Value -isnot [string] -or $property[0].Value -cnotmatch '^[0-9a-f]{64}\z') { Finish 'binding_mismatch' }
+ return $property[0].Value
+}
+function ManifestReconciled {
+ $path=Join-Path $box 'manifest.json'
+ $present=Test-Path -LiteralPath $path
+ if ($null -eq $script:manifestBytes) { if ($present) { Finish 'content_conflict' }; return }
+ # manifest.json commits before provision.json, so a provisioned box always has it.
+ if (-not $present -or -not (Exact (ReadBounded $path) $script:manifestBytes)) { Finish 'content_conflict' }
 }
 try {
  if ($Handle -notmatch '^[A-Za-z0-9_-]{1,96}$' -or $Operation -notmatch '^[A-Za-z0-9_-]{1,96}$' -or $Root -notmatch '^[A-Za-z]:[\\/]' -or $Root.Contains('..')) { Finish 'binding_mismatch' }
@@ -101,6 +133,12 @@ try {
  }
  # Never hold the shared admission lock while waiting for caller stdin.
  if ($Mode -in @('provision','publish','reconcile','reconcile_provision')) { $bytes=InputBytes }
+ # The manifest line is present exactly when provision.json binds its sha256.
+ if ($Mode -in @('provision','reconcile_provision')) {
+  $declared=ProvisionedManifestDigest $bytes
+  if (($null -eq $declared) -ne ($null -eq $script:manifestBytes)) { Finish 'binding_mismatch' }
+  if ($null -ne $declared -and (Sha $script:manifestBytes) -cne $declared) { Finish 'binding_mismatch' }
+ }
  $box=Join-Path $Root $Handle
  if ($Mode -eq 'provision') {
   if (Test-Path -LiteralPath $box) { Finish 'content_conflict' }
@@ -174,6 +212,8 @@ try {
    $item=Regular $path; if ($item.Name -notmatch '^[1-9][0-9]{0,15}\.json$') { Finish 'binding_mismatch' }; [IO.File]::Delete($path)
   }
   foreach ($name in @('reports','replies','acks','watermarks')) { [IO.Directory]::Delete((Join-Path $box $name),$false) }
+  $manifestPath=Join-Path $box 'manifest.json'
+  if (Test-Path -LiteralPath $manifestPath) { $null=Regular $manifestPath; [IO.File]::Delete($manifestPath) }
   $null=Regular (Join-Path $box 'provision.json'); [IO.File]::Delete((Join-Path $box 'provision.json'))
   ReleaseCapacity
   [IO.Directory]::Delete($box,$false); Finish 'retired'
@@ -183,14 +223,16 @@ try {
  if ($Mode -in @('reconcile','reconcile_provision')) {
   if (-not (Test-Path -LiteralPath $final)) { Finish 'missing' }
   if (-not (Exact (ReadBounded $final) $bytes)) { Finish 'content_conflict' }
-  if ($Mode -eq 'reconcile_provision') { Finish 'provisioned' }; Finish 'already_published'
+  if ($Mode -eq 'reconcile_provision') { ManifestReconciled; Finish 'provisioned' }; Finish 'already_published'
  }
  # Existing exact immutable bytes need no new space, including at saturation.
  if (Test-Path -LiteralPath $final) {
   if (-not (Exact (ReadBounded $final) $bytes)) { Finish 'content_conflict' }
   Finish 'already_published'
  }
- Capacity $bytes.Length 1 ($Selected -match '^(acks|watermarks)/')
+ $manifestLength=0; $manifestFiles=0
+ if ($Mode -eq 'provision' -and $null -ne $script:manifestBytes) { $manifestLength=$script:manifestBytes.Length; $manifestFiles=1 }
+ Capacity ($bytes.Length+$manifestLength) (1+$manifestFiles) ($Selected -match '^(acks|watermarks)/')
  if (-not (Test-Path -LiteralPath $parent)) {
   if ($Mode -ne 'publish' -or $Selected -notmatch '^replies/') { Finish 'missing' }
   SafeDirectory (Join-Path $box 'replies'); $null=New-Item -ItemType Directory -Path $parent
@@ -204,6 +246,15 @@ try {
   $sha=[Security.Cryptography.SHA256]::Create()
   try { $probe=([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes('abc')))).Replace('-','').ToLowerInvariant() } finally { $sha.Dispose() }
   if ($probe -cne 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad') { Finish 'storage_error' }
+ }
+ # manifest.json is written and read back before provision.json commits the box.
+ if ($manifestFiles -eq 1) {
+  $manifestFinal=Join-Path $box 'manifest.json'; $manifestTmp=Join-Path $box ('staging/'+$Operation+'.manifest.tmp')
+  $stream=[IO.File]::Open($manifestTmp,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+  $script:manifestTemp=$manifestTmp
+  try { $stream.Write($script:manifestBytes,0,$script:manifestBytes.Length); $stream.Flush($true) } finally { $stream.Dispose() }
+  [IO.File]::Move($manifestTmp,$manifestFinal); $script:manifestTemp=''
+  if (-not (Exact (ReadBounded $manifestFinal) $script:manifestBytes)) { Finish 'content_conflict' }
  }
  $status='published'
  try { [IO.File]::Move($tmp,$final) }

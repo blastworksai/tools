@@ -1,7 +1,7 @@
 # Existing-PowerShell work-tool helper, not a service. Invoke at work checkpoints
 # and during wait via -Mode wait. This is transport/journal machinery, not proof
 # that a configured CLI actually invokes it. Installation/evidence remains gated.
-param([string]$Root,[string]$Handle,[string]$Owner,[ValidateSet('init','report','replay','receipts','consume','wait','claim','resolve','retire-local','retire-authorized')][string]$Mode,[string]$MessageId,[ValidateRange(1000,60000)][int]$PollMs=5000,[ValidateRange(1,30)][int]$WaitSeconds=30,[string]$ReportFloor='-1',[string]$ReplyFloor='-1',[string]$ReceiptChain='',[string]$ExpectedBinding='')
+param([string]$Root,[string]$Handle,[string]$Owner,[ValidateSet('init','report','replay','receipts','consume','wait','claim','resolve','retire-local','retire-authorized','run-checks','checkout')][string]$Mode,[string]$MessageId,[ValidateRange(1000,60000)][int]$PollMs=5000,[ValidateRange(1,30)][int]$WaitSeconds=30,[string]$ReportFloor='-1',[string]$ReplyFloor='-1',[string]$ReceiptChain='',[string]$ExpectedBinding='',[string]$CheckId='')
 $ErrorActionPreference='Stop'
 $utf8=New-Object Text.UTF8Encoding($false,$true)
 function Fail([string]$Code) { throw $Code }
@@ -61,7 +61,8 @@ function JsonValue([int]$Depth) {
   $script:cursor++; Space
   if ($script:cursor -lt $script:jsonText.Length -and $script:jsonText[$script:cursor] -eq $closer) { $script:cursor++; if ($object) { return $map }; return ,$list }
   while ($true) {
-   $count++; $maximum=256; if ($object) { $maximum=64 }; if ($count -gt $maximum) { Fail 'oversize' }
+   # Arrays admit 512 entries (CHECKOUT changed_files), matching mailbox_json.awk.
+   $count++; $maximum=512; if ($object) { $maximum=64 }; if ($count -gt $maximum) { Fail 'oversize' }
    Space
    if ($object) {
     $key=JsonString; if ($utf8.GetByteCount($key) -gt 64 -or $map.ContainsKey($key)) { Fail 'invalid_schema' }
@@ -112,11 +113,18 @@ function ReadFile([string]$Path,[int]$Limit) {
 # ordinary durable 2MiB/896, settlement 2.25MiB/1008. The remaining
 # 1.5MiB journal replacement + 256KiB/16 staging slots are never ordinary space.
 $script:capacityDepth=0
+# Re-admission inside one invocation (wait polls, post-retirement lock removal) waits out
+# a busy gate for at most gateWaitMs: every holder releases it before sleep or stdio.
+# This only ever creates the gate; it never takes a held one.
+$script:gateWaitMs=0
 function EnterCapacity {
  if ($script:capacityDepth -eq 0) {
   DirectorySafe $box
-  try { $null=New-Item -ItemType Directory -Path (Join-Path $box 'capacity.lock') -ErrorAction Stop }
-  catch { Fail 'capacity_locked' }
+  $gateWatch=[Diagnostics.Stopwatch]::StartNew()
+  while ($true) {
+   try { $null=New-Item -ItemType Directory -Path (Join-Path $box 'capacity.lock') -ErrorAction Stop; break }
+   catch { if ($gateWatch.ElapsedMilliseconds -ge $script:gateWaitMs) { Fail 'capacity_locked' }; Start-Sleep -Milliseconds 100 }
+  }
  }
  $script:capacityDepth++
 }
@@ -218,6 +226,16 @@ function ValueType($Value,[string]$Type) {
   'id' { $valid=$Value -is [string] -and $Value -cmatch '^[A-Za-z0-9_-]{1,96}\z' }
   'token' { $valid=$Value -is [string] -and $Value -cmatch '^[A-Za-z0-9_-]{16,128}\z' }
   'digest' { $valid=$Value -is [string] -and $Value -cmatch '^[0-9a-f]{64}\z' }
+  'revision' { $valid=$Value -is [string] -and $Value -cmatch '^([0-9a-f]{40}|[0-9a-f]{64})\z' }
+  'class' { $valid=$Value -is [string] -and $Value -cmatch '^[a-z][a-z0-9-]{0,31}\z' }
+  'family' { $valid=$Value -is [string] -and $Value -cmatch '^[a-z][a-z0-9-]{0,23}\z' }
+  'exit' { $valid=($Value -is [long] -or $Value -is [int] -or $Value -is [double]) -and $Value -ge -2147483648 -and $Value -le 4294967295 -and $Value%1 -eq 0 }
+  'path' { $valid=$Value -is [string] -and $utf8.GetByteCount($Value) -ge 1 -and $utf8.GetByteCount($Value) -le 4096 -and -not $Value.Contains([string][char]0) }
+  'absolute' { $valid=$Value -is [string] -and $utf8.GetByteCount($Value) -ge 1 -and $utf8.GetByteCount($Value) -le 4096 -and -not $Value.Contains([string][char]0) -and $Value -cmatch '^(/|[A-Za-z]:[/\\]|\\\\)' }
+  'relative' { $valid=$Value -is [string] -and $utf8.GetByteCount($Value) -ge 1 -and $utf8.GetByteCount($Value) -le 256 -and $Value -cnotmatch '[\x00\\]|^/|^[A-Za-z]:|(^|/)\.\.(/|\z)' }
+  'branch' { $valid=$Value -is [string] -and $utf8.GetByteCount($Value) -ge 1 -and $utf8.GetByteCount($Value) -le 256 }
+  'scope' { $valid=$Value -is [string] -and $utf8.GetByteCount($Value) -ge 1 -and $utf8.GetByteCount($Value) -le 256 }
+  'finding' { $valid=$Value -is [string] -and $utf8.GetByteCount($Value) -ge 1 -and $utf8.GetByteCount($Value) -le 400 }
   'positive' { $valid=($Value -is [long] -or $Value -is [int] -or $Value -is [double]) -and $Value -ge 1 -and $Value -le 9007199254740991 -and $Value%1 -eq 0 }
   'nonnegative' { $valid=($Value -is [long] -or $Value -is [int] -or $Value -is [double]) -and $Value -ge 0 -and $Value -le 9007199254740991 -and $Value%1 -eq 0 }
   'percent' { $valid=($Value -is [long] -or $Value -is [int] -or $Value -is [double]) -and $Value -ge 0 -and $Value -le 100 -and $Value%1 -eq 0 }
@@ -233,6 +251,22 @@ function Values($Value,[string]$Type,[int]$Minimum=0,[int]$Maximum=256) {
 }
 function Choice($Value,[string[]]$Allowed) {
  if ($Value -isnot [string] -or $Value -cnotin $Allowed) { Fail 'invalid_schema' }
+}
+function Unique($Value,[string]$Key='') {
+ $seen=[Collections.Hashtable]::new([StringComparer]::Ordinal)
+ foreach ($entry in $Value) {
+  $item=$entry; if ($Key.Length -gt 0) { $item=$entry[$Key] }
+  if ($seen.ContainsKey($item)) { Fail 'invalid_schema' }; $seen[$item]=$true
+ }
+}
+function Findings($Value) {
+ if ($Value -isnot [array] -or $Value.Count -gt 32) { Fail 'invalid_schema' }
+ foreach ($finding in $Value) {
+  ObjectFields $finding @('finding_id','path','summary') @('line')
+  ValueType $finding.finding_id 'id'; ValueType $finding.path 'short'; ValueType $finding.summary 'finding'
+  if ($finding.ContainsKey('line')) { ValueType $finding.line 'positive' }
+ }
+ Unique $Value 'finding_id'
 }
 # A rollover successor's provision.json carries the issued handover ID and
 # sha256(handover_id:handover_token), never the token. ACCEPTED must match it before any
@@ -258,9 +292,9 @@ function HandoverCheck($Report) {
 }
 function ReportInput($Report) {
  ObjectFields $Report @('kind','payload') @('action_id','action_revision','handover_id','handover_token')
- Choice $Report.kind @('REGISTER','READY','ACCEPTED','HEARTBEAT','WAITING','BLOCKED','ASK','CHECKPOINT','REVIEW_READY','REVIEW_RESULT','DONE','ROLLOVER_REQUEST','LANDING_REQUEST','LANDING_RESULT','reply_ack','COORDINATOR_RELEASE','COORDINATOR_PROPOSAL')
+ Choice $Report.kind @('REGISTER','READY','ACCEPTED','HEARTBEAT','WAITING','BLOCKED','ASK','CHECKPOINT','REVIEW_READY','REVIEW_RESULT','DONE','ROLLOVER_REQUEST','LANDING_REQUEST','LANDING_RESULT','reply_ack','COORDINATOR_RELEASE','COORDINATOR_PROPOSAL','CHECK_RESULT','CHECKOUT','LABEL','DEPLOY_RESULT')
  $action=$Report.ContainsKey('action_id'); $handover=$Report.ContainsKey('handover_id')
- $required=$Report.kind -cin @('REVIEW_RESULT','LANDING_RESULT','reply_ack','COORDINATOR_RELEASE')
+ $required=$Report.kind -cin @('REVIEW_RESULT','LANDING_RESULT','reply_ack','COORDINATOR_RELEASE','LABEL','DEPLOY_RESULT')
  $optional=$Report.kind -cin @('CHECKPOINT','DONE','WAITING','BLOCKED')
  if ($action -ne $Report.ContainsKey('action_revision') -or ($required -and -not $action) -or ($action -and -not ($required -or $optional))) { Fail 'invalid_schema' }
  if ($handover -ne $Report.ContainsKey('handover_token') -or ($handover -and $Report.kind -cne 'ACCEPTED')) { Fail 'invalid_schema' }
@@ -272,10 +306,10 @@ function ReportInput($Report) {
  switch -CaseSensitive ($Report.kind) {
   'REGISTER' {
    ObjectFields $p @('capabilities')
-   Values $p.capabilities 'short' 1 5
+   Values $p.capabilities 'short' 1 7
    $seen=[Collections.Hashtable]::new([StringComparer]::Ordinal)
    foreach ($cap in $p.capabilities) {
-    Choice $cap @('report-files-v1','native-ask-v1','worker-poll-v1','argv-v1','coordinator-control-v1')
+    Choice $cap @('report-files-v1','native-ask-v1','worker-poll-v1','argv-v1','coordinator-control-v1','check-runner-v1','release-manager-v1')
     if ($seen.ContainsKey($cap)) { Fail 'invalid_schema' }; $seen[$cap]=$true
     if ($binding.ContainsKey('capabilities') -and $cap -cnotin $binding.capabilities) { Fail 'binding_mismatch' }
    }
@@ -314,8 +348,34 @@ function ReportInput($Report) {
    }
   }
   'REVIEW_READY' { ObjectFields $p @('checkpoint_id','artifact_revision') @('summary'); ValueType $p.checkpoint_id 'id'; ValueType $p.artifact_revision 'short' }
-  'REVIEW_RESULT' { ObjectFields $p @('artifact_revision','outcome','evidence') @('summary'); ValueType $p.artifact_revision 'short'; Choice $p.outcome @('approved','changes_required') }
-  'DONE' { ObjectFields $p @('checkpoint_id','artifact_revision','summary'); ValueType $p.checkpoint_id 'id'; ValueType $p.artifact_revision 'short'; ValueType $p.summary 'long' }
+  'REVIEW_RESULT' {
+   ObjectFields $p @('review_id','round','artifact_revision','outcome','findings') @('summary')
+   ValueType $p.review_id 'id'; ValueType $p.round 'positive'; ValueType $p.artifact_revision 'short'; Choice $p.outcome @('approved','changes_required')
+   Findings $p.findings
+  }
+  'DONE' { ObjectFields $p @('checkpoint_id','artifact_revision','summary') @('output_ref'); ValueType $p.checkpoint_id 'id'; ValueType $p.artifact_revision 'short'; ValueType $p.summary 'long'; if ($p.ContainsKey('output_ref')) { ValueType $p.output_ref 'relative' } }
+  'CHECK_RESULT' {
+   ObjectFields $p @('check_id','argv_sha256','exit_code','output_sha256','head','ran_at_ms')
+   ValueType $p.check_id 'id'; ValueType $p.argv_sha256 'digest'; ValueType $p.exit_code 'exit'; ValueType $p.output_sha256 'digest'; ValueType $p.head 'revision'; ValueType $p.ran_at_ms 'nonnegative'
+  }
+  'CHECKOUT' {
+   ObjectFields $p @('worktree_path','common_dir','branch','head','changed_files','changed_overflow','changed_total','dirty') @('base')
+   ValueType $p.worktree_path 'absolute'; ValueType $p.common_dir 'absolute'; ValueType $p.branch 'branch'; ValueType $p.head 'revision'
+   if ($p.ContainsKey('base')) { ValueType $p.base 'revision' }
+   Values $p.changed_files 'path' 0 512; Unique $p.changed_files
+   ValueType $p.changed_total 'nonnegative'
+   if ($p.changed_overflow -isnot [bool] -or $p.dirty -isnot [bool]) { Fail 'invalid_schema' }
+   # A sorted prefix may be shorter than 512 when the full list would exceed the report bound.
+   if ($p.changed_total -lt $p.changed_files.Count -or $p.changed_overflow -ne ($p.changed_total -gt $p.changed_files.Count)) { Fail 'invalid_schema' }
+  }
+  'LABEL' { ObjectFields $p @('work_ref','class') @('reason'); ValueType $p.work_ref 'short'; ValueType $p.class 'class'; if ($p.ContainsKey('reason')) { ValueType $p.reason 'short' } }
+  'DEPLOY_RESULT' {
+   ObjectFields $p @('deploy_id','attempt_id','landing_id','outcome','revision','evidence') @('reason')
+   foreach ($key in @('deploy_id','attempt_id','landing_id')) { ValueType $p[$key] 'id' }
+   Choice $p.outcome @('deployed','held','not_applicable','failed'); ValueType $p.revision 'short'
+   Values $p.evidence 'short' 0 16
+   if ($p.ContainsKey('reason')) { ValueType $p.reason 'short' }
+  }
   'ROLLOVER_REQUEST' { ObjectFields $p @('checkpoint_id','reason'); ValueType $p.checkpoint_id 'id'; ValueType $p.reason 'short' }
   'LANDING_REQUEST' {
    ObjectFields $p @('checkpoint_id','project_id','repo_ref','target_ref','target_revision','source_ref','source_revision') @('summary')
@@ -478,7 +538,7 @@ function Receive {
  } finally { $memory.Dispose() }
  if ($bytes.Length -ne $manifest.message_bytes -or (Hash $bytes) -cne $manifest.message_sha256) { Fail 'content_conflict' }
  $reply=Decode $bytes; MatchBinding $reply
- if ($reply.version -ne 1 -or $reply.reply_seq -ne $seq -or $reply.message_id -cne $manifest.message_id -or $reply.action_id -notmatch '^[A-Za-z0-9_-]{1,96}$' -or $reply.action_revision -lt 1 -or $reply.action_revision%1 -ne 0 -or $reply.action_revision -gt 9007199254740991 -or $reply.kind -cnotin @('assignment','report_request','owner_decision','landing_grant','landing_refresh','coordinator_activation','coordinator_retirement')) { Fail 'binding_mismatch' }
+ if ($reply.version -ne 1 -or $reply.reply_seq -ne $seq -or $reply.message_id -cne $manifest.message_id -or $reply.action_id -notmatch '^[A-Za-z0-9_-]{1,96}$' -or $reply.action_revision -lt 1 -or $reply.action_revision%1 -ne 0 -or $reply.action_revision -gt 9007199254740991 -or $reply.kind -cnotin @('assignment','report_request','owner_decision','landing_grant','landing_refresh','coordinator_activation','coordinator_retirement','review_request','rework','deploy_grant','label_request')) { Fail 'binding_mismatch' }
  $fields=@('version','logical_session_id','worker_id','worker_generation','launch_request_id','work_id','message_id','reply_seq','action_id','action_revision','kind','payload')
  if ($reply.kind -eq 'owner_decision') { $fields+=@('gate_id','gate_revision') }
  Fields $reply $fields
@@ -498,9 +558,39 @@ function Receive {
    if ($reply.gate_id -notmatch '^[A-Za-z0-9_-]{1,96}$' -or $reply.gate_revision -lt 1 -or $reply.gate_revision -gt 9007199254740991 -or $reply.gate_revision%1 -ne 0 -or $p.choice_id -notmatch '^[A-Za-z0-9_-]{1,96}$' -or $p.answer -isnot [string] -or $utf8.GetByteCount($p.answer) -lt 1) { Fail 'invalid_schema' }
   }
   'landing_grant' {
-   Fields $p @('landing_id','grant_id','project_id','checkpoint_id','repo_ref','target_ref','target_revision','source_ref','source_revision')
-   foreach ($key in @('landing_id','grant_id','project_id','checkpoint_id')) { ValueType $p[$key] 'id' }
+   Fields $p @('landing_id','grant_id','project_id','checkpoint_id','repo_ref','target_ref','target_revision','source_ref','source_revision','builder_work_id','review_id','reviewer_family','proof')
+   foreach ($key in @('landing_id','grant_id','project_id','checkpoint_id','builder_work_id','review_id')) { ValueType $p[$key] 'id' }
    foreach ($key in @('repo_ref','target_ref','target_revision','source_ref','source_revision')) { ValueType $p[$key] 'short' }
+   ValueType $p.reviewer_family 'family'
+   Fields $p.proof @('mode','artifact_revision','review_id','check_refs')
+   Choice $p.proof.mode @('cross_family_review','helper_checks'); ValueType $p.proof.artifact_revision 'short'; ValueType $p.proof.review_id 'id'
+   Values $p.proof.check_refs 'short' 0 16
+  }
+  'review_request' {
+   ObjectFields $p @('review_id','round','question_id','builder_work_id','task_ref','source_ref','artifact_revision','scope_paths','findings_prev') @('plan_ref','plan_revision')
+   foreach ($key in @('review_id','builder_work_id')) { ValueType $p[$key] 'id' }
+   ValueType $p.round 'positive'; Choice $p.question_id @('implements_task_v1')
+   foreach ($key in @('task_ref','source_ref','artifact_revision')) { ValueType $p[$key] 'short' }
+   Values $p.scope_paths 'scope' 0 64; Findings $p.findings_prev
+   if ($p.ContainsKey('plan_ref') -ne $p.ContainsKey('plan_revision')) { Fail 'invalid_schema' }
+   if ($p.ContainsKey('plan_ref')) { ValueType $p.plan_ref 'short'; ValueType $p.plan_revision 'short' }
+  }
+  'rework' {
+   ObjectFields $p @('round','artifact_revision','failed_checks','findings') @('review_id')
+   if ($p.ContainsKey('review_id')) { ValueType $p.review_id 'id' }
+   ValueType $p.round 'positive'; ValueType $p.artifact_revision 'short'
+   if ($p.failed_checks -isnot [array] -or $p.failed_checks.Count -gt 16) { Fail 'invalid_schema' }
+   foreach ($failed in $p.failed_checks) { Fields $failed @('check_id','exit_code'); ValueType $failed.check_id 'id'; ValueType $failed.exit_code 'exit' }
+   Findings $p.findings
+  }
+  'deploy_grant' {
+   Fields $p @('deploy_id','attempt_id','landing_id','revision','target_ref')
+   foreach ($key in @('deploy_id','attempt_id','landing_id')) { ValueType $p[$key] 'id' }
+   foreach ($key in @('revision','target_ref')) { ValueType $p[$key] 'short' }
+  }
+  'label_request' {
+   Fields $p @('work_ref','classes','text')
+   ValueType $p.work_ref 'short'; Values $p.classes 'class' 1 32; Unique $p.classes; ValueType $p.text 'long'
   }
   'landing_refresh' {
    Fields $p @('landing_id','project_id','repo_ref','target_ref','expected_revision','current_revision','reason')
@@ -518,6 +608,9 @@ function Receive {
    ValueType $reply.action_id 'id'; ValueType $reply.action_revision 'positive'
   }
  }
+ # Grants authorize merging/deploying; only a release-manager-v1 generation consumes them,
+ # refused before any receipt or journal change.
+ if ($reply.kind -cin @('landing_grant','deploy_grant') -and -not (Capable 'release-manager-v1')) { Fail 'capability_missing' }
  if ($reply.kind -eq 'report_request' -and $bytes.Length -gt 2048) { Fail 'oversize' }
  CompactJournal
  $retained=0L; foreach ($fact in $script:journal.consumed) { $retained+=[Convert]::FromBase64String($fact.bytes).Length }
@@ -577,6 +670,205 @@ function RetireAuthorized {
  EnterCapacity
  try { Capacity 0 0 $true; $null=ReadFile $journalPath 1572864; [IO.File]::Delete($journalPath) } finally { LeaveCapacity }
 }
+# Helper-only modes. The provisioned manifest (sha256 bound into the provision binding)
+# is the only check source; argv runs without a shell, before any gate or producer lock.
+function Capable([string]$Name) {
+ if (-not $descriptor.ContainsKey('capabilities')) { return $false }
+ Values $descriptor.capabilities 'short' 1 7
+ return $Name -cin $descriptor.capabilities
+}
+function ProvisionedManifest {
+ if (-not $descriptor.ContainsKey('manifest_sha256')) { Fail 'manifest_missing' }
+ $path=Join-Path $box 'manifest.json'
+ if (-not (Test-Path -LiteralPath $path)) { Fail 'manifest_mismatch' }
+ try { $bytes=ReadFile $path 4096 } catch { Fail 'manifest_mismatch' }
+ if ($descriptor.manifest_sha256 -isnot [string] -or (Hash $bytes) -cne $descriptor.manifest_sha256) { Fail 'manifest_mismatch' }
+ $manifest=Decode $bytes 4096
+ if ($manifest -isnot [hashtable] -or $manifest.checks -isnot [array] -or $manifest.checks.Count -gt 16) { Fail 'manifest_mismatch' }
+ foreach ($check in $manifest.checks) {
+  if ($check -isnot [hashtable] -or $check.argv -isnot [array] -or $check.argv.Count -lt 1 -or $check.argv.Count -gt 16) { Fail 'manifest_mismatch' }
+  foreach ($argument in $check.argv) { if ($argument -isnot [string] -or $argument.Length -eq 0 -or $utf8.GetByteCount($argument) -gt 512) { Fail 'manifest_mismatch' } }
+ }
+ if ($manifest.ContainsKey('base_ref') -and $manifest.base_ref -isnot [string]) { Fail 'manifest_mismatch' }
+ return $manifest
+}
+# Same bytes as POSIX `jq -j -c .argv`: only quote, backslash, C0 controls and DEL escape.
+function CanonicalArgv([string[]]$Argv) {
+ $builder=New-Object Text.StringBuilder; $null=$builder.Append('[')
+ for ($i=0;$i -lt $Argv.Length;$i++) {
+  if ($i -gt 0) { $null=$builder.Append(',') }
+  $null=$builder.Append('"')
+  foreach ($c in $Argv[$i].ToCharArray()) {
+   $code=[int]$c
+   if ($code -eq 34) { $null=$builder.Append('\"') }
+   elseif ($code -eq 92) { $null=$builder.Append('\\') }
+   elseif ($code -eq 8) { $null=$builder.Append('\b') }
+   elseif ($code -eq 9) { $null=$builder.Append('\t') }
+   elseif ($code -eq 10) { $null=$builder.Append('\n') }
+   elseif ($code -eq 12) { $null=$builder.Append('\f') }
+   elseif ($code -eq 13) { $null=$builder.Append('\r') }
+   elseif ($code -lt 32 -or $code -eq 127) { $null=$builder.Append('\u'+$code.ToString('x4')) }
+   else { $null=$builder.Append($c) }
+  }
+  $null=$builder.Append('"')
+ }
+ $null=$builder.Append(']')
+ return ,$utf8.GetBytes($builder.ToString())
+}
+# Windows CRT (CommandLineToArgvW) encoding of one literal argument. PowerShell 5.1's
+# native `& $exe @args` drops embedded quotes and empty strings; this never does.
+function CrtArgument([string]$Value) {
+ if ($Value.Length -gt 0 -and $Value -notmatch '[ \t\n\v"]') { return $Value }
+ $builder=New-Object Text.StringBuilder; $null=$builder.Append('"'); $slashes=0
+ foreach ($c in $Value.ToCharArray()) {
+  if ($c -eq [char]92) { $slashes++; continue }
+  if ($c -eq [char]34) { $null=$builder.Append([char]92,2*$slashes+1) } else { $null=$builder.Append([char]92,$slashes) }
+  $null=$builder.Append($c); $slashes=0
+ }
+ $null=$builder.Append([char]92,2*$slashes); $null=$builder.Append('"')
+ return $builder.ToString()
+}
+# PATH lookup only (no alias, function, cmdlet or script); a native .exe is required
+# because .cmd/.bat would be re-parsed by cmd.exe.
+function Application([string]$Name) {
+ $found=@(Get-Command -Name ([Management.Automation.WildcardPattern]::Escape($Name)) -CommandType Application -ErrorAction SilentlyContinue)
+ if ($found.Count -eq 0) { return '' }
+ $path=$found[0].Path
+ if ($path -isnot [string] -or -not $path.EndsWith('.exe',[StringComparison]::OrdinalIgnoreCase) -or -not [IO.File]::Exists($path)) { return '' }
+ return $path
+}
+# Direct CreateProcess with an argument array, stdin closed, both pipes drained in arrival
+# order. Check mode hashes the first 65536 combined bytes (nothing else is kept or
+# published); git mode keeps stdout. Returns $null when the program cannot start.
+function RunProgram([string]$File,[string[]]$Arguments,[bool]$Check) {
+ $info=New-Object Diagnostics.ProcessStartInfo
+ $encoded=@(); foreach ($argument in $Arguments) { $encoded+=,(CrtArgument $argument) }
+ $info.FileName=$File; $info.Arguments=$encoded -join ' '; $info.WorkingDirectory=$script:checkout
+ $info.UseShellExecute=$false; $info.CreateNoWindow=$true
+ $info.RedirectStandardInput=$true; $info.RedirectStandardOutput=$true; $info.RedirectStandardError=$true
+ $process=New-Object Diagnostics.Process; $process.StartInfo=$info
+ try { $null=$process.Start() } catch { $process.Dispose(); return $null }
+ $sha=$null; $memory=$null; [long]$taken=0
+ if ($Check) { $sha=[Security.Cryptography.SHA256]::Create() } else { $memory=New-Object IO.MemoryStream }
+ try {
+  # Closed stdin (POSIX </dev/null); a child that already exited may have broken the pipe.
+  try { $process.StandardInput.Close() } catch { }
+  $streams=@($process.StandardOutput.BaseStream,$process.StandardError.BaseStream)
+  $buffers=@((New-Object byte[] 65536),(New-Object byte[] 65536))
+  $reads=@{}; for ($i=0;$i -lt 2;$i++) { $reads[$i]=$streams[$i].ReadAsync($buffers[$i],0,65536) }
+  while ($reads.Count -gt 0) {
+   $open=@($reads.Keys)
+   $tasks=New-Object 'System.Threading.Tasks.Task[]' $open.Count
+   for ($i=0;$i -lt $open.Count;$i++) { $tasks[$i]=$reads[$open[$i]] }
+   $done=$open[[Threading.Tasks.Task]::WaitAny($tasks)]
+   $n=$reads[$done].Result
+   if ($n -le 0) { $reads.Remove($done); continue }
+   if ($Check) {
+    $take=[int][Math]::Min([long]$n,65536-$taken)
+    if ($take -gt 0) { $null=$sha.TransformBlock($buffers[$done],0,$take,$null,0); $taken+=$take }
+   } elseif ($done -eq 0) {
+    if ($memory.Length+$n -gt 67108864) { Fail 'oversize' }
+    $memory.Write($buffers[$done],0,$n)
+   }
+   $reads[$done]=$streams[$done].ReadAsync($buffers[$done],0,65536)
+  }
+  $process.WaitForExit()
+  $result=@{code=[long]$process.ExitCode}
+  if ($Check) { $null=$sha.TransformFinalBlock((New-Object byte[] 0),0,0); $result.sha256=([BitConverter]::ToString($sha.Hash)).Replace('-','').ToLowerInvariant() }
+  else { $result.out=$memory.ToArray() }
+  return $result
+ } finally {
+  if (-not $process.HasExited) { try { $process.Kill() } catch { } }
+  $process.Dispose(); if ($null -ne $sha) { $sha.Dispose() }; if ($null -ne $memory) { $memory.Dispose() }
+ }
+}
+# Not named Git/Run: a function named Git would shadow git.exe for `& git` in any scope
+# that loads these definitions (the Windows regression suite does).
+function GitRun([string[]]$Arguments) {
+ $result=RunProgram $script:git $Arguments $false
+ if ($null -eq $result) { Fail 'git_unavailable' }
+ return $result
+}
+function GitLine([string[]]$Arguments) {
+ $result=GitRun $Arguments
+ if ($result.code -ne 0) { return '' }
+ return $utf8.GetString($result.out).TrimEnd([char[]]@([char]13,[char]10))
+}
+# Refusal order: capability_missing, manifest_missing, manifest_mismatch, check_undeclared,
+# git_unavailable. Not a worktree / unborn HEAD is git_unavailable with a suffix.
+function HelperReport {
+ if (-not (Capable 'check-runner-v1')) { Fail 'capability_missing' }
+ $manifest=ProvisionedManifest
+ if ($Mode -eq 'run-checks') {
+  $declared=@($manifest.checks | Where-Object { $_.check_id -ceq $CheckId })
+  if ($CheckId.Length -eq 0 -or $declared.Count -ne 1) { Fail 'check_undeclared' }
+  $argv=[string[]]$declared[0].argv
+ }
+ $script:git=Application 'git'; if ($script:git.Length -eq 0) { Fail 'git_unavailable' }
+ $script:checkout=(Get-Location -PSProvider FileSystem).ProviderPath
+ $worktree='git_unavailable: not a git worktree'; $revision='^([0-9a-f]{40}|[0-9a-f]{64})\z'
+ if ($Mode -eq 'run-checks') {
+  if ((GitLine @('rev-parse','HEAD')) -cnotmatch $revision) { Fail $worktree }
+  $started=[DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+  $rest=@(); if ($argv.Length -gt 1) { $rest=$argv[1..($argv.Length-1)] }
+  $code=[long]127; $output=Hash ([byte[]]@())
+  $program=Application $argv[0]
+  if ($program.Length -gt 0) { $run=RunProgram $program $rest $true; if ($null -ne $run) { $code=$run.code; $output=$run.sha256 } }
+  $head=GitLine @('rev-parse','HEAD'); if ($head -cnotmatch $revision) { Fail $worktree }
+  return @{kind='CHECK_RESULT';payload=@{check_id=$CheckId;argv_sha256=(Hash (CanonicalArgv $argv));exit_code=$code;output_sha256=$output;head=$head;ran_at_ms=[long]$started}}
+ }
+ $top=GitLine @('rev-parse','--show-toplevel'); if ($top.Length -eq 0) { Fail $worktree }
+ $common=GitLine @('rev-parse','--path-format=absolute','--git-common-dir'); if ($common.Length -eq 0) { Fail $worktree }
+ $head=GitLine @('rev-parse','HEAD'); if ($head -cnotmatch $revision) { Fail $worktree }
+ $branch=GitLine @('symbolic-ref','--short','-q','HEAD'); if ($branch.Length -eq 0) { $branch='HEAD' }
+ # A hyphen-led base_ref would be read as an option: treated as absent, like a failed merge-base.
+ $base=''
+ if ($manifest.ContainsKey('base_ref') -and $manifest.base_ref.Length -gt 0) {
+  if (-not $manifest.base_ref.StartsWith('-')) { $base=GitLine @('merge-base',$manifest.base_ref,'HEAD'); if ($base -cnotmatch $revision) { $base='' } }
+ } else {
+  # No manifest base_ref: the first checkout pins HEAD as the launch base, so later
+  # checkouts still report committed work (including out-of-scope files).
+  $pin=Join-Path $box 'checkout-base'
+  if (-not (Test-Path -LiteralPath $pin)) {
+   $temp=$pin+'.'+[Guid]::NewGuid().ToString('N')+'.tmp'
+   try { [IO.File]::WriteAllBytes($temp,$utf8.GetBytes($head+"`n")); try { [IO.File]::Move($temp,$pin) } catch [IO.IOException] { } } catch { Fail 'storage_error' } finally { if ([IO.File]::Exists($temp)) { [IO.File]::Delete($temp) } }
+  }
+  $item=Get-Item -LiteralPath $pin -Force -ErrorAction SilentlyContinue
+  if ($null -eq $item -or $item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -or $item.Length -gt 66) { Fail 'storage_error' }
+  $launch=$utf8.GetString([IO.File]::ReadAllBytes($pin)).TrimEnd("`n")
+  if ($launch -cnotmatch $revision) { Fail 'storage_error' }
+  $base=GitLine @('merge-base',$launch,'HEAD'); if ($base -cnotmatch $revision) { $base='' }
+ }
+ $paths=[Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+ if ($base.Length -gt 0) {
+  $diff=GitRun @('diff','--name-only','-z',($base+'...HEAD')); if ($diff.code -ne 0) { Fail $worktree }
+  foreach ($name in $utf8.GetString($diff.out).Split([char]0)) { if ($name.Length -gt 0) { $null=$paths.Add($name) } }
+ }
+ # Staged, unstaged and untracked; a rename/copy entry carries its original path next.
+ $status=GitRun @('status','--porcelain=v1','-z','--untracked-files=all'); if ($status.code -ne 0) { Fail $worktree }
+ $entries=$utf8.GetString($status.out).Split([char]0)
+ for ($i=0;$i -lt $entries.Length;$i++) {
+  $entry=$entries[$i]; if ($entry.Length -eq 0) { continue }
+  if ($entry.Length -lt 4) { Fail 'invalid_schema' }
+  $null=$paths.Add($entry.Substring(3))
+  if ('RC'.Contains([string]$entry[0]) -or 'RC'.Contains([string]$entry[1])) { $i++; if ($i -lt $entries.Length -and $entries[$i].Length -gt 0) { $null=$paths.Add($entries[$i]) } }
+ }
+ # Bytewise UTF-8 order (jq `unique`): ordinal order of per-byte hex keys.
+ $sorted=[string[]]@($paths); $keys=New-Object string[] $sorted.Length
+ for ($i=0;$i -lt $sorted.Length;$i++) { $keys[$i]=[BitConverter]::ToString($utf8.GetBytes($sorted[$i])) }
+ [Array]::Sort([Array]$keys,[Array]$sorted,[Collections.IComparer][StringComparer]::Ordinal)
+ $total=$sorted.Length; $kept=[Math]::Min(512,$total)
+ # A shorter sorted prefix (still overflow=true) keeps the report inside the 65536-byte bound.
+ while ($true) {
+  $files=[string[]]@(); if ($kept -gt 0) { $files=[string[]]$sorted[0..($kept-1)] }
+  $payload=@{worktree_path=$top;common_dir=$common;branch=$branch;head=$head;changed_files=$files;changed_overflow=($total -gt $kept);changed_total=[long]$total;dirty=($status.out.Length -gt 0)}
+  if ($base.Length -gt 0) { $payload.base=$base }
+  $report=@{kind='CHECKOUT';payload=$payload}
+  $length=(Encode $report).Length
+  if ($length -le 64000 -or $kept -eq 0) { return $report }
+  $kept=[int][Math]::Min($kept-1,[Math]::Floor($kept*60000.0/$length))
+ }
+}
 try {
 # init takes no input. A report piped here would otherwise vanish silently, so
 # probe one byte before any mailbox effect; an empty pipe held open settles after 1s.
@@ -590,6 +882,10 @@ if ($Handle -notmatch '^[A-Za-z0-9_-]{1,96}$' -or $Owner -notmatch '^[A-Za-z0-9_
 DirectorySafe $Root; $box=Join-Path $Root $Handle; DirectorySafe $box
 $descriptor=Decode (ReadFile (Join-Path $box 'provision.json') 2048) 2048
 $binding=$descriptor.binding; if ($descriptor.handle -cne $Handle -or $binding.mailbox_handle -cne $Handle) { Fail 'binding_mismatch' }
+# Helper-only reports are produced before the shared gate and producer lock: a long check
+# holds neither, and every refusal precedes any journal read or mutation.
+$helperReport=$null
+if ($Mode -eq 'run-checks' -or $Mode -eq 'checkout') { $helperReport=HelperReport }
 $journalPath=Join-Path $box 'producer/journal.json'; $lockPath=Join-Path $box 'producer/lock'
 DirectorySafe (Join-Path $box 'producer'); DirectorySafe (Join-Path $box 'staging')
 EnterCapacity
@@ -622,14 +918,21 @@ try {
    if ($reportLength -eq 0) { Fail 'invalid_schema' }
    $reportBytes=New-Object byte[] $reportLength
    [Array]::Copy($reportBuffer,$reportBytes,$reportLength)
-   $null=Allocate (Decode $reportBytes)
+   $reportInput=Decode $reportBytes
+   # CHECK_RESULT/CHECKOUT exist only through run-checks/checkout, never caller-typed.
+   if ($reportInput -is [hashtable] -and $reportInput.kind -cin @('CHECK_RESULT','CHECKOUT')) { Fail 'helper_only_kind' }
+   if ($reportInput -is [hashtable] -and $reportInput.kind -ceq 'DEPLOY_RESULT' -and -not (Capable 'release-manager-v1')) { Fail 'capability_missing' }
+   $null=Allocate $reportInput
+  } elseif ($Mode -eq 'run-checks' -or $Mode -eq 'checkout') {
+   $null=Allocate $helperReport
   } elseif ($Mode -eq 'replay') {
    foreach ($p in $script:journal.pending) { PublishPending $p $true }
    foreach ($c in $script:journal.consumed) { if ($c.ack_seq -eq 0) { $null=Allocate @{kind='reply_ack';action_id=$c.action_id;action_revision=$c.action_revision;payload=@{message_id=$c.message_id;reply_seq=$c.reply_seq;reply_sha256=$c.sha256;status='recorded'}} $c } }
   } elseif ($Mode -eq 'receipts') { Receipts }
   elseif ($Mode -eq 'consume') { $null=Consume }
   elseif ($Mode -eq 'wait') {
-   $watch=[Diagnostics.Stopwatch]::StartNew()
+   # A later poll that meets a target's short commit waits it out, not a refusal.
+   $watch=[Diagnostics.Stopwatch]::StartNew(); $script:gateWaitMs=10000
    do { Receipts; if (Consume) { break }; if ($watch.Elapsed.TotalSeconds -ge $WaitSeconds) { break }; Start-Sleep -Milliseconds ([Math]::Min($PollMs,[Math]::Max(1,$WaitSeconds*1000-$watch.ElapsedMilliseconds))) } while ($true)
   } elseif ($Mode -eq 'claim' -or $Mode -eq 'resolve') {
    $facts=@($script:journal.consumed | Where-Object { $_.message_id -ceq $MessageId }); if ($facts.Count -ne 1) { Fail 'binding_mismatch' }; $fact=$facts[0]
@@ -650,8 +953,10 @@ try {
   }
  }
 } finally { $lock.Dispose() }
+# The OS already released the exclusive lock handle. Its retained file is inventory, so
+# it is removed under the gate; the journal is gone, so a busy gate is waited out.
 if ($retire) {
- EnterCapacity
+ $script:gateWaitMs=10000; EnterCapacity
  try { [IO.File]::Delete($lockPath) } finally { LeaveCapacity }
 }
 if ($retire -and $Mode -eq 'retire-authorized') { [Console]::Out.Write("producer_retired`n") }

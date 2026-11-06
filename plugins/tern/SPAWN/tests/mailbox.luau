@@ -212,6 +212,116 @@ do
  local unpaired=clone(successor); unpaired.handover_sha256=nil
  check(select(3,M.prepare(empty,unpaired,record,context)).error.code=='invalid_schema','handover ID and digest are paired')
 end
+-- Assignment manifest (Contract G): the exact bytes are hashed into the binding digest after the
+-- handover part, named by manifest_sha256 in provision.json and passed to the target helper.
+do
+ local function digestOf(g,manifest)
+  local parts={'report-files-v1:policy:1'}
+  local function add(value)
+   local text=if type(value)=='number' then string.format('%.0f',value) else value or ''
+   table.insert(parts,tostring(#text)..':'..text)
+  end
+  for _,key in ipairs({'logical_session_id','worker_id','worker_generation','launch_request_id','work_id','enrolment_token'}) do add(g.binding[key]) end
+  add(g.binding.mailbox_handle);add(g.record_id);add(g.record_revision);add(g.wake);add(g.backend)
+  for _,capability in ipairs(g.capabilities) do add(capability) end
+  for _,key in ipairs({'root','helper','producer_helper','worker_identity','os','shell','kind','backend','host','user','key_path','host_os','host_shell'}) do add(g.target[key]) end
+  if manifest then add('manifest');add(manifest) end
+  return C.sha256(table.concat(parts,''))
+ end
+ local manifestBytes='{"base_ref":"main","checks":[{"argv":["make","test"],"check_id":"t1-c1"}],"files":["src/a.luau"],"scope":{"paths":["src"],"systems":["spawn"]}}'
+ local plain=runtime.json.decode(op.bytes)
+ check(intent.generations.handle.binding_digest==digestOf(intent.generations.handle) and intent.generations.handle.manifest_sha256==nil,'a provision without a manifest keeps the 0.3.0 binding digest')
+ check(op.manifest==nil and plain.manifest_sha256==nil and plain.capabilities==nil,'an ordinary provision.json carries no manifest digest or capability list')
+ local before=#calls
+ local plainOutcome;M.execute(clone(op),function(value)plainOutcome=value end)
+ check(plainOutcome.status=='provisioned' and #calls==before+1 and calls[#calls].options.stdin==runtime.base64.encode(op.bytes)..'\n','a provision without a manifest sends the target helper one Base64 line')
+ local withManifest=clone(provision);withManifest.manifest=manifestBytes
+ local mOp,mIntent,mProblem=M.prepare(empty,withManifest,record,context)
+ check(mOp and mIntent and not mProblem and M.validate(mIntent)~=nil,'a bounded closed manifest provisions a valid intent')
+ local g=mIntent.generations.handle
+ check(g.manifest_sha256==C.sha256(manifestBytes) and g.binding_digest==digestOf(g,C.sha256(manifestBytes)) and g.binding_digest~=intent.generations.handle.binding_digest,'the manifest digest joins the binding after the handover part')
+ local written=runtime.json.decode(mOp.bytes)
+ check(written.manifest_sha256==g.manifest_sha256 and written.binding_digest==g.binding_digest and written.capabilities==nil and #mOp.bytes<=2048,'provision.json names the exact manifest digest within its 2048-byte bound')
+ check(mOp.manifest==manifestBytes,'the exact manifest bytes travel with the provision operation')
+ before=#calls
+ local outcome;M.execute(mOp,function(value)outcome=value end)
+ check(outcome.status=='provisioned' and #calls==before+1 and calls[#calls].options.stdin==runtime.base64.encode(mOp.bytes)..'\n'..runtime.base64.encode(manifestBytes)..'\n','the target helper receives provision.json, then the exact manifest, one Base64 line each')
+ local settled=assert(M.settle(mIntent,mOp,outcome))
+ check(M.validate(runtime.json.decode(runtime.json.encode(settled)))~=nil,'a provisioned manifest survives serialization')
+ local replayed=select(3,M.prepare(settled,withManifest,record,context))
+ check(replayed.status=='provisioned' and replayed.payload.binding_digest==g.binding_digest,'an exact manifest provision replay returns the retained result')
+ check(replayed.payload.manifest_sha256==g.manifest_sha256,'the provision result names the bound manifest digest for the ORCH+ cross-check')
+ local dropped=clone(settled);dropped.generations.handle.writes.provision.result.payload.manifest_sha256=nil
+ check(M.validate(dropped)==nil,'a retained provision result that drops its manifest digest fails closed')
+ local tampered=clone(settled);tampered.generations.handle.manifest_sha256=C.sha256(manifestBytes..' ')
+ check(M.validate(tampered)==nil,'a changed persisted manifest digest fails closed')
+ tampered=clone(settled);tampered.generations.handle.writes.provision.request.manifest=(manifestBytes:gsub('"test"','"deploy"'))
+ check(M.validate(tampered)==nil,'tampered retained manifest bytes fail closed')
+ tampered=clone(settled);tampered.generations.handle.writes.provision.request.manifest=nil
+ check(M.validate(tampered)==nil,'a retained provision cannot drop its manifest')
+ local other=clone(withManifest);other.manifest=(manifestBytes:gsub('"test"','"deploy"'))
+ check(select(3,M.prepare(settled,other,record,context)).error.code=='content_conflict','a tampered manifest cannot replay the provision')
+ check(select(3,M.prepare(settled,provision,record,context)).error.code=='content_conflict','a manifest provision cannot be replayed without its manifest')
+ check(select(3,M.prepare(reg,withManifest,record,context)).error.code=='content_conflict','a manifest cannot be added to a provisioned generation')
+ local recoveredManifest=M.recover(mIntent)
+ local reconcile=M.prepare(recoveredManifest,withManifest,record,context)
+ before=#calls
+ M.execute(reconcile,function(value)outcome=value end)
+ check(reconcile.reconcile and calls[#calls].argv[5]=='reconcile_provision' and calls[#calls].options.stdin==runtime.base64.encode(mOp.bytes)..'\n'..runtime.base64.encode(manifestBytes)..'\n','manifest readback receives the same two exact lines')
+ -- Exactly 4096 canonical bytes are admitted; one more is manifest_too_large.
+ local function sized(total)
+  local head,tail='{"checks":[],"files":[','],"scope":{"paths":[],"systems":[]}}'
+  local entries,size={},#head+#tail
+  while true do
+   local comma=if #entries>0 then 1 else 0
+   local room=total-size-comma-2
+   if room<=256 then table.insert(entries,'"'..string.rep('f',room)..'"'); break end
+   table.insert(entries,'"'..string.rep('f',200)..'"'); size+=202+comma
+  end
+  return head..table.concat(entries,',')..tail
+ end
+ local bound=clone(provision);bound.manifest=sized(4096)
+ local boundOp=M.prepare(empty,bound,record,context)
+ check(#bound.manifest==4096 and boundOp and boundOp.manifest==bound.manifest,'a manifest of exactly 4096 bytes is admitted')
+ local over=clone(provision);over.manifest=sized(4097)
+ local overOp,overIntent,overProblem=M.prepare(empty,over,record,context)
+ check(#over.manifest==4097 and overOp==nil and overIntent==nil and overProblem.error.code=='manifest_too_large','a manifest over 4096 bytes is refused manifest_too_large')
+ for _,bytes in ipairs({
+  '{"checks":[],"files":[],"scope":{"paths":[],"systems":[]},"extra":true}',
+  '{"checks":[],"files":[]}',
+  '{"checks":[{"check_id":"a","argv":["x"]},{"check_id":"a","argv":["y"]}],"files":[],"scope":{"paths":[],"systems":[]}}',
+  '{"checks":[{"check_id":"a","argv":[]}],"files":[],"scope":{"paths":[],"systems":[]}}',
+  '{"checks":[{"check_id":"a/b","argv":["x"]}],"files":[],"scope":{"paths":[],"systems":[]}}',
+  '{"base_ref":"","checks":[],"files":[],"scope":{"paths":[],"systems":[]}}',
+  '{"base_ref":null,"checks":[],"files":[],"scope":{"paths":[],"systems":[]}}',
+  '{"checks":[],"files":[],"scope":{"paths":[],"systems":[],"extra":[]}}',
+  '[]','not json',
+ }) do
+  local bad=clone(provision);bad.manifest=bytes
+  check(select(3,M.prepare(empty,bad,record,context)).error.code=='invalid_schema','a malformed or open manifest is refused before effects')
+ end
+ local blank=clone(provision);blank.manifest=''
+ check(select(3,M.prepare(empty,blank,record,context)).error.code=='invalid_schema','an empty manifest is refused')
+ -- A generation holding a 0.4.0 capability names its capability set in provision.json (sixth capability).
+ local runner=clone(record);runner.mailbox.capabilities={'report-files-v1','worker-poll-v1','argv-v1','coordinator-control-v1','check-runner-v1','release-manager-v1'}
+ check(Capabilities.validate(runner)~=nil,'a six-capability set with check-runner-v1 and release-manager-v1 is eligible')
+ local runnerOp,runnerIntent=M.prepare(empty,provision,runner,context)
+ local runnerWritten=runtime.json.decode(runnerOp.bytes)
+ check(runnerIntent and M.validate(runnerIntent)~=nil and table.concat(runnerWritten.capabilities,',')==table.concat(runner.mailbox.capabilities,',') and runnerWritten.manifest_sha256==nil,'provision.json carries the gated capability set independent of any manifest')
+ check(runnerIntent.generations.handle.binding_digest==digestOf(runnerIntent.generations.handle),'capabilities stay bound through the unchanged digest construction')
+ local seven=clone(runner);seven.mailbox.capabilities={'report-files-v1','worker-poll-v1','native-ask-v1','argv-v1','coordinator-control-v1','check-runner-v1','release-manager-v1'}
+ check(Capabilities.validate(seven)==nil,'a seventh entry still cannot combine both wake routes')
+ local eight=clone(runner);table.insert(eight.mailbox.capabilities,'check-runner-v1');table.insert(eight.mailbox.capabilities,'argv-v1')
+ check(Capabilities.validate(eight)==nil,'an eighth capability entry is refused')
+ local Config=load('config')
+ local function configured(capabilities) return Config.validate_record({id='worker',provider='custom',backend='local-terminal',command='worker',arguments={},mailbox={capabilities=capabilities}}) end
+ local list={'report-files-v1','native-ask-v1','worker-poll-v1','argv-v1','coordinator-control-v1','check-runner-v1'}
+ check(configured(list)~=nil,'Config accepts a sixth capability')
+ table.insert(list,'release-manager-v1')
+ check(configured(list)~=nil,'Config accepts a seventh capability')
+ table.insert(list,'report-files-v1')
+ check(configured(list)==nil,'Config refuses an eighth capability')
+end
 local zeroRevision=clone(provision); zeroRevision.record_revision=0
 local _,zeroIntent=M.prepare(empty,zeroRevision,record,context)
 check(zeroIntent and M.validate(zeroIntent)~=nil,'canonical initial record revision zero retained')
@@ -492,14 +602,18 @@ do
   {direction='report',bytes='{ '..common..'"enrolment_token":"'..binding.enrolment_token..'","version":3,"event_id":"'..eventId..'","seq":1,"action_id":"activation","action_revision":2,"kind":"COORDINATOR_RELEASE","payload":{'..owner..'"quiescent":true}}\n'},
  }
  local ordinary=clone(binding);ordinary.version=3;ordinary.event_id=eventId;ordinary.seq=1;ordinary.kind='REGISTER'
- ordinary.payload={capabilities={'report-files-v1','native-ask-v1','worker-poll-v1','argv-v1','coordinator-control-v1'}}
+ ordinary.payload={capabilities={'report-files-v1','native-ask-v1','worker-poll-v1','argv-v1','coordinator-control-v1','check-runner-v1'}}
  local allCapabilities=clone(expected);allCapabilities.capabilities=clone(ordinary.payload.capabilities)
- check(C.decode_report(runtime.json.encode(ordinary),allCapabilities)~=nil,'REGISTER supports all five explicit capabilities')
+ check(C.decode_report(runtime.json.encode(ordinary),allCapabilities)~=nil,'REGISTER accepts a sixth explicit capability')
+ table.insert(ordinary.payload.capabilities,'release-manager-v1');allCapabilities.capabilities=clone(ordinary.payload.capabilities)
+ check(C.decode_report(runtime.json.encode(ordinary),allCapabilities)~=nil,'REGISTER accepts a seventh explicit capability')
  table.insert(ordinary.payload.capabilities,'coordinator-control-v1')
- check(C.decode_report(runtime.json.encode(ordinary),allCapabilities)==nil,'REGISTER rejects a sixth capability')
+ check(C.decode_report(runtime.json.encode(ordinary),allCapabilities)==nil,'REGISTER rejects an eighth capability')
  table.remove(ordinary.payload.capabilities)
  ordinary.payload.capabilities[4]='coordinator-control-v1'
  check(C.decode_report(runtime.json.encode(ordinary),allCapabilities)==nil,'REGISTER rejects duplicate control capability')
+ ordinary.payload.capabilities={'report-files-v1','check-runner-v1'}
+ check(select(2,C.decode_report(runtime.json.encode(ordinary),expected)).code=='binding_mismatch','REGISTER cannot claim an unprovisioned check-runner-v1')
  local legacy=clone(expected);legacy.capabilities=nil
  ordinary.payload.capabilities={'report-files-v1'}
  check(C.decode_report(runtime.json.encode(ordinary),legacy)~=nil,'ordinary legacy registration remains usable without control capability')
@@ -549,10 +663,22 @@ check(C.decode_report(runtime.json.encode(ordinary),legacy)~=nil,'READY without 
  end
  check(landingResult({outcome='landed',result_revision='head'},false)==nil,'LANDING_RESULT requires its exact grant action correlation')
  local landingReply=clone(ordinaryReply);landingReply.kind='landing_grant'
+ landingReply.payload={landing_id='landing',grant_id='grant',project_id='project',checkpoint_id='cp',repo_ref='repo',target_ref='main',target_revision='base',source_ref='work',source_revision='rev',
+  builder_work_id='builder-work',review_id='review',reviewer_family='openai',proof={mode='cross_family_review',artifact_revision='rev',review_id='review',check_refs=runtime.json.array()}}
+ local releaseManager=clone(legacy);releaseManager.capabilities={'report-files-v1','release-manager-v1'}
+ check(C.decode_reply(runtime.json.encode(landingReply),releaseManager)~=nil,'landing_grant names the exact landing, target head, source, builder, review and proof')
+ check(select(2,C.decode_reply(runtime.json.encode(landingReply),legacy)).code=='binding_mismatch','landing_grant requires provisioned release-manager-v1')
+ check(select(2,C.decode_reply(runtime.json.encode(landingReply),expected)).code=='binding_mismatch','coordinator control does not imply release-manager-v1')
+ landingReply.payload.proof.mode='worker-attested'
+ check(C.decode_reply(runtime.json.encode(landingReply),releaseManager)==nil,'landing_grant proof mode is a closed enum')
+ landingReply.payload.proof.mode='helper_checks';landingReply.payload.proof.check_refs={'check-1'}
+ check(C.decode_reply(runtime.json.encode(landingReply),releaseManager)~=nil,'landing_grant carries helper-check proof references')
+ landingReply.payload.reviewer_family='OpenAI'
+ check(C.decode_reply(runtime.json.encode(landingReply),releaseManager)==nil,'reviewer family uses the declared family grammar')
+ landingReply.payload.reviewer_family='openai';landingReply.payload.builder_work_id=nil
+ check(C.decode_reply(runtime.json.encode(landingReply),releaseManager)==nil,'landing_grant requires the builder work ID')
  landingReply.payload={landing_id='landing',grant_id='grant',project_id='project',checkpoint_id='cp',repo_ref='repo',target_ref='main',target_revision='base',source_ref='work',source_revision='rev'}
- check(C.decode_reply(runtime.json.encode(landingReply),legacy)~=nil,'landing_grant names the exact landing, target head and source')
- landingReply.payload.source_ref=nil
- check(C.decode_reply(runtime.json.encode(landingReply),legacy)==nil,'landing_grant rejects a missing source ref')
+ check(C.decode_reply(runtime.json.encode(landingReply),releaseManager)==nil,'a 0.3.0 landing_grant without review binding and proof is refused')
  local refreshReply=clone(ordinaryReply);refreshReply.kind='landing_refresh'
  refreshReply.payload={landing_id='landing',project_id='project',repo_ref='repo',target_ref='main',expected_revision='base',current_revision='moved',reason='Target moved; refresh against current_revision.'}
  check(C.decode_reply(runtime.json.encode(refreshReply),legacy)~=nil,'landing_refresh names the exact landing, expected head and current head')
@@ -648,6 +774,221 @@ check(C.decode_report(runtime.json.encode(ordinary),legacy)~=nil,'READY without 
    local result,diagnostic=decode(bytes,expected)
    check(result==nil and diagnostic.code=='invalid_schema','coordinator exact JSON rejects null and duplicate payload keys')
   end
+ end
+end
+-- 0.4.0 report and reply kinds (Contracts C/D): exact round trips through the closed codecs and
+-- original-byte framing, closed payloads, action correlation and capability gates.
+do
+ -- Payload copies must keep empty JSON arrays distinct from empty objects.
+ local function clone(value)
+  if type(value)~='table' then return value end
+  if next(value)==nil then return if runtime.json.encode(value)=='[]' then runtime.json.array() else {} end
+  local out={}; for k,v in pairs(value) do out[k]=clone(v) end; return out
+ end
+ local function same(a,b)
+  if type(a)~=type(b) then return false end
+  if type(a)~='table' then return a==b end
+  for k,v in pairs(a) do if not same(v,b[k]) then return false end end
+  for k in pairs(b) do if a[k]==nil then return false end end
+  return true
+ end
+ local full=clone(binding);full.mailbox_handle='handle'
+ full.capabilities={'report-files-v1','worker-poll-v1','argv-v1','check-runner-v1','release-manager-v1'}
+ local plain=clone(full);plain.capabilities={'report-files-v1','worker-poll-v1','argv-v1'}
+ local head=string.rep('a',40)
+ local function report(kind,payload,action)
+  local r=clone(binding);r.version=3;r.event_id=C.sha256('handle:report:1');r.seq=1;r.kind=kind;r.payload=clone(payload)
+  if action then r.action_id='action';r.action_revision=1 end
+  return r
+ end
+ local function reply(kind,payload)
+  local r=clone(binding);r.enrolment_token=nil;r.version=1;r.message_id='message';r.reply_seq=1;r.action_id='action';r.action_revision=1;r.kind=kind;r.payload=clone(payload)
+  return r
+ end
+ local function decoder(value) return if value.message_id then C.decode_reply else C.decode_report end
+ local function accepted(value,expected,message)
+  local bytes=runtime.json.encode(value)
+  local decoded=decoder(value)(bytes,expected)
+  check(decoded~=nil and same(decoded,value),message)
+  return bytes
+ end
+ local function roundtrip(value,expected,message)
+  local bytes=accepted(value,expected,message..' round-trips exactly')
+  local direction=if value.message_id then 'reply' else 'report'
+  local frame=assert(C.frame(bytes,direction,expected))
+  local pool=C.new_reassembler()
+  assert(C.begin_assembly(pool,frame.manifest,expected,C.sha256(frame.manifest)))
+  local assembled
+  for _,chunk in ipairs(frame.chunks) do assembled=assert(C.push_chunk(pool,chunk,expected,C.sha256(chunk))) end
+  check(assembled.complete and assembled.bytes==bytes and same(assembled.envelope,value),message..' survives original-byte framing')
+ end
+ local function refused(value,expected,message,code)
+  local decoded,diagnostic=decoder(value)(runtime.json.encode(value),expected)
+  check(decoded==nil and diagnostic.code==(code or 'invalid_schema'),message)
+ end
+ local function closed(make,payload,expected,name,optional)
+  for key in pairs(payload) do
+   if not (optional and optional[key]) then
+    local bad=clone(payload);bad[key]=nil
+    refused(make(bad),expected,name..' requires '..key)
+   end
+  end
+  local bad=clone(payload);bad.extra='unissued'
+  refused(make(bad),expected,name..' payload is closed')
+ end
+ -- CHECK_RESULT: helper-only, check-runner-v1, never action-correlated.
+ local checkResult={check_id='t1-c1',argv_sha256=string.rep('b',64),exit_code=0,output_sha256=string.rep('c',64),head=head,ran_at_ms=1730000000000}
+ local function checkReport(p) return report('CHECK_RESULT',p) end
+ roundtrip(checkReport(checkResult),full,'CHECK_RESULT')
+ refused(checkReport(checkResult),plain,'CHECK_RESULT requires provisioned check-runner-v1','binding_mismatch')
+ refused(report('CHECK_RESULT',checkResult,true),full,'CHECK_RESULT carries no action correlation')
+ closed(checkReport,checkResult,full,'CHECK_RESULT')
+ for _,code in ipairs({1,255,-1,-2147483648,4294967295}) do
+  local p=clone(checkResult);p.exit_code=code
+  accepted(checkReport(p),full,'CHECK_RESULT accepts POSIX and Windows exit code '..code)
+ end
+ for _,code in ipairs({4294967296,-2147483649,1.5,'0',true}) do
+  local p=clone(checkResult);p.exit_code=code
+  refused(checkReport(p),full,'CHECK_RESULT rejects exit code '..tostring(code))
+ end
+ local sha256Head=clone(checkResult);sha256Head.head=string.rep('e',64)
+ accepted(checkReport(sha256Head),full,'CHECK_RESULT accepts a SHA-256 repository head')
+ for _,value in ipairs({string.rep('A',40),string.rep('a',39),string.rep('a',41),string.rep('a',63),'HEAD'}) do
+  local p=clone(checkResult);p.head=value
+  refused(checkReport(p),full,'CHECK_RESULT head is a lowercase 40/64-hex object name')
+ end
+ for _,key in ipairs({'argv_sha256','output_sha256'}) do
+  local p=clone(checkResult);p[key]=string.rep('B',64)
+  refused(checkReport(p),full,'CHECK_RESULT '..key..' is lowercase hex SHA-256')
+ end
+ -- CHECKOUT: helper-only checkout facts, check-runner-v1.
+ local checkout={worktree_path='/work/tree',common_dir='/work/repo/.git',branch='feature',head=head,base=string.rep('d',40),
+  changed_files={'src/a.luau','src/b.luau'},changed_overflow=false,changed_total=2,dirty=true}
+ local function checkoutReport(p) return report('CHECKOUT',p) end
+ roundtrip(checkoutReport(checkout),full,'CHECKOUT')
+ refused(checkoutReport(checkout),plain,'CHECKOUT requires provisioned check-runner-v1','binding_mismatch')
+ refused(report('CHECKOUT',checkout,true),full,'CHECKOUT carries no action correlation')
+ closed(checkoutReport,checkout,full,'CHECKOUT',{base=true})
+ local noBase=clone(checkout);noBase.base=nil
+ accepted(checkoutReport(noBase),full,'CHECKOUT base is optional')
+ for _,path in ipairs({'C:/work/tree','C:\\work\\tree','\\\\server\\share\\tree'}) do
+  local p=clone(checkout);p.worktree_path=path;p.common_dir=path
+  accepted(checkoutReport(p),full,'CHECKOUT accepts canonical Windows path '..path)
+ end
+ for _,path in ipairs({'work/tree','','./tree',string.rep('/',4097)}) do
+  local p=clone(checkout);p.worktree_path=path
+  refused(checkoutReport(p),full,'CHECKOUT worktree_path is a bounded absolute path')
+ end
+ local clean=clone(checkout);clean.changed_files=runtime.json.array();clean.changed_total=0;clean.dirty=false
+ accepted(checkoutReport(clean),full,'CHECKOUT accepts a clean checkout')
+ for _,counts in ipairs({{3,false},{2,true},{1,false}}) do
+  local p=clone(checkout);p.changed_total=counts[1];p.changed_overflow=counts[2]
+  refused(checkoutReport(p),full,'CHECKOUT overflow flag must agree with changed_total')
+ end
+ local overflow=clone(checkout);overflow.changed_total=900;overflow.changed_overflow=true
+ accepted(checkoutReport(overflow),full,'CHECKOUT reports a truncated sorted prefix with overflow')
+ local duplicate=clone(checkout);duplicate.changed_files={'src/a.luau','src/a.luau'}
+ refused(checkoutReport(duplicate),full,'CHECKOUT changed paths are unique')
+ local many={};for i=1,512 do many[i]=string.format('f%03d',i) end
+ local maximum=clone(checkout);maximum.changed_files=many;maximum.changed_total=512
+ roundtrip(checkoutReport(maximum),full,'CHECKOUT with exactly 512 changed paths')
+ local beyond=clone(maximum);table.insert(beyond.changed_files,'f513');beyond.changed_total=513
+ refused(checkoutReport(beyond),full,'CHECKOUT refuses a 513th changed path')
+ -- LABEL: labeller worker, correlated to one label_request.
+ local label={work_ref='work',class='bugfix',reason='Touches parser tests.'}
+ local function labelReport(p) return report('LABEL',p,true) end
+ roundtrip(labelReport(label),plain,'LABEL')
+ refused(report('LABEL',label),plain,'LABEL requires its label_request correlation')
+ closed(labelReport,label,plain,'LABEL',{reason=true})
+ for _,value in ipairs({'Bugfix','1fix','bug_fix',string.rep('a',33)}) do
+  local p=clone(label);p.class=value
+  refused(labelReport(p),plain,'LABEL class uses the route class grammar')
+ end
+ -- DEPLOY_RESULT: release manager, release-manager-v1, correlated to one deploy_grant.
+ local deploy={deploy_id='deploy',attempt_id='attempt-1',landing_id='landing',outcome='deployed',revision=head,evidence={'ci/run/1'}}
+ local function deployReport(p) return report('DEPLOY_RESULT',p,true) end
+ roundtrip(deployReport(deploy),full,'DEPLOY_RESULT')
+ refused(deployReport(deploy),plain,'DEPLOY_RESULT requires provisioned release-manager-v1','binding_mismatch')
+ refused(report('DEPLOY_RESULT',deploy),full,'DEPLOY_RESULT requires its deploy_grant correlation')
+ closed(deployReport,deploy,full,'DEPLOY_RESULT',{reason=true})
+ for _,outcome in ipairs({'held','not_applicable','failed'}) do
+  local p=clone(deploy);p.outcome=outcome;p.reason='Owner hold.'
+  accepted(deployReport(p),full,'DEPLOY_RESULT accepts outcome '..outcome)
+ end
+ local landed=clone(deploy);landed.outcome='landed'
+ refused(deployReport(landed),full,'DEPLOY_RESULT outcome is a closed enum')
+ local evidence=clone(deploy);evidence.evidence={};for i=1,17 do evidence.evidence[i]='e'..i end
+ refused(deployReport(evidence),full,'DEPLOY_RESULT evidence is bounded at 16')
+ -- REVIEW_RESULT (clean cutover): reviewer findings tied to file and line.
+ local finding={finding_id='f1',path='src/a.luau',line=12,summary='Off by one.'}
+ local review={review_id='review',round=1,artifact_revision='rev',outcome='changes_required',findings={finding},summary='One issue.'}
+ local function reviewReport(p) return report('REVIEW_RESULT',p,true) end
+ roundtrip(reviewReport(review),plain,'REVIEW_RESULT')
+ refused(report('REVIEW_RESULT',review),plain,'REVIEW_RESULT requires its review_request correlation')
+ closed(reviewReport,review,plain,'REVIEW_RESULT',{summary=true})
+ local approved={review_id='review',round=2,artifact_revision='rev',outcome='approved',findings=runtime.json.array()}
+ accepted(reviewReport(approved),plain,'REVIEW_RESULT approves with no findings')
+ refused(reviewReport({artifact_revision='rev',outcome='approved',evidence=runtime.json.array()}),plain,'the 0.3.0 REVIEW_RESULT payload is refused')
+ local lineless=clone(review);lineless.findings={{finding_id='f1',path='src/a.luau',summary='File-level.'}}
+ accepted(reviewReport(lineless),plain,'a finding line is optional')
+ for _,mutate in ipairs({
+  function(p) p.findings={finding,clone(finding)} end,
+  function(p) p.findings[1].line=0 end,
+  function(p) p.findings[1].summary=string.rep('s',401) end,
+  function(p) p.findings[1].extra=true end,
+  function(p) p.round=0 end,
+  function(p) p.outcome='rejected' end,
+  function(p) p.findings={};for i=1,33 do p.findings[i]={finding_id='f'..i,path='a',summary='s'} end end,
+ }) do
+  local p=clone(review);mutate(p)
+  refused(reviewReport(p),plain,'REVIEW_RESULT findings and round are closed and bounded')
+ end
+ local bounded=clone(review);bounded.findings[1].summary=string.rep('s',400)
+ accepted(reviewReport(bounded),plain,'a finding summary accepts exactly 400 bytes')
+ -- DONE gains an optional relative output_ref.
+ local done={checkpoint_id='cp',artifact_revision='rev',summary='done',output_ref='out/report.md'}
+ roundtrip(report('DONE',done),plain,'DONE with output_ref')
+ for _,value in ipairs({'/abs/report.md','../report.md','out/../../x','C:report.md','out\\report.md','',string.rep('a',257)}) do
+  local p=clone(done);p.output_ref=value
+  refused(report('DONE',p),plain,'DONE output_ref is a bounded relative path')
+ end
+ -- review_request: the fixed judge question to a reviewer.
+ local request={review_id='review',round=1,question_id='implements_task_v1',builder_work_id='builder-work',task_ref='plan.md#t1',
+  source_ref='feature',artifact_revision='rev',scope_paths={'src'},findings_prev=runtime.json.array()}
+ local function reviewRequest(p) return reply('review_request',p) end
+ roundtrip(reviewRequest(request),plain,'review_request')
+ closed(reviewRequest,request,plain,'review_request')
+ local planned=clone(request);planned.plan_ref='plans/x.md';planned.plan_revision=string.rep('f',64);planned.findings_prev={finding}
+ accepted(reviewRequest(planned),plain,'review_request carries a paired plan reference and prior findings')
+ planned.plan_revision=nil
+ refused(reviewRequest(planned),plain,'review_request plan reference and revision are paired')
+ local question=clone(request);question.question_id='find_problems'
+ refused(reviewRequest(question),plain,'review_request asks only the fixed judge question')
+ local gated=reviewRequest(request);gated.gate_id='gate';gated.gate_revision=1
+ refused(gated,plain,'review_request cannot carry owner decision gate fields')
+ -- rework: failed checks and findings back to the builder.
+ local rework={review_id='review',round=2,artifact_revision='rev',failed_checks={{check_id='t1-c1',exit_code=1}},findings={finding}}
+ local function reworkReply(p) return reply('rework',p) end
+ roundtrip(reworkReply(rework),plain,'rework')
+ closed(reworkReply,rework,plain,'rework',{review_id=true})
+ local checksOnly=clone(rework);checksOnly.review_id=nil;checksOnly.findings=runtime.json.array()
+ accepted(reworkReply(checksOnly),plain,'helper-check rework needs no review')
+ local tooMany=clone(rework);tooMany.failed_checks={};for i=1,17 do tooMany.failed_checks[i]={check_id='c'..i,exit_code=1} end
+ refused(reworkReply(tooMany),plain,'rework failed checks are bounded at 16')
+ -- deploy_grant: exactly one deploy attempt for exactly one revision, release-manager-v1.
+ local grant={deploy_id='deploy',attempt_id='attempt-1',landing_id='landing',revision=head,target_ref='production'}
+ local function deployGrant(p) return reply('deploy_grant',p) end
+ roundtrip(deployGrant(grant),full,'deploy_grant')
+ refused(deployGrant(grant),plain,'deploy_grant requires provisioned release-manager-v1','binding_mismatch')
+ closed(deployGrant,grant,full,'deploy_grant')
+ -- label_request: the labeller's closed class choice.
+ local labelRequest={work_ref='work',classes={'bugfix','docs'},text='Fix the parser.'}
+ local function labelReply(p) return reply('label_request',p) end
+ roundtrip(labelReply(labelRequest),plain,'label_request')
+ closed(labelReply,labelRequest,plain,'label_request')
+ for _,classes in ipairs({runtime.json.array(),{'bugfix','bugfix'},{'Bugfix'}}) do
+  local p=clone(labelRequest);p.classes=classes
+  refused(labelReply(p),plain,'label_request classes are 1..32 unique class names')
  end
 end
 do

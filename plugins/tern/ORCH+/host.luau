@@ -229,9 +229,12 @@ end
 local function binding(view: any): any
 	return { host_pane_id = tostring(view.pane), alias_nonce = view.alias_nonce }
 end
+-- Plain reasons for refusals whose reducer text is not owner-facing.
+local REFUSAL_TEXT = { policy_too_large = "Settings too large — shorten templates or guidance." }
 local function action(view: any, event: any, defer_render: boolean?): any
 	event.request_id = event.request_id or nonce()
 	local response = table.clone(authority:apply(event))
+	if response.ok == false and REFUSAL_TEXT[response.code] then response.message = REFUSAL_TEXT[response.code] end
 	response.request_id = event.request_id
 	view.notice = tostring(response.message or response.code)
 	if not defer_render then render_all() end
@@ -259,15 +262,25 @@ local function capture_dispatch(view: any, response: any, receipt: any?)
 	view.scoped_results[response.action_id] = retained
 end
 -- Config edits are a view-local draft over the saved session policy. The window saves it via the
--- ordinary policy command with the draft's base as expected_policy, so a stale draft is refused.
+-- ordinary policy command fenced by expected_policy_sha256 (digest of the displayed saved policy),
+-- so a stale draft is refused.
 local STEPS = { rollover_threshold_pct = { minimum = 1, maximum = 99 }, poll_ms = { minimum = 1000, maximum = 60000 },
 	heartbeat_ms = { minimum = 5000, maximum = 3600000 }, stale_ms = { minimum = 5000, maximum = 86400000 },
 	quota_reserve_pct = { minimum = 0, maximum = 99 }, quota_max_age_ms = { minimum = 60000, maximum = 900000 },
-	concurrency_limit = { minimum = 0, maximum = 32 } }
+	concurrency_limit = { minimum = 0, maximum = 32 }, loop_cap = { minimum = 1, maximum = 10 },
+	review_rounds = { minimum = 1, maximum = 2 }, stale_claim_min = { minimum = 0, maximum = 1440 } }
 local SWITCHES = { automatic_reports = true, auto_rollover = true, rollover_include_coordinator = true, quota_routing = true,
 	initial_dispatch_provider = true, initial_dispatch_account = true, initial_dispatch_model = true, sweep_enabled = true,
 	worker_rollover_provider = true, worker_rollover_account = true, worker_rollover_model = true,
-	coordinator_rollover_provider = true, coordinator_rollover_account = true, coordinator_rollover_model = true }
+	coordinator_rollover_provider = true, coordinator_rollover_account = true, coordinator_rollover_model = true,
+	enforce_cross_family = true, glitch_integration = true, auto_launch_intake = true }
+-- Draft-edited choice sets: `approve:<kind>` toggles auto_approve_kinds (stored in this canonical
+-- order); `work_source:<value>` is a radio.
+local APPROVE_ORDER = { "dispatch", "report", "review", "landing" }
+local APPROVE_KINDS = { dispatch = true, report = true, review = true, landing = true }
+local WORK_SOURCES = { glitch_plan = true, board = true }
+-- Config list pages (views paginate lists over 8 rows).
+local CONFIG_PAGES = { family_map = true, reviewer_records = true, checkout_roots = true, routes = true, templates = true }
 -- Checkbox prefixes for each routing scope's explicit record allowlist.
 local ROUTE_PREFIXES = { route = "initial_dispatch_records", wroute = "worker_rollover_records", croute = "coordinator_rollover_records" }
 local PANE_STATES = { idle = true, working = true, waiting_input = true, exited = true, unknown = true }
@@ -310,10 +323,16 @@ local function config_change(view: any, name: string, checked: boolean)
 		return
 	end
 	local worker_id = name:match("^worker:(.+)$")
+	local approve_kind = name:match("^approve:(.+)$")
+	if approve_kind and not APPROVE_KINDS[approve_kind] then approve_kind = nil end
+	local work_source = name:match("^work_source:(.+)$")
+	if work_source and not WORK_SOURCES[work_source] then work_source = nil end
 	local prefix, record_id = name:match("^(%a+):(.+)$")
 	local route_list = if prefix then ROUTE_PREFIXES[prefix] else nil
 	if not route_list then record_id = nil end
-	if not SWITCHES[name] and not worker_id and not record_id then return end
+	if not SWITCHES[name] and not worker_id and not record_id and not approve_kind and not work_source then return end
+	-- A radio choice is set by checking it; unchecking the current choice changes nothing.
+	if work_source and not checked then return end
 	local draft = config_draft(view)
 	if not draft then return end
 	if worker_id then
@@ -332,6 +351,15 @@ local function config_change(view: any, name: string, checked: boolean)
 		local index = table.find(list, record_id)
 		if checked and not index and listed then table.insert(list, record_id); table.sort(list)
 		elseif not checked and index then table.remove(list, index) end
+	elseif approve_kind then
+		local selected = {}
+		for _, kind in draft.values.auto_approve_kinds do selected[kind] = true end
+		selected[approve_kind] = checked or nil
+		local list = {}
+		for _, kind in APPROVE_ORDER do if selected[kind] then table.insert(list, kind) end end
+		draft.values.auto_approve_kinds = list
+	elseif work_source then
+		draft.values.default_work_source = work_source
 	else
 		draft.values[name] = checked
 	end
@@ -426,7 +454,7 @@ local function handle(view: any, ev: any, cx: any)
 		-- cancel_work is not workflow-only: withdrawing a rejected launch queues its mailbox retirement,
 		-- which the window drives from this command result like any other queued effect.
 		local workflow_only = table.find({ "observe", "policy", "pause", "resume", "answer", "cancel_gate", "recheck_gate", "continue_controller",
-			"cancel_landing", "move_landing", "landing_lost", "reconcile_landing", "capacity", "sweep" }, input.command) ~= nil
+			"cancel_landing", "move_landing", "landing_lost", "reconcile_landing", "capacity", "sweep", "plan_import", "board_intake", "inbox_intake", "template_start" }, input.command) ~= nil
 		if operator then
 			view.dispatch_command_result = response
 			response.command = input.command
@@ -486,6 +514,14 @@ local function handle(view: any, ev: any, cx: any)
 			view.notice = input.message
 			render_all()
 		end
+		return
+	elseif ev.act == "idle-wake" then
+		-- The window's idle-wake helper state (window.luau idle_wake): display only, never authority.
+		local input = decode(ev.value)
+		if not input or input.source_nonce ~= view.alias_nonce or (input.state ~= "active" and input.state ~= "idle" and input.state ~= "unavailable")
+			or (input.detail ~= nil and not bounded_text(input.detail, 256)) then return end
+		view.idle_wake = if input.state == "idle" then nil else { state = input.state, detail = input.detail }
+		render_all()
 		return
 	end
 	if ev.act == "assistance-result" then
@@ -564,6 +600,20 @@ local function handle(view: any, ev: any, cx: any)
 			draft.values[entry.field] = math.clamp(draft.values[entry.field] + entry.delta, minimum, bounds.maximum)
 		end
 		render_all()
+	elseif entry.kind == "config-page" then
+		-- Display paging only; it never touches the draft or authority.
+		if CONFIG_PAGES[entry.name] and type(entry.page) == "number" and entry.page >= 0 and entry.page % 1 == 0 then
+			view.config_pages = view.config_pages or {}
+			view.config_pages[entry.name] = entry.page
+		end
+		render_all()
+	elseif entry.kind == "config-move" then
+		-- Reorder an owner-ordered list in the draft; saved through the ordinary Save path.
+		local draft = config_draft(view)
+		local list = if draft and entry.field == "reviewer_records" then draft.values.reviewer_records else nil
+		local index = if list then table.find(list, entry.item) else nil
+		if list and index and index > 1 then list[index], list[index - 1] = list[index - 1], list[index] end
+		render_all()
 	elseif entry.kind == "config-discard" then
 		view.policy_draft = nil
 		render_all()
@@ -572,7 +622,10 @@ local function handle(view: any, ev: any, cx: any)
 		view.workflow_gates = 0; view.workflow_thread = 0
 		render_all()
 	elseif entry.kind == "workflow-page" then
-		if entry.name == "gates" then view.workflow_gates = entry.page else view.workflow_thread = entry.page end
+		local plan_id = entry.name:match("^plan (.+)$")
+		if entry.name == "gates" then view.workflow_gates = entry.page
+		elseif plan_id then view.workflow_plans = view.workflow_plans or {}; view.workflow_plans[plan_id] = entry.page
+		else view.workflow_thread = entry.page end
 		render_all()
 	elseif entry.kind == "dispatch-acknowledge" then
 		local retained = view.dispatch_command_result

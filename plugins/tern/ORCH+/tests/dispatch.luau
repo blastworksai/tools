@@ -12,7 +12,7 @@ local sections = { fixture = true, core = true, receipts = true, callbacks = tru
 	rollover_coordinator_self_release = true, publication_readback = true, accept_after_owner_recovery = true,
 	quota_normalize = true, quota_assembly = true, quota_routing = true, quota_gate = true, quota_claim = true,
 	quota_rollover = true, quota_ledger = true, quota_selector = true, quota_continuation = true, window_bookkeeping = true, intent_buttons = true,
-	withdraw_fenced = true }
+	withdraw_fenced = true, policy_keys = true, loop_caps = true, worker_fields = true }
 assert(section == nil or sections[section], "unknown dispatch test section: " .. tostring(section))
 local runtime, environment = tern, getfenv()
 local function clone(v) return runtime.json.decode(runtime.json.encode(v)) end
@@ -29,7 +29,7 @@ local function load(name)
 	setfenv(chunk, setmetatable({ tern = fake, require = load }, { __index = environment }))
 	local value = chunk(); modules[name] = value; return value
 end
-local host, state, dispatch, codec = load("host"), load("state"), load("dispatch"), load("transport")
+local host, state, dispatch, codec, quota = load("host"), load("state"), load("dispatch"), load("transport"), load("quota")
 local checks, serial = 0, 0
 local function check(ok, why) assert(ok, why); checks += 1 end
 local function next_id() serial += 1; return "fixture-" .. tostring(serial) end
@@ -68,7 +68,38 @@ local function fixture(clock)
 		end
 		for k, v in fields or {} do event[k] = v end; return event
 	end
-	function f:apply(command, fields) return self.authority:apply(self:event(command, fields)) end
+	-- Checkpoint 5 invariant sweep (D8/D9), run after every fixture command in every group: a gate
+	-- answered by policy needs a session that enabled auto_approve_kinds, the matching rule and
+	-- planned work (manual-source work never auto-approves); every answer source is tagged.
+	function f:autonomy_sweep()
+		local d = self.authority.registry.dispatch
+		for gid, g in (d and d.gates) or {} do
+			local src = g.answer and g.answer.source
+			if src then
+				assert(src.kind == "owner" or src.kind == "policy" or src.kind == "refusal", "gate answer source is untagged: " .. gid)
+				assert(src.kind ~= "refusal" or (g.kind == "coordinator_proposal" and g.answer.choice_id == "reject"), "an ORCH+ refusal answered something other than a proposal reject: " .. gid)
+				if src.kind == "policy" then
+					local w = d.workers[g.worker_id]
+					assert(self.autonomous, "a gate was answered by policy while auto_approve_kinds was never enabled: " .. gid)
+					assert(g.kind == "coordinator_proposal" or g.kind == "landing_approval", "policy answered a non-autonomy gate: " .. gid)
+					local kinds = dispatch.policy(self.authority.registry, w.logical_session_id).auto_approve_kinds
+					local kind = if g.kind == "landing_approval" then "landing" else codec.decode_report(g.proposal, w).payload.kind
+					assert(src.rule == "auto_approve:" .. kind and table.find(kinds, kind) and type(src.policy_revision) == "string" and #src.policy_revision == 64,
+						"policy answer rule/revision does not match an enabled kind: " .. gid)
+					local work_id = if g.kind == "landing_approval" then w.work_id else codec.decode_report(g.proposal, w).payload.work_id
+					for _, t in d.workers do
+						if t.work_id == work_id then assert(t.source and (t.source.kind == "plan" or t.source.kind == "board"), "unplanned work was auto-approved: " .. gid) end
+					end
+				end
+			end
+		end
+	end
+	function f:apply(command, fields)
+		if command == "policy" and fields and fields.policy and fields.policy.auto_approve_kinds and #fields.policy.auto_approve_kinds > 0 then self.autonomous = true end
+		local r = self.authority:apply(self:event(command, fields))
+		self:autonomy_sweep()
+		return r
+	end
 	function f:action(id) return self.authority.registry.dispatch.actions[id] end
 	function f:finish(id, status, payload)
 		local a = self:action(id)
@@ -138,7 +169,7 @@ local function fixture(clock)
 	end
 	return f
 end
-if section == "fixture" then return { fixture = fixture, clone = clone, codec = codec, state = state, dispatch = dispatch, host = host, frame = frame, load = load } end
+if section == "fixture" then return { fixture = fixture, clone = clone, codec = codec, state = state, dispatch = dispatch, host = host, quota = quota, frame = frame, load = load } end
 if section == nil or section == "core" then
 local opaque = fixture()
 local configured_id, configured_cwd = "Configured worker / one", "/" .. string.rep("a", 1200)
@@ -784,14 +815,14 @@ first_api.intents(first)
 check(not saved_policy().paused and commands("", "resume") == 1 and view.operator_intent == nil and sent_by("second-window") == 0,
 	"only the owning window runs the intent")
 
--- Save session settings: the exact >8 KiB expected policy runs once across ticks and re-renders.
+-- Save session settings over a large saved policy runs once across ticks and re-renders.
 press(kind("config-open"), "Config")
 idef.event(view, { ev = "change", name = "auto_rollover", checked = true }, ctx)
 check(no_links(), "Config renders no orchplus:// link")
 drop_acks = true -- The host never sees the settlement: the intent stays published.
 local save = press(function(entry) return entry.kind == "operator-intent" and entry.request.command == "policy" and entry.request.field == nil end, "Save session settings")
-local legacy = "orchplus://dispatch/" .. runtime.base64.encode(runtime.json.encode(save.request), { url = true })
-check(#legacy > 8192, "the Save control's request exceeds the former 8192-byte link limit")
+check(type(save.request.expected_sha256) == "string" and #save.request.expected_sha256 == 64 and save.request.expected == nil,
+	"the Save control fences the saved policy by its digest, never a full copy")
 for _ = 1, 4 do first_api.intents(first); second_api.intents(second); idef.view(view, ctx) end
 local after = saved_policy()
 check(after.auto_rollover == true and #after.initial_dispatch_records == 24 and #after.worker_rollover_records == 24
@@ -1047,8 +1078,10 @@ local function window_consumer(mode)
 				"native bridge creation opens the bridge tab, never splits the controller and never steals focus")
 			return 9003
 		end }
-	cx.prompt = function()
-		return { next = function(_promise, callback) callback("Explicit chained fixture task", nil, table.clone(cx)) end }
+	-- The assignment text first; the CP2 declared files/checks/base ref prompts are left empty.
+	cx.prompt = function(_cx, options)
+		local text = if options and options.action == "next: declared files" then "Explicit chained fixture task" else ""
+		return { next = function(_promise, callback) callback(text, nil, table.clone(cx)) end }
 	end
 	cx.pick = function()
 		return { next = function(_promise, callback) callback({ continue_controller = true }, nil, table.clone(cx)) end }
@@ -1866,9 +1899,12 @@ if section == nil or section == "sweep_policy" then
 		"valid sweep settings save through the ordinary policy command")
 	local legacy = clone(f.authority.registry)
 	legacy.dispatch.policies[sid].sweep_enabled = nil; legacy.dispatch.policies[sid].sweep_time = nil
-	-- A genuine pre-sweep policy also predates the rollover-routing and concurrency fields.
+	-- A genuine pre-sweep policy also predates the rollover-routing, concurrency and Config v4 fields.
 	for _, key in { "worker_rollover_records", "worker_rollover_provider", "worker_rollover_account", "worker_rollover_model", "coordinator_rollover_records",
-		"coordinator_rollover_provider", "coordinator_rollover_account", "coordinator_rollover_model", "concurrency_limit" } do legacy.dispatch.policies[sid][key] = nil end
+		"coordinator_rollover_provider", "coordinator_rollover_account", "coordinator_rollover_model", "concurrency_limit",
+		"loop_cap", "review_rounds", "stale_claim_min", "enforce_cross_family", "family_map", "reviewer_records", "release_manager_record", "checkout_roots",
+		"auto_approve_kinds", "glitch_integration", "default_work_source", "board_path", "board_lanes", "inbox_folder", "auto_launch_intake", "routes",
+		"labeller_record", "role_guidance", "templates" } do legacy.dispatch.policies[sid][key] = nil end
 	check(not dispatch.valid(legacy.dispatch, legacy), "a pre-sweep stored policy is accepted only at the restore boundary")
 	local migrated = assert(state.rehydrate(clone(legacy))).dispatch.policies[sid]
 	check(migrated.sweep_enabled == true and migrated.sweep_time == "03:00" and migrated.poll_ms == saved.poll_ms, "pre-sweep policies migrate with the sweep defaults")
@@ -2062,25 +2098,25 @@ if section == nil or section == "policy" then
 		and defaults.quota_routing == false and #defaults.excluded_workers == 0, "CP3 Config defaults extend the existing session policy")
 	for _, bad in { 0, 100, 80.5, -1, "80", true } do
 		local before = runtime.json.encode(f.authority.registry)
-		check(f:apply("policy", { policy = { rollover_threshold_pct = bad }, expected_policy = saved() }).code == "invalid_policy"
+		check(f:apply("policy", { policy = { rollover_threshold_pct = bad }, expected_policy_sha256 = quota.digest(saved()) }).code == "invalid_policy"
 			and runtime.json.encode(f.authority.registry) == before, "rollover threshold " .. tostring(bad) .. " is refused with nothing changed")
 	end
 	for _, bad in { { auto_rollover = "yes" }, { rollover_include_coordinator = 1 }, { quota_routing = runtime.json.null }, { paused = true }, { unknown = true }, {} } do
 		local before = runtime.json.encode(f.authority.registry)
-		check(f:apply("policy", { policy = bad, expected_policy = saved() }).code == "invalid_policy" and runtime.json.encode(f.authority.registry) == before,
+		check(f:apply("policy", { policy = bad, expected_policy_sha256 = quota.digest(saved()) }).code == "invalid_policy" and runtime.json.encode(f.authority.registry) == before,
 			"policy rejects undocumented, non-boolean or empty settings with nothing changed")
 	end
 	for _, threshold in { 1, 99 } do
-		check(f:apply("policy", { policy = { rollover_threshold_pct = threshold }, expected_policy = saved() }).code == "policy_updated"
+		check(f:apply("policy", { policy = { rollover_threshold_pct = threshold }, expected_policy_sha256 = quota.digest(saved()) }).code == "policy_updated"
 			and saved().rollover_threshold_pct == threshold, "rollover threshold " .. tostring(threshold) .. " is accepted")
 	end
-	check(f:apply("policy", { policy = { auto_rollover = true, rollover_include_coordinator = true, quota_routing = true }, expected_policy = saved() }).code == "policy_updated"
+	check(f:apply("policy", { policy = { auto_rollover = true, rollover_include_coordinator = true, quota_routing = true }, expected_policy_sha256 = quota.digest(saved()) }).code == "policy_updated"
 		and saved().auto_rollover and saved().rollover_include_coordinator and saved().quota_routing and saved().poll_ms == 5000,
 		"partial Config save changes only the named settings")
 	local displayed = saved()
 	assert(f:apply("pause").ok)
 	local before = runtime.json.encode(f.authority.registry)
-	check(f:apply("policy", { policy = { auto_rollover = false }, expected_policy = displayed }).code == "policy_conflict"
+	check(f:apply("policy", { policy = { auto_rollover = false }, expected_policy_sha256 = quota.digest(displayed) }).code == "policy_conflict"
 		and runtime.json.encode(f.authority.registry) == before and saved().auto_rollover, "stale editor is refused after an intervening pause; nothing changes")
 	assert(f:apply("resume").ok)
 	local restored = assert(state.rehydrate(clone(f.authority.registry)))
@@ -2103,7 +2139,7 @@ if section == nil or section == "policy" then
 	-- Exclusion is honored by automatic report scheduling and never stops anything.
 	local id = f:accepted(false)
 	local other = f:accepted(false)
-	assert(f:apply("policy", { policy = { automatic_reports = true, heartbeat_ms = 5000, stale_ms = 600000 }, expected_policy = saved() }).ok)
+	assert(f:apply("policy", { policy = { automatic_reports = true, heartbeat_ms = 5000, stale_ms = 600000 }, expected_policy_sha256 = quota.digest(saved()) }).ok)
 	for _, worker_id in { id, other } do
 		local w = f.authority.registry.dispatch.workers[worker_id]
 		assert(f:apply("observe", { worker_id = worker_id, pane_binding = clone(w.pane_binding), native_state = "idle" }).ok)
@@ -2111,13 +2147,13 @@ if section == nil or section == "policy" then
 	clock.mono_ms += 6000
 	assert(f.authority:apply({ kind = "workflow_tick" }).ok)
 	check(projected(id).due_report and projected(other).due_report, "fixture makes both safe idle workers due for automatic reports")
-	check(f:apply("policy", { policy = { excluded_workers = { "worker-unknown" } }, expected_policy = saved() }).code == "invalid_policy",
+	check(f:apply("policy", { policy = { excluded_workers = { "worker-unknown" } }, expected_policy_sha256 = quota.digest(saved()) }).code == "invalid_policy",
 		"exclusion must name a managed worker of this session")
-	check(f:apply("policy", { policy = { excluded_workers = { id, id } }, expected_policy = saved() }).code == "invalid_policy",
+	check(f:apply("policy", { policy = { excluded_workers = { id, id } }, expected_policy_sha256 = quota.digest(saved()) }).code == "invalid_policy",
 		"duplicate exclusions are refused")
 	local function actions_for(worker_id) local n = 0; for _, a in f.authority.registry.dispatch.actions do if a.worker_id == worker_id then n += 1 end end; return n end
 	local w_before, actions_before = clone(f.authority.registry.dispatch.workers[id]), actions_for(id)
-	check(f:apply("policy", { policy = { excluded_workers = { id } }, expected_policy = saved() }).code == "policy_updated"
+	check(f:apply("policy", { policy = { excluded_workers = { id } }, expected_policy_sha256 = quota.digest(saved()) }).code == "policy_updated"
 		and projected(id).orchestration_excluded and not projected(id).due_report and projected(other).due_report,
 		"unticked managed worker is skipped by automatic report scheduling; others remain due")
 	local w = f.authority.registry.dispatch.workers[id]
@@ -2129,7 +2165,7 @@ if section == nil or section == "policy" then
 	check(not projected(id).due_report, "later ticks keep the excluded worker out of automatic scheduling")
 	check(f:apply("observe", { worker_id = id, pane_binding = clone(w.pane_binding), native_state = "idle" }).ok, "excluded worker health observation continues")
 	check(state.rehydrate(clone(f.authority.registry)).dispatch.policies[sid].excluded_workers[1] == id, "exclusion persists by durable worker_id")
-	check(f:apply("policy", { policy = { excluded_workers = {} }, expected_policy = saved() }).code == "policy_updated" and projected(id).due_report,
+	check(f:apply("policy", { policy = { excluded_workers = {} }, expected_policy_sha256 = quota.digest(saved()) }).code == "policy_updated" and projected(id).due_report,
 		"re-ticking restores automatic scheduling eligibility")
 end
 -- Verified worker rollover (CP4). Epoch-bound clocks make native liveness evidence fresh.
@@ -4157,5 +4193,662 @@ do
 			and g:action(glaunch).phase == "uncertain", "the continued window never re-runs it")
 		check(state.rehydrate(clone(g.authority.registry)) ~= nil, "the strict launch state restores")
 	end
+end
+-- Config v4 (CP1): 46 bounded keys, every historical store migrates, live saves stay strict.
+local POLICY_V0 = { "paused", "poll_ms", "heartbeat_ms", "stale_ms", "automatic_reports" }
+local POLICY_V1 = { "auto_rollover", "rollover_threshold_pct", "rollover_include_coordinator", "quota_routing", "excluded_workers" }
+local POLICY_V2 = { "quota_reserve_pct", "quota_max_age_ms", "initial_dispatch_records", "initial_dispatch_provider", "initial_dispatch_account", "initial_dispatch_model" }
+local POLICY_V3 = { "sweep_enabled", "sweep_time" }
+local POLICY_V4 = { "worker_rollover_records", "worker_rollover_provider", "worker_rollover_account", "worker_rollover_model",
+	"coordinator_rollover_records", "coordinator_rollover_provider", "coordinator_rollover_account", "coordinator_rollover_model", "concurrency_limit" }
+local POLICY_NEW = { loop_cap = 3, review_rounds = 2, stale_claim_min = 30, enforce_cross_family = true, family_map = {}, reviewer_records = {},
+	release_manager_record = "", checkout_roots = {}, auto_approve_kinds = {}, glitch_integration = true, default_work_source = "glitch_plan",
+	board_path = "", board_lanes = { queued = "Todo", running = "Doing", review = "Review", done = "Done" }, inbox_folder = "", auto_launch_intake = false,
+	routes = {}, labeller_record = "", role_guidance = { builder = "", reviewer = "", release_manager = "", labeller = "", coordinator = "" }, templates = {} }
+local function key_count(t) local n = 0; for _ in t do n += 1 end; return n end
+local function same_json(a, b)
+	local function canon(v)
+		if type(v) ~= "table" then return runtime.json.encode(v) end
+		local parts = {}
+		for k, value in v do table.insert(parts, tostring(k) .. "=" .. canon(value)) end
+		table.sort(parts)
+		return "{" .. table.concat(parts, ",") .. "}"
+	end
+	return canon(a) == canon(b)
+end
+if section == nil or section == "policy_keys" then
+	local f = fixture(function() return { now_ms = 1000, mono_ms = 1000, epoch = "policy-keys-host" } end)
+	local sid = f.origin.logical_session_id
+	local function saved() return dispatch.policy(f.authority.registry, sid) end
+	local function save(fields) return f:apply("policy", fields) end
+	local defaults = saved()
+	check(key_count(defaults) == 46, "a fresh session policy has exactly 46 keys")
+	local new_ok = true
+	for key, value in POLICY_NEW do if not same_json(defaults[key], value) then new_ok = false end end
+	check(new_ok and key_count(POLICY_NEW) == 19, "every Contract B key starts at its documented default")
+	-- A fresh session has no stored policy yet; one save stores the full 46-key form.
+	check(save({ policy = { loop_cap = 4 } }).code == "policy_updated" and key_count(f.authority.registry.dispatch.policies[sid]) == 46, "the first save stores all 46 keys")
+	-- Migration: each historical store shape restores to all 46 keys with its own values kept.
+	local shapes, keys = {}, {}
+	for _, group in { POLICY_V0, POLICY_V1, POLICY_V2, POLICY_V3, POLICY_V4 } do
+		for _, key in group do table.insert(keys, key) end
+		table.insert(shapes, table.clone(keys))
+	end
+	for index, shape in shapes do
+		check(#shape == ({ 5, 10, 16, 18, 27 })[index], "historical shape " .. index .. " has its recorded key count")
+		local legacy = clone(f.authority.registry); local stored = {}
+		for _, key in shape do stored[key] = clone(defaults[key]) end
+		stored.poll_ms = 2000
+		legacy.dispatch.policies[sid] = stored
+		check(not dispatch.valid(legacy.dispatch, legacy), #shape .. "-key policy is not a live store shape")
+		local restored = state.rehydrate(clone(legacy))
+		local migrated = restored and restored.dispatch.policies[sid]
+		local filled = migrated ~= nil and key_count(migrated) == 46 and migrated.poll_ms == 2000
+		if filled then for key, value in POLICY_NEW do if not same_json(migrated[key], value) then filled = false end end end
+		check(filled, #shape .. "-key policy migrates at restore to 46 keys with the new defaults and its own values kept")
+		local short = clone(legacy); short.dispatch.policies[sid].poll_ms = nil
+		check(state.rehydrate(short) == nil, #shape - 1 .. "-key policy (one key missing from the " .. #shape .. "-key form) is rejected, not defaulted")
+	end
+	local partial = clone(f.authority.registry); partial.dispatch.policies[sid].loop_cap = nil
+	check(state.rehydrate(partial) == nil and not dispatch.valid(partial.dispatch, partial), "a 45-key store is rejected at restore and live")
+	local extra = clone(f.authority.registry); extra.dispatch.policies[sid].deploy_hold = true
+	check(state.rehydrate(extra) == nil, "a 47-key store with an unknown key is rejected")
+	check(dispatch.valid(f.authority.registry.dispatch, f.authority.registry) and state.rehydrate(clone(f.authority.registry)) ~= nil, "the 46-key store is valid live and restores")
+	-- Bounds: each limit refused one past, accepted at the edge; refusals change nothing.
+	local cases = {
+		{ "loop_cap", { 0, 11, 2.5, "3", true }, { 1, 10 } },
+		{ "review_rounds", { 0, 3, 1.5 }, { 1, 2 } },
+		{ "stale_claim_min", { -1, 1441, 0.5, "30" }, { 0, 1440 } },
+		{ "enforce_cross_family", { "yes", 1, runtime.json.null }, { false, true } },
+		{ "glitch_integration", { "no", 0 }, { false, true } },
+		{ "auto_launch_intake", { "true" }, { true, false } },
+		{ "default_work_source", { "jira", "", 1 }, { "board", "glitch_plan" } },
+		{ "auto_approve_kinds", { { "deploy" }, { "report", "report" }, "landing" },
+			{ { "dispatch", "landing" }, { "dispatch", "report", "review", "landing" }, {} } },
+		{ "family_map", { { native = "Anthropic" }, { native = "" }, { native = string.rep("a", 25) }, { [""] = "openai" } }, { { native = "anthropic" }, { native = "a" .. string.rep("b", 23) }, {} } },
+		{ "reviewer_records", { { "a", "b", "c", "d", "e", "f", "g", "h", "i" }, { "*" }, { "rec-*" } }, { { "a", "b", "c", "d", "e", "f", "g", "h" }, { "rec-b", "rec-a" }, {} } },
+		{ "release_manager_record", { runtime.json.null, 5, "*" }, { "native", "" } },
+		{ "labeller_record", { runtime.json.null, false }, { "native", "" } },
+		{ "checkout_roots", { { "relative/root" }, { "/" .. string.rep("r", 512) }, { "/a", "/b", "/c", "/d", "/e", "/f", "/g", "/h", "/i" } },
+			{ { "/" .. string.rep("r", 511) }, { "/a", "/b", "/c", "/d", "/e", "/f", "/g", "/h" }, {} } },
+		{ "board_path", { "board.md", runtime.json.null }, { "/srv/board.md", "" } },
+		{ "inbox_folder", { "inbox", runtime.json.null }, { "/srv/inbox", "" } },
+		{ "board_lanes", { { queued = "Todo", running = "Doing", review = "Review" }, { queued = "Todo", running = "Doing", review = "Review", done = string.rep("d", 65) },
+			{ queued = "Todo", running = "Doing", review = "Review", done = "Done", extra = "X" } },
+			{ { queued = "Backlog", running = "Doing", review = "Review", done = string.rep("d", 64) }, { queued = "Todo", running = "Doing", review = "Review", done = "Done" } } },
+		{ "role_guidance", { { builder = string.rep("g", 1025), reviewer = "", release_manager = "", labeller = "", coordinator = "" }, { builder = "" } },
+			{ { builder = string.rep("g", 1024), reviewer = "Review strictly.", release_manager = "", labeller = "", coordinator = "" } } },
+		{ "routes", { { { class = "Docs", record_id = "native" } }, { { class = "docs" } }, { { class = "a" .. string.rep("b", 32), record_id = "native" } } },
+			{ { { class = "docs", record_id = "native" } }, { { class = "a" .. string.rep("b", 31), record_id = "native" } }, {} } },
+	}
+	for _, case in cases do
+		local key, bad, good = case[1], case[2], case[3]
+		for _, value in bad do
+			local before = runtime.json.encode(f.authority.registry)
+			local outcome = save({ policy = { [key] = value } })
+			check(outcome.code == "invalid_policy" and runtime.json.encode(f.authority.registry) == before,
+				key .. " = " .. runtime.json.encode(value) .. " is refused with nothing changed")
+		end
+		for _, value in good do
+			local outcome = save({ policy = { [key] = value } })
+			check(outcome.code == "policy_updated" and same_json(saved()[key], value), key .. " = " .. runtime.json.encode(value) .. " is accepted")
+		end
+	end
+	-- Reviewer records keep the owner's order; a repeated id is dropped on save, refused in a store.
+	check(save({ policy = { reviewer_records = { "rec-b", "rec-a", "rec-b" } } }).code == "policy_updated" and same_json(saved().reviewer_records, { "rec-b", "rec-a" }),
+		"reviewer records keep the owner's order and drop a repeated id")
+	local duplicate = clone(f.authority.registry); duplicate.dispatch.policies[sid].reviewer_records = { "rec-b", "rec-a", "rec-b" }
+	check(state.rehydrate(duplicate) == nil, "a stored reviewer list with a duplicate id is refused")
+	local unsorted = clone(f.authority.registry); unsorted.dispatch.policies[sid].reviewer_records = { "rec-z", "rec-a" }
+	check(state.rehydrate(unsorted) ~= nil, "a stored reviewer list in owner order restores")
+	-- role_guidance_put edits exactly one role's text.
+	local guidance_before = clone(saved().role_guidance)
+	check(save({ role_guidance_put = { role = "reviewer", text = string.rep("r", 1024) } }).code == "policy_updated"
+		and saved().role_guidance.reviewer == string.rep("r", 1024) and saved().role_guidance.builder == guidance_before.builder
+		and saved().role_guidance.coordinator == guidance_before.coordinator, "role_guidance_put sets only the named role's text, at the 1024-byte bound")
+	check(save({ role_guidance_put = { role = "reviewer", text = "" } }).code == "policy_updated" and saved().role_guidance.reviewer == "", "role_guidance_put may clear a role")
+	for _, bad in { { role = "reviewer", text = string.rep("r", 1025) }, { role = "owner", text = "x" }, { role = "builder" }, { text = "x" }, { role = "builder", text = 5 },
+		{ role = "builder", text = "x", extra = true } } do
+		local before = runtime.json.encode(f.authority.registry)
+		check(save({ role_guidance_put = bad }).code == "invalid_policy" and runtime.json.encode(f.authority.registry) == before,
+			"role_guidance_put " .. runtime.json.encode(bad) .. " is refused with nothing changed")
+	end
+	local before_two = runtime.json.encode(f.authority.registry)
+	check(save({ role_guidance_put = { role = "builder", text = "x" }, template_remove = "t01" }).code == "invalid_policy" and runtime.json.encode(f.authority.registry) == before_two,
+		"two edits in one save are refused")
+	-- Bad templates through the same policy command.
+	local function template(id, prompt_len, next_id)
+		return { id = id, title = "Template " .. id, prompt = string.rep("x", prompt_len - 7) .. "{input}", output = "out/" .. id .. ".md", next = next_id or "" }
+	end
+	for _, bad in { (function() local t = template("t01", 32); t.prompt = "no placeholder"; return t end)(),
+		(function() local t = template("t01", 32); t.prompt = "{input} twice {input}"; return t end)(), template("t01", 4097),
+		(function() local t = template("t01", 32); t.title = string.rep("T", 81); return t end)(),
+		(function() local t = template("t01", 32); t.output = "/abs/path.md"; return t end)(),
+		(function() local t = template("t01", 32); t.output = string.rep("o", 257); return t end)(), template("t01", 32, "t99") } do
+		local before = runtime.json.encode(f.authority.registry)
+		check(save({ template_put = bad }).code ~= "policy_updated" and runtime.json.encode(f.authority.registry) == before, "an invalid template is refused with nothing changed")
+	end
+	check(save({ template_put = template("t01", 4096) }).code == "policy_updated" and #saved().templates == 1, "a template at the 4096-byte prompt bound is accepted")
+	check(save({ template_put = template("t02", 64, "t01") }).code == "policy_updated", "a template may chain to an existing template")
+	check(save({ template_remove = "t01" }).code == "template_referenced" and #saved().templates == 2, "a template another template chains to cannot be removed")
+	check(save({ template_remove = "t99" }).code == "template_unknown", "removing an unknown template is refused")
+	check(save({ template_remove = "t02" }).code == "policy_updated" and save({ template_remove = "t01" }).code == "policy_updated" and #saved().templates == 0,
+		"unreferenced templates remove in order")
+	-- Aggregate bound: the canonical policy may be at most 48 KiB. Templates within their own
+	-- bounds fill it; editing one template's prompt changes the canonical size byte for byte.
+	local LIMIT = 49152
+	local function size() return #quota.canonical(saved()) end
+	local prompts, order = {}, {}
+	local function put(id, length) local outcome = save({ template_put = template(id, length) }); if outcome.code == "policy_updated" then if not prompts[id] then table.insert(order, id) end; prompts[id] = length end; return outcome end
+	local index = 0
+	while true do
+		index += 1; assert(index <= 16, "templates never reached the aggregate bound")
+		local before = runtime.json.encode(f.authority.registry)
+		local outcome = put(string.format("t%02d", index), 4096)
+		if outcome.code ~= "policy_updated" then
+			check(outcome.code == "policy_too_large" and runtime.json.encode(f.authority.registry) == before, "a policy over 48 KiB within every per-field bound is refused with nothing changed")
+			break
+		end
+	end
+	-- Make room, add the refused template small, then grow prompts until exactly at the bound.
+	assert(put(order[#order], 7).ok)
+	assert(put(string.format("t%02d", index), 7).ok, "a small template fits after making room")
+	for _, id in order do
+		local gap = LIMIT - size()
+		if gap <= 0 then break end
+		assert(put(id, math.min(4096, prompts[id] + gap)).ok)
+	end
+	check(size() == LIMIT, "a policy of exactly 48 KiB is accepted")
+	local grow; for _, id in order do if prompts[id] < 4096 then grow = id end end
+	local before = runtime.json.encode(f.authority.registry)
+	check(grow ~= nil and put(grow, prompts[grow] + 1).code == "policy_too_large" and runtime.json.encode(f.authority.registry) == before,
+		"one byte over 48 KiB is refused with nothing changed")
+	assert(put(grow, prompts[grow] - 1).ok)
+	check(size() == LIMIT - 1, "one byte under 48 KiB is accepted")
+	for index2 = #order, 1, -1 do assert(save({ template_remove = order[index2] }).ok) end
+	-- Stale editors stay fenced for the new keys.
+	local displayed = saved()
+	assert(save({ policy = { loop_cap = 4 } }).code == "policy_updated")
+	local before = runtime.json.encode(f.authority.registry)
+	check(save({ policy = { loop_cap = 5 }, expected_policy_sha256 = quota.digest(displayed) }).code == "policy_conflict"
+		and runtime.json.encode(f.authority.registry) == before, "a stale editor cannot overwrite a new key; nothing changes")
+	check(save({ policy = { loop_cap = 5 }, expected_policy_sha256 = quota.digest(saved()) }).code == "policy_updated" and saved().loop_cap == 5,
+		"the current editor saves the new key")
+	local fence_before = runtime.json.encode(f.authority.registry)
+	check(save({ policy = { loop_cap = 6 }, expected_policy = displayed }).code == "controller_mismatch" and runtime.json.encode(f.authority.registry) == fence_before,
+		"the removed full expected_policy fence is refused by the closed event check")
+	check(save({ policy = { loop_cap = 6 }, template_put = template("t50", 32) }).code == "invalid_policy" and runtime.json.encode(f.authority.registry) == fence_before,
+		"a save carrying both a policy patch and a template edit is refused")
+	check(state.rehydrate(clone(f.authority.registry)) ~= nil, "the saved v4 policy restores")
+end
+-- Contract L loop caps present in 0.3.0: each loop runs exactly loop_cap times, the next attempt
+-- opens one loop_cap gate naming the loop; allow_more resets the counter, stop keeps it stopped.
+local function loop_gates(f, name)
+	local found = {}
+	for key, g in f.authority.registry.dispatch.gates or {} do
+		if g.kind == "loop_cap" and table.find(g.evidence, "loop:" .. name) then table.insert(found, key) end
+	end
+	return found
+end
+local function open_loop_gates(f, name)
+	local n = 0
+	for _, key in loop_gates(f, name) do if f.authority.registry.dispatch.gates[key].phase == "pending" then n += 1 end end
+	return n
+end
+local function answer_gate(f, gid, choice)
+	local g = f.authority.registry.dispatch.gates[gid]
+	local label; for _, option in g.options do if option.id == choice then label = option.label end end
+	return f:apply("answer", { gate_id = gid, gate_revision = g.revision, choice_id = choice, answer = label or choice })
+end
+local function starts(text, prefix) return type(text) == "string" and text:sub(1, #prefix) == prefix end
+-- A worker retains at most 16 report receipts. Loops that send many reports publish the owed
+-- acknowledgements and settle a receipt watermark before each cycle so the bound never trips.
+local function settle_receipts(f, id)
+	for _ = 1, 16 do
+		local owed = false
+		for _, receipt in worker_of(f, id).receipts do if receipt.publish then owed = true end end
+		if not owed then break end
+		local queued = f:apply("poll", { worker_id = id }); assert(queued.ok, queued.message)
+		local op = f:action(queued.action_id).request.op
+		assert(op == "mailbox_publish_ack" or op == "mailbox_publish_reply", op)
+		assert(f:finish(queued.action_id, "published", {}).ok)
+	end
+	assert(f:watermark(id).ok)
+end
+if section == nil or section == "loop_caps" then
+	-- Rollover checkpoint re-request, at cap 1 (stop) and cap 10 (allow_more).
+	for _, cap in { 1, 10 } do
+		local f, id = rollover_fixture()
+		assert(f:apply("policy", { policy = { loop_cap = cap } }).ok)
+		local requested = f:apply("rollover", { worker_id = id, trigger = "owner" }); assert(requested.code == "rollover_requested")
+		local hid = requested.handover_id
+		local early = true
+		for attempt = 2, cap do
+			settle_receipts(f, id)
+			assert(answer_checkpoint(f, id, "loop-cp-" .. attempt, "not_run").ok)
+			local again = f:apply("rollover", { worker_id = id, trigger = "owner" })
+			early = early and again.code == "checkpoint_rerequested" and open_loop_gates(f, "rollover_checkpoint") == 0
+		end
+		check(early and rollover_of(f, hid).checkpoint_loop.count == cap, "cap " .. cap .. ": the checkpoint is requested " .. cap .. " times without a loop gate")
+		settle_receipts(f, id)
+		assert(answer_checkpoint(f, id, "loop-cp-over", "not_run").ok)
+		local over = f:apply("rollover", { worker_id = id, trigger = "owner" })
+		local g = over.gate_id and f.authority.registry.dispatch.gates[over.gate_id]
+		check(over.ok and over.code == "loop_capped" and g and g.kind == "loop_cap" and open_loop_gates(f, "rollover_checkpoint") == 1
+			and rollover_of(f, hid).checkpoint_loop.count == cap and rollover_of(f, hid).checkpoint_loop.state == "gated",
+			"cap " .. cap .. ": the next re-request opens one loop_cap gate instead")
+		check(starts(g.question, "Checkpoint requested " .. cap .. " times without a verified checkpoint; last refusal: verification_missing."),
+			"the rollover loop gate names the loop, its count and the last refusal")
+		check(g.options[1].id == "allow_more" and g.options[1].label == "Allow " .. cap .. " more attempts" and g.options[2].id == "stop", "the loop gate offers allow_more and stop")
+		local repeat_over = f:apply("rollover", { worker_id = id, trigger = "owner" })
+		check(repeat_over.code == "loop_capped" and repeat_over.gate_id == over.gate_id and #loop_gates(f, "rollover_checkpoint") == 1, "a further re-request reuses the open gate")
+		check(state.rehydrate(clone(f.authority.registry)) ~= nil, "a gated rollover loop restores")
+		if cap == 10 then
+			check(answer_gate(f, over.gate_id, "allow_more").code == "loop_cap_answered" and f.authority.registry.dispatch.gates[over.gate_id].phase == "resolved"
+				and rollover_of(f, hid).checkpoint_loop.count == 0 and rollover_of(f, hid).checkpoint_loop.state == nil, "allow_more resets the rollover loop")
+			check(f:apply("rollover", { worker_id = id, trigger = "owner" }).code == "checkpoint_rerequested", "after allow_more the owner may request the checkpoint again")
+		else
+			check(answer_gate(f, over.gate_id, "stop").code == "loop_cap_answered" and rollover_of(f, hid).checkpoint_loop.state == "stopped", "stop keeps the rollover loop stopped")
+			local gates_before = #loop_gates(f, "rollover_checkpoint")
+			local stopped = f:apply("rollover", { worker_id = id, trigger = "owner" })
+			check(not stopped.ok and stopped.code == "loop_stopped" and open_loop_gates(f, "rollover_checkpoint") == 0 and #loop_gates(f, "rollover_checkpoint") == gates_before
+				and rollover_of(f, hid).phase == "checkpoint_pending", "a stopped rollover loop refuses the re-request, opens no new gate and stays held")
+		end
+	end
+	-- Owner retry of full backpressure, at cap 1 and cap 10.
+	local FULL = { resource = "window_authorization", current = 1, limit = 1, retryable = true, effect_started = false }
+	for _, cap in { 1, 10 } do
+		local f = fixture(); f:catalog(0)
+		assert(f:apply("policy", { policy = { loop_cap = cap } }).ok)
+		local queued = f:queue(false); assert(queued.ok, queued.message)
+		assert(f:finish(queued.action_id, "provisioned", { handle = "mailbox-retry", binding_digest = string.rep("e", 64),
+			capabilities = runtime.json.array({ "report-files-v1", "native-ask-v1" }), limits = {} }).ok)
+		local launch = f.authority.registry.dispatch.workers[queued.worker_id].launch_action_id
+		assert(f:finish(launch, "full", FULL).code == "backpressure")
+		local early = true
+		for _ = 1, cap do
+			early = early and f:apply("retry", { action_id = launch, trigger = "owner" }).ok and open_loop_gates(f, "full_retry") == 0
+			early = early and f:finish(launch, "full", FULL).code == "backpressure"
+		end
+		check(early and f:action(launch).retry_loop.count == cap, "cap " .. cap .. ": " .. cap .. " owner retries of full backpressure run without a loop gate")
+		local over = f:apply("retry", { action_id = launch, trigger = "owner" })
+		local g = over.gate_id and f.authority.registry.dispatch.gates[over.gate_id]
+		check(over.code == "loop_capped" and g and g.kind == "loop_cap" and f:action(launch).phase == "backpressure" and f:action(launch).retry_loop.count == cap,
+			"cap " .. cap .. ": the next owner retry opens a loop_cap gate and the action stays in backpressure")
+		check(starts(g.question, "Owner retry of full backpressure reached " .. cap .. " attempts; last error: full:window_authorization."), "the retry loop gate names the loop and the last error")
+		check(f:apply("retry", { action_id = launch }).code ~= "loop_capped" and f:action(launch).retry_loop.count == cap, "an automatic recheck is neither counted nor capped")
+		check(state.rehydrate(clone(f.authority.registry)) ~= nil, "a gated retry loop restores")
+		if cap == 1 then
+			if f:action(launch).phase ~= "backpressure" then assert(f:finish(launch, "full", FULL).code == "backpressure") end
+			check(answer_gate(f, over.gate_id, "stop").code == "loop_cap_answered" and f:action(launch).retry_loop.state == "stopped", "stop keeps the retry loop stopped")
+			local shown = dispatch.project(f.authority.registry, f.origin.logical_session_id, f.origin.alias_nonce).actions[launch]
+			check(shown ~= nil and shown.retry_loop ~= nil and shown.retry_loop.state == "stopped" and shown.retry_loop.count == cap and shown.retry_loop.gate_id == nil,
+				"the projected action carries its stopped retry loop")
+			local gates_before = #loop_gates(f, "full_retry")
+			local stopped = f:apply("retry", { action_id = launch, trigger = "owner" })
+			check(not stopped.ok and stopped.code == "loop_stopped" and #loop_gates(f, "full_retry") == gates_before and f:action(launch).phase == "backpressure",
+				"a stopped retry loop refuses the owner retry and opens no new gate")
+		end
+	end
+	-- Automatic report requests without a new report, at cap 1 and cap 10.
+	for _, cap in { 1, 10 } do
+		local clock = { now_ms = 1000, mono_ms = 1000, epoch = "report-loop-host" }
+		local f = fixture(function() return clone(clock) end); local id = f:accepted(false)
+		assert(f:apply("policy", { policy = { loop_cap = cap } }).ok)
+		-- The automatic scheduler marks this worker due once it is idle and heartbeat_ms has passed.
+		local function due_after_heartbeat()
+			assert(f:apply("policy", { policy = { automatic_reports = true, heartbeat_ms = 5000, stale_ms = 600000 } }).ok)
+			assert(f:apply("observe", { worker_id = id, pane_binding = clone(worker_of(f, id).pane_binding), native_state = "idle" }).ok)
+			clock.mono_ms += 6000; clock.now_ms += 6000
+			assert(f.authority:apply({ kind = "workflow_tick" }).ok)
+			for _, shown in dispatch.project(f.authority.registry, f.origin.logical_session_id, f.origin.alias_nonce).workflow.workers do
+				if shown.worker_id == id then return shown.due_report end
+			end
+			error("worker missing from projection")
+		end
+		local function cycle()
+			settle_receipts(f, id)
+			assert(f:apply("observe", { worker_id = id, pane_binding = clone(worker_of(f, id).pane_binding), native_state = "idle" }).ok)
+			local sent = f:apply("reply", { worker_id = id, trigger = "policy" })
+			if sent.code == "loop_capped" or not sent.ok then return sent end
+			local request = clone(worker_of(f, id).workflow.report_request)
+			assert(send_report(f, id, "reply_ack", { message_id = request.message_id, reply_seq = request.reply_seq, reply_sha256 = codec.sha256(request.bytes), status = "recorded" },
+				{ action_id = request.action_id, action_revision = request.action_revision }).ok)
+			assert(send_report(f, id, "HEARTBEAT", { state = "working", request_id = request.request_id }).ok)
+			return sent
+		end
+		local early = true
+		for _ = 1, cap do early = early and cycle().ok and open_loop_gates(f, "report_request") == 0 end
+		check(early and worker_of(f, id).workflow.report_loop.count == cap, "cap " .. cap .. ": " .. cap .. " answered requests without a new report open no gate")
+		local over = cycle()
+		local g = over.gate_id and f.authority.registry.dispatch.gates[over.gate_id]
+		check(over.ok and over.code == "loop_capped" and g and g.kind == "loop_cap", "cap " .. cap .. ": the next automatic request opens a loop_cap gate and issues nothing")
+		check(starts(g.question, "Report requested " .. cap .. " times without a new report."), "the report loop gate names the loop")
+		check(cycle().gate_id == over.gate_id and #loop_gates(f, "report_request") == 1, "a further automatic request reuses the open gate")
+		if cap == 1 then
+			-- A new report clears the loop record entirely (no record = count 0, not gated).
+			local reset = send_report(f, id, "READY", { state = "idle", summary = "New progress" })
+			local loop = worker_of(f, id).workflow.report_loop
+			check(reset.ok and (loop == nil or (loop.count == 0 and loop.state == nil)) and f.authority.registry.dispatch.gates[over.gate_id].phase ~= "pending",
+				"a new unsolicited report resets the loop and supersedes its gate")
+			check(worker_of(f, id).workflow.report_request == nil and due_after_heartbeat() == true, "after a reset an idle worker past heartbeat_ms is due for an automatic report")
+			check(cycle().code ~= "loop_capped", "after a new report the next automatic request is sent")
+		else
+			check(answer_gate(f, over.gate_id, "stop").code == "loop_cap_answered" and worker_of(f, id).workflow.report_loop.state == "stopped", "stop keeps the report loop stopped")
+			check(f:apply("reply", { worker_id = id, trigger = "policy" }).code == "loop_stopped", "a stopped report loop refuses automatic requests")
+			check(worker_of(f, id).workflow.report_request == nil and due_after_heartbeat() == false,
+				"a stopped report loop is never marked due by the automatic scheduler, even when idle past heartbeat_ms")
+			check(f:apply("reply", { worker_id = id }).ok, "an owner request is not an automatic request and still runs")
+		end
+		check(state.rehydrate(clone(f.authority.registry)) ~= nil, "the report loop restores")
+	end
+	-- Landing refresh cycles (stale_target) at cap 1 and cap 3, and the transport bound of 8 grants.
+	-- Grants need Rule H proof (enforce_cross_family=false: a passing helper CHECK_RESULT for every
+	-- declared check at the source revision plus an approved review from a reviewer worker) and go to
+	-- the session's release manager (record "release", provisioned with release-manager-v1), never the
+	-- builder. Every cycle requests the same proven revision; a refresh voids the review, so a cycle
+	-- after a refresh re-reviews it.
+	local LREV = string.rep("c", 40)
+	local LCAPS = { "report-files-v1", "native-ask-v1", "coordinator-control-v1", "check-runner-v1", "release-manager-v1" }
+	local function lcp(cp_id)
+		return { checkpoint_id = cp_id, task_ref = "task:fixture", project_id = "project-one", worktree_ref = "worktree:fixture", artifact_revision = LREV,
+			completed = runtime.json.array({ "Implemented the assigned change" }), remaining = runtime.json.array(), holds = runtime.json.array(),
+			checks = runtime.json.array({ { check_id = "unit", artifact_revision = LREV, outcome = "passed", evidence_ref = "unit:log" } }) }
+	end
+	local function item(f, lid) return f.authority.registry.dispatch.landing.items[lid] end
+	local function lfixture()
+		local f = fixture()
+		local r = f:apply("catalog"); assert(r.ok, r.message)
+		local records = {}
+		for _, record_id in { "native", "reviewer", "release" } do
+			table.insert(records, { id = record_id, revision = 0, provider = "omp", account_label = "configured, not verified", backend = "native-agent", enabled = true, eligible = true,
+				capability_evidence = "configured_operator_attestation_not_runtime_proof", effective_identity = { provider = "omp", evidence = "configured" },
+				capabilities = runtime.json.array(LCAPS), unsupported = runtime.json.array(), cwd = "/fixture", placement = "split" })
+		end
+		assert(f:finish(r.action_id, "catalog", { namespace = "fixture-spawn", host_key = "fixture-host", config_revision = 0, revision = 0, records = runtime.json.array(records) }).ok)
+		assert(f:apply("policy", { policy = { enforce_cross_family = false, reviewer_records = runtime.json.array({ "reviewer" }), release_manager_record = "release" } }).ok)
+		return f
+	end
+	local function lstart(f, coordinator, pane)
+		local event = { record_id = "native", record_revision = 0, catalog_revision = 0, prompt = "Complete the explicit landing fixture assignment.", cwd = "/fixture",
+			placement = "split", coordinator = coordinator }
+		if not coordinator then event.checks = runtime.json.array({ { check_id = "unit", argv = runtime.json.array({ "luau", "tests/run.luau" }) } }) end
+		local queued = f:apply("queue", event); assert(queued.ok and queued.action_id, queued.message)
+		local id = queued.worker_id
+		assert(f:finish(queued.action_id, "provisioned", { handle = "mailbox-landing-" .. pane, binding_digest = string.rep("d", 64),
+			capabilities = runtime.json.array(LCAPS), limits = {}, manifest_sha256 = worker_of(f, id).manifest_sha256 }).ok)
+		assert(f:finish(worker_of(f, id).launch_action_id, "awaiting_acceptance", { pane_binding = { pane_id = pane, window_key = f.origin.window_key,
+			window_epoch = f.origin.window_epoch, native_session_id = f.origin.native_session_id, window_host_id = f.origin.window_host_id } }).ok)
+		assert(f:apply("intake", { worker_id = id, bytes = f:report(id, 1, "ACCEPTED", { assignment_sha256 = worker_of(f, id).assignment_sha256 }) }).ok)
+		assert(f:finish(f:apply("poll", { worker_id = id }).action_id, "published", {}).ok)
+		assert(f:finish(f:apply("poll", { worker_id = id }).action_id, "accepted", {}).ok)
+		return id
+	end
+	local function lack(f, id, delivery)
+		return send_report(f, id, "reply_ack", { message_id = delivery.message_id, reply_seq = delivery.reply_seq, reply_sha256 = codec.sha256(delivery.bytes), status = "recorded" },
+			{ action_id = delivery.action_id, action_revision = delivery.action_revision })
+	end
+	-- One approved REVIEW_RESULT at LREV from the fresh reviewer worker ORCH+ queues on the builder's REVIEW_READY.
+	local function lreview(f, id, cp_id)
+		assert(send_report(f, id, "REVIEW_READY", { checkpoint_id = cp_id, artifact_revision = LREV }).ok)
+		local rv
+		for _, candidate in f.authority.registry.dispatch.reviews do if candidate.builder_work_id == worker_of(f, id).work_id and candidate.status == "queued" then rv = candidate end end
+		assert(rv, "REVIEW_READY queued no review")
+		local c, provision = rv.reviewer_worker_id, nil
+		if not c then for key, w in f.authority.registry.dispatch.workers do if w.role == "reviewer" and w.review_id == rv.review_id and w.phase == "queued" then c = key end end end
+		for key, a in f.authority.registry.dispatch.actions do if a.worker_id == c and a.request.op == "mailbox_provision" and a.phase == "ready" then provision = key end end
+		assert(f:finish(assert(provision, "reviewer provision missing"), "provisioned", { handle = "mailbox-reviewer-" .. id, binding_digest = string.rep("d", 64),
+			capabilities = runtime.json.array(LCAPS), limits = {}, manifest_sha256 = worker_of(f, c).manifest_sha256 }).ok)
+		assert(f:finish(worker_of(f, c).launch_action_id, "awaiting_acceptance", { pane_binding = { pane_id = "99" .. id:match("(%d+)$"), window_key = f.origin.window_key,
+			window_epoch = f.origin.window_epoch, native_session_id = f.origin.native_session_id, window_host_id = f.origin.window_host_id } }).ok)
+		assert(f:apply("intake", { worker_id = c, bytes = f:report(c, 1, "ACCEPTED", { assignment_sha256 = worker_of(f, c).assignment_sha256 }) }).ok)
+		assert(f:finish(f:apply("poll", { worker_id = c }).action_id, "published", {}).ok)
+		assert(f:finish(f:apply("poll", { worker_id = c }).action_id, "accepted", {}).ok)
+		local request = clone(f.authority.registry.dispatch.reviews[rv.review_id].request); assert(request, "review_request missing")
+		local retained = worker_of(f, c).replies[tostring(request.reply_seq)]
+		assert(lack(f, c, { message_id = request.message_id, reply_seq = request.reply_seq, bytes = retained.bytes, action_id = request.action_id, action_revision = request.action_revision }).ok)
+		assert(send_report(f, c, "REVIEW_RESULT", { review_id = rv.review_id, round = request.round, artifact_revision = LREV, outcome = "approved", findings = runtime.json.array() },
+			{ action_id = request.action_id, action_revision = request.action_revision }).ok)
+	end
+	-- A builder whose LREV already carries the full Rule H proof.
+	local function lbuilder(f, pane)
+		local id = lstart(f, false, pane)
+		assert(send_report(f, id, "CHECKPOINT", lcp("cp-0")).ok)
+		assert(send_report(f, id, "CHECK_RESULT", { check_id = "unit", argv_sha256 = codec.sha256("argv"), exit_code = 0, output_sha256 = codec.sha256("unit output"),
+			head = LREV, ran_at_ms = 1 }).ok)
+		lreview(f, id, "cp-0")
+		return id
+	end
+	-- Launch the release manager ORCH+ queued for the first grantable item (once per session).
+	local function lrm(f)
+		for key, w in f.authority.registry.dispatch.workers do
+			if w.role == "release_manager" and w.phase == "queued" then
+				for aid, a in f.authority.registry.dispatch.actions do
+					if a.worker_id == key and a.request.op == "mailbox_provision" and a.phase == "ready" then
+						assert(f:finish(aid, "provisioned", { handle = "mailbox-release-" .. key, binding_digest = string.rep("d", 64),
+							capabilities = runtime.json.array(LCAPS), limits = {}, manifest_sha256 = w.manifest_sha256 }).ok)
+						assert(f:finish(worker_of(f, key).launch_action_id, "awaiting_acceptance", { pane_binding = { pane_id = "9800", window_key = f.origin.window_key,
+							window_epoch = f.origin.window_epoch, native_session_id = f.origin.native_session_id, window_host_id = f.origin.window_host_id } }).ok)
+						assert(f:apply("intake", { worker_id = key, bytes = f:report(key, 1, "ACCEPTED", { assignment_sha256 = worker_of(f, key).assignment_sha256 }) }).ok)
+						assert(f:finish(f:apply("poll", { worker_id = key }).action_id, "published", {}).ok)
+						assert(f:finish(f:apply("poll", { worker_id = key }).action_id, "accepted", {}).ok)
+						break
+					end
+				end
+			end
+		end
+	end
+	local function approved(f, id)
+		for _, rv in f.authority.registry.dispatch.reviews or {} do
+			if rv.builder_work_id == worker_of(f, id).work_id and rv.status == "approved" and rv.void == nil and rv.artifact_revision == LREV then return true end
+		end
+		return false
+	end
+	local function landing_cycle(f, id, k, head)
+		-- The builder consumes any landing_refresh it was sent, so refreshes never fill its reply outbox.
+		local owed = {}
+		for _, retained in worker_of(f, id).replies do
+			local reply = not retained.acknowledged and codec.decode_reply(retained.bytes, worker_of(f, id))
+			if reply and reply.kind == "landing_refresh" then table.insert(owed, { message_id = reply.message_id, reply_seq = reply.reply_seq, bytes = retained.bytes,
+				action_id = reply.action_id, action_revision = reply.action_revision }) end
+		end
+		for _, delivery in owed do settle_receipts(f, id); assert(lack(f, id, delivery).ok) end
+		settle_receipts(f, id)
+		assert(send_report(f, id, "CHECKPOINT", lcp("cp-" .. k)).ok)
+		if not approved(f, id) then settle_receipts(f, id); lreview(f, id, "cp-" .. k) end
+		settle_receipts(f, id)
+		assert(send_report(f, id, "LANDING_REQUEST", { checkpoint_id = "cp-" .. k, project_id = "project-one", repo_ref = "repo:fixture", target_ref = "refs/heads/main",
+			target_revision = head, source_ref = "refs/heads/cp-" .. k, source_revision = LREV }).ok)
+		local lid
+		for key, candidate in f.authority.registry.dispatch.landing.items do
+			if candidate.work_id == worker_of(f, id).work_id and not table.find({ "landed", "cancelled", "rejected" }, candidate.status) then lid = key end
+		end
+		assert(lid, "landing item missing")
+		local approval = f.authority.registry.dispatch.gates[item(f, lid).gate_id]
+		assert(f:apply("answer", { gate_id = approval.id, gate_revision = approval.revision, choice_id = "approve", answer = "Owner approves this exact request." }).ok)
+		lrm(f)
+		return lid
+	end
+	-- The release manager holding the item's grant consumes it and reports stale_target.
+	local function stale(f, _, lid, observed)
+		local it = item(f, lid); local gr = it.grants[#it.grants]; local rm = gr.worker_id
+		settle_receipts(f, rm)
+		assert(send_report(f, rm, "reply_ack", { message_id = gr.message_id, reply_seq = gr.reply_seq, reply_sha256 = codec.sha256(gr.bytes), status = "recorded" },
+			{ action_id = gr.action_id, action_revision = gr.action_revision }).ok)
+		return send_report(f, rm, "LANDING_RESULT", { landing_id = lid, grant_id = gr.grant_id, project_id = it.request.project_id, repo_ref = it.request.repo_ref,
+			target_ref = it.request.target_ref, target_revision = gr.target_revision, source_revision = gr.source_revision, outcome = "stale_target",
+			observed_target_revision = observed, evidence = runtime.json.array({ "log:fixture" }) }, { action_id = gr.action_id, action_revision = gr.action_revision })
+	end
+	for _, cap in { 1, 3 } do
+		local f = lfixture(); local id = lbuilder(f, "9002")
+		assert(f:apply("policy", { policy = { loop_cap = cap } }).ok)
+		local head, lid = "head-0", nil
+		local early = true
+		for k = 1, cap do
+			lid = landing_cycle(f, id, k, head); head = "head-" .. k
+			early = early and stale(f, id, lid, head).ok and item(f, lid).hold.code == "refresh_required" and open_loop_gates(f, "landing_refresh") == 0
+		end
+		check(early and item(f, lid).refresh_loop.count == cap, "cap " .. cap .. ": " .. cap .. " stale_target refresh cycles run without a loop gate")
+		lid = landing_cycle(f, id, cap + 1, head); head = "head-" .. (cap + 1)
+		check(stale(f, id, lid, head).ok and item(f, lid).hold.code == "loop_cap" and item(f, lid).refresh_required and item(f, lid).refresh_loop.state == "gated"
+			and item(f, lid).refresh_loop.cause == "stale_target" and open_loop_gates(f, "landing_refresh") == 1, "cap " .. cap .. ": the next stale_target trips the refresh loop")
+		local g = f.authority.registry.dispatch.gates[item(f, lid).refresh_loop.gate_id]
+		check(starts(g.question, "Landing refresh cycles reached " .. cap .. " for " .. lid .. "; last cause: stale_target."), "the refresh loop gate names the loop, item and cause")
+		check(state.rehydrate(clone(f.authority.registry)) ~= nil, "a gated landing refresh loop restores")
+		-- allow_more resets the counter and the owed refresh is then issued in the same commit (count 1).
+		check(answer_gate(f, g.id, "allow_more").code == "loop_cap_answered" and item(f, lid).refresh_loop.count == 1 and item(f, lid).refresh_loop.state == nil,
+			"allow_more resets the refresh loop and the owed refresh is issued, counting once")
+	end
+	do
+		local f = lfixture(); local id = lbuilder(f, "9002")
+		assert(f:apply("policy", { policy = { loop_cap = 10 } }).ok)
+		local head, lid = "head-0", nil
+		local early = true
+		for k = 1, 8 do
+			lid = landing_cycle(f, id, k, head); head = "head-" .. k
+			early = early and #item(f, lid).grants == k and stale(f, id, lid, head).ok and open_loop_gates(f, "landing_grants") == 0
+		end
+		check(early and item(f, lid).refresh_loop.count == 8, "eight granted cycles stay under loop_cap 10 and open no grant gate")
+		lid = landing_cycle(f, id, 9, head)
+		local it = item(f, lid)
+		check(#it.grants == 8 and it.hold.code == "attempts_exhausted" and it.grant_loop.count == 8 and it.grant_loop.state == "gated" and open_loop_gates(f, "landing_grants") == 1,
+			"the ninth grant attempt opens the transport-bound loop gate instead of a grant")
+		local g = f.authority.registry.dispatch.gates[it.grant_loop.gate_id]
+		check(starts(g.question, "Landing grants reached the transport bound 8 for " .. lid .. ".") and #g.options == 1 and g.options[1].id == "stop",
+			"the grants gate names the transport bound and offers only stop")
+		check(answer_gate(f, g.id, "stop").code == "loop_cap_answered" and item(f, lid).grant_loop.state == "stopped" and #item(f, lid).grants == 8, "stop keeps the grants stopped")
+		check(state.rehydrate(clone(f.authority.registry)) ~= nil, "a stopped grant loop restores")
+	end
+	-- target_moved notices count on the same refresh counter as stale_target results.
+	do
+		-- Queue order is la, lc, lb: a blocked item keeps its place, so a refreshed lc is granted
+		-- ahead of the refreshed lb and its landing moves the head under lb a second time.
+		local f = lfixture(); local a = lbuilder(f, "9002")
+		local c = lbuilder(f, "9005")
+		local b = lbuilder(f, "9004")
+		assert(f:apply("policy", { policy = { loop_cap = 1 } }).ok)
+		local function land(_, lid, head)
+			local it = item(f, lid); local gr = it.grants[#it.grants]
+			settle_receipts(f, gr.worker_id)
+			return send_report(f, gr.worker_id, "LANDING_RESULT", { landing_id = lid, grant_id = gr.grant_id, project_id = it.request.project_id, repo_ref = it.request.repo_ref,
+				target_ref = it.request.target_ref, target_revision = gr.target_revision, source_revision = gr.source_revision, outcome = "landed",
+				result_revision = head, evidence = runtime.json.array({ "log:fixture" }) }, { action_id = gr.action_id, action_revision = gr.action_revision })
+		end
+		local la = landing_cycle(f, a, "a1", "head-0")
+		local lc = landing_cycle(f, c, "c1", "head-0")
+		local lb = landing_cycle(f, b, "b1", "head-0")
+		check(item(f, la).status == "granted" and item(f, lb).status == "ready" and item(f, lb).refresh_loop == nil, "no refresh is counted while the head is unchanged")
+		assert(land(a, la, "head-1").ok)
+		check(item(f, lb).hold.code == "target_moved" and item(f, lb).refresh_loop.count == 1 and item(f, lb).refresh_loop.cause == "target_moved"
+			and open_loop_gates(f, "landing_refresh") == 0, "cap 1: the first target_moved notice counts once and opens no gate")
+		check(landing_cycle(f, c, "c2", "head-1") == lc and item(f, lc).status == "granted", "the earlier refreshed request is granted against the new head")
+		check(landing_cycle(f, b, "b2", "head-1") == lb and item(f, lb).status == "ready", "the later refreshed request rebinds the same item and waits behind it")
+		assert(land(c, lc, "head-2").ok)
+		check(item(f, lb).hold.code == "loop_cap" and item(f, lb).refresh_loop.state == "gated" and item(f, lb).refresh_loop.cause == "target_moved"
+			and open_loop_gates(f, "landing_refresh") == 1, "cap 1: the second target move trips the refresh loop instead of another notice")
+		local g = f.authority.registry.dispatch.gates[item(f, lb).refresh_loop.gate_id]
+		check(starts(g.question, "Landing refresh cycles reached 1 for " .. lb .. "; last cause: target_moved."), "the refresh gate names target_moved as the last cause")
+		check(state.rehydrate(clone(f.authority.registry)) ~= nil, "a target_moved-gated refresh loop restores")
+	end
+end
+-- Contract A worker fields (CP1 storage): queue-time role/family, strict validators, 0.3.0
+-- restore defaults and the rollover successor copy rule.
+if section == nil or section == "worker_fields" then
+	local A, B = string.rep("a", 64), string.rep("b", 64)
+	local valid = {
+		class = "docs", template_id = "t01", files = runtime.json.array({ "src/a.luau" }),
+		scope = { paths = runtime.json.array({ "src" }), systems = runtime.json.array({ "ci" }) },
+		checks = runtime.json.array({ { check_id = "unit", argv = runtime.json.array({ "luau", "tests/run.luau" }) } }),
+		source = { kind = "plan", ref = "plan:fixture" }, manifest_sha256 = A,
+		checkout = { worktree_path = "/work/tree", common_dir = "/work/.git", branch = "main", head = "abc123", changed_files = runtime.json.array(),
+			changed_overflow = false, changed_total = 0, dirty = false },
+		check_results = { unit = { check_id = "unit", argv_sha256 = A, exit_code = 0, output_sha256 = B, head = "abc123", ran_at_ms = 1 } },
+		usage_before = { account = { canonical_ids = runtime.json.array({ A }), generation = 1 }, windows = runtime.json.array({ { key = "five_hour", remaining = 40, observed_at_ms = 1 } }), observed_at_ms = 1 },
+		usage_after = { account = { canonical_ids = runtime.json.array({ A }), generation = 1 }, windows = runtime.json.array(), observed_at_ms = 2 },
+	}
+	local invalid = {
+		role = "admin", family = "Anthropic", class = "Docs", template_id = "T 1", files = runtime.json.array({ string.rep("f", 257) }),
+		scope = { paths = runtime.json.array({ "src" }) }, checks = runtime.json.array({ { check_id = "unit", argv = runtime.json.array() } }),
+		source = { kind = "jira" }, manifest_sha256 = "xyz",
+		checkout = { worktree_path = "relative/tree", common_dir = "/work/.git", branch = "main", head = "abc123", changed_files = runtime.json.array(),
+			changed_overflow = false, changed_total = 0, dirty = false },
+		check_results = { unit = { check_id = "other", argv_sha256 = A, exit_code = 0, output_sha256 = B, head = "abc123", ran_at_ms = 1 } },
+		usage_before = { account = {}, windows = runtime.json.array({ { key = "five_hour", remaining = 101, observed_at_ms = 1 } }), observed_at_ms = 1 },
+		usage_after = { account = {}, observed_at_ms = 2 },
+	}
+	local f = fixture(); local id = f:accepted(false)
+	local w = f.authority.registry.dispatch.workers[id]
+	check(w.role == "builder" and w.family == nil, "queue sets role builder; an OMP record has no family until the owner maps it")
+	for _, name in { "class", "template_id", "files", "scope", "checks", "source", "manifest_sha256", "checkout", "check_results", "usage_before", "usage_after" } do
+		check(w[name] == nil, name .. " is absent until a later checkpoint populates it")
+	end
+	-- A stored manifest digest must match the worker's retained mailbox_provision request (CP2), so a
+	-- well-formed digest alone is checked on the seeded rollover predecessor below instead.
+	for name, value in valid do
+		local good = clone(f.authority.registry); good.dispatch.workers[id][name] = clone(value)
+		if name == "manifest_sha256" then
+			check(state.rehydrate(good) == nil, "a manifest digest the retained provision request never carried is refused")
+		else
+			check(state.rehydrate(good) ~= nil, name .. " accepts a well-formed value")
+		end
+	end
+	for name, value in invalid do
+		local bad = clone(f.authority.registry); bad.dispatch.workers[id][name] = clone(value)
+		check(state.rehydrate(bad) == nil, name .. " rejects a malformed value")
+	end
+	local unknown = clone(f.authority.registry); unknown.dispatch.workers[id].reviewer_of = "worker-1"
+	check(state.rehydrate(unknown) == nil, "the worker key list stays closed")
+	-- 0.3.0 workers restore with role defaults; family stays unresolved.
+	local legacy = clone(f.authority.registry); legacy.dispatch.workers[id].role = nil; legacy.dispatch.workers[id].family = nil
+	local restored = state.rehydrate(clone(legacy))
+	check(restored ~= nil and restored.dispatch.workers[id].role == "builder" and restored.dispatch.workers[id].family == nil, "a 0.3.0 worker restores as a builder")
+	local c = fixture(); local cid = c:accepted(true)
+	check(c.authority.registry.dispatch.workers[cid].role == "coordinator", "a queued coordinator gets role coordinator")
+	local cl = clone(c.authority.registry); cl.dispatch.workers[cid].role = nil
+	local crestored = state.rehydrate(cl)
+	check(crestored ~= nil and crestored.dispatch.workers[cid].role == "coordinator", "a 0.3.0 coordinator restores with role coordinator from its markers")
+	-- Family comes from the owner's family map at queue time.
+	local m = fixture(); m:catalog(0)
+	assert(m:apply("policy", { policy = { family_map = { native = "anthropic" } } }).ok)
+	local mq = m:queue(false); assert(mq.ok, mq.message)
+	check(m.authority.registry.dispatch.workers[mq.worker_id].family == "anthropic", "an owner-mapped record resolves its family at queue time")
+	-- Successor copy: assignment fields copy, family is recomputed, checkout/results/usage never inherit.
+	local r, rid = rollover_fixture()
+	local pred = r.authority.registry.dispatch.workers[rid]
+	for name, value in valid do pred[name] = clone(value) end
+	-- The successor's provision rebuilds the manifest from the copied fields, so the seed is its real
+	-- digest, carried by the predecessor's retained provision request as a CP2 queue would have sent it.
+	local manifest = assert(codec.encode_manifest({ checks = pred.checks, files = pred.files, scope = pred.scope, base_ref = pred.base_ref }))
+	pred.manifest_sha256 = codec.sha256(manifest)
+	for _, a in r.authority.registry.dispatch.actions do
+		if a.worker_id == rid and a.request.op == "mailbox_provision" then
+			-- Its retained request bytes and response frame bind the exact request, so both are rewritten.
+			a.request.manifest = manifest; a.request_bytes = runtime.json.encode(a.request)
+			if a.response_bytes then
+				local payload = clone(a.response.payload); payload.manifest_sha256 = pred.manifest_sha256
+				a.response_bytes = frame(a.request, a.response.status, payload); a.response = dispatch.decode_response(a.response_bytes, a.request)
+			end
+		end
+	end
+	pred.family = "anthropic"
+	assert(dispatch.valid(r.authority.registry.dispatch, r.authority.registry), "seeded predecessor fields are valid")
+	assert(r:apply("policy", { policy = { family_map = { native = "openai" } } }).ok)
+	local _, succ_id = rollover_granted(r, rid)
+	local succ = r.authority.registry.dispatch.workers[succ_id]
+	local copied = succ.role == "builder"
+	for _, name in { "class", "template_id", "files", "scope", "checks", "source", "manifest_sha256" } do
+		copied = copied and runtime.json.encode(succ[name]) == runtime.json.encode(pred[name])
+	end
+	check(copied, "the successor copies role, class, template, files, scope, checks, source and manifest")
+	check(succ.family == "openai" and pred.family == "anthropic", "the successor's family is recomputed for its record")
+	check(succ.checkout == nil and succ.check_results == nil and succ.usage_before == nil and succ.usage_after == nil,
+		"the successor reports its own checkout, check results and usage")
+	check(state.rehydrate(clone(r.authority.registry)) ~= nil, "predecessor and successor worker fields restore")
+	local shown
+	for _, candidate in dispatch.project(r.authority.registry, r.origin.logical_session_id, r.origin.alias_nonce).workflow.workers do
+		if candidate.worker_id == rid then shown = candidate end
+	end
+	check(shown ~= nil and shown.role == "builder" and shown.family == "anthropic" and shown.class == "docs" and shown.files_count == 1 and shown.checks_count == 1
+		and shown.scope.paths == 1 and shown.scope.systems == 1 and shown.manifest_sha256 == nil, "views get role, family, class and counts, never the manifest digest")
 end
 return "dispatch" .. (if section then "/" .. section else "") .. ": " .. tostring(checks) .. " checks passed"

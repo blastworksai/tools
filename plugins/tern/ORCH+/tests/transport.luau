@@ -51,7 +51,7 @@ value, diagnostic = transport.strict_decode("{}" .. string.rep(" ", 8191), 8192)
 rejected(value, diagnostic, "oversize", "8193-byte wire JSON rejected before parsing")
 value, diagnostic = transport.strict_decode(string.rep("[", 13) .. "0" .. string.rep("]", 13))
 rejected(value, diagnostic, "invalid_schema", "JSON depth bound enforced")
-value, diagnostic = transport.strict_decode("[" .. string.rep("0,", 256) .. "0]")
+value, diagnostic = transport.strict_decode("[" .. string.rep("0,", 512) .. "0]")
 rejected(value, diagnostic, "invalid_schema", "array bound enforced")
 local many_fields = {}
 for index = 1, 65 do table.insert(many_fields, '"k' .. tostring(index) .. '":0') end
@@ -85,7 +85,7 @@ local fixtures = {
 		completed = list({ "Finished work" }), remaining = list(), holds = list(), checks = list({ { check_id = "unit", artifact_revision = "abc", outcome = "passed", evidence_ref = "checks/ref" } }),
 		plan_ref = "plan/ref", plan_revision = "3" } },
 	{ "REVIEW_READY", { checkpoint_id = "cp_1", artifact_revision = "abc" } },
-	{ "REVIEW_RESULT", { artifact_revision = "abc", outcome = "approved", evidence = list() }, { action_id = "review_1", action_revision = 1 } },
+	{ "REVIEW_RESULT", { review_id = "review_1", round = 1, artifact_revision = "abc", outcome = "approved", findings = list() }, { action_id = "review_1", action_revision = 1 } },
 	{ "DONE", { checkpoint_id = "cp_1", artifact_revision = "abc", summary = "Complete" } },
 	{ "ROLLOVER_REQUEST", { checkpoint_id = "cp_1", reason = "Fresh context needed" } },
 	{ "LANDING_RESULT", { landing_id = "landing_1", grant_id = "grant_1", project_id = "project_1", repo_ref = "repo/ref", target_ref = "main", target_revision = "base",
@@ -98,6 +98,81 @@ for _, fixture in fixtures do
 	local decoded, err = transport.decode_report(encode(report(fixture[1], fixture[2], fixture[3])), binding)
 	check(decoded ~= nil and err == nil and decoded.kind == fixture[1], "closed report schema " .. fixture[1])
 end
+-- Checkpoint 2 (Contracts C/F): helper-only and role report kinds, with their capability gates.
+-- Pinned names; ORCH+ transport.luau gains them in Task 2D, so these fail until 2D lands.
+local all_capabilities = { "report-files-v1", "native-ask-v1", "worker-poll-v1", "argv-v1", "coordinator-control-v1", "check-runner-v1", "release-manager-v1" }
+local granted = clone(binding); granted.capabilities = all_capabilities
+local check_runner = clone(binding); check_runner.capabilities = { "report-files-v1", "check-runner-v1" }
+local release_manager = clone(binding); release_manager.capabilities = { "report-files-v1", "release-manager-v1" }
+local new_reports = {
+	{ "CHECK_RESULT", { check_id = "t1-c1", argv_sha256 = zero_hash, exit_code = 0, output_sha256 = zero_hash, head = string.rep("a", 40), ran_at_ms = 1 }, nil, check_runner },
+	{ "CHECK_RESULT", { check_id = "t1-c2", argv_sha256 = zero_hash, exit_code = 1, output_sha256 = zero_hash, head = string.rep("a", 64), ran_at_ms = 2 }, nil, check_runner },
+	{ "CHECKOUT", { worktree_path = "/work/tree", common_dir = "/work/repo/.git", branch = "work/branch", head = string.rep("a", 40), base = string.rep("b", 40),
+		changed_files = list({ "a.luau", "b/c.luau" }), changed_overflow = false, changed_total = 2, dirty = true }, nil, check_runner },
+	{ "CHECKOUT", { worktree_path = "/work/tree", common_dir = "/work/tree/.git", branch = "main", head = string.rep("a", 40),
+		changed_files = list(), changed_overflow = false, changed_total = 0, dirty = false }, nil, check_runner },
+	{ "LABEL", { work_ref = "work/ref", class = "feature", reason = "Adds a mode" }, { action_id = "label_1", action_revision = 1 } },
+	{ "LABEL", { work_ref = "work/ref", class = "fix" }, { action_id = "label_1", action_revision = 2 } },
+	{ "DEPLOY_RESULT", { deploy_id = "deploy_1", attempt_id = "attempt_1", landing_id = "landing_1", outcome = "deployed", revision = "abc", evidence = list({ "deploy/log" }) },
+		{ action_id = "deploy_1", action_revision = 1 }, release_manager },
+	{ "DEPLOY_RESULT", { deploy_id = "deploy_1", attempt_id = "attempt_2", landing_id = "landing_1", outcome = "failed", revision = "abc", evidence = list(), reason = "Health check failed" },
+		{ action_id = "deploy_1", action_revision = 2 }, release_manager },
+	{ "REVIEW_RESULT", { review_id = "review_1", round = 2, artifact_revision = "abc", outcome = "changes_required",
+		findings = list({ { finding_id = "f1", path = "a.luau", line = 3, summary = "Missing bound." }, { finding_id = "f2", path = "b.luau", summary = "Untested." } }),
+		summary = "Two findings" }, { action_id = "review_1", action_revision = 2 } },
+	{ "DONE", { checkpoint_id = "cp_1", artifact_revision = "abc", summary = "Complete", output_ref = "out/report.md" } },
+}
+for _, fixture in new_reports do
+	local wire = encode(report(fixture[1], fixture[2], fixture[3]))
+	local decoded, err = transport.decode_report(wire, fixture[4] or binding)
+	check(decoded ~= nil and err == nil and decoded.kind == fixture[1] and encode(decoded.payload) == encode(fixture[2]), "closed report round trip " .. fixture[1])
+	check(transport.decode_report(wire, granted) ~= nil, fixture[1] .. " decodes under the full seven-capability binding")
+	local bad = clone(fixture[2]); bad.unexpected = true
+	local refused, refusal = transport.decode_report(encode(report(fixture[1], bad, fixture[3])), fixture[4] or binding)
+	rejected(refused, refusal, "invalid_schema", fixture[1] .. " payload is closed")
+end
+for _, fixture in { new_reports[1], new_reports[3] } do
+	check(transport.decode_report(encode(report(fixture[1], fixture[2])), binding) == nil, fixture[1] .. " requires provisioned check-runner-v1")
+	check(transport.decode_report(encode(report(fixture[1], fixture[2])), release_manager) == nil, fixture[1] .. " is not granted by release-manager-v1")
+end
+check(transport.decode_report(encode(report("DEPLOY_RESULT", new_reports[7][2], new_reports[7][3])), binding) == nil, "DEPLOY_RESULT requires provisioned release-manager-v1")
+check(transport.decode_report(encode(report("DEPLOY_RESULT", new_reports[7][2], new_reports[7][3])), check_runner) == nil, "DEPLOY_RESULT is not granted by check-runner-v1")
+check(transport.decode_report(encode(report("DEPLOY_RESULT", new_reports[7][2])), release_manager) == nil, "DEPLOY_RESULT requires the grant action correlation")
+for _, change in {
+	{ outcome = "rolled_back" }, { evidence = list(table.create(17, "e")) }, { revision = "" },
+} do
+	local payload = clone(new_reports[7][2]); for key, child in change do payload[key] = child end
+	check(transport.decode_report(encode(report("DEPLOY_RESULT", payload, new_reports[7][3])), release_manager) == nil, "DEPLOY_RESULT bounds enforced")
+end
+for _, change in {
+	{ exit_code = 1.5 }, { argv_sha256 = string.rep("A", 64) }, { output_sha256 = "short" }, { check_id = "" },
+} do
+	local payload = clone(new_reports[1][2]); for key, child in change do payload[key] = child end
+	check(transport.decode_report(encode(report("CHECK_RESULT", payload)), check_runner) == nil, "CHECK_RESULT field shapes enforced")
+end
+local overflow = clone(new_reports[3][2])
+local many = {}
+for index = 1, 512 do many[index] = string.format("f%04d", index) end
+overflow.changed_files = list(many); overflow.changed_overflow = true; overflow.changed_total = 700
+check(transport.decode_report(encode(report("CHECKOUT", overflow)), check_runner) ~= nil, "CHECKOUT carries exactly 512 paths with the overflow flag")
+table.insert(many, "f0513"); overflow.changed_files = list(many)
+check(transport.decode_report(encode(report("CHECKOUT", overflow)), check_runner) == nil, "CHECKOUT refuses more than 512 paths")
+for _, change in {
+	{ outcome = "rejected" }, { findings = list(table.create(33, { finding_id = "f", path = "a", summary = "s" })) },
+	{ findings = list({ { finding_id = "f", path = "a", summary = string.rep("x", 401) } }) }, { evidence = list() },
+} do
+	local payload = clone(new_reports[9][2]); for key, child in change do payload[key] = child end
+	check(transport.decode_report(encode(report("REVIEW_RESULT", payload, new_reports[9][3])), binding) == nil, "REVIEW_RESULT Contract C bounds enforced")
+end
+local long_output = clone(new_reports[10][2]); long_output.output_ref = string.rep("o", 257)
+check(transport.decode_report(encode(report("DONE", long_output)), binding) == nil, "DONE output_ref bounded at 256")
+local registered = clone(binding); registered.capabilities = nil
+check(transport.decode_report(encode(report("REGISTER", { capabilities = list(all_capabilities) })), registered) ~= nil, "REGISTER accepts seven capabilities")
+check(transport.decode_report(encode(report("REGISTER", { capabilities = list({ table.unpack(all_capabilities) }) })), granted) ~= nil, "REGISTER of seven is within the seven provisioned")
+local eight = { table.unpack(all_capabilities) }; table.insert(eight, "invented-v1")
+check(transport.decode_report(encode(report("REGISTER", { capabilities = list(eight) })), registered) == nil, "REGISTER refuses an eighth capability")
+local eight_known = { table.unpack(all_capabilities) }; table.insert(eight_known, "report-files-v1")
+check(transport.decode_report(encode(report("REGISTER", { capabilities = list(eight_known) })), registered) == nil, "REGISTER refuses eight entries")
 local good = report("ACCEPTED", { assignment_sha256 = zero_hash })
 local bytes = encode(good)
 local mutated = clone(good)
@@ -134,7 +209,7 @@ mutated = clone(good)
 mutated.action_id, mutated.action_revision = "unexpected", 1
 value, diagnostic = transport.decode_report(encode(mutated), binding)
 rejected(value, diagnostic, "invalid_schema", "action fields forbidden for ordinary acceptance")
-mutated = report("REVIEW_RESULT", { artifact_revision = "abc", outcome = "approved", evidence = list() }, { action_id = "missing-revision" })
+mutated = report("REVIEW_RESULT", { review_id = "review_1", round = 1, artifact_revision = "abc", outcome = "approved", findings = list() }, { action_id = "missing-revision" })
 value, diagnostic = transport.decode_report(encode(mutated), binding)
 rejected(value, diagnostic, "invalid_schema", "result requires complete action correlation")
 mutated = clone(good)
@@ -205,27 +280,46 @@ for _, field in { "checkpoint_id", "project_id", "repo_ref", "target_ref", "targ
 	value, diagnostic = transport.decode_report(encode(report("LANDING_REQUEST", mutated)), binding)
 	rejected(value, diagnostic, "invalid_schema", "landing request requires exact " .. field)
 end
--- Landing evidence is worker-attested: exact revision, run checks, no failures and no holds.
-local function landing_checkpoint(change)
-	local payload = clone(fixtures[8][2]); payload.plan_ref = nil; payload.plan_revision = nil
-	for key, child in change or {} do payload[key] = child end
-	return { kind = "CHECKPOINT", payload = payload }
+-- Landing proof (Contract H) replaces worker-attested checkpoint evidence.
+local source = string.rep("a", 40)
+local function proof_input(change)
+	local input = { enforce_cross_family = true, source_revision = source, builder_worker_id = "builder", builder_family = "anthropic",
+		checks = list({ { check_id = "t1-c1", argv = list({ "true" }) } }),
+		check_results = { ["t1-c1"] = { check_id = "t1-c1", exit_code = 0, head = source, output_sha256 = zero_hash } },
+		review = { review_id = "review_1", reviewer_worker_id = "reviewer", reviewer_family = "openai", reviewer_role = "reviewer", artifact_revision = source, outcome = "approved" } }
+	for key, child in change or {} do input[key] = child end
+	return input
 end
-local verified = transport.verify_landing(landing_checkpoint(), "abc")
-check(verified and verified.attestation == "worker-attested" and verified.artifact_revision == "abc", "fresh passed checks verify landing evidence")
+local function review(change)
+	local value = clone(proof_input().review)
+	for key, child in change do value[key] = child end
+	return value
+end
+local proof = transport.verify_landing_proof(proof_input())
+check(proof and proof.mode == "cross_family_review" and proof.artifact_revision == source and proof.review_id == "review_1", "approved cross-family review proves landing")
+proof = transport.verify_landing_proof(proof_input({ check_results = { ["t1-c1"] = { check_id = "t1-c1", exit_code = 1, head = source, output_sha256 = zero_hash } } }))
+check(proof and proof.mode == "cross_family_review", "failed attested check is evidence only under cross-family review")
+proof = transport.verify_landing_proof(proof_input({ enforce_cross_family = false, review = review({ reviewer_family = "anthropic" }) }))
+check(proof and proof.mode == "helper_checks" and proof.check_refs[1] == "t1-c1:" .. zero_hash, "passing helper checks plus same-family review prove landing")
 for _, case in {
-	{ nil, "def", "verification_stale", "checkpoint for another revision" },
-	{ { checks = list() }, "abc", "verification_missing", "no required checks" },
-	{ { checks = list({ { check_id = "unit", artifact_revision = "abc", outcome = "not_run", evidence_ref = "r" } }) }, "abc", "verification_missing", "not_run check" },
-	{ { checks = list({ { check_id = "unit", artifact_revision = "abc", outcome = "failed", evidence_ref = "r" } }) }, "abc", "verification_failed", "failed check" },
-	{ { checks = list({ { check_id = "unit", artifact_revision = "old", outcome = "passed", evidence_ref = "r" } }) }, "abc", "verification_stale", "check for another revision" },
-	{ { holds = list({ "Owner hold" }) }, "abc", "hold_present", "checkpoint hold" },
+	{ { review = false }, "review_required", "no review" },
+	{ { review = review({ outcome = "changes_required" }) }, "review_not_approved", "changes required" },
+	{ { review = review({ artifact_revision = string.rep("b", 40) }) }, "review_stale", "review of another revision" },
+	{ { review = review({ reviewer_worker_id = "builder" }) }, "reviewer_is_builder", "builder reviewed itself" },
+	{ { review = review({ reviewer_family = "anthropic" }) }, "family_same", "same family under cross-family" },
+	{ { review = review({ reviewer_family = false }) }, "family_unknown", "unknown reviewer family" },
+	{ { enforce_cross_family = false, checks = false }, "checks_undeclared", "no declared checks" },
+	{ { enforce_cross_family = false, check_results = {} }, "check_missing", "declared check never ran" },
+	{ { enforce_cross_family = false, check_results = { ["t1-c1"] = { check_id = "t1-c1", exit_code = 1, head = source, output_sha256 = zero_hash } } }, "check_failed", "failed check" },
+	{ { enforce_cross_family = false, check_results = { ["t1-c1"] = { check_id = "t1-c1", exit_code = 0, head = string.rep("b", 40), output_sha256 = zero_hash } } }, "check_stale", "check of another head" },
+	{ { enforce_cross_family = false, review = false }, "review_required", "passing checks still need a review" },
 } do
-	local value, problem = transport.verify_landing(landing_checkpoint(case[1]), case[2])
-	check(value == nil and problem.code == case[3], "landing evidence blocks: " .. case[4])
+	local input = proof_input()
+	for key, child in case[1] do input[key] = if child == false then nil else child end
+	if input.review and input.review.reviewer_family == false then input.review.reviewer_family = nil end
+	local value, problem = transport.verify_landing_proof(input)
+	check(value == nil and problem ~= nil and problem.code == case[2], "landing proof blocks: " .. case[3] .. " (" .. tostring(problem and problem.code) .. ")")
 end
-local missing, missing_problem = transport.verify_landing(nil, "abc")
-check(missing == nil and missing_problem.code == "checkpoint_missing", "absent checkpoint blocks landing")
 
 local function reply(kind, payload)
 	return { version = 1, logical_session_id = binding.logical_session_id, worker_id = binding.worker_id,
@@ -237,14 +331,37 @@ for _, fixture in {
 	{ "report_request", { request_id = "request_1", requested_kind = "HEARTBEAT", reason = "Status requested" } },
 	{ "owner_decision", { choice_id = "choice_1", answer = "Proceed" } },
 	{ "landing_grant", { landing_id = "landing_1", grant_id = "grant_1", project_id = "project_1", checkpoint_id = "cp_1", repo_ref = "repo/ref",
-		target_ref = "main", target_revision = "base", source_ref = "work/branch", source_revision = "abc" } },
+		target_ref = "main", target_revision = "base", source_ref = "work/branch", source_revision = "abc",
+		builder_work_id = "work_1", review_id = "review_1", reviewer_family = "openai",
+		proof = { mode = "cross_family_review", artifact_revision = "abc", review_id = "review_1", check_refs = list() } } },
+	{ "review_request", { review_id = "review_1", round = 1, question_id = "implements_task_v1", builder_work_id = "work_1", task_ref = "task/ref",
+		plan_ref = "plan/ref", plan_revision = "3", source_ref = "work/branch", artifact_revision = "abc", scope_paths = list({ "a.luau" }), findings_prev = list() } },
+	{ "rework", { review_id = "review_1", round = 2, artifact_revision = "abc", failed_checks = list({ { check_id = "t1-c2", exit_code = 1 } }),
+		findings = list({ { finding_id = "f1", path = "a.luau", line = 3, summary = "Missing bound." } }) } },
+	{ "rework", { round = 1, artifact_revision = "abc", failed_checks = list(), findings = list() } },
+	{ "deploy_grant", { deploy_id = "deploy_1", attempt_id = "attempt_1", landing_id = "landing_1", revision = "abc", target_ref = "production" } },
+	{ "label_request", { work_ref = "work/ref", classes = list({ "feature", "fix" }), text = "Classify this work." } },
 	{ "landing_refresh", { landing_id = "landing_1", project_id = "project_1", repo_ref = "repo/ref", target_ref = "main",
 		expected_revision = "base", current_revision = "moved", reason = "Target moved; refresh against current_revision." } },
 } do
 	local candidate = reply(fixture[1], fixture[2])
 	if candidate.kind == "owner_decision" then candidate.gate_id, candidate.gate_revision = "gate_1", 1 end
-	check(transport.decode_reply(encode(candidate), binding) ~= nil, "closed reply schema " .. candidate.kind)
+	local decoded = transport.decode_reply(encode(candidate), granted)
+	check(decoded ~= nil and encode(decoded.payload) == encode(candidate.payload), "closed reply schema " .. candidate.kind)
+	if candidate.kind == "landing_grant" or candidate.kind == "deploy_grant" then
+		check(transport.decode_reply(encode(candidate), release_manager) ~= nil, candidate.kind .. " parses under release-manager-v1")
+		check(transport.decode_reply(encode(candidate), binding) == nil, candidate.kind .. " requires provisioned release-manager-v1")
+		check(transport.decode_reply(encode(candidate), check_runner) == nil, candidate.kind .. " is not granted by check-runner-v1")
+	end
+	local bad = clone(candidate); bad.payload.unexpected = true
+	check(transport.decode_reply(encode(bad), granted) == nil, "closed reply payload " .. candidate.kind)
 end
+local review_reply = reply("review_request", { review_id = "review_1", round = 1, question_id = "score_v1", builder_work_id = "work_1", task_ref = "task/ref",
+	source_ref = "work/branch", artifact_revision = "abc", scope_paths = list(), findings_prev = list() })
+check(transport.decode_reply(encode(review_reply), granted) == nil, "review_request carries only the fixed judge question")
+local legacy_grant = reply("landing_grant", { landing_id = "landing_1", grant_id = "grant_1", project_id = "project_1", checkpoint_id = "cp_1", repo_ref = "repo/ref",
+	target_ref = "main", target_revision = "base", source_ref = "work/branch", source_revision = "abc" })
+check(transport.decode_reply(encode(legacy_grant), granted) == nil, "landing_grant requires builder, review and proof fields")
 local reply_value = reply("owner_decision", { choice_id = "choice_1", answer = "Proceed" })
 value, diagnostic = transport.decode_reply(encode(reply_value), binding)
 rejected(value, diagnostic, "invalid_schema", "owner reply requires explicit gate revision")
@@ -253,7 +370,7 @@ local reply_bytes = encode(reply_value)
 value, diagnostic = transport.decode_reply(reply_bytes .. string.rep(" ", 2049 - #reply_bytes), binding)
 rejected(value, diagnostic, "oversize", "report-request reserved control limit enforced")
 reply_value = reply("landing_grant", { project_id = "project_1", target_ref = "main", source_revision = "abc", checkpoint_id = "cp_1", grant_id = "grant_1" })
-value, diagnostic = transport.decode_reply(encode(reply_value), binding)
+value, diagnostic = transport.decode_reply(encode(reply_value), granted)
 rejected(value, diagnostic, "invalid_schema", "landing grant must name the exact landing, repository, expected head and source ref")
 reply_value = reply("landing_refresh", { landing_id = "landing_1", project_id = "project_1", repo_ref = "repo/ref", target_ref = "main", expected_revision = "base",
 	reason = "Target moved" })

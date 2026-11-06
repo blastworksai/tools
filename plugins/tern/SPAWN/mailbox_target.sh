@@ -80,10 +80,23 @@ esac
 # Read request input before acquiring shared admission: a slow stdin sender
 # cannot hold the mailbox capacity gate. Read-only/compaction need no input.
 case "$mode" in
- provision|publish|reconcile|reconcile_provision)
+ publish|reconcile)
   encoded=$(dd bs=1 count=5466 2>/dev/null)
   [ "${#encoded}" -le 5464 ] || full encoded_bytes "${#encoded}" 5464
   case "$encoded" in ''|*[!A-Za-z0-9+/=]*) out binding_mismatch;; esac;;
+ provision|reconcile_provision)
+  # Line 1 is provision.json; an optional line 2 is the assignment manifest
+  # (<=4096 bytes, 5464 base64), bound by provision.json's manifest_sha256.
+  request=$(dd bs=1 count=10932 2>/dev/null)
+  [ "${#request}" -le 10929 ] || full encoded_bytes "${#request}" 10929
+  nl='
+'
+  encoded=${request%%"$nl"*} manifest_b64=
+  [ "$encoded" = "$request" ] || manifest_b64=${request#*"$nl"}
+  [ "${#encoded}" -le 5464 ] || full encoded_bytes "${#encoded}" 5464
+  [ "${#manifest_b64}" -le 5464 ] || full manifest_bytes "${#manifest_b64}" 5464
+  case "$encoded" in ''|*[!A-Za-z0-9+/=]*) out binding_mismatch;; esac
+  case "$manifest_b64" in *[!A-Za-z0-9+/=]*) out binding_mismatch;; esac;;
 esac
 admission=$box/capacity.lock
 if ! mkdir "$admission" 2>/dev/null; then
@@ -176,11 +189,15 @@ if [ "$mode" = compact ] || [ "$mode" = retire ]; then
  for file in "$box/watermarks/"*.json; do [ ! -e "$file" ] || { regular "$file" || out binding_mismatch; rm "$file"; }; done
  for child in reports replies acks watermarks; do rmdir "$box/$child" || out incomplete; done
  regular "$box/provision.json" || out incomplete
+ if [ -e "$box/manifest.json" ] || [ -L "$box/manifest.json" ]; then regular "$box/manifest.json" || out binding_mismatch; rm "$box/manifest.json"; fi
  rm "$box/provision.json"
  rmdir "$admission" || out incomplete; admitted=0
  rmdir "$box" || out incomplete; out retired
 fi
 case "$mode" in provision|publish|reconcile|reconcile_provision) ;; *) out binding_mismatch;; esac
+[ -z "${manifest_b64:-}" ] || [ "$selected" = provision.json ] || out binding_mismatch
+manifest=$box/manifest.json
+if [ -e "$manifest" ] || [ -L "$manifest" ]; then regular "$manifest" || out binding_mismatch; fi
 if [ "$selected" = provision.json ]; then parent=$box; else parent=$box/${selected%/*}; fi
 if [ ! -d "$parent" ]; then
  case "$mode:$selected" in publish:replies/*/*) safe_dir "$box/replies"; mkdir "$parent" || out storage_error;; *) out missing;; esac
@@ -195,7 +212,14 @@ if [ "$mode" = reconcile ] || [ "$mode" = reconcile_provision ]; then
  size=$(wc -c < "$final"); [ "$size" -le 4096 ] || full object_bytes "$size" 4096
  actual=$(base64 < "$final" | tr -d '\r\n')
  [ "$actual" = "$encoded" ] || out content_conflict
- [ "$mode" != reconcile_provision ] || out provisioned
+ if [ "$mode" = reconcile_provision ]; then
+  if [ -n "$manifest_b64" ]; then
+   [ -e "$manifest" ] || out missing
+   size=$(wc -c < "$manifest"); [ "$size" -le 4096 ] || full manifest_bytes "$size" 4096
+   [ "$(base64 < "$manifest" | tr -d '\r\n')" = "$manifest_b64" ] || out content_conflict
+  elif [ -e "$manifest" ]; then out content_conflict; fi
+  out provisioned
+ fi
  out already_published
 fi
 # Identical immutable replay does not need staging or spend drain headroom.
@@ -214,10 +238,16 @@ case "$selected" in acks/*.json|watermarks/*.json) byte_limit=2359296; file_limi
 wire_bytes=$(( ${#encoded}/4*3 ))
 case "$encoded" in *==) wire_bytes=$((wire_bytes-2));; *=) wire_bytes=$((wire_bytes-1));; esac
 [ "$wire_bytes" -le 4096 ] || full object_bytes "$wire_bytes" 4096
-[ "$((files+1))" -le "$file_limit" ] || full mailbox_files "$((files+1))" "$file_limit"
-[ "$((total+wire_bytes))" -le "$byte_limit" ] || full mailbox_bytes "$((total+wire_bytes))" "$byte_limit"
-[ "$((files+2))" -le 1024 ] || full mailbox_files "$((files+2))" 1024
-[ "$((total+wire_bytes*2))" -le 4194304 ] || full mailbox_bytes "$((total+wire_bytes*2))" 4194304
+manifest_files=0 manifest_bytes=0
+if [ -n "${manifest_b64:-}" ]; then
+ manifest_files=1 manifest_bytes=$(( ${#manifest_b64}/4*3 ))
+ case "$manifest_b64" in *==) manifest_bytes=$((manifest_bytes-2));; *=) manifest_bytes=$((manifest_bytes-1));; esac
+ [ "$manifest_bytes" -ge 1 ] && [ "$manifest_bytes" -le 4096 ] || full manifest_bytes "$manifest_bytes" 4096
+fi
+[ "$((files+1+manifest_files))" -le "$file_limit" ] || full mailbox_files "$((files+1+manifest_files))" "$file_limit"
+[ "$((total+wire_bytes+manifest_bytes))" -le "$byte_limit" ] || full mailbox_bytes "$((total+wire_bytes+manifest_bytes))" "$byte_limit"
+[ "$((files+2+manifest_files*2))" -le 1024 ] || full mailbox_files "$((files+2+manifest_files*2))" 1024
+[ "$((total+(wire_bytes+manifest_bytes)*2))" -le 4194304 ] || full mailbox_bytes "$((total+(wire_bytes+manifest_bytes)*2))" 4194304
 safe_dir "$box/staging"
 tmp=$box/staging/$operation.tmp
 (set -C; printf '%s' "$encoded" | decode > "$tmp") || out storage_error
@@ -230,6 +260,24 @@ if [ "$mode" = provision ]; then
  (set -C; printf abc > "$probe") || out storage_error
  [ "$(hash "$probe")" = ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad ] || out storage_error
  rm "$probe"
+ # The manifest is linked before provision.json: a provisioned mailbox never
+ # lacks the manifest its binding digest names. Bytes are stored verbatim.
+ bound=$(jq -r 'if has("manifest_sha256") then .manifest_sha256 else "" end' "$tmp") || out binding_mismatch
+ if [ -n "$manifest_b64" ]; then
+  case "$bound" in *[!0-9a-f]*|'') out binding_mismatch;; esac
+  [ "${#bound}" = 64 ] || out binding_mismatch
+  staged=$box/staging/$operation.manifest
+  (set -C; printf '%s' "$manifest_b64" | decode > "$staged") || out storage_error
+  regular "$staged" || out binding_mismatch
+  size=$(wc -c < "$staged"); [ "$size" -le 4096 ] || full manifest_bytes "$size" 4096
+  [ "$(base64 < "$staged" | tr -d '\r\n')" = "$manifest_b64" ] || out content_conflict
+  [ "$(hash "$staged")" = "$bound" ] || out binding_mismatch
+  if ! ln "$staged" "$manifest" 2>/dev/null; then regular "$manifest" && cmp -s "$staged" "$manifest" || out content_conflict; fi
+  regular "$manifest" && cmp -s "$staged" "$manifest" || out content_conflict
+  rm "$staged"
+ else
+  [ -z "$bound" ] || out binding_mismatch
+ fi
 fi
 status=published
 if ! ln "$tmp" "$final" 2>/dev/null; then

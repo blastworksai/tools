@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import pwd
 import shutil
+import signal
 import subprocess
 import tempfile
 import time
@@ -23,6 +24,11 @@ TARGET = SOURCE / "mailbox_target.sh"
 OWNER = "regression_owner_123456"
 HARD_BYTES, HARD_FILES = 4194304, 1024
 ORDINARY_BYTES, ORDINARY_FILES = 2097152, 896
+SEVEN = ["report-files-v1", "native-ask-v1", "worker-poll-v1", "argv-v1", "coordinator-control-v1",
+         "check-runner-v1", "release-manager-v1"]
+CHECKS = ["report-files-v1", "check-runner-v1"]
+RELEASE = ["report-files-v1", "release-manager-v1"]
+MANIFEST_BYTES = 4096
 
 
 def encode(value):
@@ -31,6 +37,25 @@ def encode(value):
 
 def digest(value):
     return hashlib.sha256(value).hexdigest()
+
+
+def canonical(value):
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode()
+
+
+def git(cwd, *argv, env=None):
+    return subprocess.run(["git", *argv], cwd=cwd, check=True, capture_output=True, env=env).stdout.decode().strip()
+
+
+def make_repo(path):
+    path.mkdir(parents=True)
+    git(path, "init", "-q", "-b", "main")
+    git(path, "config", "user.email", "test@example.invalid")
+    git(path, "config", "user.name", "Test")
+    (path / "tracked.txt").write_text("base\n")
+    git(path, "add", "tracked.txt")
+    git(path, "commit", "-q", "-m", "base")
+    return git(path, "rev-parse", "HEAD")
 
 
 def until(predicate, timeout=10):
@@ -42,7 +67,8 @@ def until(predicate, timeout=10):
 
 
 class Mailbox:
-    def __init__(self, root, handle="box", enrolment_token="enrolment_aaaaaaaa", handover=None):
+    def __init__(self, root, handle="box", enrolment_token="enrolment_aaaaaaaa", handover=None,
+                 manifest=None, capabilities=None):
         self.root, self.handle = root, handle
         self.box = root / handle
         self.operation = 0
@@ -52,12 +78,18 @@ class Mailbox:
                             mailbox_handle=handle)
         provision = dict(version=1, handle=handle, binding_digest=digest(encode(self.binding)),
                          binding=self.binding)
+        if capabilities is not None:
+            provision["capabilities"] = capabilities
+        if manifest is not None:
+            provision["manifest_sha256"] = digest(manifest)
         if handover is not None:
             # A rollover successor: the issued ID and sha256(id:token), never the token.
             handover_id, token = handover
             provision["handover"] = dict(handover_id=handover_id,
                                          handover_sha256=digest(f"{handover_id}:{token}".encode()))
-        assert self.target("provision", "provision.json", encode(provision)).stdout == b"provisioned\n"
+        # The target receives the manifest as a second Base64 line and writes it verbatim.
+        extra = [manifest] if manifest is not None else []
+        assert self.target("provision", "provision.json", encode(provision), extra=extra).stdout == b"provisioned\n"
         self.worker("init", check=True)
 
     @property
@@ -71,10 +103,10 @@ class Mailbox:
         return ["/bin/sh", str(WORKER), str(self.root), self.handle, OWNER,
                 mode, message, str(poll), str(seconds)]
 
-    def worker(self, mode, value=None, message="", env=None, check=False):
+    def worker(self, mode, value=None, message="", env=None, check=False, cwd=None):
         data = value if isinstance(value, bytes) else (encode(value) if value is not None else b"")
         result = subprocess.run(self.worker_argv(mode, message), input=data,
-                                capture_output=True, env=env, timeout=20)
+                                capture_output=True, env=env, timeout=60, cwd=cwd)
         if check and result.returncode:
             raise AssertionError(result.stderr.decode())
         return result
@@ -87,12 +119,13 @@ class Mailbox:
         return subprocess.run(argv + [str(report_floor), str(reply_floor), chain, encoded],
                               capture_output=True, timeout=20)
 
-    def target(self, mode, selected="-", data=b"", report_floor=0, reply_floor=0):
+    def target(self, mode, selected="-", data=b"", report_floor=0, reply_floor=0, extra=()):
         self.operation += 1
         argv = ["/bin/sh", str(TARGET), str(self.root), self.handle, mode, selected,
                 "operation_" + str(self.operation), pwd.getpwuid(os.getuid()).pw_name,
                 str(report_floor), str(reply_floor), str(WORKER)]
-        result = subprocess.run(argv, input=base64.b64encode(data), capture_output=True, timeout=20)
+        stdin = base64.b64encode(data) + b"".join(b"\n" + base64.b64encode(part) for part in extra)
+        result = subprocess.run(argv, input=stdin + (b"\n" if extra else b""), capture_output=True, timeout=20)
         if result.returncode:
             raise AssertionError(result.stderr.decode())
         return result
@@ -584,7 +617,7 @@ sys.exit(result.returncode)
             dict(kind="COORDINATOR_PROPOSAL", payload={key: value for key, value in dict(proposal, kind="dispatch", record_id="configured native", record_revision=0, prompt="Explicit task").items() if key != "checkpoint_id"}),
             dict(kind="REVIEW_READY", payload=dict(checkpoint_id="c", artifact_revision="r")),
             dict(kind="REVIEW_RESULT", action_id="a", action_revision=1,
-                 payload=dict(artifact_revision="r", outcome="approved", evidence=[])),
+                 payload=dict(review_id="r", round=1, artifact_revision="r", outcome="approved", findings=[])),
             dict(kind="DONE", payload=dict(checkpoint_id="c", artifact_revision="r", summary="done")),
             dict(kind="ROLLOVER_REQUEST", payload=dict(checkpoint_id="c", reason="next")),
             dict(kind="LANDING_REQUEST", payload=landing_request),
@@ -740,10 +773,12 @@ sys.exit(result.returncode)
 
     def test_landing_grant_entrypoint_closed_schema_and_exact_bytes(self):
         payload = dict(landing_id="landing", grant_id="grant", project_id="project", checkpoint_id="checkpoint",
-                       repo_ref="repo", target_ref="main", target_revision="base", source_ref="work", source_revision="revision")
+                       repo_ref="repo", target_ref="main", target_revision="base", source_ref="work", source_revision="revision",
+                       builder_work_id="builder", review_id="review", reviewer_family="openai",
+                       proof=dict(mode="cross_family_review", artifact_revision="revision", review_id="review", check_refs=[]))
         def grant(reply):
             reply.update(kind="landing_grant", payload=payload.copy())
-        mailbox = Mailbox(self.root, "landing_grant")
+        mailbox = Mailbox(self.root, "landing_grant", capabilities=RELEASE)
         raw = mailbox.reply(1, transform=grant)
         self.assertEqual(mailbox.worker("consume", check=True).stdout, raw)
         ack = json.loads(base64.b64decode(mailbox.journal()["pending"][0]["bytes"]))
@@ -753,7 +788,7 @@ sys.exit(result.returncode)
                       ("target_revision", "é" * 513), ("source_ref", 1)]
         for index, (key, value) in enumerate(mutations):
             with self.subTest(key=key, value=value):
-                rejected = Mailbox(self.root, "landing_grant_" + str(index))
+                rejected = Mailbox(self.root, "landing_grant_" + str(index), capabilities=RELEASE)
                 def invalid(reply):
                     grant(reply)
                     if value is None:
@@ -791,6 +826,108 @@ sys.exit(result.returncode)
                 before = rejected.journal_path.read_bytes()
                 self.assertNotEqual(rejected.worker("consume").returncode, 0)
                 self.assertEqual(rejected.journal_path.read_bytes(), before)
+
+    def assert_reply_kind(self, kind, payload, mutations, capabilities=None, optional=()):
+        def build(reply):
+            reply.update(kind=kind, payload=json.loads(json.dumps(payload)))
+        mailbox = Mailbox(self.root, kind, capabilities=capabilities)
+        raw = mailbox.reply(1, transform=build)
+        self.assertEqual(mailbox.worker("consume", check=True).stdout, raw)
+        removals = [(key, None) for key in payload if key not in optional]
+        for index, (key, value) in enumerate(removals + mutations):
+            with self.subTest(kind=kind, key=key, value=value):
+                rejected = Mailbox(self.root, f"{kind}_{index}", capabilities=capabilities)
+                def invalid(reply):
+                    build(reply)
+                    if value is None:
+                        del reply["payload"][key]
+                    else:
+                        reply["payload"][key] = value
+                rejected.reply(1, transform=invalid)
+                before = rejected.journal_path.read_bytes()
+                self.assertNotEqual(rejected.worker("consume").returncode, 0)
+                self.assertEqual(rejected.journal_path.read_bytes(), before)
+
+    def assert_reply_needs_release_manager(self, kind, payload):
+        # Without release-manager-v1 the grant is refused before any receipt.
+        for suffix, capabilities in (("none", None), ("checks", CHECKS)):
+            with self.subTest(kind=kind, capabilities=capabilities):
+                mailbox = Mailbox(self.root, f"{kind}_{suffix}", capabilities=capabilities)
+                mailbox.reply(1, transform=lambda reply: reply.update(kind=kind, payload=dict(payload)))
+                before = mailbox.journal_path.read_bytes()
+                self.assertNotEqual(mailbox.worker("consume").returncode, 0)
+                self.assertEqual(mailbox.journal_path.read_bytes(), before)
+
+    def test_new_reply_kinds_closed_schema_and_capability(self):
+        self.assert_reply_kind("review_request", dict(
+            review_id="review", round=1, question_id="implements_task_v1", builder_work_id="builder", task_ref="task",
+            plan_ref="plan", plan_revision="3", source_ref="work", artifact_revision="revision",
+            scope_paths=["a.luau"], findings_prev=[]), [("extra", True), ("question_id", "score_v1")],
+            optional=("plan_ref", "plan_revision"))
+        self.assert_reply_kind("rework", dict(
+            review_id="review", round=2, artifact_revision="revision", failed_checks=[dict(check_id="c1", exit_code=1)],
+            findings=[dict(finding_id="f1", path="a.luau", line=3, summary="Missing bound.")]),
+            [("extra", True), ("failed_checks", [dict(check_id="c1")])], optional=("review_id",))
+        deploy = dict(deploy_id="deploy", attempt_id="attempt", landing_id="landing", revision="revision", target_ref="production")
+        self.assert_reply_kind("deploy_grant", deploy, [("extra", True), ("deploy_id", "bad id"), ("revision", "")],
+                               capabilities=RELEASE)
+        self.assert_reply_needs_release_manager("deploy_grant", deploy)
+        self.assert_reply_kind("label_request", dict(work_ref="work", classes=["feature", "fix"], text="Classify."),
+                               [("extra", True), ("classes", "feature")])
+        self.assert_reply_needs_release_manager("landing_grant", dict(
+            landing_id="landing", grant_id="grant", project_id="project", checkpoint_id="checkpoint",
+            repo_ref="repo", target_ref="main", target_revision="base", source_ref="work", source_revision="revision",
+            builder_work_id="builder", review_id="review", reviewer_family="openai",
+            proof=dict(mode="helper_checks", artifact_revision="revision", review_id="review", check_refs=["c1"])))
+
+    def test_new_report_kinds_and_capability_bound(self):
+        valid = [
+            dict(kind="LABEL", action_id="label", action_revision=1, payload={"work_ref": "work", "class": "feature", "reason": "new mode"}),
+            dict(kind="REVIEW_RESULT", action_id="review", action_revision=1, payload=dict(
+                review_id="review", round=1, artifact_revision="revision", outcome="changes_required",
+                findings=[dict(finding_id="f1", path="a.luau", line=3, summary="Missing bound.")], summary="One")),
+            dict(kind="DONE", payload=dict(checkpoint_id="cp", artifact_revision="revision", summary="done", output_ref="out/a.md")),
+            dict(kind="REGISTER", payload=dict(capabilities=SEVEN)),
+        ]
+        deploy = dict(kind="DEPLOY_RESULT", action_id="deploy", action_revision=1, payload=dict(
+            deploy_id="deploy", attempt_id="attempt", landing_id="landing", outcome="deployed", revision="revision", evidence=[]))
+        for index, (capabilities, value) in enumerate([(None, value) for value in valid] + [(RELEASE, deploy)]):
+            with self.subTest(kind=value["kind"]):
+                mailbox = Mailbox(self.root, "new_valid_" + str(index), capabilities=capabilities)
+                mailbox.worker("report", value, check=True)
+                report = json.loads(base64.b64decode(mailbox.journal()["pending"][0]["bytes"]))
+                self.assertEqual(report["payload"], value["payload"])
+        invalid = [
+            (None, dict(kind="REGISTER", payload=dict(capabilities=SEVEN + ["invented-v1"]))),
+            (None, dict(kind="REGISTER", payload=dict(capabilities=SEVEN + ["argv-v1"]))),
+            (None, dict(kind="REVIEW_RESULT", action_id="review", action_revision=1, payload=dict(
+                artifact_revision="revision", outcome="approved", evidence=[]))),
+            (None, dict(kind="DONE", payload=dict(checkpoint_id="cp", artifact_revision="revision", summary="done", output_ref="o" * 257))),
+            (None, dict(kind="LABEL", action_id="label", action_revision=1, payload={"work_ref": "work", "class": "feature", "extra": 1})),
+            (None, dict(kind="LABEL", payload={"work_ref": "work", "class": "feature"})),
+            (None, deploy), (CHECKS, deploy),
+        ]
+        for index, (capabilities, value) in enumerate(invalid):
+            with self.subTest(index=index):
+                mailbox = Mailbox(self.root, "new_invalid_" + str(index), capabilities=capabilities)
+                before = mailbox.journal_path.read_bytes()
+                self.assertNotEqual(mailbox.worker("report", value).returncode, 0)
+                self.assertEqual(mailbox.journal_path.read_bytes(), before)
+
+    def test_report_mode_refuses_helper_only_kinds(self):
+        mailbox = Mailbox(self.root, "helper_only", manifest=canonical(dict(checks=[], base_ref="", files=[], scope=dict(paths=[], systems=[]))),
+                          capabilities=CHECKS)
+        for value in (dict(kind="CHECK_RESULT", payload=dict(check_id="c", argv_sha256="a" * 64, exit_code=0,
+                                                             output_sha256="a" * 64, head="a" * 40, ran_at_ms=1)),
+                      dict(kind="CHECKOUT", payload=dict(worktree_path="/w", common_dir="/w/.git", branch="main", head="a" * 40,
+                                                         changed_files=[], changed_overflow=False, changed_total=0, dirty=False))):
+            with self.subTest(kind=value["kind"]):
+                before = mailbox.journal_path.read_bytes()
+                result = mailbox.worker("report", value)
+                self.assertEqual((result.returncode, result.stderr), (1, b"helper_only_kind\n"))
+                self.assertEqual(mailbox.journal_path.read_bytes(), before)
+                self.assertEqual(list((mailbox.box / "reports").iterdir()), [])
+
 
     def test_crash_after_receipt_commit_before_ack_publication_and_stdout(self):
         raw = self.mailbox.reply(1)
@@ -970,12 +1107,293 @@ sys.exit(subprocess.run([actual] + sys.argv[1:]).returncode)
         self.assertTrue(gate.is_dir())
         gate.rmdir()
 
+    def paused_wait(self):
+        # `wait` paused in its first poll sleep, holding only its producer lock.
+        # Fractional gate-wait sleeps pass straight through and are recorded.
+        env = self.shim("sleep", """root = pathlib.Path(os.environ['TEST_ROOT'])
+if sys.argv[1:] == ['0.1']:
+    (root / 'gate_wait').touch()
+else:
+    (root / 'sleeping').touch()
+    while not (root / 'wake').exists():
+        time.sleep(0.01)
+sys.exit(subprocess.run([actual] + sys.argv[1:]).returncode)
+""")
+        process = subprocess.Popen(self.mailbox.worker_argv("wait", seconds=30), env=env,
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                   start_new_session=True)
+        self.addCleanup(self.stop_process, process, self.root / "wake")
+        until((self.root / "sleeping").exists)
+        self.assertTrue((self.mailbox.box / "producer/lock").is_dir())
+        self.assertFalse((self.mailbox.box / "capacity.lock").exists())
+        return process
+
+    def assert_producer_released(self):
+        for leftover in ("producer/lock", "staging/worker-" + OWNER):
+            self.assertFalse((self.mailbox.box / leftover).exists(), leftover + " leaked")
+
+    def test_wait_poll_waits_out_busy_gate_then_releases_producer_lock(self):
+        # Final-smoke leak: a later poll met the target's short-lived gate, failed
+        # producer_locked, and exit cleanup could not re-take the gate to remove
+        # its lock, so every later call was refused producer_locked.
+        process = self.paused_wait()
+        raw = self.mailbox.reply(1)
+        gate = self.mailbox.box / "capacity.lock"
+        gate.mkdir()
+        (self.root / "wake").touch()
+        until(lambda: process.poll() is not None or (self.root / "gate_wait").exists())
+        self.assertTrue(gate.is_dir())
+        gate.rmdir()
+        stdout, stderr = process.communicate(timeout=30)
+        self.assert_producer_released()
+        self.assertEqual(process.returncode, 0, stderr)
+        self.assertEqual(stdout, raw)
+        self.assertFalse(gate.exists())
+        self.assertEqual(self.mailbox.worker("receipts").returncode, 0)
+
+    def test_interrupted_wait_waits_out_busy_gate_then_releases_producer_lock(self):
+        process = self.paused_wait()
+        gate = self.mailbox.box / "capacity.lock"
+        gate.mkdir()
+        os.killpg(process.pid, signal.SIGTERM)
+        until(lambda: process.poll() is not None or (self.root / "gate_wait").exists())
+        # Cleanup waits for the other holder; it never takes or removes that gate.
+        self.assertTrue(gate.is_dir())
+        gate.rmdir()
+        _, stderr = process.communicate(timeout=30)
+        self.assertNotEqual(process.returncode, 0)
+        self.assert_producer_released()
+        self.assertFalse(gate.exists())
+        result = self.mailbox.worker("receipts")
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_interrupted_wait_releases_own_lock_but_never_takes_held_gate(self):
+        process = self.paused_wait()
+        gate = self.mailbox.box / "capacity.lock"
+        gate.mkdir()
+        os.utime(gate, (1, 1))
+        started = time.monotonic()
+        os.killpg(process.pid, signal.SIGTERM)
+        _, stderr = process.communicate(timeout=60)
+        elapsed = time.monotonic() - started
+        self.assertNotEqual(process.returncode, 0)
+        # Release of its own lock does not depend on the gate; the gate is untouched.
+        self.assert_producer_released()
+        self.assertTrue(gate.is_dir())
+        self.assertEqual(gate.stat().st_mtime, 1)
+        # It first waited out the gate (which is normally short-lived).
+        self.assertGreaterEqual(elapsed, 5)
+        result = self.mailbox.worker("receipts")
+        self.assertIn(b"producer_locked", result.stderr)
+        self.assert_producer_released()
+        # Explicit recovery of the abandoned gate alone makes the mailbox usable.
+        gate.rmdir()
+        result = self.mailbox.worker("receipts")
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_read_and_compaction_remain_available_above_byte_ceiling(self):
         self.mailbox.worker("report", dict(kind="READY", payload=dict(state="idle")), check=True)
         self.mailbox.fill_bytes(HARD_BYTES + 1)
         self.assertTrue(self.mailbox.target("read", "reports/1/manifest.json").stdout.startswith(b"object\n"))
         self.assertEqual(self.mailbox.target("compact", report_floor=1).stdout, b"compacted\n")
 
+
+class PosixHelperModeTests(unittest.TestCase):
+    """run-checks and checkout on disposable git repositories (Contracts C/F/G)."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="spawn-helper-modes-")
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name).resolve()
+        self.repo = self.root / "repo"
+        self.base = make_repo(self.repo)
+        self.count = 0
+
+    def manifest(self, checks=()):
+        return canonical(dict(checks=list(checks), base_ref=self.base, files=[], scope=dict(paths=[], systems=[])))
+
+    def mailbox(self, manifest=None, capabilities=CHECKS):
+        self.count += 1
+        return Mailbox(self.root, "helper_" + str(self.count), manifest=manifest, capabilities=capabilities)
+
+    def published(self, mailbox):
+        pending = mailbox.journal()["pending"]
+        self.assertEqual(len(pending), 1)
+        self.assertTrue((mailbox.box / "reports/1/manifest.json").is_file())
+        return json.loads(base64.b64decode(pending[0]["bytes"]))
+
+    def refused(self, mailbox, mode, code, message="", cwd=None, env=None):
+        before = mailbox.journal_path.read_bytes()
+        result = mailbox.worker(mode, message=message, cwd=cwd or self.repo, env=env)
+        self.assertEqual((result.returncode, result.stderr, result.stdout), (1, code.encode() + b"\n", b""))
+        self.assertEqual(mailbox.journal_path.read_bytes(), before)
+        self.assertEqual(list((mailbox.box / "reports").iterdir()), [])
+
+    def checkout(self, cwd=None):
+        mailbox = self.mailbox(self.manifest())
+        result = mailbox.worker("checkout", cwd=cwd or self.repo)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        report = self.published(mailbox)
+        self.assertEqual(report["kind"], "CHECKOUT")
+        return report["payload"]
+
+    def test_run_checks_pass_and_fail_are_both_reported(self):
+        checks = [dict(check_id="t1-c1", argv=["true"]), dict(check_id="t1-c2", argv=["false"]),
+                  dict(check_id="t1-c3", argv=["printf", "%s", "a b;$(x)"])]
+        manifest = self.manifest(checks)
+        head = git(self.repo, "rev-parse", "HEAD")
+        for check, exit_code, output in ((checks[0], 0, b""), (checks[1], 1, b""), (checks[2], 0, b"a b;$(x)")):
+            with self.subTest(check=check["check_id"]):
+                mailbox = self.mailbox(manifest)
+                before = int(time.time() * 1000)
+                result = mailbox.worker("run-checks", message=check["check_id"], cwd=self.repo)
+                self.assertEqual((result.returncode, result.stdout), (0, b""), result.stderr)
+                report = self.published(mailbox)
+                self.assertEqual(report["kind"], "CHECK_RESULT")
+                payload = report["payload"]
+                self.assertEqual(sorted(payload), ["argv_sha256", "check_id", "exit_code", "head", "output_sha256", "ran_at_ms"])
+                self.assertEqual((payload["check_id"], payload["exit_code"], payload["head"]), (check["check_id"], exit_code, head))
+                self.assertEqual(payload["argv_sha256"], digest(encode(check["argv"])))
+                # Output is hashed, never published; argv metacharacters reach printf unexpanded.
+                self.assertEqual(payload["output_sha256"], digest(output))
+                self.assertNotIn(b"a b;", base64.b64decode(mailbox.journal()["pending"][0]["bytes"]))
+                self.assertGreaterEqual(payload["ran_at_ms"], before - 1000)
+
+    def test_run_checks_output_hash_is_capped_at_64_kib(self):
+        big = self.root / "big.bin"
+        big.write_bytes(b"x" * 70000)
+        mailbox = self.mailbox(self.manifest([dict(check_id="cat", argv=["cat", str(big)])]))
+        mailbox.worker("run-checks", message="cat", cwd=self.repo, check=True)
+        payload = self.published(mailbox)["payload"]
+        self.assertEqual((payload["exit_code"], payload["output_sha256"]), (0, digest(b"x" * 65536)))
+
+    def test_run_checks_and_checkout_refusals(self):
+        manifest = self.manifest([dict(check_id="t1-c1", argv=["true"])])
+        self.refused(self.mailbox(manifest), "run-checks", "check_undeclared", message="t1-c9")
+        for mode, message in (("run-checks", "t1-c1"), ("checkout", "")):
+            with self.subTest(mode=mode):
+                # Capability is checked first, before any manifest fact.
+                self.refused(self.mailbox(manifest, capabilities=["report-files-v1"]), mode, "capability_missing", message=message)
+                self.refused(self.mailbox(None, capabilities=None), mode, "capability_missing", message=message)
+                self.refused(self.mailbox(None), mode, "manifest_missing", message=message)
+                missing = self.mailbox(manifest)
+                (missing.box / "manifest.json").unlink()
+                self.refused(missing, mode, "manifest_mismatch", message=message)
+                tampered = self.mailbox(manifest)
+                # A worker editing argv after provisioning cannot run it.
+                (tampered.box / "manifest.json").write_bytes(manifest.replace(b'"true"', b'"echo"'))
+                self.refused(tampered, mode, "manifest_mismatch", message=message)
+
+    def test_provision_writes_manifest_verbatim(self):
+        manifest = self.manifest([dict(check_id="t1-c1", argv=["true"])])
+        mailbox = self.mailbox(manifest)
+        self.assertEqual((mailbox.box / "manifest.json").read_bytes(), manifest)
+        self.assertEqual(json.loads((mailbox.box / "provision.json").read_bytes())["manifest_sha256"], digest(manifest))
+        self.assertFalse((self.mailbox(None).box / "manifest.json").exists())
+
+    def test_checkout_clean_repository(self):
+        payload = self.checkout()
+        self.assertEqual(payload["worktree_path"], os.path.realpath(self.repo))
+        self.assertEqual(payload["common_dir"], os.path.realpath(self.repo / ".git"))
+        self.assertEqual((payload["branch"], payload["head"], payload["base"]), ("main", self.base, self.base))
+        self.assertEqual((payload["changed_files"], payload["changed_overflow"], payload["changed_total"], payload["dirty"]),
+                         ([], False, 0, False))
+
+    def test_checkout_dirty_repository_unions_committed_staged_unstaged(self):
+        (self.repo / "committed.txt").write_text("c\n")
+        git(self.repo, "add", "committed.txt")
+        git(self.repo, "commit", "-q", "-m", "work")
+        (self.repo / "tracked.txt").write_text("changed\n")
+        (self.repo / "staged.txt").write_text("s\n")
+        git(self.repo, "add", "staged.txt")
+        payload = self.checkout()
+        self.assertEqual((payload["head"], payload["base"]), (git(self.repo, "rev-parse", "HEAD"), self.base))
+        self.assertEqual(payload["changed_files"], ["committed.txt", "staged.txt", "tracked.txt"])
+        self.assertEqual((payload["changed_overflow"], payload["changed_total"], payload["dirty"]), (False, 3, True))
+
+    def test_checkout_untracked_only(self):
+        (self.repo / "sub").mkdir()
+        (self.repo / "sub/new.txt").write_text("n\n")
+        payload = self.checkout()
+        self.assertEqual(payload["changed_files"], ["sub/new.txt"])
+        self.assertEqual((payload["changed_total"], payload["dirty"]), (1, True))
+
+    def test_checkout_linked_worktree_reports_own_top_level_and_shared_common_dir(self):
+        linked = self.root / "linked"
+        git(self.repo, "worktree", "add", "-q", "-b", "side", str(linked))
+        (linked / "nested").mkdir()
+        payload = self.checkout(cwd=linked / "nested")
+        self.assertEqual(payload["worktree_path"], os.path.realpath(linked))
+        self.assertEqual(payload["common_dir"], os.path.realpath(self.repo / ".git"))
+        self.assertEqual(payload["branch"], "side")
+
+    def test_checkout_overflow_beyond_512_paths(self):
+        names = [f"many/f{index:04d}.txt" for index in range(600)]
+        (self.repo / "many").mkdir()
+        for name in names:
+            (self.repo / name).write_text("x")
+        payload = self.checkout()
+        self.assertEqual((payload["changed_overflow"], payload["changed_total"]), (True, 600))
+        self.assertEqual(payload["changed_files"], sorted(names)[:512])
+
+    def test_checkout_without_base_ref_pins_launch_base(self):
+        for label, base_ref in (("empty", ""), ("absent", None)):
+            with self.subTest(base_ref=label):
+                fields = dict(checks=[], files=[], scope=dict(paths=[], systems=[]))
+                if base_ref is not None:
+                    fields["base_ref"] = base_ref
+                mailbox = self.mailbox(canonical(fields))
+                launch = git(self.repo, "rev-parse", "HEAD")
+                mailbox.worker("checkout", cwd=self.repo, check=True)
+                first = self.published(mailbox)["payload"]
+                pin = mailbox.box / "checkout-base"
+                self.assertEqual(pin.read_bytes(), launch.encode() + b"\n")
+                self.assertEqual((first["base"], first["changed_files"]), (launch, []))
+                self.assertEqual([p.name for p in mailbox.box.iterdir() if p.name.startswith("checkout-base")], ["checkout-base"])
+                (self.repo / ("outside-" + label + ".txt")).write_text("x\n")
+                git(self.repo, "add", ".")
+                git(self.repo, "commit", "-q", "-m", "out of scope")
+                mailbox.worker("checkout", cwd=self.repo, check=True)
+                second = json.loads(base64.b64decode(mailbox.journal()["pending"][-1]["bytes"]))["payload"]
+                self.assertEqual(pin.read_bytes(), launch.encode() + b"\n")
+                self.assertEqual((second["base"], second["changed_files"]), (launch, ["outside-" + label + ".txt"]))
+
+    def test_checkout_rejects_tampered_launch_base(self):
+        manifest = canonical(dict(checks=[], base_ref="", files=[], scope=dict(paths=[], systems=[])))
+        for label, plant in (("garbage", lambda p: p.write_text("--output=x\n")),
+                             ("symlink", lambda p: p.symlink_to(self.root / "elsewhere"))):
+            with self.subTest(pin=label):
+                mailbox = self.mailbox(manifest)
+                plant(mailbox.box / "checkout-base")
+                self.refused(mailbox, "checkout", "storage_error")
+
+    def test_git_unavailable_is_a_definite_refusal(self):
+        # A PATH holding every executable the helpers might use except git.
+        farm = self.root / "nogit"
+        farm.mkdir()
+        for directory in os.environ["PATH"].split(os.pathsep):
+            if not os.path.isdir(directory):
+                continue
+            for entry in os.listdir(directory):
+                source, link = os.path.join(directory, entry), farm / entry
+                if entry != "git" and not os.path.lexists(link) and os.path.isfile(source) and os.access(source, os.X_OK):
+                    link.symlink_to(source)
+        env = dict(os.environ, PATH=str(farm))
+        manifest = self.manifest([dict(check_id="t1-c1", argv=["true"])])
+        self.refused(self.mailbox(manifest), "run-checks", "git_unavailable", message="t1-c1", env=env)
+        self.refused(self.mailbox(manifest), "checkout", "git_unavailable", env=env)
+
+
+    def test_manifest_bound_is_4096_bytes(self):
+        manifest = self.manifest([dict(check_id="t1-c1", argv=["true"])])
+        oversized = self.mailbox(manifest)
+        (oversized.box / "manifest.json").write_bytes(manifest + b" " * (MANIFEST_BYTES + 1 - len(manifest)))
+        self.refused(oversized, "run-checks", "manifest_mismatch", message="t1-c1")
+        padded = manifest[:-1] + b" " * (MANIFEST_BYTES - len(manifest)) + b"}"
+        self.assertEqual(len(padded), MANIFEST_BYTES)
+        self.mailbox(padded).worker("run-checks", message="t1-c1", cwd=self.repo, check=True)
+        with self.assertRaises(AssertionError):
+            self.mailbox(padded + b" ")
 
 if __name__ == "__main__":
     unittest.main()
