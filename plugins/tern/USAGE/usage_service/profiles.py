@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 import re
 import stat
+import subprocess
 import sys
 import tempfile
 
@@ -144,7 +145,8 @@ async def acquire_usage(store, spec):
         process = None
         try:
             process = await asyncio.create_subprocess_exec(*argv, stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL, env=env)
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL, env=env,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
             async def exchange():
                 process.stdin.write(raw)
                 await process.stdin.drain()

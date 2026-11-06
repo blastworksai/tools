@@ -457,9 +457,11 @@ def detached_options() -> dict:
     result = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL,
               "close_fds": True}
     if os.name == "nt":
-        # DETACHED_PROCESS prevents console inheritance; CREATE_NO_WINDOW covers
-        # GUI-launched console interpreters. Windows ignores the latter when detached.
-        result["creationflags"] = subprocess.DETACHED_PROCESS | subprocess.CREATE_NO_WINDOW
+        # A venv's Scripts\python.exe is a launcher that starts the real
+        # interpreter as its child. Under DETACHED_PROCESS that child has no
+        # console to inherit, so Windows opens a visible one for it. A new
+        # hidden console (CREATE_NO_WINDOW) is inherited by the whole tree.
+        result["creationflags"] = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
     else:
         result["start_new_session"] = True
     return result
