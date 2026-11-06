@@ -484,4 +484,14 @@ function M.validate_execution_projection(value: any): (any?, string?)
 	return value, nil
 end
 
+-- A window's pending request whose retained host reply is a definitive refusal.
+-- The authority commits every ok=false reply without any job or attempt change
+-- (a rejected dispatch discards its candidate), so nothing ran and the pending
+-- request may be acknowledged automatically. ok=true or no reply never qualifies.
+function M.refused_pending(pending: any, reply: any, observer_id: any): boolean
+	if type(pending) ~= "table" or type(pending.request_id) ~= "string" then return false end
+	if type(reply) ~= "table" then return false end
+	return reply.request_id == pending.request_id and reply.observer_id == observer_id and reply.ok == false
+end
+
 return M

@@ -3122,7 +3122,8 @@ end
 -- has an owner withdrawal (cancel_work), gated on SPAWN's retained status when SPAWN received the
 -- request. Regression: a retried launch was fenced never_claimed while SPAWN still
 -- held its expired window challenge; neither cancel_work nor rebind_unlaunched applied, so the work
--- and its reservations were wedged.
+-- and its reservations were wedged. Withdrawn work whose mailbox was already provisioned retires
+-- that never-used mailbox (w.withdrawn) instead of deleting the worker and leaking the generation.
 if section == nil or section == "withdraw_fenced" then
 	local AUTH_FULL = { resource = "window_authorization", current = 1, limit = 1, retryable = true, effect_started = false }
 	local PROVISIONED_W = { handle = "mailbox-withdraw", binding_digest = string.rep("e", 64),
@@ -3149,6 +3150,25 @@ if section == nil or section == "withdraw_fenced" then
 		local w = dispatch.project(fx.authority.registry, fx.origin.logical_session_id, fx.origin.alias_nonce).workers[worker_id]
 		return if w then w.withdrawal else nil
 	end
+	local OCCUPIED = { code = "binding_mismatch", message = "Occupied SPAWN controller binding; inspect Config and recover the prior owner explicitly" }
+	local function reject(fx, action_id, problem)
+		if fx:action(action_id).phase == "ready" then assert(fx:apply("claim", { action_id = action_id, executor = fx.origin.window_epoch }).ok) end
+		local a = fx:action(action_id)
+		return fx:apply("result", { action_id = action_id, executor = a.claim.executor, grant_id = a.claim.grant_id, response_bytes = frame(a.request, "rejected", nil, problem) })
+	end
+	-- This worker's mailbox retirements, optionally only those in `phase`.
+	local function retirements(fx, worker_id, phase)
+		local n = 0
+		for _, key in actions_of(fx, worker_id, "mailbox_retire") do if phase == nil or fx:action(key).phase == phase then n += 1 end end
+		return n
+	end
+	local function same_value(a, b)
+		if type(a) ~= type(b) then return false end
+		if type(a) ~= "table" then return a == b end
+		for k, v in a do if not same_value(v, b[k]) then return false end end
+		for k in b do if a[k] == nil then return false end end
+		return true
+	end
 	-- The live defect: an expired challenge backpressured the launch, the automatic recheck made it
 	-- ready again (keeping SPAWN's answer), and continuation fenced it before any new claim.
 	local f = fixture(); f:catalog(0)
@@ -3165,8 +3185,9 @@ if section == nil or section == "withdraw_fenced" then
 		and worker_of(f, id).origin_binding.window_epoch == "fixture-window", "continuation fences the retried old-route launch; it is neither moved nor re-sent")
 	local offered = withdrawal(f, id)
 	check(offered ~= nil and offered.action_id == launch_id and offered.op == "launch" and offered.status_required == true
-		and offered.request_id == fenced.request.request_id and offered.controller_generation == fenced.request.controller_generation,
-		"the controller offers withdrawal of the fenced launch, gated on SPAWN's status of that exact request")
+		and offered.request_id == fenced.request.request_id and offered.controller_generation == fenced.request.controller_generation
+		and offered.mailbox_provisioned == true and offered.mailbox_retire == "not_requested",
+		"the controller offers withdrawal of the fenced launch, gated on SPAWN's status of that exact request; its provisioned mailbox is not yet retired")
 	local projection = state.project(f.authority.registry)
 	projection.dispatch = dispatch.project(f.authority.registry, f.origin.logical_session_id, f.origin.alias_nonce)
 	local rendered = load("views").render({ pane = 42, alias_nonce = f.origin.alias_nonce, orch_session_id = f.origin.logical_session_id,
@@ -3185,13 +3206,36 @@ if section == nil or section == "withdraw_fenced" then
 		"an uncertain SPAWN outcome is never withdrawn")
 	check(cancel(f, id, status_evidence(f, fenced, "found", "full", AUTH_FULL, { target_request_id = "launch-other" })).code == "binding_mismatch" and worker_of(f, id) ~= nil,
 		"the status of another request is not evidence")
+	-- C2 (ORCH+ side): SPAWN answers this exact expired, never-consumed challenge as a retryable
+	-- pre-effect `full`, and then accepts the unused mailbox's `mailbox_retire` without stop evidence.
+	-- The SPAWN side of the same shape is SPAWN tests/dispatch.luau section `unused_retirement`.
 	local cancelled = cancel(f, id, status_evidence(f, fenced, "found", "full", AUTH_FULL))
-	check(cancelled.ok and cancelled.code == "work_cancelled" and worker_of(f, id) == nil and f:action(launch_id) == nil and f:action(queued.action_id) == nil,
-		"SPAWN's expired challenge proves the launch can never run: the work and its settled actions are removed")
-	check(state.rehydrate(clone(f.authority.registry)) ~= nil, "the withdrawn state restores")
+	local fw = worker_of(f, id)
+	check(cancelled.ok and cancelled.code == "withdrawal_retiring" and fw ~= nil and f:action(launch_id) ~= nil and f:action(launch_id).phase == "resolved"
+		and retirements(f, id) == 1 and fw.mailbox_retire_action_id == cancelled.action_id
+		and fw.withdrawn ~= nil and fw.withdrawn.op == "launch" and fw.withdrawn.action_id == launch_id and fw.withdrawn.evidence == "never_claimed",
+		"SPAWN's expired challenge proves the launch can never run: the worker and its fenced launch are kept and exactly one mailbox retirement is queued")
+	local retire = f:action(cancelled.action_id).request
+	check(retire.op == "mailbox_retire" and retire.mode == "retire" and retire.handle == "mailbox-withdraw" and retire.origin_binding.window_epoch == "replacement-window"
+		and fw.origin_binding.window_epoch == "fixture-window", "the retirement is issued on the continued route; the fenced work keeps its old route")
+	local retiring_view = withdrawal(f, id)
+	check(retiring_view ~= nil and retiring_view.mailbox_retire == "retiring" and retiring_view.status_required == false and retiring_view.evidence == "never_claimed"
+		and retiring_view.action_id == launch_id and retiring_view.request_id == fenced.request.request_id and retiring_view.mailbox_provisioned == true,
+		"the withdrawal shows the pending retirement; its consumed status evidence is not asked for again")
+	check(cancel(f, id).code == "retirement_unresolved" and retirements(f, id) == 1, "a pending retirement is never issued twice")
+	check(cancel(f, id, status_evidence(f, fenced, "found", "full", AUTH_FULL)).code == "invalid_command" and retirements(f, id) == 1,
+		"a withdrawn request's status evidence was already consumed; cancelling again with evidence is refused")
+	-- Restart while the retirement is pending on the continued route.
+	local restored = state.rehydrate(clone(f.authority.registry))
+	check(restored ~= nil and same_value(dispatch.project(restored, f.origin.logical_session_id, f.origin.alias_nonce).workers[id].withdrawal, retiring_view)
+		and same_value(restored.dispatch.workers[id].withdrawn, fw.withdrawn), "a restart while the withdrawal retires restores the same withdrawal")
+	check(f:finish(cancelled.action_id, "retired", nil).ok and worker_of(f, id).mailbox_retired == true and withdrawal(f, id) == nil,
+		"SPAWN's confirmed retirement retires the unused mailbox")
+	check(state.rehydrate(clone(f.authority.registry)) ~= nil, "the retired withdrawal restores")
 	local again = f:queue(false)
-	check(again.ok and again.worker_id ~= id and worker_of(f, again.worker_id).launch_request_id ~= fenced.request.request_id,
-		"the assignment can be queued again; it gets a new launch request ID")
+	check(again.ok and worker_of(f, id) == nil and f:action(launch_id) == nil and f:action(queued.action_id) == nil
+		and again.worker_id ~= id and worker_of(f, again.worker_id).launch_request_id ~= fenced.request.request_id,
+		"the retired worker and its settled actions are reclaimed; the assignment can be queued again with a new launch request ID")
 	-- A provision SPAWN refused before effects, fenced at continuation; SPAWN has no record of it.
 	local g = fixture(); g:catalog(0)
 	local gq = g:queue(false); assert(gq.ok)
@@ -3221,11 +3265,35 @@ if section == nil or section == "withdraw_fenced" then
 	assert(m:finish(adopted.action_id, "provisioned", PROVISIONED_W).ok)
 	local ask = worker_of(m, adopted.worker_id).launch_action_id
 	continue_on_b(m)
+	local mid = adopted.worker_id
 	check(m:action(ask).request.op == "adopt" and m:action(ask).phase == "resolved" and m:action(ask).resolution.evidence == "never_claimed"
-		and withdrawal(m, adopted.worker_id).status_required == false, "continuation fences the never-claimed adoption ask; SPAWN never received it")
-	check(cancel(m, adopted.worker_id).code == "work_cancelled" and worker_of(m, adopted.worker_id) == nil, "the fenced adoption is withdrawn without a SPAWN read")
-	check(adopt(m).code == "adoption_queued", "the owner may explicitly adopt the pane again in the continued window")
-	-- A fenced coordinator start releases its never-bound orchestrator reservation.
+		and withdrawal(m, mid).status_required == false and withdrawal(m, mid).mailbox_retire == "not_requested",
+		"continuation fences the never-claimed adoption ask; SPAWN never received it")
+	local mfirst = cancel(m, mid)
+	check(mfirst.code == "withdrawal_retiring" and worker_of(m, mid) ~= nil and worker_of(m, mid).withdrawn.op == "adopt" and retirements(m, mid) == 1,
+		"the fenced adoption is withdrawn without a SPAWN read; its unused mailbox retires")
+	-- SPAWN revoked the retirement's never-consumed authorization: the marker is released and the
+	-- owner's next cancel issues the one retirement again.
+	check(reject(m, mfirst.action_id, { code = "authorization_revoked", message = "Controller recovery revoked the unconsumed authorization" }).code == "authorization_reissue"
+		and worker_of(m, mid).mailbox_retire_action_id == nil and worker_of(m, mid).withdrawn ~= nil and withdrawal(m, mid).mailbox_retire == "not_requested",
+		"a revoked retirement authorization leaves the withdrawal with no retirement issued")
+	check(state.rehydrate(clone(m.authority.registry)) ~= nil, "the withdrawal with a revoked retirement restores")
+	local msecond = cancel(m, mid)
+	check(msecond.code == "withdrawal_retiring" and msecond.action_id ~= mfirst.action_id and retirements(m, mid, "ready") == 1,
+		"cancel again with no prior retirement issues exactly one")
+	check(reject(m, msecond.action_id, OCCUPIED).code == "bridge_rejected" and worker_of(m, mid).phase == "held" and withdrawal(m, mid).mailbox_retire == "refused"
+		and withdrawal(m, mid).status_required == false and worker_of(m, mid).reason.code == "binding_mismatch",
+		"SPAWN's definite refusal holds the worker visibly with a refused retirement")
+	check(state.rehydrate(clone(m.authority.registry)) ~= nil, "a held withdrawn worker restores")
+	local mthird = cancel(m, mid)
+	check(mthird.code == "withdrawal_retiring" and mthird.action_id ~= msecond.action_id and retirements(m, mid, "ready") == 1,
+		"after a definite refusal the owner may cancel again with exactly one fresh retirement")
+	check(m:finish(mthird.action_id, "retired", nil).ok and worker_of(m, mid).mailbox_retired == true and withdrawal(m, mid) == nil,
+		"SPAWN confirms the fresh retirement")
+	check(adopt(m).code == "adoption_queued" and worker_of(m, mid) == nil,
+		"the retired withdrawn worker is reclaimed; the owner may explicitly adopt the pane again in the continued window")
+	-- A fenced coordinator start keeps its never-bound orchestrator reservation until the unused
+	-- mailbox retires, then releases it.
 	local c = fixture(); c:catalog(0)
 	local cq = c:queue(true); assert(cq.ok, cq.message)
 	assert(c:finish(cq.action_id, "provisioned", PROVISIONED_W).ok)
@@ -3237,9 +3305,16 @@ if section == nil or section == "withdraw_fenced" then
 	check(c:action(claunch).resolution.evidence == "pre_effect_refusal" and reserved.phase == "reserved" and reserved.managed_worker_id == cid,
 		"the fenced coordinator start still holds the session's orchestrator reservation")
 	check(c:queue(true).code == "orchestrator_slot_occupied", "no second coordinator can start while the fenced one holds the slot")
-	check(cancel(c, cid, status_evidence(c, c:action(claunch), "found", "full", AUTH_FULL)).code == "work_cancelled" and worker_of(c, cid) == nil
-		and coordinator_owner(c) == nil and c.authority.registry.retired[reserved.owner_id] ~= nil, "withdrawal releases the never-bound coordinator reservation")
-	check(c:queue(true).code == "task_queued" and state.rehydrate(clone(c.authority.registry)) ~= nil, "the freed slot accepts an explicit new coordinator start")
+	local cretire = cancel(c, cid, status_evidence(c, c:action(claunch), "found", "full", AUTH_FULL))
+	check(cretire.code == "withdrawal_retiring" and worker_of(c, cid) ~= nil and worker_of(c, cid).withdrawn.evidence == "pre_effect_refusal"
+		and coordinator_owner(c) ~= nil and coordinator_owner(c).managed_worker_id == cid and coordinator_owner(c).phase == "reserved",
+		"withdrawal keeps the coordinator reservation while the unused mailbox retires")
+	check(c:queue(true).code == "orchestrator_slot_occupied" and state.rehydrate(clone(c.authority.registry)) ~= nil,
+		"the slot stays held until SPAWN confirms retirement; the state restores")
+	check(c:finish(cretire.action_id, "retired", nil).ok and coordinator_owner(c) == nil and c.authority.registry.retired[reserved.owner_id] ~= nil,
+		"confirmed retirement releases the never-bound coordinator reservation")
+	check(c:queue(true).code == "task_queued" and worker_of(c, cid) == nil and state.rehydrate(clone(c.authority.registry)) ~= nil,
+		"the freed slot accepts an explicit new coordinator start; the withdrawn worker is reclaimed")
 	-- A launch claimed on the old window may have run: it stays uncertain and is never withdrawn.
 	local u = fixture(); u:catalog(0)
 	local uq = u:queue(false); assert(uq.ok)
@@ -3253,12 +3328,6 @@ if section == nil or section == "withdraw_fenced" then
 	-- A launch (or adoption ask) SPAWN definitively rejected after its mailbox was provisioned: the
 	-- owner's cancel retires the never-used mailbox through the exact retirement path; the worker stays
 	-- visible until SPAWN confirms `retired`, and a refused or uncertain retirement keeps it.
-	local OCCUPIED = { code = "binding_mismatch", message = "Occupied SPAWN controller binding; inspect Config and recover the prior owner explicitly" }
-	local function reject(fx, action_id, problem)
-		if fx:action(action_id).phase == "ready" then assert(fx:apply("claim", { action_id = action_id, executor = fx.origin.window_epoch }).ok) end
-		local a = fx:action(action_id)
-		return fx:apply("result", { action_id = action_id, executor = a.claim.executor, grant_id = a.claim.grant_id, response_bytes = frame(a.request, "rejected", nil, problem) })
-	end
 	local function rejected_launch(fx, coordinator)
 		local q = fx:queue(coordinator); assert(q.ok, q.message)
 		assert(fx:finish(q.action_id, "provisioned", PROVISIONED_W).ok)
@@ -3970,6 +4039,46 @@ do
 		local cq = q_queue(c); assert(cq.code == "task_queued", cq.message)
 		assert(c:apply("claim", { action_id = cq.action_id, executor = c.origin.window_epoch }).ok)
 		check(c:apply("cancel_work", { worker_id = cq.worker_id }).code == "worker_unbound" and q_worker(c, cq.worker_id) ~= nil, "a claimed provision is never withdrawn")
+		-- Fenced routed launch with a provisioned mailbox: withdrawal keeps the fenced launch, so the
+		-- work is never routed again, holds no concurrency reservation and opens no fallback gate
+		-- while its unused mailbox retires.
+		local AUTH_FULL = { resource = "window_authorization", current = 1, limit = 1, retryable = true, effect_started = false }
+		local validation = { revision = A, auth_revision = "auth-1", status = "current", validated_at_ms = QNOW, expires_at_ms = QNOW + 60000 }
+		local p = q_fixture()
+		assert(p:apply("policy", { policy = { quota_routing = true, concurrency_limit = 1 } }).ok)
+		assert(q_capacity(p, { q_known("native", 60) }).ok)
+		local pq = q_queue(p); assert(pq.code == "task_queued", pq.message)
+		local pid = pq.worker_id
+		assert(p:finish(pq.action_id, "provisioned", PROVISIONED).ok)
+		local plaunch = q_worker(p, pid).launch_action_id
+		assert(p:apply("claim", { action_id = plaunch, executor = p.origin.window_epoch, capacity_validation = validation }).ok)
+		local pa = p:action(plaunch)
+		check(p:apply("result", { action_id = plaunch, executor = pa.claim.executor, grant_id = pa.claim.grant_id, response_bytes = frame(pa.request, "full", AUTH_FULL) }).code == "backpressure",
+			"the routed launch is refused before effects by an expired SPAWN window challenge")
+		p.origin.window_epoch = "replacement-window"; p.controller_pane = "9010"
+		assert(p:apply("continue_controller", { expected_revision = p.authority.registry.revision, operator_verified = true }).ok)
+		local pfenced = p:action(plaunch)
+		check(pfenced.phase == "resolved" and pfenced.resolution.evidence == "pre_effect_refusal", "continuation fences the routed launch")
+		local query = { schema = 1, origin = "orchplus", op = "status", request_id = next_id(), action_id = next_id(), origin_binding = clone(pfenced.request.origin_binding),
+			controller_pane = p.controller_pane, controller_generation = pfenced.request.controller_generation, target_request_id = pfenced.request.request_id }
+		local outcome = { schema = 1, op = "launch", request_id = pfenced.request.request_id, action_id = pfenced.request.action_id, origin_binding = clone(pfenced.request.origin_binding),
+			controller_generation = pfenced.request.controller_generation, status = "full", payload = AUTH_FULL }
+		local withdrawn = p:apply("cancel_work", { worker_id = pid, query_bytes = runtime.json.encode(query), response_bytes = frame(query, "found", { outcome = outcome }) })
+		local pw = q_worker(p, pid)
+		check(withdrawn.code == "withdrawal_retiring" and pw ~= nil and p:action(plaunch) ~= nil and pw.routing.phase == "selected" and pw.routing.reservation.phase == "released",
+			"the withdrawn routed work keeps its fenced launch and holds no concurrency reservation")
+		local actions_before = q_actions(p, pid)
+		assert(q_capacity(p, { q_known("native", 0) }, B).ok)
+		check(q_gate(p, pid) == nil and q_actions(p, pid) == actions_before and q_worker(p, pid).routing.phase == "selected",
+			"new capacity evidence never re-routes the withdrawn work or opens a fallback gate for it")
+		assert(q_capacity(p, { q_known("native", 60) }, C).ok)
+		local next_work = q_queue(p)
+		check(next_work.code == "task_queued" and q_worker(p, next_work.worker_id).routing.reservation.phase == "reserved",
+			"the concurrency limit of one admits new routed work while the withdrawal retires")
+		check(state.rehydrate(clone(p.authority.registry)) ~= nil, "the routed withdrawal restores")
+		check(p:finish(withdrawn.action_id, "retired", nil).ok and q_worker(p, pid).mailbox_retired == true, "SPAWN confirms the routed withdrawal's retirement")
+		q_queue(p) -- Queueing reclaims settled retired workers first.
+		check(q_worker(p, pid) == nil, "the retired routed worker is reclaimed")
 	end
 
 	if section == nil or section == "quota_continuation" then

@@ -499,11 +499,25 @@ local function prepare_wake(root,entry)
  w.request_id=r.request_id;w.pane_binding=P.clone(select(3,route(launch)))
  return finish(root,entry,P.body(r,'resolved',{wake_status='awaiting_window',wake_effect_started=false}),true)
 end
--- A launch-family request SPAWN rejected never reached native execution: every stored launch or
--- adoption rejection precedes the native call (an adoption `refused` result precedes its ask). No
--- pane was bound and no producer ran, so its never-used mailbox may retire without a native stop.
+-- A requested challenge is consumable only on this host VM before its deadline: M.authorize
+-- refuses an expired or earlier-VM nonce. Expiry is registry time alone; it never depends on the
+-- requesting window or bridge still existing.
+local function live_challenge(a)
+ return a~=nil and a.phase=='requested' and a.boot==boot and a.deadline>=tern.now()
+end
+-- A launch-family request never reached native execution in two cases, so its never-used mailbox
+-- may retire without a native stop (contract C2; ORCH+ `dispatch/withdraw_fenced` is the other side):
+-- 1. SPAWN rejected it: every stored launch or adoption rejection precedes the native call (an
+--    adoption `refused` result precedes its ask).
+-- 2. It was only staged: no execution or ORCH+ claim was ever recorded and its requested challenge
+--    expired or belongs to an earlier host VM, so it can never be consumed. The accepting
+--    retirement fences it (see `mailbox`), turning it into case 1 before M.stage can re-nonce it.
+-- Neither case bound a pane or ran a producer.
 local function unexecuted_launch(entry)
- return launched(entry) and entry.body.status=='rejected' and entry.pane_binding==nil and entry.attachment==nil and entry.stop_request_id==nil and entry.acceptance==nil
+ if not launched(entry) or entry.pane_binding~=nil or entry.attachment~=nil or entry.stop_request_id~=nil or entry.acceptance~=nil then return false end
+ if entry.body.status=='rejected' then return true end
+ local a=entry.authorization
+ return entry.claim==nil and entry.orch_claim==nil and a~=nil and a.phase=='requested' and not live_challenge(a)
 end
 local function mailbox(root,entry,snapshot,changed)
  local r=entry.request;local record=nil
@@ -537,6 +551,13 @@ local function mailbox(root,entry,snapshot,changed)
   if issued and not unused then
    local target,why=retire_launch(root,entry)
    if not target then return finish(root,entry,P.reject(r,'binding_mismatch',why),true) end
+  elseif issued and unused and issued.authorization and issued.body.status~='rejected' then
+   -- Fence the never-consumable challenge in this same save so the launch is terminal-rejected
+   -- and M.stage can never re-nonce and authorize it while its mailbox retires.
+   local a=issued.authorization
+   issued.authorization_fence={nonce=a.nonce,phase=a.phase,bridge=a.bridge,executor=a.window_executor}
+   issued.authorization=nil
+   issued.body=P.reject(issued.request,'authorization_revoked','Unused mailbox retirement fenced the unconsumed launch challenge')
   end
  end
  if r.op=='mailbox_provision' then
@@ -638,12 +659,6 @@ local function mailbox(root,entry,snapshot,changed)
   changed(body)
  end)
  return entry.body
-end
--- A requested challenge is consumable only on this host VM before its deadline: M.authorize
--- refuses an expired or earlier-VM nonce. Expiry is registry time alone; it never depends on the
--- requesting window or bridge still existing.
-local function live_challenge(a)
- return a~=nil and a.phase=='requested' and a.boot==boot and a.deadline>=tern.now()
 end
 -- An unconsumed challenge whose deadline passed or whose host VM restarted can
 -- never be consumed, so no effect started for it.

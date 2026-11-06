@@ -153,7 +153,7 @@ class WorkflowEntryContract(unittest.TestCase):
         cases = [
             {'hook_event_name': 'UserPromptSubmit', 'prompt': 'Explain /glitch-execute to me'},
             {'hook_event_name': 'PreToolUse', 'tool_name': 'Read',
-             'tool_input': {'file_path': '/opt/glitch/plans/other-pane.md'}},
+             'tool_input': {'file_path': '/work/plans/other-pane.md'}},
         ]
         self.assertEqual([(r.returncode, r.stdout) for r in map(self.hook, cases)], [(0, ''), (0, '')])
 

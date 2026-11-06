@@ -16,6 +16,44 @@ local function mark(r,key)
  entry.keys[key]=true
 end
 local timer=nil
+-- Bounded focus guards, keyed by the pane a managed launch created. A native agent tab can take
+-- focus after agents:start returns (on macOS once its composer is ready), so the one immediate
+-- check misses it. For 5 s each tick restores `previous` at most once, and only while focus sits
+-- on the created pane; focus seen on any other pane (the operator moved) drops the guard.
+-- Focus is presentation only: guards never touch launch markers or results.
+local GUARD_MS,GUARD_CAP=5000,32
+local focus_guards,guard_order={},{}
+local function unguard(created)
+ focus_guards[created]=nil
+ for i,id in ipairs(guard_order) do if id==created then table.remove(guard_order,i);break end end
+end
+local function guard_focus(created,previous)
+ -- Back-to-back launches: focus on an earlier guarded pane returns to that guard's controller.
+ local earlier=focus_guards[previous]
+ if earlier then previous=earlier.previous end
+ unguard(created)
+ local guard={previous=previous,deadline=tern.now()+GUARD_MS}
+ focus_guards[created]=guard;table.insert(guard_order,created)
+ while #guard_order>GUARD_CAP do focus_guards[table.remove(guard_order,1)]=nil end
+ return guard
+end
+local function check_focus(cx)
+ if #guard_order==0 then return end
+ local now=tern.now();local focused=cx.session:focused()
+ for _,created in ipairs(table.clone(guard_order)) do
+  local guard=focus_guards[created]
+  if not guard then continue end
+  if now>guard.deadline then unguard(created)
+  elseif focused==created then
+   unguard(created)
+   pcall(cx.layout.focus,cx.layout,guard.previous)
+   focused=cx.session:focused()
+  elseif focused~=nil and focused~=guard.previous and not focus_guards[focused] then
+   -- A third pane that no managed launch created: the operator chose it; never steal it back.
+   unguard(created)
+  end
+ end
+end
 local function read_node(cx,pane,block,key,role,limit)
  local info=cx.session:pane(pane);if not info or info.block~=block then return nil end
  local tree=cx.session:surface(pane,{as='table',root='main.'..key,nodes=4,depth=2,max_chars=limit})
@@ -142,7 +180,8 @@ local function execute(cx,pane,projection)
  if launch.backend=='native-agent' and (type(launch.prompt)~='string' or not launch.prompt:find('%S')) then return end
  if not origin_ok(cx,pane,r,projection.orch_claim) then return end
  -- A managed launch runs in the background: it never keeps focus. Terminals open unfocused;
- -- native agents:start has no focus option, so the pane focused before it gets focus back.
+ -- native agents:start has no focus option, so the pane focused before it gets focus back,
+ -- now and (through its focus guard) when the new pane takes focus late.
  local focused=cx.session:focused()
  -- Validate first, then mark BEFORE native invocation: a throw may be an effect.
  mark(r,k..'/effect')
@@ -157,7 +196,10 @@ local function execute(cx,pane,projection)
  end)
  if ok and type(created)=='number' and focused~=nil and focused~=created then
   -- Focus is presentation only; a failure here must never change the launch result.
-  pcall(function()if cx.session:focused()==created then cx.layout:focus(focused) end end)
+  -- The guard stays after a successful immediate restore: late focus can still arrive.
+  pcall(guard_focus,created,focused)
+  local previous=if focus_guards[created] then focus_guards[created].previous else focused
+  pcall(function()if cx.session:focused()==created then cx.layout:focus(previous) end end)
  end
  if not origin_ok(cx,pane,r,projection.orch_claim) then return end
  local result
@@ -268,6 +310,8 @@ local function prune(cx)
 end
 local function tick(cx)
  if not cx then return end
+ -- Guards expire on their own deadline whatever the host state; a throw never blocks dispatch.
+ pcall(check_focus,cx)
  local host=cx.hosts:current();local session=cx.sessions:current()
  if not host or not session or host.state~='connected' then return end
  local visited=0

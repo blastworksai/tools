@@ -377,6 +377,7 @@ recovered_execution.hooks.command_started({ pane = 17, line = recovered_executio
 recovered_execution.hooks.command_finished({ pane = 17, line = recovered_execution.job.command, status = 0 })
 check(recovered_execution.job.pane_reused and recovered_execution.job.stage == "unknown", "a later identical manual command cannot supply the original provider's completion")
 check(#different_epoch.writes == 0 and different_epoch.probes == 0 and different_epoch.job.stage == "unknown", "different daemon epoch refuses even an observational pane-identity guess")
+check(different_epoch.job.observation.diagnostic == "Host restarted (daemon epoch changed): lost; execution will not be repeated" and different_epoch.job.observation.error_category == "host-unavailable", "a known different daemon epoch names the host restart")
 local lost_completion = execution_fixture(active_saved)
 lost_completion.drain()
 check(#lost_completion.writes == 0 and lost_completion.job.stage == "unknown", "an idle retained shell after reload cannot invent successful provider completion")
@@ -385,12 +386,27 @@ claimed_gap.stage, claimed_gap.epoch, claimed_gap.command, claimed_gap.process_i
 local recovered_gap = execution_fixture(claimed_gap)
 recovered_gap.drain()
 check(#recovered_gap.writes == 0 and recovered_gap.job.stage == "unknown", "claim-before-submission reload is observation-only rather than a deferred retry")
+check(recovered_gap.job.observation.diagnostic == "The daemon epoch is different or unverifiable after reload; execution will not be repeated" and recovered_gap.job.observation.error_category == "host-unavailable", "an unrecorded epoch keeps the unverifiable message")
 local slow_store = execution_fixture(nil, { slow_store = true })
 slow_store.drain()
 check(slow_store.spawn() ~= nil, "slow journal storage cannot trip the native spawn-filter deadline")
 check(slow_store.spawn() == nil, "a pending deferred claim cannot be consumed twice")
 slow_store.drain()
 check(#slow_store.writes == 1 and slow_store.claims == 1 and slow_store.job.stage == "running", "deferred persistence admits exactly one provider invocation")
+
+-- A pending window request is cleared automatically only by its own definitive refusal.
+do
+	local pending = { request_id = "window-1:22", op = "launch_record" }
+	local refusal = { request_id = "window-1:22", observer_id = "window-1", ok = false, error = "duplicate" }
+	check(lifecycle.refused_pending(pending, refusal, "window-1"), "a matching ok=false reply clears its pending request")
+	local admitted_reply = copy(refusal); admitted_reply.ok, admitted_reply.error = true, nil
+	check(not lifecycle.refused_pending(pending, admitted_reply, "window-1"), "an admitted reply keeps manual transport review")
+	check(not lifecycle.refused_pending(pending, nil, "window-1"), "a missing reply may still be in flight")
+	local other_request = copy(refusal); other_request.request_id = "window-1:23"
+	check(not lifecycle.refused_pending(pending, other_request, "window-1"), "a reply for another request never clears this one")
+	check(not lifecycle.refused_pending(pending, refusal, "window-2"), "a reply for another observer never clears this one")
+	check(not lifecycle.refused_pending({ op = "launch_record" }, refusal, "window-1") and not lifecycle.refused_pending("window-1:22", refusal, "window-1"), "a malformed pending journal is never cleared")
+end
 
 -- Real lifecycle mutations: no simulated launch results or wiring assertions.
 local state = lifecycle.new()

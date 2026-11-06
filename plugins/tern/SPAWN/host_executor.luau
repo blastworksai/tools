@@ -2,6 +2,13 @@
 local Resolution = require("./launch_resolution")
 local Native = require("./native_cli")
 local Executor = {}
+-- The daemon's identity cannot change under a running host VM, so a known
+-- epoch is read once per VM; reloads and snapshots reuse it without /proc.
+local cached_epoch: string? = nil
+function Executor.epoch(): string?
+	if cached_epoch == nil then cached_epoch = Native.epoch() end
+	return cached_epoch
+end
 local function nonempty(value: any): string?
 	return if type(value) == "string" and value:match("%S") ~= nil then value else nil
 end
@@ -287,7 +294,7 @@ end
 local function submit(track)
 	local job = current(track)
 	if job == nil or job.stage ~= "claimed" or job.pane_reused then return end
-	local epoch = Native.epoch()
+	local epoch = Executor.epoch()
 	if epoch ~= nil then
 		job = update(track, job, { epoch = epoch })
 		if job == nil then fail_job(track, "The host epoch could not be recorded before execution"); return end
@@ -422,10 +429,14 @@ local function pane_exited(event)
 	fail_job(track, "The retained native pane exited without a matching provider completion; no provider exit status can be inferred")
 end
 local function recover(track, job)
-	local epoch = Native.epoch()
+	local epoch = Executor.epoch()
 	if job.epoch == nil or epoch == nil or job.epoch ~= epoch then
 		detach_observer(track)
-		uncertain(track, "The daemon epoch is different or unverifiable after reload; execution will not be repeated")
+		if job.epoch ~= nil and epoch ~= nil then
+			uncertain(track, "Host restarted (daemon epoch changed): lost; execution will not be repeated")
+		else
+			uncertain(track, "The daemon epoch is different or unverifiable after reload; execution will not be repeated")
+		end
 		return
 	end
 	membership(track, function(found, problem)

@@ -29,7 +29,7 @@ local fake=setmetatable({
 modules.native_cli={inspect=function(_window,_options,callback)
  if holdInspection then deferred=callback;return end
  callback({status=0,timed_out=false,stdout=runtime.json.encode(inventory)},nil)
-end}
+end,epoch=function()return 'fixture-epoch' end}
 local function load(name)
  name=name:gsub('^%./','')
  if modules[name]~=nil then return modules[name] end
@@ -150,4 +150,29 @@ check(reply.ok and #admitted.attempts==1 and #admitted.jobs==1,'approved launch 
 check(admitted.jobs[1].attempt_id==admitted.attempts[1].id and type(admitted.jobs[1].ticket)=='string','admission binds the released harmless ticket to its exact attempt')
 check(admitted.attempts[1].purpose~='managed','ordinary editor admission never converts managed metadata into a managed reservation')
 check(hooks.spawn~=nil and #hooks.spawn==1 and #timers>=1,'real host executor installs only deferred hooks while editor tests execute no native effects')
+-- Host restart: an attempt recorded under an earlier daemon epoch is listed
+-- and released only by the explicit two-click resolve-lost action.
+local lostId=admitted.attempts[1].id
+local native={pane=42,window_key='',program='/bin/bash',executable='/opt/tern',socket='/tmp/tern.sock'}
+check(A.claim_execution(state.binding,lostId,native)~=nil,'fixture claims the admitted job')
+check(A.update_execution(state.binding,lostId,'claimed',{epoch='previous-epoch'})~=nil,'fixture records the earlier daemon epoch')
+check(A.update_execution(state.binding,lostId,'claimed',{stage='submission_intent',command='ordinary-cli'})~=nil,'fixture records submission intent')
+check(A.update_execution(state.binding,lostId,'submission_intent',{stage='running'},{phase='Running',pane=42})~=nil,'fixture observes the provider running')
+check(A.update_execution(state.binding,lostId,'running',{stage='unknown'},{phase='Unknown',error_category='host-unavailable',diagnostic='Host restarted (daemon epoch changed): lost; execution will not be repeated'})~=nil,'fixture loses the attempt to a restart')
+refresh()
+check(state.snapshot.host_restart~=nil and P.equal(state.snapshot.host_restart.attempts,{lostId}),'reload passes the host epoch and lists the lost attempt')
+state.page='runtime'
+local lostRows={}
+for _,section in ipairs(definition.view(state,cx).main.children[1].p.sections) do
+ for _,item in ipairs(section.rows) do lostRows[item.id]=item end
+end
+local lostAction='resolve-lost@'..tostring(state.snapshot.config_revision)
+check(lostRows['host-restart']~=nil and lostRows['resolve-lost']~=nil and lostRows['resolve-lost'].control.act==lostAction,'Running agents shows the restart notice and one config-revision-bound bulk action')
+before=clone(saved)
+definition.event(state,{ev='action',act=lostAction},cx)
+check(state.armed=='resolve-lost' and P.equal(before,saved),'the first click only arms the bulk release')
+definition.event(state,{ev='action',act=lostAction},cx)
+local releasedView=snapshot()
+check(state.armed==nil and not releasedView.attempts[1].unresolved and releasedView.jobs[1].stage=='resolved','the confirming click releases the lost reservation through resolve-lost-attempts')
+check(assert(A.snapshot(state.binding,'fixture-epoch')).host_restart==nil and state.notice=='Saved. No agents were launched.','no lost attempt remains and the release reports success')
 return 'host_editor checks: '..checks

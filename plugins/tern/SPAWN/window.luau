@@ -8,6 +8,8 @@ local BLOCK = "spawn.spawner"
 local PREFIX = "SPAWN_STATE_V2 "
 local MAX_QUEUE = 64
 local POLL_MS = 250
+-- Spawn all starts each submitted launch this far apart so start-up memory spikes don't stack.
+local BATCH_INTERVAL_MS = 5000
 local MODES = { ["native-agent"] = "Native OMP", ["local-terminal"] = "Terminal", ["ssh-command"] = "SSH terminal" }
 local COLORS = { claude = "orange", codex = "green", kimi = "teal", muse = "blue", agy = "red", grok = "yellow", omp = "purple" }
 local ICONS = { claude = "provider-anthropic", codex = "provider-openai-codex", kimi = "provider-kimi-code", muse = "provider-meta", agy = "provider-google-antigravity", grok = "provider:xai", omp = "pi-mark" }
@@ -263,7 +265,7 @@ local function ensure_observer(cx: any, callback: any)
 						end
 						if count ~= #state.acknowledgments then error("Invalid sparse request acknowledgment journal") end
 						if state.pending ~= nil then
-							local ops = { refresh = true, import_records = true, launch_record = true, start_setup = true, resolve_attempt = true }
+							local ops = { refresh = true, import_records = true, launch_record = true, start_setup = true, resolve_attempt = true, resolve_lost_attempts = true }
 							if type(state.pending) ~= "table" or not identity(state.pending.request_id, 512) or not ops[state.pending.op] then error("Invalid pending request journal; inspect Config without replaying it") end
 						end
 					end
@@ -272,6 +274,15 @@ local function ensure_observer(cx: any, callback: any)
 						if key ~= track.attempt.id .. "@" .. track.origin.authority_id or track.job.attempt_id ~= track.attempt.id or track.job.record_id ~= track.attempt.record_id or track.job.session_key ~= track.origin.session_key or track.attempt.scope ~= track.origin.session_key then error("Saved execution association identity mismatch") end
 					end
 					if saved.setup ~= nil and (type(saved.setup) ~= "table" or not identity(saved.setup.id, 256) or not valid_origin(saved.setup.origin) or not identity(saved.setup.job_id, 96) or not identity(saved.setup.ticket, 512) or type(saved.setup.initial_prompt) ~= "string" or #saved.setup.initial_prompt > 120000 or (saved.setup.pane ~= nil and not integer(saved.setup.pane))) then error("Invalid saved setup run; use Config paste recovery") end
+					-- Optional, additive within version 2: one shown host-restart notice per session.
+					if saved.restart_notices ~= nil then
+						if type(saved.restart_notices) ~= "table" then error("Invalid saved host restart notices") end
+						local notices = 0
+						for session_key, restart_id in saved.restart_notices do
+							notices += 1
+							if notices > 64 or not identity(session_key, 2048) or not identity(restart_id, 64) then error("Invalid saved host restart notices") end
+						end
+					end
 					return saved
 				end)
 				if loaded then observer = data; tracked = data.tracked; setup = data.setup else problem = tostring(data) end
@@ -334,6 +345,25 @@ local function validate_snapshot(value: any): (any?, string?)
 		if count > 64 or not identity(id, 256) or not integer(sequence) then return nil, "Invalid authority request watermark" end
 	end
 	if value.error ~= nil and type(value.error) ~= "string" then return nil, "Invalid authority error" end
+	if value.host_restart ~= nil then
+		local restart = value.host_restart
+		local valid = type(restart) == "table" and identity(restart.restart_id, 64) and type(restart.attempts) == "table"
+		if valid then
+			for name in restart do if name ~= "restart_id" and name ~= "attempts" then valid = false end end
+		end
+		if valid then
+			local listed, seen = 0, {}
+			for index, id in restart.attempts do
+				listed += 1
+				local attempt = if type(id) == "string" then attempts[id] else nil
+				if listed > 128 or not integer(index) or index < 1 or index > #restart.attempts or attempt == nil or seen[id]
+					or attempt.phase ~= "Unknown" or attempt.unresolved ~= true or attempt.purpose == "managed" then valid = false; break end
+				seen[id] = true
+			end
+			if valid and (listed == 0 or listed ~= #restart.attempts) then valid = false end
+		end
+		if not valid then return nil, "Invalid host restart notice" end
+	end
 	value.records = records
 	return value, nil
 end
@@ -517,7 +547,21 @@ pump = function(cx: any, queue: any)
 	if value == nil then finish(cx, nil, err); return end
 	local state = transport(origin)
 	if type(state) ~= "table" or not integer(state.sequence) or type(state.acknowledgments) ~= "table" then finish(cx, nil, "The saved observer transport is invalid"); return end
-	if state.pending ~= nil then finish(cx, nil, "An earlier request has an unreviewed outcome. Open Running agents → Transport review before continuing."); return end
+	if state.pending ~= nil then
+		local pending, prior_acknowledgments = state.pending, state.acknowledgments
+		local refused = value.replies[pending.request_id]
+		if not Launch.refused_pending(pending, refused, observer.id) then
+			finish(cx, nil, "An earlier " .. tostring(pending.op) .. " request has an unreviewed outcome. Open SPAWN: Running agents → Transport review → acknowledge it, then try again."); return
+		end
+		-- A definitive refusal executed nothing; settle it exactly as the poll does.
+		state.acknowledgments = { pending.request_id }
+		state.pending = nil
+		if not save_observer(cx) then
+			state.pending, state.acknowledgments = pending, prior_acknowledgments
+			finish(cx, nil, "An earlier " .. tostring(pending.op) .. " request has an unreviewed outcome. Open SPAWN: Running agents → Transport review → acknowledge it, then try again."); return
+		end
+		cx:toast("info", "Cleared an earlier refused SPAWN request", "The host refused " .. tostring(pending.op) .. " (" .. tostring(refused.error) .. "); nothing ran. Continuing with your new request.")
+	end
 	state.sequence = math.max(state.sequence, value.request_sequences[observer.id] or 0) + 1
 	local id = observer.id .. ":" .. tostring(state.sequence)
 	local acknowledged = {}
@@ -645,6 +689,22 @@ local function sync_snapshot(cx: any, origin: any, value: any)
 	end
 	refresh_artwork(cx)
 	if changed then save_observer(cx) end
+	local restart = value.host_restart
+	if restart ~= nil and observer ~= nil then
+		local notices = observer.restart_notices or {}
+		if notices[value.session_key] ~= restart.restart_id then
+			if notices[value.session_key] == nil then
+				local entries = 0
+				for _ in notices do entries += 1 end
+				if entries >= 64 then notices[(next(notices))] = nil end
+			end
+			notices[value.session_key] = restart.restart_id
+			observer.restart_notices = notices
+			save_observer(cx)
+			local lost = #restart.attempts
+			cx:toast("info", "Host restarted — " .. tostring(lost) .. " SPAWN " .. (if lost == 1 then "agent was" else "agents were") .. " lost", "Nothing was relaunched. Running agents → Mark all lost agents no longer running after review.")
+		end
+	end
 	for id in changed_batches do if batches[id] ~= nil then batch_summary(cx, batches[id]) end end
 end
 local function admission_result(reply: any, origin: any, record_id: string, purpose: string, run_id: string?): (any?, any?, string?)
@@ -779,10 +839,24 @@ local function run_batch(cx: any, origin: any, records: any)
 	for _, record in records do batch.record_ids[record.id] = true end
 	batches[batch.id] = batch
 	local index = 0
-	local function next_record(fresh: any, stop: string?)
+	local admit: any
+	-- paced is true only after a record reached the host submission boundary.
+	-- Skipped, duplicate and disabled records continue at once; the first
+	-- record is never delayed. No ticket or admission exists during the wait.
+	local function next_record(fresh: any, stop: string?, paced: boolean?)
 		if stop ~= nil then batch.stopped = true; fail(fresh, stop); batch_summary(fresh, batch); return end
 		index += 1
 		if index > #records then batch.completed = true; batch_summary(fresh, batch); return end
+		if paced then
+			tern.timer(BATCH_INTERVAL_MS, function(next_cx)
+				if next_cx == nil then batch.stopped = true; return end
+				admit(next_cx)
+			end)
+			return
+		end
+		admit(fresh)
+	end
+	admit = function(fresh: any)
 		local changed = context_error(fresh, origin, true)
 		if origin.config_revision ~= batch.config_revision then changed = "Saved configuration changed during this batch; choose Spawn again after review" end
 		if changed ~= nil then batch.stopped = true; fail(fresh, changed); batch_summary(fresh, batch); return end
@@ -795,7 +869,9 @@ local function run_batch(cx: any, origin: any, records: any)
 			end
 			local job, attempt, admission_error = admission_result(reply, origin, record.id, "launch", nil)
 			if job == nil then batch.failed += 1; next_record(admitted_cx, admission_error); return end
-			allocate_ticket(admitted_cx, origin, job, attempt, reply.result.replayed, batch, next_record)
+			allocate_ticket(admitted_cx, origin, job, attempt, reply.result.replayed, batch, function(done_cx: any, problem: string?)
+				next_record(done_cx, problem, true)
+			end)
 		end)
 	end
 	next_record(cx)
@@ -935,6 +1011,16 @@ open_running = function(cx: any)
 			groups[group] = true
 			table.insert(items, { group = group, label = label(track.job) .. " · Host " .. attempt.phase, detail = detail, attempt = attempt, job = track.job, verified = verified })
 		end
+		-- The host alone decides which attempts are lost; a pane this window still
+		-- verifies is never offered for bulk release.
+		if value.host_restart ~= nil then
+			local verified_ids, lost = {}, {}
+			for _, item in items do if item.attempt ~= nil and item.verified then verified_ids[item.attempt.id] = true end end
+			for _, id in value.host_restart.attempts do if not verified_ids[id] then table.insert(lost, id) end end
+			if #lost > 0 then
+				table.insert(items, 1, { group = "Host restart", label = "Host restarted — " .. tostring(#lost) .. " SPAWN " .. (if #lost == 1 then "agent was" else "agents were") .. " lost", detail = "The execution host's daemon restarted; their panes cannot be verified. Nothing was relaunched.", lost = lost })
+			end
+		end
 		local pane_hosts, tab_sessions = {}, {}
 		for _, host in fresh.hosts:list() do for _, pane in host.panes do pane_hosts[pane] = host end end
 		for _, tab in fresh.session:tabs() do tab_sessions[tab.id] = tab.session end
@@ -960,6 +1046,23 @@ open_running = function(cx: any)
 			if next_cx == nil then return end
 			if err ~= nil then fail(next_cx, err); return end
 			if item == nil or item.other then return end
+			if item.lost ~= nil then
+				local ids = item.lost
+				next_cx:pick({ items = {
+					{ label = "Keep reservations", action = "keep" },
+					{ label = "Mark all " .. tostring(#ids) .. " lost agents no longer running", detail = "Only after inspection. Releases duplicate blocking for exactly these attempts; does not stop or close a program.", action = "release" },
+				}, placeholder = "Host restart · lost SPAWN agents" }):next(function(choice, choice_error, decision_cx)
+					if decision_cx == nil then return end
+					if choice_error ~= nil then fail(decision_cx, choice_error); return end
+					if choice == nil or choice.action ~= "release" then return end
+					request(decision_cx, origin, "resolve_lost_attempts", { attempt_ids = ids, attempt_revision = value.attempt_revision }, function(done_cx, reply, release_error)
+						if release_error ~= nil then fail(done_cx, release_error); return end
+						local released = if type(reply) == "table" and type(reply.result) == "table" then reply.result.released else #ids
+						done_cx:toast("info", "SPAWN", "Released " .. tostring(released) .. " lost reservations; no pane was closed")
+					end)
+				end)
+				return
+			end
 			if item.transport then
 				next_cx:pick({ items = {
 					{ label = "Keep waiting state", action = "keep" },

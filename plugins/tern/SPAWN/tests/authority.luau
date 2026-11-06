@@ -1156,7 +1156,7 @@ local function host_block(db, authority, config)
 		if name == "./config" then return config end
 		if name == "./authority" then return authority end
 		if name == "./native_cli" then return native_cli end
-		if name == "./host_executor" then return { install = function() end, attach = function() end } end
+		if name == "./host_executor" then return { install = function() end, attach = function() end, epoch = function() return nil end } end
 		if name == "./dispatch" then return {recovery_view=function()return {}end,import_decode=function()return nil end} end
 		if name == "./codec" then return load("codec") end
 		error("Unexpected host dependency: " .. name)
@@ -1228,6 +1228,115 @@ sections.transient_reply = function()
 	local refused = 0
 	for _, item in pairs(replies()) do if item.observer_id == "D" then refused += 1 end end
 	check(refused == 16, "refusal replies are bounded")
+end
+
+-- C3: only Unknown native work recorded under a different, known daemon epoch
+-- is lost. Bulk release is all-or-nothing on the request and edit paths.
+sections.lost_release = function()
+	local reason_unverifiable = "host-epoch-unverifiable: inspect and mark each attempt individually"
+	for _, path in ipairs({ "remote", "native" }) do
+		local db, authority, binding = fresh({ record("expired"), record("lost-a"), record("lost-b"), record("live") })
+		local revision = snapshot(authority, binding).config_revision
+		local sequence = 0
+		local function admit(record_id)
+			sequence += 1
+			local reply = submit(authority, binding, reserve_request(binding, "owner", sequence, revision, record_id))
+			check(reply.ok, "admit " .. record_id)
+			return reply.result.attempt.id
+		end
+		local function run(id, pane)
+			claim(authority, binding, id, pane)
+			update(authority, binding, id, "claimed", { epoch = "daemon:1" })
+			update(authority, binding, id, "claimed", { stage = "submission_intent", command = "ordinary-cli" })
+			update(authority, binding, id, "submission_intent", { stage = "running" }, { phase = "Running", pane = pane })
+		end
+		local function lose(id, pane)
+			run(id, pane)
+			update(authority, binding, id, "running", { stage = "unknown" }, { phase = "Unknown", error_category = "host-unavailable", diagnostic = "Host restarted (daemon epoch changed): lost; execution will not be repeated" })
+		end
+		local expired = admit("expired")
+		db.now += authority.ADMISSION_SECONDS + 1
+		check(snapshot(authority, binding).jobs[1].stage == "unknown", "an unclaimed admission expires to Unknown without an epoch")
+		local a, b = admit("lost-a"), admit("lost-b")
+		lose(a, 42); lose(b, 43)
+		local live = admit("live"); run(live, 44)
+		local function restart_of(epoch)
+			local value, err = authority.snapshot(binding, epoch)
+			assert(value, tostring(err))
+			return value.host_restart, value
+		end
+		local restart, view = restart_of("daemon:2")
+		check(restart ~= nil and equal(restart.attempts, { a, b }), path .. ": a changed host epoch lists exactly the lost attempts")
+		check(type(restart.restart_id) == "string" and #restart.restart_id == 32 and restart.restart_id:find("daemon", 1, true) == nil, "the restart id is a digest, never the raw epoch")
+		check(restart_of("daemon:1") == nil, "the recording epoch lists no lost attempt")
+		check(restart_of(nil) == nil, "an unknown host epoch lists no lost attempt")
+		local function ledger()
+			local scope = db.peek("authority").sessions[binding.session_key]
+			return { launch = scope.launch, jobs = scope.jobs }
+		end
+		local function remote(ids, attempt_revision, epoch)
+			sequence += 1
+			local value = request(binding, "owner", sequence, revision, "resolve_lost_attempts", { attempt_ids = ids, attempt_revision = attempt_revision })
+			local ok, err = authority.request(binding, value, epoch)
+			check(ok, "lost release request commits its reply: " .. tostring(err))
+			local _, latest = restart_of(epoch)
+			return latest.replies[value.request_id], value
+		end
+		local before = ledger()
+		for _, case in ipairs({
+			{ name = "stale attempt revision", ids = { a, b }, revision = view.attempt_revision - 1, epoch = "daemon:2", reason = "stale-attempt-revision" },
+			{ name = "mix with a running job", ids = { a, b, live }, revision = view.attempt_revision, epoch = "daemon:2", reason = "not-lost: " .. live },
+			{ name = "mix with an admission-expired job", ids = { a, expired }, revision = view.attempt_revision, epoch = "daemon:2", reason = "not-lost: " .. expired },
+			{ name = "unknown host epoch", ids = { a, b }, revision = view.attempt_revision, epoch = nil, reason = reason_unverifiable },
+		}) do
+			if path == "remote" then
+				local reply = remote(case.ids, case.revision, case.epoch)
+				check(reply ~= nil and not reply.ok and reply.error == case.reason, "remote " .. case.name .. " is refused: " .. tostring(reply and reply.error))
+				same(ledger(), before, "remote " .. case.name .. " leaves the ledger unchanged")
+			else
+				refused_unchanged(db, function()
+					return authority.edit(binding, revision, "resolve-lost-attempts", { attempt_ids = case.ids, attempt_revision = case.revision, epoch = case.epoch })
+				end, "native " .. case.name, case.reason)
+			end
+		end
+		if path == "native" then
+			refused_unchanged(db, function()
+				return authority.edit(binding, revision, "resolve-lost-attempts", { attempt_ids = { a, a }, attempt_revision = view.attempt_revision, epoch = "daemon:2" })
+			end, "native duplicate attempt IDs")
+		else
+			local duplicate = request(binding, "owner", sequence + 1, revision, "resolve_lost_attempts", { attempt_ids = { a, a }, attempt_revision = view.attempt_revision })
+			refused_unchanged(db, function() return authority.request(binding, duplicate, "daemon:2") end, "remote duplicate attempt IDs")
+		end
+		local current = select(2, restart_of("daemon:2"))
+		if path == "remote" then
+			local reply, value = remote({ a, b }, current.attempt_revision, "daemon:2")
+			check(reply ~= nil and reply.ok and reply.result.released == 2, "remote bulk release reports every released attempt")
+			check(authority.validate(db.peek("authority")) ~= nil, "the retained release reply survives read_root validation")
+			local settled = ledger()
+			check(authority.request(binding, value, "daemon:2"), "an identical replay returns the retained reply")
+			same(ledger(), settled, "an identical replay changes nothing")
+			same(select(2, restart_of("daemon:2")).replies[value.request_id], reply, "the replayed reply is unchanged")
+		else
+			edit(authority, binding, "resolve-lost-attempts", { attempt_ids = { a, b }, attempt_revision = current.attempt_revision, epoch = "daemon:2" })
+			local released = select(2, restart_of("daemon:2"))
+			refused_unchanged(db, function()
+				return authority.edit(binding, revision, "resolve-lost-attempts", { attempt_ids = { a, b }, attempt_revision = released.attempt_revision, epoch = "daemon:2" })
+			end, "native repeated release", "not-lost: " .. a)
+		end
+		local after_restart, after = restart_of("daemon:2")
+		check(after_restart == nil, path .. ": no lost attempt remains after release")
+		for _, attempt in after.attempts do
+			local job = nil
+			for _, candidate in after.jobs do if candidate.id == attempt.id then job = candidate end end
+			if attempt.id == a or attempt.id == b then
+				check(not attempt.unresolved and attempt.phase == "Unknown" and job.stage == "resolved", path .. ": released attempt and job are resolved")
+			elseif attempt.id == live then
+				check(attempt.unresolved and attempt.phase == "Running" and job.stage == "running", path .. ": running attempt is untouched")
+			else
+				check(attempt.unresolved and job.stage == "unknown", path .. ": admission-expired attempt stays per-attempt only")
+			end
+		end
+	end
 end
 
 local run = assert(sections[section], "unknown authority test section: " .. section)

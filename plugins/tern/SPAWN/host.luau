@@ -130,7 +130,7 @@ local function live_sessions(state)
 end
 local function reload(state)
 	if not state.binding then return false end
-	local snapshot,err=Authority.snapshot(state.binding)
+	local snapshot,err=Authority.snapshot(state.binding,Executor.epoch())
 	if not snapshot then state.notice=err;state.transport_error=err;state.reload_error=err;state.snapshot=nil;return false end
 	if state.transport_error==state.reload_error then state.transport_error=nil end
 	state.reload_error=nil;state.snapshot=snapshot;state.config={schema=2,agents=snapshot.records}
@@ -326,6 +326,12 @@ local function record_sections(state)
 end
 local function runtime_sections(state)
 	local live={};local history={};local other={};local transport={}
+	local restart=state.snapshot.host_restart
+	if restart then
+		local count=#restart.attempts
+		table.insert(live,static_row("host-restart","Host restarted — "..tostring(count).." SPAWN "..(if count==1 then "agent was" else "agents were").." lost","The execution host's daemon restarted; their panes cannot be verified. Nothing was relaunched.","Attempts: "..table.concat(restart.attempts,", ")))
+		table.insert(live,action_row("resolve-lost",if state.armed=="resolve-lost" then "Confirm mark all lost agents no longer running" else "Mark all lost agents no longer running",action(state,"resolve-lost"),"Releases only these reservations; never closes a pane or stops a program."))
+	end
 	for _,a in ipairs(state.snapshot.attempts) do
 		local target=if a.phase=="Exited" or a.phase=="Failed" or not a.unresolved then history else live
 		local phase=if state.scope_error and a.unresolved then "Unknown (last observed "..a.phase..")" else a.phase
@@ -497,7 +503,7 @@ local definition={
 			verify(state,cx,function(session,why)
 				if not session then state.transport_error=why;refuse(state,input,why);return end
 				if not state.binding then state.transport_error="Authority not initialized";refuse(state,input,state.transport_error);return end
-				local ok,reason=Authority.request(state.binding,input)
+				local ok,reason=Authority.request(state.binding,input,Executor.epoch())
 				if ok and (input.op=="launch_record" or input.op=="start_setup") then Executor.attach(state.binding) end
 				state.transport_error=if ok then nil else reason;reload(state)
 				if not ok then refuse(state,input,reason) end
@@ -580,7 +586,7 @@ local definition={
 					if not review.run then review.run=state.binding.authority_id.."/manual/"..observer.."/"..tostring(seq) end
 					for id,reply in pairs(state.snapshot.replies) do if reply.observer_id==observer then table.insert(acks,id) end end
 					local request={version=2,request_id=observer..":"..tostring(seq),authority_id=state.binding.authority_id,observer_id=observer,request_sequence=seq,acknowledged_requests=acks,expected_config_revision=review.revision,op="import_records",data={setup_run_id=review.run,records=review.records}}
-					local ok,why=Authority.request(state.binding,request);reload(state)
+					local ok,why=Authority.request(state.binding,request,Executor.epoch());reload(state)
 					local reply=state.snapshot and state.snapshot.replies[request.request_id]
 					if ok and reply and reply.ok then state.import_review=nil;state.import_text="";state.notice="Imported "..tostring(reply.result.imported).." records. No agents were launched." else state.notice=why or (reply and reply.error) or "Import was not acknowledged; refresh and review transport" end
 					if reply then
@@ -603,6 +609,18 @@ local definition={
 				candidate.review_required=nil;candidate.review_reason=nil
 				local validated,why=Config.validate_record(candidate);if not validated then state.notice=why;return end
 				local records=Authority.clone(state.config.agents);records[index]=validated;mutate(state,cx,expected,"replace-records",{records=records});return
+			end
+			if op=="resolve-lost" then
+				local restart=state.snapshot.host_restart
+				if state.armed~=op then
+					if not restart then state.notice="No host-restart lost agents are listed; nothing was changed.";return end
+					state.armed=op;state.armed_attempt_revision=state.snapshot.attempt_revision;state.armed_lost_attempts=Authority.clone(restart.attempts)
+					state.notice="Inspect the listed lost agents, then click the confirmation again.";return
+				end
+				local ids=state.armed_lost_attempts
+				state.armed=nil;state.armed_lost_attempts=nil
+				mutate(state,cx,expected,"resolve-lost-attempts",{attempt_ids=ids,attempt_revision=state.armed_attempt_revision,epoch=Executor.epoch()})
+				return
 			end
 			if op=="reset-roster" or op=="clear-history" or op=="reset-transport" or op:match("^resolve:") or op:match("^review%-reply:") then
 				if state.armed~=op then state.armed=op;state.armed_attempt_revision=state.snapshot.attempt_revision;state.notice="Inspect the displayed state, then click the confirmation again.";return end

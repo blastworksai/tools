@@ -9,6 +9,12 @@ local function shown(value: any, empty: string): string
 	if type(value) == "table" then return if next(value) == nil then empty else tern.json.encode(value) end
 	return tostring(value)
 end
+-- A worker's shown state: retirement and a verified native stop outrank the last recorded phase.
+local function worker_state(worker: any): string
+	if worker.mailbox_status == "retired" then return "retired" end
+	if worker.stop_status == "absent" or worker.stop_status == "exited" then return "stopped" end
+	return tostring(worker.phase)
+end
 local SWEEP_REASON_TEXT = {
 	retired = "mailbox already retired",
 	stopped_settled = "provably stopped and settled — the normal mailbox retirement was queued",
@@ -237,7 +243,7 @@ local function dispatch_view(view: any, projection: any, selected: any): (any, a
 		if admitted and d.catalog.next_cursor ~= nil then table.insert(rows, dispatch_link(view, "catalog", "Next catalog page", { bytes = d.catalog.next_cursor })) end
 	end
 	for _, worker in d.workers do
-		table.insert(rows, ui.text(worker.work_id .. " / " .. worker.worker_id .. " · " .. worker.record_id .. " · " .. worker.phase
+		table.insert(rows, ui.text(worker.work_id .. " / " .. worker.worker_id .. " · " .. worker.record_id .. " · " .. worker_state(worker)
 			.. " · receipt " .. shown(worker.accepted_seq, "none yet") .. " / confirmed " .. shown(worker.compacted_floor, "none yet")))
 		if worker.reason then table.insert(rows, ui.text(tern.json.encode(worker.reason))) end
 		routing_rows(view, rows, worker, admitted)
@@ -250,12 +256,18 @@ local function dispatch_view(view: any, projection: any, selected: any): (any, a
 				table.insert(rows, ui.text("Cancelled by the owner: its unused mailbox is being retired (" .. tostring(worker.mailbox_status) .. "). The worker is removed once SPAWN confirms retirement; an uncertain retirement is never re-issued, so inspect its retained outcome."))
 			elseif admitted then
 				table.insert(rows, dispatch_link(view, "cancel_work", "Cancel never-launched work…", { worker_id = worker.worker_id }))
-				table.insert(rows, ui.text(if fenced.status_required
-					then "SPAWN received that exact request, so cancel first reads its retained SPAWN status. The worker is removed and its reservations released only when the request can never run: SPAWN has no record of it, rejected it, or reports a pre-effect refusal such as an expired window challenge. A live challenge refuses until it expires (30 s). A provisioned mailbox stays unused; nothing native is stopped or retired."
-					elseif fenced.mailbox_retire == "refused" then "SPAWN refused the previous retirement of this work's unused mailbox (reason above); nothing was removed. Cancel again to issue one fresh retirement."
-					elseif fenced.mailbox_retire ~= nil then "SPAWN's rejection is terminal and no producer ever ran, so cancel retires the unused mailbox through the exact retirement path. The worker and its reservations are released once SPAWN confirms retirement; a refused or uncertain retirement keeps the worker here with that outcome."
+				local retire_sentence = if fenced.mailbox_provisioned
+					then " Its provisioned, never-used mailbox is then retired through the exact retirement path; the worker is removed once SPAWN confirms retirement. Nothing native is stopped."
+					else " Nothing native is stopped or retired."
+				table.insert(rows, ui.text(if fenced.mailbox_retire == "refused" then "SPAWN refused the previous retirement of this work's unused mailbox (reason above); nothing was removed. Cancel again to issue one fresh retirement."
+					elseif fenced.status_required
+					then "SPAWN received that exact request, so cancel first reads its retained SPAWN status. The worker is removed and its reservations released only when the request can never run: SPAWN has no record of it, rejected it, or reports a pre-effect refusal such as an expired window challenge. A live challenge refuses until it expires (30 s)." .. retire_sentence
+					elseif fenced.mailbox_retire ~= nil then (if fenced.evidence == "spawn_rejected" then "SPAWN's rejection is terminal and no producer ever ran"
+						else "Continuation proved this request never ran")
+						.. ", so cancel retires the unused mailbox through the exact retirement path. The worker and its reservations are released once SPAWN confirms retirement; a refused or uncertain retirement keeps the worker here with that outcome."
 					elseif fenced.evidence == "spawn_rejected" then "SPAWN's retained rejection is terminal and no mailbox was created, so cancel removes the worker and releases its reservations directly. Nothing native is stopped or retired."
-					else "That exact request was never sent, so cancel removes the worker and releases its reservations directly. A provisioned mailbox stays unused; nothing native is stopped or retired."))
+					elseif fenced.mailbox_provisioned then "That exact request was never sent." .. retire_sentence
+					else "That exact request was never sent, so cancel removes the worker and releases its reservations directly. Nothing native is stopped or retired."))
 			end
 		end
 		if worker.rejected_report then
@@ -288,6 +300,9 @@ local function dispatch_view(view: any, projection: any, selected: any): (any, a
 			if admitted and worker.activation_issued and not worker.retirement_requested and not worker.release_seq and not worker.owner_released then
 				table.insert(rows, dispatch_link(view, "retire", "Request graceful coordinator retirement", { worker_id = worker.worker_id }))
 			end
+		end
+		if not worker.coordinator_owner_id and worker.stop_status ~= nil and worker.stop_status ~= "not_requested" and not (admitted and worker.finish_requested) then
+			table.insert(rows, ui.text("Native stop: " .. tostring(worker.stop_status) .. " · mailbox: " .. shown(worker.mailbox_status, "not provisioned")))
 		end
 		if admitted and not worker.coordinator_owner_id then
 			if worker.finish_requested then

@@ -1,6 +1,6 @@
 -- Deterministic real reducer/host/window coverage. Run bounded sections in native host callbacks.
 local root, section = ...
-assert(section == nil or table.find({ "clock", "native", "controls", "timer", "driver_controls", "epoch_window", "epoch_host", "finish", "continuation", "alias_recovery", "held_report", "sweep_schedule", "readable_views", "guided_recovery", "guided_recovery_host_restart", "expired_wake", "revoked_authorization", "observe_retention", "uncertain_read", "quota_reader", "bridge_lifecycle", "withdraw_fenced" }, section), "unknown health section")
+assert(section == nil or table.find({ "clock", "native", "controls", "timer", "driver_controls", "epoch_window", "epoch_host", "finish", "continuation", "alias_recovery", "held_report", "sweep_schedule", "readable_views", "guided_recovery", "guided_recovery_empty", "guided_recovery_host_restart", "stopped_worker_view", "expired_wake", "revoked_authorization", "observe_retention", "uncertain_read", "quota_reader", "bridge_lifecycle", "withdraw_fenced" }, section), "unknown health section")
 local runtime, environment = tern, getfenv()
 local shared = assert(loadstring(runtime.fs.read(root .. "/tests/dispatch.luau"), "health-fixture"))(root, "fixture")
 local clone, state, dispatch = shared.clone, shared.state, shared.dispatch
@@ -111,7 +111,7 @@ local function window_fixture()
 	local session_tabs = { [7] = { 1 }, [8] = { 2 } }
 	local next_bridge, next_lease = nil, nil
 	local bridge_events, result_events = {}, {}
-	local timers, hooks, events, notices = {}, {}, {}, {}
+	local timers, hooks, events, notices, toasts = {}, {}, {}, {}, {}
 	local pick_callback, prompt_callback, picked, picker_spec, prompt_spec
 	-- The controller block's published one-shot operator intent (host.luau publishes it on click).
 	local intent, intent_serial = nil, 0
@@ -156,7 +156,7 @@ local function window_fixture()
 			end,
 			move_to_tab = function(_, pane, tab) panes[pane].tab = tab; moved[pane] = true; return true end,
 			name_tab = function(_, tab, name) tab_names[tab] = name end },
-		toast = function(_, _, _, message) table.insert(notices, message) end,
+		toast = function(_, level, _, message) table.insert(notices, message); table.insert(toasts, { level = level, text = message }) end,
 		new_block = function(_, block, _args, how, options)
 			if block == "usage.capacity" then
 				if not usage then return nil end
@@ -216,6 +216,8 @@ local function window_fixture()
 			local input = runtime.json.decode(event.value)
 			table.insert(bridge_events, input)
 			if input.op == "owner_status" then bridge_bytes = shared.frame(input, "owner_status", { owner = owner_answer }); return end
+			-- A withdrawal's exact unused-mailbox retirement (never the original effect): SPAWN confirms it.
+			if input.op == "mailbox_retire" and input.mode == "retire" then bridge_bytes = shared.frame(input, "retired", {}); return end
 			assert(input.op == "status", "replacement window must never resubmit the original effect")
 			bridge_bytes = if bridge_missing then shared.frame(input, "missing") else shared.frame(input, "found", { outcome = bridge_outcome })
 			return
@@ -249,7 +251,7 @@ local function window_fixture()
 	local fixed_os = table.clone(os); fixed_os.time = function(spec: any?) if spec ~= nil then return os.time(spec) end return wall end
 	setfenv(module, setmetatable({ tern = ftern, require = shared.load, os = fixed_os }, { __index = environment }))
 	local api = module()
-	local w = { f = f, id = id, cx = cx, api = api, timers = timers, hooks = hooks, events = events, agents = agents, panes = panes, current = current, notices = notices }
+	local w = { f = f, id = id, cx = cx, api = api, timers = timers, hooks = hooks, events = events, agents = agents, panes = panes, current = current, notices = notices, toasts = toasts }
 	-- The owner clicks a dispatch button: its host block publishes the exact request as a one-shot
 	-- intent, which the window's observation consumer runs at most once.
 	function w:click(command, fields)
@@ -783,6 +785,41 @@ if section == nil or section == "guided_recovery" then
 	for _, e in w.events do if e.command == "continue_worker" then attached += 1 end end
 	check(attached == 0, "no attachment is submitted without the owner's explicit pane selection and attestation")
 end
+-- The owner finishes the fixture's ordinary worker up to its verified native stop (as `finish` does).
+local function stop_worker(w, observation)
+	w:click("finish", { worker_id = w.id }); w:pick({ finish = true }); assert(w:outcome().ok)
+	local worker = w.f.authority.registry.dispatch.workers[w.id]
+	local mark = { version = 1, type = "receipt_watermark", mailbox_handle = worker.mailbox_handle,
+		through_seq = worker.accepted_seq, receipt_chain_sha256 = worker.receipt_chain }
+	for _, key in { "logical_session_id", "worker_id", "worker_generation", "launch_request_id", "work_id", "enrolment_token" } do mark[key] = worker[key] end
+	local read = w.f:apply("poll", { worker_id = w.id, bytes = "watermark" }); assert(read.ok)
+	local page = assert(shared.codec.project_page(runtime.json.encode(mark), w.f:action(read.action_id).request.selector))
+	assert(w.f:finish(read.action_id, "complete", runtime.json.decode(page)).ok)
+	local stop = w.f:apply("poll", { worker_id = w.id })
+	local request = w.f:action(stop.action_id).request
+	assert(request.op == "stop", request.op)
+	assert(w.f:finish(stop.action_id, "stopped", { pane_binding = request.pane_binding, observation = observation }).ok)
+end
+-- Nothing to recover: the guide still opens a picker that says so, with an info (not error) toast.
+if section == nil or section == "guided_recovery_empty" then
+	local w = window_fixture()
+	w:bridge({ placeholder = true }) -- A SPAWN bridge pane answers read-only probes.
+	w:owner_answer("current")
+	stop_worker(w, "absent") -- A stopped worker never needs reattachment.
+	local seen, toasts_before = w:picker(), #w.toasts
+	w:palette("recovery_guide")
+	for _ = 1, 6 do if w:picker() ~= seen then break end; w:tick() end
+	local picker = w:picker()
+	check(picker ~= seen and picker.items[1].label:find("No reload recovery step remains", 1, true) == 1 and picker.items[1].kind == nil and picker.items[2].kind == nil,
+		"an empty guide opens a picker that says no reload recovery step remains; no item acts")
+	check(#w:recovery_steps().steps == 0, "the controller checklist is published empty")
+	local errors, infos = 0, 0
+	for index = toasts_before + 1, #w.toasts do
+		local toast = w.toasts[index]
+		if toast.level == "error" then errors += 1 elseif toast.level == "info" then infos += 1 end
+	end
+	check(errors == 0 and infos == 1, "an empty guide is one info toast, never an error")
+end
 -- Host-only restart (e.g. `tern remote serve` daemon): the window VM and its origin are unchanged,
 -- but the host restores the controller as uncertain, so the guide must still list continuation.
 if section == nil or section == "guided_recovery_host_restart" then
@@ -810,6 +847,62 @@ if section == nil or section == "guided_recovery_host_restart" then
 	items = open()
 	check(items[1] == "Next: " .. reattach and #items == 2, "after continuation the step disappears; only the worker reattachment remains")
 	check(#w:recovery_steps().steps == 1 and w:recovery_steps().steps[1].label == reattach, "the checklist drops the continuation step")
+end
+-- A stopped or retired worker reads as such after a host restart; a live worker keeps its phase.
+if section == nil or section == "stopped_worker_view" then
+	local views = shared.load("views")
+	local function texts(node, out)
+		if type(node) ~= "table" then return out end
+		if type(node.p) == "table" and type(node.p.role) == "string" and node.p.role:sub(1, 9) == "orchplus." then return out end
+		for key, value in node do
+			if type(value) == "string" then
+				if key == "t" or key == "text" or key == "label" or type(key) == "number" then table.insert(out, value) end
+			elseif key ~= "actions" then texts(value, out) end
+		end
+		return out
+	end
+	local function render(f)
+		local projection = state.project(f.authority.registry)
+		projection.dispatch = dispatch.project(f.authority.registry, f.origin.logical_session_id, f.origin.alias_nonce)
+		return texts(views.render({ pane = 42, alias_nonce = f.origin.alias_nonce, orch_session_id = f.origin.logical_session_id, action_serial = 0 }, projection, "ready"), {})
+	end
+	local function count(lines, needle) local n = 0; for _, line in lines do if line:find(needle, 1, true) then n += 1 end end; return n end
+	-- The worker's own row (other rows, e.g. actions, may also print phases).
+	local function row_of(lines, prefix) for _, line in lines do if line:find(prefix, 1, true) == 1 then return line end end; return nil end
+	local function exported(f, worker_id)
+		local row = dispatch.project(f.authority.registry, f.origin.logical_session_id, f.origin.alias_nonce).workers[worker_id]
+		return if row then "phase=" .. tostring(row.phase) .. " stop_status=" .. tostring(row.stop_status) .. " mailbox_status=" .. tostring(row.mailbox_status) else "no projected worker"
+	end
+	local function work_id_of(fw) return fw.f.authority.registry.dispatch.workers[fw.id].work_id end
+	local function restart(w)
+		w.f.authority = shared.host.new_authority(w.f.memory, function() return { now_ms = 1700000000000, mono_ms = 5000, epoch = "stopped-view-restarted" } end)
+		assert(w.f.authority:load().ok)
+	end
+	local w = window_fixture()
+	local work_id = w.f.authority.registry.dispatch.workers[w.id].work_id
+	local row = work_id .. " / " .. w.id .. " · "
+	stop_worker(w, "absent")
+	local settled = tostring(w.f.authority.registry.dispatch.workers[w.id].stopped and w.f.authority.registry.dispatch.workers[w.id].stopped.observation)
+	restart(w)
+	local lines = render(w.f)
+	local shown_row = row_of(lines, row)
+	check(shown_row ~= nil and shown_row:find(" · stopped · ", 1, true) ~= nil and shown_row:find(" · accepted · ", 1, true) == nil,
+		"after restore a stopped worker shows stopped, not its recorded accepted phase; row=" .. tostring(shown_row)
+			.. " | before restore stopped.observation=" .. settled .. " | projected " .. exported(w.f, w.id))
+	check(count(lines, "Native stop: absent · mailbox: ") + count(lines, "native stop absent") == 1,
+		"the native stop line is shown once for an ordinary worker; lines=" .. table.concat(lines, " ¦ "))
+	local done = window_fixture()
+	stop_worker(done, "absent")
+	local retire = done.f:apply("poll", { worker_id = done.id }); assert(retire.ok, retire.message)
+	assert(done.f:action(retire.action_id).request.op == "mailbox_retire")
+	assert(done.f:finish(retire.action_id, "retired", {}).ok)
+	local retired_row = row_of(render(done.f), work_id_of(done) .. " / " .. done.id .. " · ")
+	check(done.f.authority.registry.dispatch.workers[done.id].mailbox_retired == true and retired_row ~= nil and retired_row:find(" · retired · ", 1, true) ~= nil,
+		"a retired worker shows retired; row=" .. tostring(retired_row) .. " | projected " .. exported(done.f, done.id))
+	local live = window_fixture()
+	local live_row = row_of(render(live.f), work_id_of(live) .. " / " .. live.id .. " · ")
+	check(live_row ~= nil and live_row:find(" · accepted · ", 1, true) ~= nil and count(render(live.f), "Native stop:") == 0,
+		"a live accepted worker still shows accepted, with no native stop line; row=" .. tostring(live_row) .. " | projected " .. exported(live.f, live.id))
 end
 -- SPAWN reports an unconsumed window challenge past its deadline (or from an earlier host VM) as
 -- definitive pre-effect `full`; that evidence turns a lost/uncertain native wake into recheckable
@@ -1290,16 +1383,53 @@ if section == nil or section == "withdraw_fenced" then
 	w:bridge({ schema = 1, op = r.op, request_id = r.request_id, action_id = r.action_id, origin_binding = clone(r.origin_binding),
 		controller_generation = r.controller_generation, status = "full", payload = expired })
 	w:click("cancel_work", { worker_id = wid })
-	check(w:picker().placeholder:find("Cancel never-launched work", 1, true) == 1, "the owner confirms withdrawal of the never-launched work first")
+	check(w:picker().placeholder:find("Cancel never-launched work", 1, true) == 1 and w:picker().placeholder:find("never-used mailbox is retired", 1, true) ~= nil,
+		"the owner confirms withdrawal of the never-launched work first, told its unused mailbox is retired")
+	local function withdrawal() local row = dispatch.project(f.authority.registry, f.origin.logical_session_id, f.origin.alias_nonce).workers[wid]; return if row then row.withdrawal else nil end
+	check(withdrawal().mailbox_provisioned == true and withdrawal().mailbox_retire == "not_requested", "the withdrawal offer names the provisioned mailbox before any cancel")
 	local before = #w:bridge_events()
 	w:pick({ confirm = true })
-	for _ = 1, 8 do if f.authority.registry.dispatch.workers[wid] == nil then break end; w:tick() end
+	for _ = 1, 8 do if w:outcome() and w:outcome().command == "cancel_work" then break end; w:tick() end
 	local reads = 0
 	for index = before + 1, #w:bridge_events() do
 		local e = w:bridge_events()[index]
 		if e.op == "status" and e.target_request_id == r.request_id then reads += 1 end
 	end
-	check(reads == 1 and w:outcome().command == "cancel_work" and w:outcome().code == "work_cancelled" and f.authority.registry.dispatch.workers[wid] == nil,
-		"the window reads SPAWN's status of the exact fenced request once and the host cancels on its expired-challenge evidence")
+	check(reads == 1 and w:outcome().command == "cancel_work" and w:outcome().code == "withdrawal_retiring" and f.authority.registry.dispatch.workers[wid] ~= nil
+		and withdrawal().mailbox_retire == "retiring" and withdrawal().status_required == false,
+		"the window reads SPAWN's status of the exact fenced request once; the host keeps the worker and retires its unused mailbox")
+	-- The window drives that retirement: it claims the retire action, sends the one exact
+	-- mailbox_retire to SPAWN and delivers SPAWN's answer to the controller block as a
+	-- `dispatch-result/<grant>/<epoch>` event. This fixture records that event instead of committing
+	-- it (the host block commits it in production), so the test commits the delivered bytes.
+	local retire_id = w:outcome().action_id
+	local function delivered()
+		local a = f:action(retire_id)
+		if not a or not a.claim then return nil end
+		for index = 1, #w:result_events() do -- Grants are unique, so only this retirement's delivery matches.
+			local e = w:result_events()[index]
+			local prefix = "dispatch-result/" .. a.claim.grant_id .. "/" -- The continued window's execution epoch follows.
+			if e.act:sub(1, #prefix) == prefix then return e end
+		end
+		return nil
+	end
+	local ticks = 0
+	for _ = 1, 12 do if delivered() then break end; w:tick(); ticks += 1 end
+	local retires = 0
+	for index = before + 1, #w:bridge_events() do if w:bridge_events()[index].op == "mailbox_retire" then retires += 1 end end
+	local delivery = delivered()
+	local claim = f:action(retire_id) and f:action(retire_id).claim
+	-- The host block commits under the continued controller origin the window used (as in
+	-- alias_recovery); the fixture's pre-reload origin is refused with continuation_required.
+	for index = #w.events, 1, -1 do if w.events[index].command == "cancel_work" then f.origin = clone(w.events[index].origin); break end end
+	local committed = if delivery and claim then f:apply("result", { action_id = retire_id, executor = claim.executor, grant_id = claim.grant_id, response_bytes = delivery.value }) else nil
+	local retired_worker = f.authority.registry.dispatch.workers[wid]
+	check(retires == 1 and committed ~= nil and committed.ok and retired_worker ~= nil and retired_worker.mailbox_retired == true,
+		"the withdrawal driver sends the one exact retirement and SPAWN's confirmation is recorded; retires=" .. retires .. " ticks=" .. ticks
+			.. " retire_phase=" .. tostring(f:action(retire_id) and f:action(retire_id).phase) .. " delivered=" .. tostring(delivery ~= nil)
+			.. " commit=" .. tostring(committed and committed.code) .. " mailbox_retired=" .. tostring(retired_worker and retired_worker.mailbox_retired)
+			.. " reason=" .. tostring(retired_worker and retired_worker.reason and retired_worker.reason.code))
+	assert(f:queue(false).ok)
+	check(f.authority.registry.dispatch.workers[wid] == nil, "the retired never-launched worker is reclaimed")
 end
 return "health/" .. tostring(section or "all") .. ": " .. tostring(checks) .. " checks passed"

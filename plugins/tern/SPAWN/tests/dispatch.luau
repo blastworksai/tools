@@ -697,9 +697,47 @@ sections.unused_retirement=function()
  f.d.request(retire,f.binding,1,function()end)
  check(f.effects.operation~=nil and f.effects.operation.retire_producer==nil and f.saved['dispatch-v1'].requests['session/retire-unused'].body.status=='retired'
   and f.effects.retirements==nil,'the rejected launch\'s unused mailbox retires without a stop, producer cleanup or launch reservation settlement')
+ check(f.saved['dispatch-v1'].requests['session/rejected-launch'].body.error.code=='unsupported_capability','retiring the rejected launch\'s mailbox keeps its original rejection code')
  local g,stop=retirement_fixture(false);g.effects.allow_mailbox=true;g.effects.outcome={status='retired'}
  local accepted=g.req('mailbox_retire','retire-accepted',{logical_session_id='session',worker_id='worker-id',worker_generation=1,launch_request_id='launch',work_id='work',enrolment_token='aaaaaaaaaaaaaaaa',handle='mailbox',expected_generation=1,mode='retire',settlement_revision=5,report_floor=0,report_chain_sha256=g.c.sha256('unused'),reply_floor=0,grant_id='accepted-grant'})
  check(g.d.request(accepted,g.binding,1,function()end).status=='rejected' and g.effects.operation==nil and stop~=nil,'an executed launch\'s mailbox still needs its exact native stop')
+ -- C2 rule 3 (ORCH+ `dispatch/withdraw_fenced` is the other side): a launch that was only staged,
+ -- whose challenge can never be consumed, retires its unused mailbox and is fenced in that save.
+ -- The default fixture stubs the mailbox, so these assert the retirement result, not generations.
+ -- The stub settles synchronously into a reloaded root, so the call itself still answers the
+ -- pre-settlement `pending`; the durable retirement body is the settled answer.
+ local function retire_staged(x,id)
+  x.effects.allow_mailbox=true;x.effects.outcome={status='retired'};x.effects.operation=nil
+  local q=x.req('mailbox_retire',id,{logical_session_id='session',worker_id='worker-id',worker_generation=1,launch_request_id='staged',work_id='work',enrolment_token='aaaaaaaaaaaaaaaa',handle='mailbox',expected_generation=1,mode='retire',settlement_revision=5,report_floor=0,report_chain_sha256=x.c.sha256('unused'),reply_floor=0,grant_id='grant-'..id})
+  local answer=x.d.request(q,x.binding,1,function()end)
+  local stored=x.saved['dispatch-v1'].requests['session/'..id]
+  return if stored then stored.body else answer
+ end
+ local function shown(body)return ' ['..tostring(body.status)..' '..tostring(body.error and body.error.code)..' '..tostring(body.error and body.error.message)..']' end
+ local e=fixture();local staged=e.launch('staged')
+ check(e.raw.stage(staged,e.binding,1,77).status=='pending' and e.effects.reserves==0,'the launch is only staged behind a window challenge')
+ e.effects.now=1700030001.25
+ local expired=retire_staged(e,'retire-expired')
+ local fenced=e.saved['dispatch-v1'].requests['session/staged']
+ check(expired.status=='retired' and e.effects.operation~=nil and e.effects.operation.retire_producer==nil and e.effects.retirements==nil,'an expired unconsumed launch challenge retires its unused mailbox without a stop'..shown(expired))
+ check(fenced.authorization==nil and fenced.authorization_fence~=nil and fenced.body.status=='rejected' and fenced.body.error.code=='authorization_revoked','the accepting retirement fences the launch entry as authorization_revoked in the same save')
+ local restaged=e.raw.stage(staged,e.binding,1,77)
+ check(restaged.status=='rejected' and restaged.error.code=='authorization_revoked' and e.raw.execution(staged,77)==nil and e.saved['dispatch-v1'].requests['session/staged'].authorization==nil,'re-staging the fenced launch refuses and never issues a new challenge')
+ local l=fixture();local live=l.launch('staged')
+ l.raw.stage(live,l.binding,1,77)
+ local refused=retire_staged(l,'retire-live')
+ check(refused.status=='rejected' and refused.error.code=='binding_mismatch' and refused.error.message=='Exact native stop evidence is missing' and l.effects.operation==nil,'a live launch challenge may still be consumed, so retirement needs a native stop'..shown(refused))
+ check(l.saved['dispatch-v1'].requests['session/staged'].authorization~=nil,'a refused retirement leaves the live launch challenge untouched')
+ local c=fixture();local claimed=c.launch('staged')
+ check(c.d.request(claimed,c.binding,1,function()end).status=='resolved','ordinary launch is authorized');c.d.claim(claimed,'executor','claim')
+ c.effects.now=1700030001.25
+ local claim_refused=retire_staged(c,'retire-claimed')
+ check(claim_refused.status=='rejected' and claim_refused.error.code=='binding_mismatch' and c.effects.operation==nil,'a claimed launch may have run, so retirement needs a native stop'..shown(claim_refused))
+ local b=fixture();local before_boot=b.launch('staged')
+ b.raw.stage(before_boot,b.binding,1,77)
+ local rebooted=fixture(b.image());rebooted.launch('staged') -- A new host VM boot with the same registry and clock.
+ local reboot_answer=retire_staged(rebooted,'retire-rebooted')
+ check(reboot_answer.status=='retired' and rebooted.saved['dispatch-v1'].requests['session/staged'].body.error.code=='authorization_revoked','an earlier-boot launch challenge can never be consumed, so its unused mailbox retires and the launch is fenced'..shown(reboot_answer))
 end
 sections.coordinator_launch=function()
  local f=fixture()

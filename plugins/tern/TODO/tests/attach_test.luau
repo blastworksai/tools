@@ -2,7 +2,7 @@
 local attach=require("../lib/attach")
 local function fixture()
     local f={picks={},blocks={},toasts={},timers={},events={},closed={},panes={{pane=10,tab=20,kind="terminal",program="bash",title="CodexBWAI",cwd="/work"}}}
-    f.host={id=1,name="VM",address="cmdr@vm",state="connected",kind="remote",panes={10}}
+    f.host={id=1,name="host",address="user@host",state="connected",kind="remote",panes={10}}
     f.root={split="right",{pane=10},{pane=11}}
     local cx={session={},hosts={},layout={}}
     function cx.session:focused() return 10 end

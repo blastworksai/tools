@@ -231,7 +231,14 @@ local function job_valid(root,key,scope,job,a)
 	if stage=="resolved" then return a.phase=="Unknown" and not a.unresolved end
 	return false
 end
-local OPS = {refresh = {}, import_records = {setup_run_id=true, records=true}, launch_record = {record_id=true}, start_setup = {record_id=true,setup_run_id=true}, resolve_attempt = {attempt_id=true,attempt_revision=true}}
+local OPS = {refresh = {}, import_records = {setup_run_id=true, records=true}, launch_record = {record_id=true}, start_setup = {record_id=true,setup_run_id=true}, resolve_attempt = {attempt_id=true,attempt_revision=true}, resolve_lost_attempts = {attempt_ids=true,attempt_revision=true}}
+local MAX_LOST = 128
+local function unique_ids(ids)
+	if not array(ids,MAX_LOST) or #ids<1 then return false end
+	local seen={}
+	for _,id in ipairs(ids) do if not text(id,96) or seen[id] then return false end seen[id]=true end
+	return true
+end
 local function request_valid(r)
 	if not fields(r, {version=true,request_id=true,authority_id=true,observer_id=true,request_sequence=true,acknowledged_requests=true,expected_config_revision=true,op=true,data=true}) or r.version ~= 2 then return false end
 	if not text(r.request_id, 256) or not text(r.authority_id, 256) or not text(r.observer_id, 256) or not integer(r.request_sequence, 1) or not integer(r.expected_config_revision, 0) then return false end
@@ -243,6 +250,7 @@ local function request_valid(r)
 	if r.op == "launch_record" then return text(d.record_id,96) end
 	if r.op == "start_setup" then return text(d.record_id,96) and text(d.setup_run_id,256) end
 	if r.op == "resolve_attempt" then return text(d.attempt_id,96) and integer(d.attempt_revision,0) end
+	if r.op == "resolve_lost_attempts" then return unique_ids(d.attempt_ids) and integer(d.attempt_revision,0) end
 	return true
 end
 local function result_valid(reply,request,key,native_session)
@@ -251,6 +259,7 @@ local function result_valid(reply,request,key,native_session)
 	local result=reply.result
 	if request.op=="refresh" then return fields(result,{}) end
 	if request.op=="import_records" then return fields(result,{imported=true,replayed=true}) and integer(result.imported,0) and result.imported<=32 and (result.replayed==nil or type(result.replayed)=="boolean") end
+	if request.op=="resolve_lost_attempts" then return fields(result,{released=true}) and integer(result.released,1) and result.released==#request.data.attempt_ids end
 	local is_launch=request.op=="launch_record" or request.op=="start_setup"
 	local allowed=if is_launch then {attempt=true,job=true,replayed=true} else {attempt=true}
 	if not fields(result,allowed) or type(result.attempt)~="table" then return false end
@@ -435,22 +444,55 @@ local function read_root()
 	if value==nil then return nil,"Authority has not been initialized" end
 	return upgrade(value)
 end
-local function snapshot_value(root,key)
+-- C3: the single definition of an attempt lost to a host daemon restart. Both
+-- epochs must be known and differ; an unknown epoch is never lost (per-attempt only).
+local function epoch_lost(scope,a,epoch)
+	if a==nil or a.purpose=="managed" or a.phase~="Unknown" or not a.unresolved or not text(epoch,4096) then return false end
+	local job=scope.jobs[a.id]
+	return job~=nil and job.stage=="unknown" and job.native~=nil and text(job.epoch,4096) and job.epoch~=epoch
+end
+local function lost_ids(scope,epoch)
+	local ids={}
+	for _,a in ipairs(scope.launch.attempts) do
+		if #ids<MAX_LOST and epoch_lost(scope,a,epoch) then table.insert(ids,a.id) end
+	end
+	return ids
+end
+-- All-or-nothing explicit release; the only gate on both request and edit paths.
+local function resolve_lost(scope,ids,revision,epoch)
+	if not unique_ids(ids) or not integer(revision,0) then return nil,"invalid-lost-attempts: 1-128 unique attempt IDs and an attempt revision are required" end
+	if revision~=scope.launch.revision then return nil,"stale-attempt-revision" end
+	if not text(epoch,4096) then return nil,"host-epoch-unverifiable: inspect and mark each attempt individually" end
+	for _,id in ipairs(ids) do if not epoch_lost(scope,attempt(scope,id),epoch) then return nil,"not-lost: "..id end end
+	for _,id in ipairs(ids) do
+		local accepted,why=Launch.resolve(scope.launch,id);if not accepted then return nil,why end
+		scope.jobs[id].stage="resolved"
+	end
+	return {released=#ids}
+end
+-- Persist-time capacity uses a probe epoch no real daemon reports, so the byte
+-- ceiling always counts the largest possible host restart notice.
+local CAPACITY_EPOCH="spawn-capacity-probe"
+local function snapshot_value(root,key,host_epoch)
 	local scope=root.sessions[key]
-	return {version=2,namespace=root.namespace,host_key=root.host_key,authority_id=scope.authority_id,session_key=key,
+	local value={version=2,namespace=root.namespace,host_key=root.host_key,authority_id=scope.authority_id,session_key=key,
 		config_revision=root.config_revision,records=clone(root.config.hosts[root.host_key].agents),
 		attempt_revision=scope.launch.revision,attempts=clone(scope.launch.attempts),jobs=public_jobs(scope),
 		replies=clone(scope.replies),request_sequences=clone(scope.request_sequences),
 		host_os=tern.runtime.os,host_shell=tern.getenv("SHELL") or tern.getenv("ComSpec") or "unknown",
 		ready=root.review==nil,migration=clone(root.review),
 		error=if root.review then "Migration or legacy source review required in Config" else nil}
+	local lost=lost_ids(scope,host_epoch)
+	-- Only a digest of the host epoch is published, never the raw boot identity.
+	if #lost>0 then value.host_restart={restart_id=require("./codec").sha256(host_epoch):sub(1,32),attempts=lost} end
+	return value
 end
 local function capacity(root)
 	local valid,err=validate(root)
 	if not valid then return false,err end
 	-- Snapshot overhead is checked as well as the larger durable value.
 	for key, scope in pairs(root.sessions) do
-		local value=snapshot_value(root,key)
+		local value=snapshot_value(root,key,CAPACITY_EPOCH)
 		local json=encoded(value)
 		if not json or #SNAPSHOT_PREFIX+#json>MAX_BYTES then return false,"Snapshot capacity exhausted; nothing saved" end
 	end
@@ -577,7 +619,7 @@ function M.open(host_key,native_session,client_config,origin_scope)
 	return binding_for(root,key),nil
 end
 
-local function dispatch(root,key,r,now)
+local function dispatch(root,key,r,now,host_epoch)
 	local scope=root.sessions[key];local d=r.data
 	if r.expected_config_revision~=root.config_revision then return nil,"stale-config" end
 	if root.review then return nil,"migration-review-required" end
@@ -619,6 +661,8 @@ local function dispatch(root,key,r,now)
 		for name,value in pairs(display(record,purpose)) do job[name]=value end
 		scope.jobs[job.id]=job
 		return {attempt=clone(a),job=public_job(job)}
+	elseif r.op=="resolve_lost_attempts" then
+		return resolve_lost(scope,d.attempt_ids,d.attempt_revision,host_epoch)
 	elseif r.op=="resolve_attempt" then
 		if d.attempt_revision~=scope.launch.revision then return nil,"stale-attempt-revision" end
 		local accepted,err=Launch.resolve(scope.launch,d.attempt_id)
@@ -629,7 +673,7 @@ local function dispatch(root,key,r,now)
 	end
 	return nil,"unsupported-operation"
 end
-function M.request(binding,input)
+function M.request(binding,input,host_epoch)
 	if not request_valid(input) then return false,"Invalid authority request; nothing executed" end
 	local now=os.time()
 	local ok,result,reason=pcall(function()
@@ -657,7 +701,7 @@ function M.request(binding,input)
 		end
 		-- Change, reply and watermark commit together in one atomic write.
 		local candidate=clone(base)
-		local value,dispatch_err=dispatch(candidate,key,input,now)
+		local value,dispatch_err=dispatch(candidate,key,input,now,host_epoch)
 		-- A rejected operation must not retain any candidate mutation.
 		if value==nil then candidate=clone(base) end
 		scope=candidate.sessions[key]
@@ -669,12 +713,12 @@ function M.request(binding,input)
 	if not ok then return false,"Authority processing failed; nothing was admitted: "..tostring(result) end
 	return result,reason
 end
-function M.snapshot(binding)
+function M.snapshot(binding,host_epoch)
 	local root,err=read_root();if not root then return nil,err end
 	local scope=root.sessions[binding.session_key]
 	if not scope or scope.authority_id~=binding.authority_id then return nil,"stale-authority; reopen Config" end
 	root,err=expire_admissions(root,os.time());if not root then return nil,err end
-	return snapshot_value(root,binding.session_key),nil
+	return snapshot_value(root,binding.session_key,host_epoch),nil
 end
 
 -- Native UI operations share the same writer and optimistic revision fence.
@@ -717,6 +761,9 @@ function M.edit(binding,expected,operation,data)
 		if data.attempt_revision~=scope.launch.revision then return false,"stale-attempt-revision: inspect the refreshed attempt before marking it no longer running" end
 		local accepted,why=Launch.resolve(scope.launch,data.id);if not accepted then return false,why end
 		if attempt(scope,data.id).phase=="Unknown" and scope.jobs[data.id] then scope.jobs[data.id].stage="resolved" end
+	elseif operation=="resolve-lost-attempts" then
+		if type(data)~="table" then return false,"invalid-lost-attempts" end
+		local released,why=resolve_lost(scope,data.attempt_ids,data.attempt_revision,data.epoch);if not released then return false,why end
 	elseif operation=="clear-history" then
 		if data.attempt_revision~=scope.launch.revision then return false,"Launch history changed; inspect the refreshed history before clearing it" end
 		local registry,registry_error=managed_registry();if registry==nil then return false,registry_error end
