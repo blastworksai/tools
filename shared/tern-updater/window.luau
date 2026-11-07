@@ -127,7 +127,8 @@ function Updater.register(cfg)
 		end
 	end
 
-	-- Fetch + after_check + kv; cb(outcome, remote?, err?, cx).
+	-- Fetch + after_check + kv; cb(outcome, remote?, err?, cx). cx is nil when tern.fetch raised
+	-- synchronously, so every caller notifies through `fresh or <its own cx>`.
 	local function check(cb)
 		fetch_remote(function(remote, err, cx)
 			local record = load()
@@ -146,12 +147,12 @@ function Updater.register(cfg)
 		local due = State.due(record, os.time())
 		tern.log.debug("updater tick", if due then "due" else "not due")
 		if not due then return end
-		copy_kind(function(info, err)
+		copy_kind(function(info, err, kind_cx)
 			if info == nil then tern.log.warn("updater", "copy kind", tostring(err)); return end
 			if info.dev then return end
 			check(function(outcome, _, check_err, fresh, notice)
 				if outcome == "error" then tern.log.warn("updater", "background check", tostring(check_err)) end
-				if notice ~= nil then notify(fresh, notice) end
+				if notice ~= nil then notify(fresh or kind_cx or cx, notice) end
 			end)
 		end)
 	end
@@ -164,8 +165,9 @@ function Updater.register(cfg)
 			if info == nil then check_failed(now_cx, err); return end
 			if info.dev then say(now_cx, "info", DEV); return end
 			check(function(outcome, remote, check_err, fresh)
-				if outcome == "error" then check_failed(fresh, check_err); return end
-				outcome_notice(fresh, outcome, remote)
+				local now = fresh or now_cx
+				if outcome == "error" then check_failed(now, check_err); return end
+				outcome_notice(now, outcome, remote)
 			end)
 		end)
 	end
@@ -189,7 +191,9 @@ function Updater.register(cfg)
 				say(cx, "error", "Couldn't open a shell on that host", tostring(err))
 			end
 		end
-		Cli.install(info.exe, src, function(result, fresh)
+		-- A spawn failure calls back synchronously with no fresh cx; this call's cx is still live then.
+		Cli.install(info.exe, src, function(result, fresh_cx)
+			local fresh = fresh_cx or cx
 			local current = load()
 			if result.status == 0 then
 				local version = nil
@@ -296,9 +300,10 @@ function Updater.register(cfg)
 			if info == nil then check_failed(now_cx, err); return end
 			if info.dev then say(now_cx, "info", DEV); return end
 			check(function(outcome, remote, check_err, fresh)
-				if outcome == "error" then check_failed(fresh, check_err); return end
-				if outcome ~= "update" then outcome_notice(fresh, outcome, remote); return end
-				requirements(info, fresh, function(installed_plugins, req_cx)
+				local now = fresh or now_cx
+				if outcome == "error" then check_failed(now, check_err); return end
+				if outcome ~= "update" then outcome_notice(now, outcome, remote); return end
+				requirements(info, now, function(installed_plugins, req_cx)
 					confirm(req_cx, info, remote, installed_plugins)
 				end)
 			end)
