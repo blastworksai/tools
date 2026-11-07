@@ -62,7 +62,7 @@ A seat that sets `browser_port` has a standing ssh tunnel on that port, so the l
 
 **SSH mode (the browser is on another computer).** When the seat's config sets `browser_mode: "ssh"`, or the operator says the browser is on another computer than this one, run `browser-open --browser ssh`. It needs a fixed `browser_port` and a standing tunnel from the operator's computer, and it checks a key in both directions.
 It finds the operator's computer by itself, proves the tunnel reaches this service, and opens the page on that computer: through the Glitch Idea Tern plugin (a browser pane above the focused pane) on a Windows computer running Tern, else the default browser on macOS and Linux. When the plugin is not ready or does not answer, nothing opens and the result carries the link to show the operator. The one-time link travels over ssh on stdin, never in a command line.
-Show no link when `browser.opened` is `true`: tell the operator the page is open and paired. When it is `false` (the warning `ssh_open_failed`), show `browser.link` exactly as in link mode.
+Show no link when `browser.opened` is `true`: tell the operator the page is open and paired. When it is `false` (the warning `ssh_open_failed`), show `browser.link` exactly as in link mode, and name `browser.failure` in one plain clause.
 These errors are loud and the open stops. Name the failing direction in plain words and stop; never print an `ssh -L` line or retry around them:
 - `ssh_requires_fixed_port`: the seat has no `browser_port`; SSH mode needs one.
 - `ssh_no_client`, `ssh_client_unreachable`, `ssh_client_os_unknown`, `ssh_client_no_curl`: this machine cannot find, reach, identify or use the operator's computer.
