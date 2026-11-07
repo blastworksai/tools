@@ -27,9 +27,10 @@ def refused():
 
 class Client:
     def __init__(self, os_name='windows', addresses=('127.0.0.1', '192.0.2.23'), key=True, tunnel='good', tern=True,
-                 open_ok=True, curl=True, machine_id=None, printed=None):
+                 open_ok=True, curl=True, machine_id=None, printed=None, open_exit=4):
         self.os, self.addresses, self.key, self.tunnel, self.tern = os_name, addresses, key, tunnel, tern
         self.open_ok, self.curl, self.machine_id, self.printed = open_ok, curl, machine_id, printed
+        self.open_exit = open_exit
         self.opened = []
 
 
@@ -91,9 +92,9 @@ class Fake:
         if remote.startswith('powershell') or remote.startswith('sh -c'):
             client.opened.append(input)
             if not client.open_ok:
-                return Result(4)
+                return Result(client.open_exit)
             if client.os == 'windows' and not client.tern:
-                return Result(4)  # no ready plugin: nothing opened, no other road
+                return Result(10)  # no ready plugin: nothing opened, no other road
             return Result(0, client.printed if client.printed is not None else 'OPENED ' + ('tern-plugin' if client.os == 'windows' else 'default') + '\r\n')
         raise AssertionError('unexpected remote command: ' + remote)
 
@@ -432,7 +433,9 @@ class Opening(unittest.TestCase):
         client = Client(os_name, **kw)
         fake = Fake({'c': client})
         url = ORIGIN.rstrip('/') + '/#pair=' + URL_CODE
-        return idea_ssh.open_on_client(fake, 'c', os_name, url), fake, client, url
+        how, self.failure = idea_ssh.open_on_client(fake, 'c', os_name, url)
+        self.assertEqual(how is None, self.failure is not None)
+        return how, fake, client, url
 
     def assert_url_only_on_stdin(self, fake, client, url):
         for argv, _ in fake.calls:
@@ -594,7 +597,75 @@ class Opening(unittest.TestCase):
     def test_windows_without_a_ready_plugin_opens_nothing(self):
         how, fake, client, url = self.open('windows', tern=False)
         self.assertIsNone(how)
+        self.assertEqual(self.failure, 'plugin_not_ready')
         self.assert_url_only_on_stdin(fake, client, url)
+
+    def test_every_failure_names_its_fixed_reason(self):
+        windows = {3: 'invalid_input', 4: 'tern_missing', 5: 'plugin_no_answer', 6: 'plugin_did_not_claim',
+                   7: 'plugin_refused', 8: 'request_folder_unsafe', 9: 'no_tern_window', 10: 'plugin_not_ready',
+                   124: 'timeout', 255: 'ssh_failed', 1: 'open_failed', 42: 'open_failed'}
+        for status, reason in windows.items():
+            with self.subTest(os='windows', status=status):
+                self.assertIsNone(self.open('windows', open_ok=False, open_exit=status)[0])
+                self.assertEqual(self.failure, reason)
+        for name in ('macos', 'linux'):
+            for status, reason in {3: 'invalid_input', 124: 'timeout', 255: 'ssh_failed', 1: 'open_failed', 9: 'open_failed'}.items():
+                with self.subTest(os=name, status=status):
+                    self.assertIsNone(self.open(name, open_ok=False, open_exit=status)[0])
+                    self.assertEqual(self.failure, reason)
+        # exit 0 without the OPENED line is still a failure with a reason, never a silent None
+        self.assertIsNone(self.open('windows', printed='')[0])
+        self.assertEqual(self.failure, 'open_failed')
+
+    def test_every_windows_exit_in_the_script_has_a_reason(self):
+        script = self.windows_script()
+        statuses = {int(n) for n in re.findall(r'\bexit (\d+)', script)} - {0}
+        self.assertEqual(statuses, set(idea_ssh._WINDOWS_FAILURES))
+
+    @staticmethod
+    def daemon_search(script):
+        """The daemon search: an inherited TERN_DAEMON_SOCKET, then the default daemon with the variable cleared, then
+        each tern-* pipe owned by the user's own SID; it stops only on a daemon with a window AND the ready plugin, and
+        both checks run against that same daemon."""
+        loop = re.search(r"\$sockets = @\(\)\n(.*?)\nif \(-not \$window\) \{ exit 9 \}\nif \(-not \$ready\) \{ exit 10 \}",
+                         script, re.S)
+        if not loop:
+            return False
+        body = loop.group(1)
+        pieces = ("if ($env:TERN_DAEMON_SOCKET) { $sockets += $env:TERN_DAEMON_SOCKET }", "$sockets += ''",
+                  "[IO.Directory]::GetFiles('\\\\.\\pipe\\')", "-like '\\\\.\\pipe\\tern-*'", 'Select-Object -First 16',
+                  "GetOwner([Security.Principal.SecurityIdentifier]).Value -eq $me.Value) { $sockets += $p }",
+                  'foreach ($s in $sockets)',
+                  'if ($s) { $env:TERN_DAEMON_SOCKET = $s } else { Remove-Item -LiteralPath Env:TERN_DAEMON_SOCKET -ErrorAction SilentlyContinue }',
+                  '& $tern inspect --json', "$_.kind -eq 'window'", 'if (-not $here) { continue }', '& $tern plugin list --json',
+                  "$_.id -eq 'glitch-idea'", 'if ($ready) { break }')
+        if not all(piece in body for piece in pieces):
+            return False
+        order = [body.index(p) for p in ('$sockets += $env:TERN_DAEMON_SOCKET', "$sockets += ''", '$sockets += $p',
+                                          'foreach ($s in $sockets)', '& $tern inspect', 'if (-not $here) { continue }',
+                                          '& $tern plugin list', 'if ($ready) { break }')]
+        return (order == sorted(order) and 'break' not in body[:body.index('if ($ready) { break }')]
+                and script.index('$me = $identity.User') < loop.start()
+                and 'TERN_DAEMON_SOCKET' not in script[loop.end():] and 'plugin list' not in script[loop.end():])
+
+    def test_an_elevated_login_finds_the_window_on_the_users_own_daemon(self):
+        script = self.windows_script()
+        self.assertTrue(self.daemon_search(script))
+        self.assertNotIn('BUILTIN', script)
+        # mutations: the default daemon only (the bug), any owner's pipe, the variable not set per daemon, an inherited
+        # override kept for the "default" candidate (review finding), stopping on a window without the plugin, and the
+        # plugin check moved out of the loop
+        for old, new in (("foreach ($s in $sockets)", "foreach ($s in @(''))"),
+                         ("-eq $me.Value) { $sockets += $p }", ") { $sockets += $p }"),
+                         ("if ($s) { $env:TERN_DAEMON_SOCKET = $s }", "if ($s) { }"),
+                         (" else { Remove-Item -LiteralPath Env:TERN_DAEMON_SOCKET -ErrorAction SilentlyContinue }", ""),
+                         ("if (-not $here) { continue }\n  $window = $true", "if (-not $here) { continue }\n  $window = $true\n  break"),
+                         ("if ($ready) { break }", ""),
+                         ("if ($env:TERN_DAEMON_SOCKET) { $sockets += $env:TERN_DAEMON_SOCKET }\n", "")):
+            with self.subTest(mutation=old):
+                mutated = script.replace(old, new)
+                self.assertNotEqual(mutated, script)
+                self.assertFalse(self.daemon_search(mutated))
 
     def test_macos(self):
         how, fake, client, url = self.open('macos')
@@ -723,12 +794,19 @@ class Door(unittest.TestCase):
         self.assertEqual(browser['link'], 'http://127.0.0.1:8840/#pair=' + URL_CODE)
         self.assertEqual(result['binding_id'], 'binding_' + '1' * 32)
         self.assertNotIn('warning', result)
+        self.assertNotIn('failure', browser)
         self.assertEqual(len(self.sessions), 1)
+
+    def test_no_window_on_any_daemon_is_named(self):
+        result = self.run_door(Client(open_ok=False, open_exit=9))
+        self.assertEqual((result['warning'], result['browser']['failure'], result['browser']['opened']),
+                         ('ssh_open_failed', 'no_tern_window', False))
 
     def test_open_failure_keeps_the_session_and_warns(self):
         result = self.run_door(Client(open_ok=False))
         self.assertIs(result['browser']['opened'], False)
         self.assertEqual(result['warning'], 'ssh_open_failed')
+        self.assertEqual(result['browser']['failure'], 'tern_missing')
         self.assertIn('#pair=', result['browser']['link'])
         self.assertEqual(len(self.sessions), 1)
 

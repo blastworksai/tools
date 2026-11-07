@@ -404,20 +404,38 @@ if ($u.EndsWith("`r`n")) { $u = $u.Substring(0, $u.Length - 2) } elseif ($u.Ends
 if ($u -cnotmatch '^@@PAT@@\z') { exit 3 }
 $tern = Join-Path $env:LOCALAPPDATA 'Programs\Tern\tern.com'
 if (-not $env:LOCALAPPDATA -or -not (Test-Path -LiteralPath $tern)) { exit 4 }
-$window = $false
-try {
-  $i = (& $tern inspect --json | Out-String) | ConvertFrom-Json
-  $window = @($i.clients | Where-Object { $_.kind -eq 'window' }).Count -gt 0
-} catch { }
-if (-not $window) { exit 4 }
-$ready = $false
-try {
-  $pl = (& $tern plugin list --json | Out-String) | ConvertFrom-Json
-  $ready = @($pl.plugins | Where-Object { $_.id -eq 'glitch-idea' -and $_.window -eq $true -and $_.status -eq 'ready' }).Count -gt 0
-} catch { }
-if (-not $ready) { exit 4 }
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $me = $identity.User
+# An administrator's ssh login is elevated, and an elevated tern.com talks to Tern's elevated daemon, not the one the
+# operator's window uses. So: an inherited TERN_DAEMON_SOCKET, then the default daemon (the variable cleared), then
+# every Tern daemon pipe this user's own SID owns; the first daemon with a window AND the ready plugin is the one.
+$sockets = @()
+if ($env:TERN_DAEMON_SOCKET) { $sockets += $env:TERN_DAEMON_SOCKET }
+$sockets += ''
+try {
+  foreach ($p in @([IO.Directory]::GetFiles('\\.\pipe\') | Where-Object { $_ -like '\\.\pipe\tern-*' } | Select-Object -First 16)) {
+    try { if ([IO.Directory]::GetAccessControl($p).GetOwner([Security.Principal.SecurityIdentifier]).Value -eq $me.Value) { $sockets += $p } } catch { }
+  }
+} catch { }
+$window = $false
+$ready = $false
+foreach ($s in $sockets) {
+  if ($s) { $env:TERN_DAEMON_SOCKET = $s } else { Remove-Item -LiteralPath Env:TERN_DAEMON_SOCKET -ErrorAction SilentlyContinue }
+  $here = $false
+  try {
+    $i = (& $tern inspect --json | Out-String) | ConvertFrom-Json
+    $here = @($i.clients | Where-Object { $_.kind -eq 'window' }).Count -gt 0
+  } catch { }
+  if (-not $here) { continue }
+  $window = $true
+  try {
+    $pl = (& $tern plugin list --json | Out-String) | ConvertFrom-Json
+    $ready = @($pl.plugins | Where-Object { $_.id -eq 'glitch-idea' -and $_.window -eq $true -and $_.status -eq 'ready' }).Count -gt 0
+  } catch { }
+  if ($ready) { break }
+}
+if (-not $window) { exit 9 }
+if (-not $ready) { exit 10 }
 $system = New-Object Security.Principal.SecurityIdentifier('S-1-5-18')
 $admins = New-Object Security.Principal.SecurityIdentifier('S-1-5-32-544')
 $isAdmin = (New-Object Security.Principal.WindowsPrincipal($identity)).IsInRole($admins)
@@ -500,8 +518,21 @@ def windows_stdin(url):
     return base64.b64encode(windows_script().encode('utf-8')).decode('ascii') + '\n' + url + '\n'
 
 
+# Why a page did not open, by the opener's exit status: fixed codes only, never remote output.
+_WINDOWS_FAILURES = {3: 'invalid_input', 4: 'tern_missing', 5: 'plugin_no_answer', 6: 'plugin_did_not_claim',
+                     7: 'plugin_refused', 8: 'request_folder_unsafe', 9: 'no_tern_window', 10: 'plugin_not_ready'}
+_COMMON_FAILURES = {124: 'timeout', 255: 'ssh_failed'}
+
+
+def open_failure(os_name, returncode):
+    """The fixed reason for an opener that did not print OPENED."""
+    table = {**_COMMON_FAILURES, **(_WINDOWS_FAILURES if os_name == 'windows' else {3: 'invalid_input'})}
+    return table.get(returncode, 'open_failed')
+
+
 def open_on_client(runner, alias, os_name, url):
-    """-> how ('tern-plugin' on Windows, 'default' on macOS and Linux), or None when it did not open.
+    """-> (how, failure): how is 'tern-plugin' on Windows or 'default' on macOS and Linux with failure None, or how is
+    None and failure is the fixed reason it did not open (see open_failure).
 
     The URL travels on ssh's stdin only. Windows opens it through the Tern plugin's request file, so it reaches no argv
     there. macOS `open` and Linux `xdg-open` take the URL as an argument, so on those computers it is briefly visible in
@@ -517,7 +548,9 @@ def open_on_client(runner, alias, os_name, url):
     payload = windows_stdin(url) if os_name == 'windows' else url + '\n'
     done = _ssh(runner, alias, command, input=payload, timeout=30)
     match = re.search(r'^OPENED (tern-plugin|default)\s*$', done.stdout, re.MULTILINE)
-    return match.group(1) if done.returncode == 0 and match else None
+    if done.returncode == 0 and match:
+        return match.group(1), None
+    return None, open_failure(os_name, done.returncode)
 
 
 # ---- the whole door ---------------------------------------------------------------------------------
@@ -549,13 +582,14 @@ def open_ssh_session(store, runtime_root, config, *, ssh_client=None, ssh_server
     result = idea_launch.open_session(store, runtime_root, config, **options)
     code = result['pairing_code']
     link = result['origin'].rstrip('/') + '/#pair=' + code
-    how = open_on_client(runner, alias, os_name, link)
+    how, failure = open_on_client(runner, alias, os_name, link)
     browser = dict(mode='ssh', url=result['origin'], link=link, client=alias, client_os=os_name, opened=how is not None)
     result = dict(result, browser=browser,
                   fallback_line=f'Only if the tab did not open paired: type {code} within 60 s.')
     if how is None:
         # The session is live and its code lasts 60 s: hand back the link rather than waste it, but say so loudly.
         result['warning'] = 'ssh_open_failed'
+        browser['failure'] = failure
     else:
         browser['how'] = how
     return result

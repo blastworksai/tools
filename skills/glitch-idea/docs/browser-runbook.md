@@ -170,6 +170,22 @@ Each one names a direction and stops the open.
 
 The warning `ssh_open_failed` means the page did not open on your computer.
 The result still carries `browser.link` with `browser.opened` set to `false`; click or paste that link.
+`browser.failure` says why, as one fixed code:
+
+| Code | Meaning |
+| --- | --- |
+| `no_tern_window` | No Tern window is open on any Tern daemon of yours (Windows). |
+| `plugin_not_ready` | The Glitch Idea plugin is not installed or not ready in that window (Windows). |
+| `plugin_did_not_claim` | The window did not pick up the request within 4 s (Windows). |
+| `plugin_no_answer` | The window picked it up and gave no answer within 15 s (Windows). |
+| `plugin_refused` | The window answered that it could not open the page (Windows). |
+| `request_folder_unsafe` | The private request folder failed its owner or permission check (Windows). |
+| `tern_missing` | Tern is not installed for your account (Windows). |
+| `invalid_input` | The computer refused the link's shape. |
+| `timeout` / `ssh_failed` / `open_failed` | The ssh call timed out, failed, or the opener failed some other way. |
+
+On Windows an administrator's ssh login is elevated, and an elevated Tern talks to its own elevated session daemon, not the one your window uses.
+The opener tries a `TERN_DAEMON_SOCKET` already set in the ssh environment, then the default daemon, then up to 16 Tern daemon pipes that your own account owns, and uses the first one with a window and the ready plugin.
 A throwaway `ssh -L` line is no longer the way.
 
 ### 5.2a Tern on a remote host
