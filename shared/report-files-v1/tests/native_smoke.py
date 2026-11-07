@@ -24,8 +24,8 @@ TESTS = Path(__file__).resolve().parent
 ROOT = TESTS.parents[2]
 BASELINE = 'b8c9df4e8ea920586f51d7dd5ecec09963a1bc69'
 GROUPS = {
-    'orch': ('state', 'transport', 'authority', 'dispatch', 'reports', 'gates', 'health', 'workflow'),
-    'spawn': ('behavior', 'authority', 'backend', 'dispatch', 'window_dispatch', 'mailbox', 'host_editor', 'retirement_adapter'),
+    'orch': ('state', 'transport', 'authority', 'dispatch', 'reports', 'gates', 'health', 'workflow', 'setup_ui', 'readiness_ui'),
+    'spawn': ('behavior', 'authority', 'backend', 'dispatch', 'window_dispatch', 'mailbox', 'host_editor', 'retirement_adapter', 'managed_route', 'page_navigation'),
 }
 PLUGINS = {'orch': 'ORCH+', 'spawn': 'SPAWN'}
 SCENARIOS = ('reports', 'setup', 'policy', 'lifecycle', 'rulings', 'recovery', 'repository')
@@ -239,6 +239,11 @@ def scenarios(base, root, selection, args, evidence, processes, lib):
     results = {}
     evidence['scenarios'] = results
     for name in requested:
+        if name in ('setup', 'policy'):
+            from product_c2 import product_setup, product_policy
+            run = product_setup if name == 'setup' else product_policy
+            results[name] = run(base, root, evidence, processes, lib, args)
+            continue
         if name != 'reports':
             results[name] = {'status': 'unavailable', 'reason': 'checkpoint runtime driver not implemented; no fixture substitute is accepted'}
             continue
@@ -291,7 +296,38 @@ def main():
     parser.add_argument('--evidence', required=True, type=Path)
     parser.add_argument('--baseline-archive', type=Path, help='verified git archive of pinned '+BASELINE)
     parser.add_argument('--source', type=Path, default=ROOT, help='owned source root (default this checkout)')
+    parser.add_argument('--policy-modes', default='cross_family_review,helper_checks,review_disabled',
+                        help='actual deterministic native policy cells (comma-separated)')
+    parser.add_argument('--policy-cases', default='passed,failed,missing,stale,empty',
+                        help='actual helper check cases (comma-separated)')
+    parser.add_argument('--capture-hold', type=int, default=0,
+                        help='hold each C2 owned desktop for inspection, at most 600 seconds; release via metadata release_file')
+    parser.add_argument('--capture-desktop', action='store_true',
+                        help='owned 1920x1080 Xvfb/native window, 17px native fonts, passive display metadata; no video process')
+    parser.add_argument('--capture-start-hold', type=int, default=0,
+                        help='pause before C2 inputs for recorder attachment, at most 600 seconds; metadata exposes release path')
+    parser.add_argument('--control-metadata', type=Path,
+                        help='write current owned C2 endpoints/input protocol here before native interaction')
+    parser.add_argument('--legacy-archive', type=Path,
+                        help='verified prior-version source archive for native create/update/adoption qualification')
+    parser.add_argument('--provider-readiness', action='store_true',
+                        help='EXPLICIT CONSENT: policy scenario uses real configured-provider native readiness, not deterministic workers')
+    parser.add_argument('--provider-agent-dir', type=Path,
+                        help='explicit existing approved native OMP agent directory used in place; credentials are never copied')
+    parser.add_argument('--provider-approve-landing', action='store_true',
+                        help='explicitly answer only the ordinary owner gate for the disposable readiness landing; never native tool/auth/billing gates')
     args = parser.parse_args()
+    if not 0 <= args.capture_hold <= 600:
+        parser.error('--capture-hold must be between 0 and 600 seconds')
+    if not 0 <= args.capture_start_hold <= 600:
+        parser.error('--capture-start-hold must be between 0 and 600 seconds')
+    if args.provider_readiness:
+        if not args.provider_agent_dir or not args.scenarios or 'policy' not in args.scenarios.split(','):
+            parser.error('--provider-readiness requires --provider-agent-dir and --scenarios policy')
+        if args.policy_cases != 'passed,failed,missing,stale,empty':
+            parser.error('provider readiness uses the product fixed real passing-check task; --policy-cases selects deterministic qualification only')
+    elif args.provider_agent_dir or args.provider_approve_landing:
+        parser.error('provider authentication/landing consent options require --provider-readiness')
     evidence = {'passed': False, 'mode': 'suites' if args.suites else 'scenarios', 'platform': sys.platform, 'checks': []}
     processes = []
     lib = None

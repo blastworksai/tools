@@ -145,7 +145,9 @@ if section == nil or section == "migration" then
  local old = api.clone(f.authority.registry); local issued = worker(f,id).workflow.report_request.bytes
  old.dispatch.workers[id].workflow = nil; old.dispatch.gates = nil; old.dispatch.policies = nil
  local restored = api.state.rehydrate(old)
- check(restored ~= nil and restored.version == 2, "additive CP2 workflow migration preserves schema2 authority")
+ check(restored ~= nil and restored.dispatch.workers[id].work_id == old.dispatch.workers[id].work_id
+  and restored.dispatch.workers[id].accepted_seq == old.dispatch.workers[id].accepted_seq,
+  "additive workflow migration preserves the accepted worker's identity and report cursor")
  check(restored.dispatch.workers[id].workflow.report_request.bytes == issued, "migration adopts exact existing report-request outbox without reissuing")
  check(restored.dispatch.workers[id].workflow.health.freshness == "unconfirmed", "migration never invents old progress freshness")
  local invalid = api.clone(f.authority.registry); invalid.dispatch.workers[id].workflow.observation_cursor = true
@@ -232,7 +234,7 @@ local function catalog(f, rows)
  -- CP4: the session's release manager (the only merging actor) is its own record.
  local release = api.clone(records[1]); release.id = "release"; release.cwd = "/fixture"; table.insert(records, release)
  local r = f:apply("catalog"); assert(r.ok, r.message)
- assert(f:finish(r.action_id, "catalog", { namespace = "fixture-spawn", host_key = "fixture-host", config_revision = 0, revision = 0, records = tern.json.array(records) }).ok)
+ assert(f:finish(r.action_id, "catalog", { catalog_version = 2, setup = { schema = 1, state = "completed", config_revision = 0, readiness = { state = "not_run", config_revision = 0, summary = "" } }, namespace = "fixture-spawn", host_key = "fixture-host", config_revision = 0, revision = 0, records = tern.json.array(records) }).ok)
  assert(f:apply("policy", { policy = { reviewer_records = tern.json.array({ "reviewer" }), release_manager_record = "release" } }).ok)
  f.cp2_catalog = true
 end
@@ -260,9 +262,9 @@ local function launch(f, record, cwd, fields, caps)
  local queued = queue_work(f, record, cwd, fields); assert(queued.ok and queued.action_id, queued.message)
  return start(f, queued.worker_id, queued.action_id, caps)
 end
--- A landing builder: Rule H's helper-checks branch (enforce_cross_family=false) with one declared check.
+-- A landing builder: review required, same-family allowed, with one declared check.
 local function builder(f, fields, caps)
- if not f.cp2_catalog then catalog(f, { { "native", "/fixture" } }); assert(f:apply("policy", { policy = { enforce_cross_family = false } }).ok) end
+ if not f.cp2_catalog then catalog(f, { { "native", "/fixture" } }); assert(f:apply("policy", { policy = { require_other_family = false } }).ok) end
  return launch(f, "native", "/fixture", fields or { checks = UNIT }, caps)
 end
 -- CP2/CP3 cycles add helper reports (CHECK_RESULT) and a reviewer-worker review per landing, so long fixtures
@@ -307,6 +309,11 @@ local rm -- launches the session's queued release manager (defined with the land
 -- reviewer answers that exact request. Returns the review ID.
 local function review(f, id, cp_id, revision, outcome)
  settle(f, id)
+ local w = worker(f, id)
+ local checkpoint = assert(api.codec.decode_report(w.workflow.evidence.CHECKPOINT, w))
+ local prior = w.checkout
+ assert(checkout(f, id, checkpoint.payload.worktree_ref, if prior then prior.changed_files else nil,
+  { head = hx(revision), dirty = if prior then prior.dirty else false }).ok)
  local sent = send(f, id, "REVIEW_READY", { checkpoint_id = cp_id, artifact_revision = hx(revision) }); assert(sent.ok, sent.message)
  local rv, serial = nil, -1
  for _, candidate in f.authority.registry.dispatch.reviews or {} do
@@ -330,7 +337,7 @@ local function review(f, id, cp_id, revision, outcome)
 end
 -- Landing queue (CP4): exact requests, owner approval gates, one slot per target, exact results.
 local function lcp(id, revision, outcome, holds)
- return { checkpoint_id = id, task_ref = "task:fixture", project_id = "project-one", worktree_ref = "worktree:fixture", artifact_revision = hx(revision),
+ return { checkpoint_id = id, task_ref = "task:fixture", project_id = "project-one", worktree_ref = "/fixture/worktree", artifact_revision = hx(revision),
   completed = tern.json.array({ "Implemented the assigned change" }), remaining = tern.json.array(), holds = holds or tern.json.array(),
   checks = tern.json.array({ { check_id = "unit", artifact_revision = hx(revision), outcome = outcome or "passed", evidence_ref = "unit:log" } }) }
 end
@@ -1025,7 +1032,7 @@ if section == nil or section == "file_overlap" then
  check(restores(f) and restores(g), "overlap gates restore")
 end
 if section == nil or section == "scope" then
- local f = api.fixture(); catalog(f, { { "repo", "/repo" } }); assert(f:apply("policy", { policy = { enforce_cross_family = false } }).ok)
+ local f = api.fixture(); catalog(f, { { "repo", "/repo" } }); assert(f:apply("policy", { policy = { require_other_family = false } }).ok)
  local a = launch(f, "repo", "/repo", { files = arr({ "src/feature.luau" }), scope = { paths = arr({ "src/**" }), systems = arr() }, checks = UNIT })
  local function scoped() return gates_of(f, a, "scope") end
  check(checkout(f, a, "/repo", { "src/feature.luau" }).ok and #scoped() == 0, "changed files inside scope.paths do not gate")
@@ -1057,7 +1064,7 @@ end
 -- scope_open with no gate left to answer. Owner decisions live on the worker, written with the
 -- answer; gate reclamation removes only the question, never the decision or its thread record.
 if section == nil or section == "scope_durable" then
- local f = api.fixture(); catalog(f, { { "repo", "/repo" }, { "other", "/other" } }); assert(f:apply("policy", { policy = { enforce_cross_family = false } }).ok)
+ local f = api.fixture(); catalog(f, { { "repo", "/repo" }, { "other", "/other" } }); assert(f:apply("policy", { policy = { require_other_family = false } }).ok)
  local a = launch(f, "repo", "/repo", { files = arr({ "src/feature.luau" }), scope = { paths = arr({ "src/**" }), systems = arr() }, checks = UNIT })
  local function hold(lid) local h = item(f, lid).hold; return if h then h.code else nil end
  assert(checkout(f, a, "/repo", { "src/feature.luau", "notes.txt" }).ok)
@@ -1115,19 +1122,19 @@ if section == nil or section == "check_proof" then
   and #proof.check_refs == 2 and proof.check_refs[1] == "unit:" .. OUTPUT and proof.check_refs[2] == "lint:" .. OUTPUT, "passing: every declared check passing at the head grants with its proof")
  local g = api.fixture(); local gw = builder(g, {}); assert(send(g, gw, "CHECKPOINT", lcp("cp-1", "rev-1")).ok); review(g, gw, "cp-1", "rev-1")
  local glid = request(g, gw, "cp-1", "rev-1"); assert(approve(g, glid).ok)
- held(g, glid, "checks_undeclared", "work that declared no checks cannot prove itself in helper-checks mode")
+ check(item(g, glid).status == "granted" and #item(g, glid).proof.check_refs == 0, "an empty declared-check set passes without fabricated check evidence")
  local k = api.fixture(); local kw = builder(k, nil, { "report-files-v1", "native-ask-v1", "check-runner-v1" }); ready(k, kw, "cp-1", "rev-1")
  local klid = request(k, kw, "cp-1", "rev-1"); assert(approve(k, klid).ok)
  check(item(k, klid).status == "granted" and holder(k, klid) ~= kw and item(k, klid).proof ~= nil,
   "the builder needs no release-manager-v1: a fully proven request is granted to the release manager, never the builder")
  local m = api.fixture(); local mw = builder(m, nil, { "report-files-v1", "native-ask-v1", "release-manager-v1" })
  check(not check_result(m, mw, "rev-1").ok and next(worker(m, mw).check_results or {}) == nil, "CHECK_RESULT needs the check-runner-v1 capability")
- -- enforce_cross_family=true: a reviewer-worker review between undeclared (OMP) families is no cross-family proof.
+ -- Other-family required: a review between undeclared (OMP) families is not cross-family proof.
  local e = api.fixture(); local ew = builder(e); ready(e, ew, "cp-1", "rev-1")
- assert(e:apply("policy", { policy = { enforce_cross_family = true } }).ok)
+ assert(e:apply("policy", { policy = { require_other_family = true } }).ok)
  local elid = request(e, ew, "cp-1", "rev-1"); assert(approve(e, elid).ok)
  held(e, elid, "family_unknown", "enforcement on: passing checks and an approved review without declared different families never grant")
- assert(e:apply("policy", { policy = { enforce_cross_family = false } }).ok); rm(e)
+ assert(e:apply("policy", { policy = { require_other_family = false } }).ok); rm(e)
  check(item(e, elid).status == "granted" and item(e, elid).proof.mode == "helper_checks", "turning enforcement off re-evaluates the same evidence and grants")
  check(restores(f) and restores(g) and restores(k) and restores(e), "check results, holds and proofs restore")
 end
@@ -1135,7 +1142,7 @@ end
 if section == nil or section == "gate_invariants" then
  local ROOT = "/srv/agents/workspaces"
  local f = api.fixture(); catalog(f, { { "native", "/fixture" }, { "one", ROOT .. "/one" }, { "two", ROOT .. "/two" }, { "top", "/srv/agents" } })
- assert(f:apply("policy", { policy = { enforce_cross_family = false, checkout_roots = arr({ ROOT }) } }).ok)
+ assert(f:apply("policy", { policy = { require_other_family = false, checkout_roots = arr({ ROOT }) } }).ok)
  local fields = { files = arr({ "src/a.luau" }), scope = { paths = arr({ "src/**" }), systems = arr() }, checks = UNIT }
  local one = launch(f, "one", ROOT .. "/one", fields); local two = launch(f, "two", ROOT .. "/two", fields); launch(f, "top", "/srv/agents")
  assert(checkout(f, one, ROOT .. "/one", { "src/a.luau" }).ok); assert(checkout(f, two, ROOT .. "/two", { "src/a.luau" }).ok)

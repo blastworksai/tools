@@ -450,7 +450,7 @@ local function dispatch_view(view: any, projection: any, selected: any): (any, a
 		action = if active then pick(active, ACTION_KEYS, { action_id = active.request.action_id }) else nil,
 		result = if outcome then pick(outcome, RESULT_KEYS, { action_id = outcome.action_id }) else nil,
 		command_result = if command_result then pick(command_result, "request_id command action_id ok code message acknowledged") else nil,
-		driver_result = if driver_result then pick(driver_result, "request_id command action_id ok code message") else nil,
+		driver_result = if driver_result then pick(driver_result, "request_id command action_id worker_id ok code message") else nil,
 		receipt = view.dispatch_receipt, uncertain_actions = uncertain_ids }
 	local request_node = if active then keyed(active.request_bytes, "dispatch-request", "orchplus.request") else nil
 	local bytes = tern.json.encode(machine)
@@ -569,7 +569,8 @@ local function workflow_view(view: any, projection: any, selected: any): (any, a
 		end
 		-- Task 3B: role, declared family, review round/status, findings and Rule H proof status.
 		do
-			local enforce = flow.policy and flow.policy.enforce_cross_family == true
+			local review_required = flow.policy and flow.policy.require_code_review == true
+			local enforce = review_required and flow.policy.require_other_family == true
 			local review = worker.review
 			local facts = { { "Role", shown(worker.role, "builder") },
 				{ "Family", (if worker.family then tostring(worker.family) else "unknown") .. " (declared, not verified)" } }
@@ -588,16 +589,19 @@ local function workflow_view(view: any, projection: any, selected: any): (any, a
 			end
 			if worker.role == nil or worker.role == "builder" then
 				local total, passed = worker.checks_count or 0, 0
-				local revision = if review then review.artifact_revision else nil
+				local revision = worker.artifact_revision
 				for _, r in worker.check_results or {} do
-					if r.exit_code == 0 and (revision == nil or r.head == revision) then passed += 1 end
+					if revision ~= nil and r.exit_code == 0 and r.head == revision then passed += 1 end
 				end
-				local checks = "checks " .. tostring(passed) .. "/" .. tostring(total) .. " helper-run"
+				local checks = "checks " .. tostring(passed) .. "/" .. tostring(total) .. " helper-run" .. (if revision == nil and total > 0 then " · current artifact revision unconfirmed" else "")
 				local status = if review and not review.voided then review.status else nil
-				local proof = if enforce then (ENFORCED_PROOF[status] or "awaiting cross-family review") .. " · " .. checks .. " (evidence only)"
-					else checks .. (if total > 0 and passed == total then "" else " — landing waits for every declared check")
-						.. " · " .. (PLAIN_PROOF[status] or "awaiting review")
-				table.insert(facts, { "Proof (Rule H)", proof })
+				local proof = if not review_required then "Review disabled"
+					elseif enforce then ENFORCED_PROOF[status] or "awaiting cross-family review"
+					else PLAIN_PROOF[status] or "awaiting review"
+				table.insert(facts, { "Review policy", proof })
+				table.insert(facts, { "Mandatory checks", checks .. (if total == 0 then " — none declared (no fabricated evidence)"
+					elseif passed == total then " — current evidence still subject to landing validation"
+					else " — landing waits for every declared check; approval cannot override failures") })
 			end
 			table.insert(details, ui.kv(facts))
 		end
@@ -814,7 +818,12 @@ local function workflow_view(view: any, projection: any, selected: any): (any, a
 		for index = page * 8 + 1, math.min(#lines, page * 8 + 8) do table.insert(entries, ui.text(lines[index])) end
 		table.insert(rows, ui.card("Imported plan · " .. preview(plan.title, 80), entries))
 	end
-	machine("workflow-index", "orchplus.workflow", { policy = policy, policy_sha256 = flow.policy_sha256, worker_ids = ids, sweep_last_date = if type(flow.sweep) == "table" then flow.sweep.last_date else nil }, 65536)
+	machine("workflow-index", "orchplus.workflow", { policy = policy, policy_revision = flow.policy_revision, policy_sha256 = flow.policy_sha256, worker_ids = ids, sweep_last_date = if type(flow.sweep) == "table" then flow.sweep.last_date else nil }, 65536)
+	local readiness_landings = {}
+	for _, queue in flow.landing or {} do
+		for _, item in queue.items do table.insert(readiness_landings, { worker_id = item.worker_id, status = item.status, repo_ref = queue.repo_ref }) end
+	end
+	machine("readiness-index", "orchplus.readiness", { catalog = if projection.dispatch then projection.dispatch.catalog else nil, landings = readiness_landings }, 65536)
 	-- Window contract for work sources (Contract K): newest intakes and the desired lane of each mapped board card.
 	machine("workflow-intake", "orchplus.intake", { intakes = flow.intakes or {}, board = flow.board or {} }, 65536)
 	table.insert(rows, ui.text(ui.span("Nightly mailbox sweep" .. (if policy.sweep_enabled then " at " .. shown(policy.sweep_time, "03:00") .. " local time" else " (off in Config)"), "strong")))
@@ -873,7 +882,7 @@ local EDITABLE = { "poll_ms", "heartbeat_ms", "stale_ms", "automatic_reports", "
 	"initial_dispatch_records", "initial_dispatch_provider", "initial_dispatch_account", "initial_dispatch_model", "sweep_enabled", "sweep_time",
 	"worker_rollover_records", "worker_rollover_provider", "worker_rollover_account", "worker_rollover_model",
 	"coordinator_rollover_records", "coordinator_rollover_provider", "coordinator_rollover_account", "coordinator_rollover_model", "concurrency_limit",
-	"loop_cap", "review_rounds", "stale_claim_min", "enforce_cross_family", "family_map", "reviewer_records", "release_manager_record",
+	"loop_cap", "review_rounds", "stale_claim_min", "require_code_review", "require_other_family", "family_map", "reviewer_records", "release_manager_record",
 	"checkout_roots", "auto_approve_kinds", "glitch_integration", "default_work_source", "board_path", "board_lanes", "inbox_folder",
 	"auto_launch_intake", "routes", "labeller_record", "role_guidance", "templates" }
 -- Lists in Config show at most this many rows per page; the rest page explicitly.
@@ -899,7 +908,7 @@ end
 -- controller gets editing controls; saving goes through the ordinary policy command.
 local function config_view(view: any, projection: any, selected: any): { any }
 	local head = {
-		ui.text("Orchestration settings for this logical session. Launch records, accounts, models and host settings remain in SPAWN Config."),
+		ui.text("Session overrides — settings for this logical session only. Installation defaults seed new sessions; changing them never overwrites this session. Launch records remain in SPAWN Config."),
 		button(view, "Open ORCH+ controller", { kind = "config-close" }),
 	}
 	local cards = {}
@@ -1041,8 +1050,13 @@ local function config_view(view: any, projection: any, selected: any): { any }
 			stepper("stale_claim_min", "Stale-claim alert after", " minutes (0 = off; 0–1440)", { -30, -5, 5, 30 }),
 			ui.text("Every loop that re-engages a model or a worker stops at the cap with one loop_cap owner decision naming the loop; allowing more resets only that loop's counter. Code-only waits stay time-bounded. A claim older than the stale-claim limit raises one stale_claim decision; ORCH+ never takes over a claim."),
 		}, false)
-		local review = { checkbox("enforce_cross_family", values.enforce_cross_family == true, admitted,
-			"Enforce cross-family review — a green review from a different provider family is the landing proof; off: checks run by the SPAWN helper are the proof") }
+		local review = {
+			checkbox("require_code_review", values.require_code_review == true, admitted, "Require code review before landing"),
+			checkbox("require_other_family", values.require_other_family == true, admitted and values.require_code_review == true, "Require a different declared provider family"),
+			ui.text("Every declared check independently requires successful current-revision helper evidence in all review modes. Turning review off also turns the family requirement off; turning it on does not restore a previous family preference."),
+			ui.text(if values.require_code_review then "Review enabled: builder and reviewer remain separate roles."
+				else "Review disabled: no automatic reviewer, reviewer-availability gate or explicit review proposal execution."),
+		}
 		table.insert(review, ui.text(ui.span("Family map (owner-declared, not verified)", "strong")))
 		local mapped = {}
 		for record_id in values.family_map do table.insert(mapped, record_id) end
@@ -1060,7 +1074,7 @@ local function config_view(view: any, projection: any, selected: any): { any }
 				if admitted and index > 1 then button(view, "Move up", { kind = "config-move", field = "reviewer_records", item = reviewers[index] }) else nil,
 				field_link("Remove", "reviewer_records", { op = "remove", item = reviewers[index] })))
 		end)
-		if #reviewers == 0 then table.insert(review, ui.text("No reviewer records: review requests hold as reviewer_unavailable.")) end
+		if #reviewers == 0 then table.insert(review, ui.text(if values.require_code_review then "No reviewer records: review requests hold as reviewer_unavailable." else "No reviewer required while review is disabled.")) end
 		if #reviewers < 8 then add(review, field_link("Add reviewer record…", "reviewer_records", { op = "add" })) end
 		config_card("Review & proof", review, true)
 		local manager = values.release_manager_record
@@ -1195,10 +1209,39 @@ function M.render(view: any, projection: any, status: string, diagnostic: string
 		ui.text(ui.span("ORCH+ · ownership and managed dispatch", "strong")),
 		ui.text("Host-persisted claims, explicit assignments and durable mailbox receipts. Missing capability is a visible prerequisite, never a raw-command fallback."),
 	}
+	if status == "ready" and projection.setup and projection.installation_defaults then
+		local setup, defaults = projection.setup, projection.installation_defaults
+		local policy, repository = defaults.policy, defaults.repository
+		local function control(label: string, command: string): any
+			return button(view, label, { kind = "setup-intent", command = command }, { ["data-orchplus-setup"] = command })
+		end
+		table.insert(rows, ui.card("Installation defaults", {
+			ui.text("Host-wide defaults for NEW sessions only. Session overrides below remain separate and unchanged."),
+			ui.text("Setup: " .. setup.state .. (if setup.review_existing then " · Review existing setup — adoption required" else "") .. " · configuration revision " .. tostring(defaults.revision)),
+			ui.text("Review: " .. (if not policy.require_code_review then "disabled" elseif policy.require_other_family then "required, different declared family" else "required, same family allowed") .. " · declared checks always required"),
+			ui.text("Repository: " .. (if repository then repository.repo_root .. " · target " .. repository.target_ref .. " · " .. repository.queue_route else "not verified")),
+			ui.text("Builder: " .. shown(defaults.builder_record, "none") .. " · release manager: " .. shown(policy.release_manager_record, "none")),
+			ui.text("Optional readiness: " .. setup.readiness.state .. (if setup.readiness_stale then " (stale configuration revision)" else "") .. " · " .. setup.readiness.summary),
+			ui.text("Role text is guidance; declared provider family is not identity isolation. Native tool flags and repository protection are the real permission controls. Coordinator, labeller and USAGE are optional."),
+			ui.row({ control(if setup.review_existing then "Review existing setup…" else "Setup wizard…", "wizard"),
+				control("Edit Installation defaults…", "defaults"), control("SPAWN managed setup…", "spawn"),
+				control("Optional readiness exercise…", "readiness"), control("Dismiss setup", "dismiss") }),
+		}))
+		if view.setup_result and view.setup_result.ok == false then
+			table.insert(rows, ui.text(ui.span("Setup refused: " .. tostring(view.setup_result.message or view.setup_result.code), "error")))
+		end
+		table.insert(rows, keyed(tern.json.encode({ version = 1, source_nonce = view.alias_nonce, host_pane_id = tostring(view.pane),
+			setup = setup, installation_defaults = defaults, setup_result = view.setup_result, setup_repository = view.setup_repository }), "setup-index", "orchplus.setup"))
+		if view.setup_catalog_request then table.insert(rows, keyed(tern.json.encode(view.setup_catalog_request), "setup-catalog-request", "orchplus.setup.request")) end
+	end
 	if diagnostic ~= nil then table.insert(rows, ui.text(ui.span(diagnostic, "error"))) end
 	if view.notice ~= nil then table.insert(rows, ui.text(ui.span(view.notice, "info"))) end
+	-- Host-bounded one-shot window intent. Native page entry can expose prerequisites before authority exists;
+	-- the consuming window validates its live scope, and controller operations still require their owner origin.
+	if type(view.operator_intent) == "table" then table.insert(rows, keyed(tern.json.encode(view.operator_intent), "operator-intent", "orchplus.intent")) end
 	if status ~= "ready" then
 		table.insert(rows, ui.text("Authority store: " .. status .. ". Existing ownership is never silently reset."))
+		table.insert(rows, button(view, "SPAWN managed setup…", { kind = "setup-intent", command = "spawn" }, { ["data-orchplus-setup"] = "spawn" }))
 		table.insert(rows, button(view, "Recheck restored store", { kind = "recheck-store" }))
 		if status == "missing" then
 			table.insert(rows, ui.text("First installation only: initialize after verifying that there is no previous ownership store or active ORCH+ owner. Otherwise restore the backup and recheck."))
@@ -1207,6 +1250,9 @@ function M.render(view: any, projection: any, status: string, diagnostic: string
 				table.insert(rows, button(view, "Confirm first use — no prior owners or lost store", { kind = "initialize-confirm" }))
 			end
 		end
+		-- View identity only: an inert page may ask its window to show prerequisites before authority exists.
+		table.insert(rows, keyed(tern.json.encode({ version = 2, alias_nonce = view.alias_nonce,
+			owners = {}, config_open = view.config_open == true }), "ownership-alias", "orchplus.alias"))
 		return ui.col(rows)
 	end
 	table.insert(rows, ui.text("Committed registry revision " .. tostring(projection.revision) .. " · all controller blocks share this host authority."))
@@ -1279,9 +1325,6 @@ function M.render(view: any, projection: any, status: string, diagnostic: string
 			end
 		end
 	end
-	-- One-shot operator intent of the last clicked window-side control (host-bounded). The window
-	-- whose origin owns this controller consumes it once per (source_nonce, serial).
-	if type(view.operator_intent) == "table" then table.insert(rows, keyed(tern.json.encode(view.operator_intent), "operator-intent", "orchplus.intent")) end
 	-- config_open only asks this window for the display-only session agent-pane list.
 	table.insert(rows, ui.text("Window alias diagnostic (not identity or authorization)"))
 	table.insert(rows, keyed(tern.json.encode({ version = 2, alias_nonce = view.alias_nonce, orch_session_id = view.orch_session_id,

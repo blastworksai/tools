@@ -28,7 +28,8 @@ local function check_count(value)
 		prefix, suffix = "shared/" .. task.consumer .. "/" .. task.case_id .. ": ", " checks passed"
 	elseif task.family == "orch" then
 		local endings = { state = " ownership state checks", transport = " report transport checks", authority = " authority assertions" }
-		if endings[task.group] then prefix, suffix = "PASS ", endings[task.group]
+		if task.group == "setup_ui" or task.group == "readiness_ui" then prefix, suffix = task.group .. ": ", " checks"
+		elseif endings[task.group] then prefix, suffix = "PASS ", endings[task.group]
 		else
 			local section = if task.section then "/" .. task.section elseif task.group == "dispatch" then "" else "/all"
 			prefix, suffix = task.group .. section .. ": ", " checks passed"

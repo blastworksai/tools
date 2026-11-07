@@ -734,7 +734,8 @@ if section == nil or section == "alias_recovery" then
 	w.f.origin = clone(w.events[#w.events].origin)
 	w:bridge({ schema = 1, op = action.request.op, request_id = action.request.request_id, action_id = action.request.action_id,
 		origin_binding = action.request.origin_binding, controller_generation = action.request.controller_generation,
-		status = "catalog", payload = { namespace = "fixture-spawn", host_key = "fixture-host", config_revision = 0, revision = 0, records = runtime.json.array() } })
+		status = "catalog", payload = { catalog_version = 2, namespace = "fixture-spawn", host_key = "fixture-host", config_revision = 0, revision = 0,
+			setup = { schema = 1, state = "completed", config_revision = 0, readiness = { state = "not_run", config_revision = 0, summary = "" } }, records = runtime.json.array() } })
 	w:click("reconcile", { action_id = action.request.action_id })
 	w:tick(); w:tick()
 	local query = assert(w:bridge_events()[1])
@@ -1519,7 +1520,8 @@ if section == nil or section == "bridge_lifecycle" then
 	-- some in its background bridge tab 50, where an earlier build also moved 8996 (unreadable now).
 	w:bridge({ schema = 1, op = action.request.op, request_id = action.request.request_id, action_id = action.request.action_id,
 		origin_binding = action.request.origin_binding, controller_generation = action.request.controller_generation,
-		status = "catalog", payload = { namespace = "fixture-spawn", host_key = "fixture-host", config_revision = 0, revision = 0, records = runtime.json.array() } })
+		status = "catalog", payload = { catalog_version = 2, namespace = "fixture-spawn", host_key = "fixture-host", config_revision = 0, revision = 0,
+			setup = { schema = 1, state = "completed", config_revision = 0, readiness = { state = "not_run", config_revision = 0, summary = "" } }, records = runtime.json.array() } })
 	w:lease(9003, lease())
 	w:add_bridge(8990, lease({ held = true })) -- SPAWN still names it in a requested authorization.
 	w:add_bridge(8991, lease({ live = true })) -- Its execution projection is live.
@@ -1657,6 +1659,122 @@ if section == nil or section == "withdraw_fenced" then
 	assert(f:queue(false).ok)
 	check(f.authority.registry.dispatch.workers[wid] == nil, "the retired never-launched worker is reclaimed")
 end
+-- Pre-controller catalog forwarding uses SPAWN's structured page cursor without writing authority.
+if section == nil or section == "config_cards" then
+	local stored, writes = state.new_registry(), 0
+	local definition
+	local fake = table.clone(runtime)
+	fake.kv = { get = function() return clone(stored) end,
+		set = function(_, value) stored = clone(value); writes += 1 end }
+	fake.block = { define = function(_, value) definition = value end }
+	fake.on = function() end
+	fake.timer = function() return { cancel = function() end } end
+	local chunk = assert(loadstring(runtime.fs.read(root .. "/host.luau"), "health-setup-cursor-host"))
+	setfenv(chunk, setmetatable({ tern = fake, require = shared.load }, { __index = environment }))
+	chunk()
+	local cx = { pane = 42, render = function() end }
+	local view = definition.init(cx, { "config" }, nil)
+	local before, baseline_writes = runtime.json.encode(stored), writes
+	local origin = { host_pane_id = "42", window_key = "", window_epoch = "setup-cursor-window",
+		native_session_id = "7", window_host_id = "local" }
+	local serial = 0
+	local function request(cursor)
+		serial += 1
+		return { schema = 1, origin = "orchplus", op = "catalog", request_id = "catalog-page-" .. serial,
+			action_id = "catalog-action-" .. serial, setup_origin = clone(origin), cursor = cursor }
+	end
+	local function send(value, nonce, outer_origin)
+		definition.event(view, { ev = "action", act = "setup-command", value = runtime.json.encode({
+			kind = "catalog_request", source_nonce = nonce or view.alias_nonce, request_id = "host-" .. value.request_id,
+			setup_origin = outer_origin or clone(origin), request = value,
+		}) }, cx)
+	end
+	local function published()
+		local function find(node)
+			if node.p and node.p.role == "orchplus.setup.request" then
+				local span = node.p.spans[1]
+				return runtime.json.decode(if type(span) == "string" then span else span.t)
+			end
+			for _, child in node.c or {} do local found = find(child); if found then return found end end
+			return nil
+		end
+		return find(definition.view(view, cx).main)
+	end
+	-- Deterministic SPAWN response fixtures use the actual framed consumer, not a string cursor
+	-- or a source-text assertion. Every returned cursor must survive the host view roundtrip.
+	local cursor, seen = nil, {}
+	for page = 1, 3 do
+		local outgoing = request(cursor)
+		send(outgoing)
+		local forwarded = assert(published())
+		check(view.setup_result.ok and view.setup_result.code == "catalog_requested"
+			and view.setup_result.request_id == "host-" .. outgoing.request_id
+			and shared.quota.digest(forwarded) == shared.quota.digest(outgoing),
+			"setup catalog page " .. page .. " forwards the exact request and structured cursor through the real host surface")
+		local records = {}
+		for index = (page - 1) * 2 + 1, page * 2 do
+			table.insert(records, { id = "record-" .. index, revision = 7, provider = "omp", account_label = "fixture",
+				backend = "native-agent", enabled = true, eligible = true, capabilities = runtime.json.array({ "report-files-v1" }),
+				unsupported = runtime.json.array(), capability_evidence = "configured_operator_attestation_not_runtime_proof",
+				effective_identity = { provider = "omp", evidence = "configured" }, cwd = "/fixture", placement = "split" })
+		end
+		local body = { schema = 1, op = "catalog", request_id = forwarded.request_id, action_id = forwarded.action_id,
+			setup_origin = forwarded.setup_origin, status = "catalog", payload = {
+				catalog_version = 2, namespace = "fixture-spawn", host_key = "fixture-host", revision = 7, config_revision = 7,
+				setup = { schema = 1, state = "completed", config_revision = 7,
+					readiness = { state = "not_run", config_revision = 7, summary = "" } },
+				records = runtime.json.array(records), next_cursor = if page < 3 then { revision = 7, index = page * 2 + 1 } else nil,
+			} }
+		local bytes = runtime.json.encode(body)
+		local wire = "SPAWN_DISPATCH v1 " .. runtime.json.encode({ schema = 1, op = "catalog", request_id = forwarded.request_id,
+			complete = true, body_bytes = #bytes, body_sha256 = shared.codec.sha256(bytes), body_json = bytes })
+		local response = assert(dispatch.decode_setup_response(wire, forwarded))
+		for _, record in response.payload.records do table.insert(seen, record.id) end
+		cursor = response.payload.next_cursor
+	end
+	check(cursor == nil and table.concat(seen, ",") == "record-1,record-2,record-3,record-4,record-5,record-6",
+		"second and subsequent setup pages reach the full fixture roster without losing records")
+	for _, value in { { revision = 0, index = 1 }, { revision = 9007199254740991, index = 9007199254740991 } } do
+		send(request(value))
+		check(view.setup_result.ok and shared.quota.digest(published().cursor) == shared.quota.digest(value),
+			"host accepts SPAWN's inclusive numeric cursor bounds without coercion")
+	end
+	local retained = shared.quota.digest(published())
+	for _, value in { "page-2", 2, false, {}, { revision = 7 }, { index = 3 }, { revision = "7", index = 3 },
+		{ revision = 7, index = "3" }, { revision = false, index = 3 }, { revision = 7, index = true },
+		{ revision = -1, index = 3 }, { revision = 7, index = 0 }, { revision = 7, index = -1 },
+		{ revision = 0.5, index = 3 }, { revision = 7, index = 1.5 },
+		{ revision = 9007199254740992, index = 3 }, { revision = 7, index = 9007199254740992 },
+		{ revision = 7, index = 3, extra = true }, runtime.json.array({ 7, 3 }) } do
+		send(request(value))
+		check(not view.setup_result.ok and view.setup_result.code == "invalid_catalog_request"
+			and shared.quota.digest(published()) == retained,
+			"malformed, nonclosed or out-of-bound cursor refuses without replacing the pending catalog request")
+	end
+	local result = shared.quota.digest(view.setup_result)
+	for _, raw_cursor in { "null", '{"revision":7,"index":1e309}', '{"revision":1e309,"index":3}',
+		'{"revision":7,"index":3,"index":4}', '{"revision":7,"index":' } do
+		local malformed = runtime.json.encode({ kind = "catalog_request", source_nonce = view.alias_nonce,
+			request_id = "malformed-cursor", request = request("RAW_CURSOR") }):gsub('"RAW_CURSOR"', function() return raw_cursor end)
+		definition.event(view, { ev = "action", act = "setup-command", value = malformed }, cx)
+		check(shared.quota.digest(view.setup_result) == result and shared.quota.digest(published()) == retained,
+			"null, nonfinite, duplicate-key or truncated cursor is rejected before changing host view state")
+	end
+	send(request({ revision = 7, index = 3 }), "foreign-source-nonce")
+	check(shared.quota.digest(view.setup_result) == result and shared.quota.digest(published()) == retained,
+		"structured cursor cannot bypass source nonce correlation")
+	local foreign = clone(origin); foreign.window_epoch = "another-window"
+	send(request({ revision = 7, index = 3 }), nil, foreign)
+	check(view.setup_result.code == "invalid_catalog_request" and shared.quota.digest(published()) == retained,
+		"structured cursor cannot bypass outer and request setup-origin correlation")
+	local wrong = request({ revision = 7, index = 3 }); wrong.setup_origin.host_pane_id = "99"
+	send(wrong)
+	check(view.setup_result.code == "invalid_catalog_request" and shared.quota.digest(published()) == retained,
+		"structured cursor cannot forward a request naming another host view")
+	check(writes == baseline_writes and runtime.json.encode(stored) == before and next(stored.sessions) == nil,
+		"setup catalog pages and refusals create no controller, history or authority mutation")
+end
+
 -- Config v4 cards (CP1): every new card renders; outside the admitted controller each is read-only
 -- with the reason first, checkboxes disabled and no step buttons or field links.
 if section == nil or section == "config_cards" then
@@ -1715,9 +1833,55 @@ if section == nil or section == "config_cards" then
 		check(mine.buttons > 0 or (mine.checkboxes > 0 and mine.disabled == 0), title .. " card in the controller offers its editing controls")
 	end
 	local function joined(node) return table.concat(texts(node, {}), "\n") end
-	local review = joined(card(admitted, "Review & proof"))
-	check(review:find("Enforce cross-family review — a green review from a different provider family is the landing proof; off: checks run by the SPAWN helper are the proof", 1, true) ~= nil,
-		"Review & proof labels the cross-family switch with both proof rules")
+	local function review_controls(tree)
+		local found = {}
+		walk(card(tree, "Review & proof"), function(p)
+			if p.type == "checkbox" then found[p.name] = p end
+		end)
+		return found
+	end
+	local w = window_fixture({ no_worker = true })
+	local function save_review(patch)
+		w:click("policy", { policy = patch, expected_sha256 = shared.quota.digest(flow(w.f).policy) })
+		assert(w:outcome().ok, w:outcome().message)
+	end
+	local function current_review()
+		local projection = state.project(w.f.authority.registry)
+		projection.dispatch = dispatch.project(w.f.authority.registry, w.f.origin.logical_session_id, w.f.origin.alias_nonce)
+		return views.render({ pane = 42, alias_nonce = w.f.origin.alias_nonce, orch_session_id = w.f.origin.logical_session_id,
+			action_serial = 0, config_open = true }, projection, "ready")
+	end
+	save_review({ require_code_review = true, require_other_family = true })
+	local enabled = review_controls(current_review())
+	check(enabled.require_code_review.checked and enabled.require_other_family.checked and not enabled.require_other_family.disabled,
+		"native Config exposes independently enabled review and other-family choices")
+	save_review({ require_code_review = false })
+	local off_tree = current_review()
+	local off = review_controls(off_tree)
+	check(not flow(w.f).policy.require_code_review and not flow(w.f).policy.require_other_family
+		and not off.require_code_review.checked and not off.require_other_family.checked and off.require_other_family.disabled,
+		"turning review off through the real window normalizes saved family policy and disables its unchecked native control")
+	local off_text = joined(card(off_tree, "Review & proof"))
+	check(off_text:find("No reviewer required", 1, true) ~= nil and off_text:find("review requests hold as reviewer_unavailable", 1, true) == nil,
+		"review-off Config does not claim that an absent reviewer blocks work")
+	save_review({ require_code_review = true })
+	local resumed = review_controls(current_review())
+	check(flow(w.f).policy.require_code_review and not flow(w.f).policy.require_other_family
+		and resumed.require_code_review.checked and not resumed.require_other_family.checked and not resumed.require_other_family.disabled,
+		"re-enabling review restores the family choice without resurrecting its previous preference")
+	local fresh = state.new_registry()
+	local precontroller = { pane = 42, alias_nonce = "fresh-settings-view", action_serial = 0, config_open = true }
+	local fresh_tree = views.render(precontroller, state.project(fresh), "ready")
+	local defaults = assert(card(fresh_tree, "Installation defaults"))
+	local edit_defaults = false
+	for _, action in precontroller.actions do
+		if action.kind == "setup-intent" and action.command == "defaults" then edit_defaults = true end
+	end
+	check(next(fresh.sessions) == nil and edit_defaults and joined(defaults):find("NEW sessions only", 1, true) ~= nil
+		and card(fresh_tree, "Review & proof") == nil,
+		"before any controller exists, native Config offers installation defaults without pretending they are editable session overrides")
+	check(joined(admitted):find("Session overrides", 1, true) ~= nil and card(admitted, "Installation defaults") ~= nil,
+		"with a controller, installation defaults and session overrides remain visibly separate")
 	check(joined(card(admitted, "Role guidance")):find("guidance only — restrict tools in the SPAWN record's own CLI flags", 1, true) ~= nil,
 		"Role guidance says it does not restrict tools")
 	local loops = joined(card(admitted, "Loops"))
@@ -1885,7 +2049,8 @@ if section == nil or section == "role_pickers" then
 			capabilities = runtime.json.array(caps), unsupported = runtime.json.array(), cwd = "/fixture", placement = "split" })
 	end
 	local r = w.f:apply("catalog"); assert(r.ok, r.message)
-	assert(w.f:finish(r.action_id, "catalog", { namespace = "fixture-spawn", host_key = "fixture-host", config_revision = 0, revision = 0, records = runtime.json.array(records) }).ok)
+	assert(w.f:finish(r.action_id, "catalog", { catalog_version = 2, namespace = "fixture-spawn", host_key = "fixture-host", config_revision = 0, revision = 0,
+		setup = { schema = 1, state = "completed", config_revision = 0, readiness = { state = "not_run", config_revision = 0, summary = "" } }, records = runtime.json.array(records) }).ok)
 	assert(w.f:apply("policy", { policy = { reviewer_records = runtime.json.array({ "reviewer" }) } }).ok)
 	local function offered(field)
 		w:click("policy", { field = field, expected_sha256 = shared.quota.digest(flow(w.f).policy) })

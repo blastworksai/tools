@@ -26,6 +26,13 @@ class UI:
         lib.wait_for(lambda: read_json(self.data/'ready.json'), 'real product UI controller', 30)
 
     def __call__(self, op, **fields):
+        if op == 'action':
+            # Ordinary native action dispatch, outside a plugin callback. Cross-plugin
+            # product navigation is exercised through its actual clicked controls.
+            if fields.get('pane') is not None:
+                self('focus', pane=fields['pane'])
+            self.runtime.ctl('plugins', 'run', fields['action'])
+            return True
         self.serial += 1
         request = {'id': self.serial, 'op': op, **fields}
         temporary = self.data/'command.pending'
@@ -46,7 +53,7 @@ class UI:
     def prompt(self, label, text):
         self.lib.wait_for(lambda: label in json.dumps(self.runtime.ctl('tree'), ensure_ascii=False), 'native prompt '+label, 30)
         if text:
-            self.runtime.ctl('type', json.dumps(text))
+            self.runtime.ctl('type', json.dumps(text, ensure_ascii=False))
         self.runtime.ctl('key', 'Enter')
 
 

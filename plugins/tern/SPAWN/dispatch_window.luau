@@ -71,7 +71,33 @@ local function member(cx,pane,host,session)
  for _,tab in ipairs(cx.session:tabs()) do if tab.id==info.tab and tab.session==session.id then return true end end
  return false
 end
+local function setup_origin_ok(cx,bridge,r)
+ local b=r.setup_origin;local host=cx.hosts:current();local session=cx.sessions:current()
+ if not b or not host or not session or host.state~='connected' or tostring(host.id)~=b.window_host_id or tostring(session.id)~=b.native_session_id or session.host~=host.id or cx:window_key()~=b.window_key or not member(cx,bridge,host,session) then return false end
+ local source=nil;local visited=0
+ for _,pane in ipairs(cx.session:panes()) do
+  if pane.block~='orchplus.orchestrator' or not member(cx,pane.pane,host,session) then continue end
+  visited+=1;if visited>32 then return false end
+  local bytes=read_node(cx,pane.pane,'orchplus.orchestrator','setup-index','orchplus.setup',65536)
+  local index=if bytes then Codec.strict_decode(bytes,65536) else nil
+  if not index or index.version~=1 or index.host_pane_id~=b.host_pane_id then continue end
+  local request_bytes=read_node(cx,pane.pane,'orchplus.orchestrator','setup-catalog-request','orchplus.setup.request',8192)
+  local current=if request_bytes then P.decode(request_bytes) else nil
+  if current and P.equal(current,r) then
+   if source then return false end
+   source=pane.pane
+  end
+ end
+ return source~=nil
+end
+local function setup_catalog(cx,pane,projection)
+ local r=projection.request
+ if not r or not P.id(projection.observation_id) or not P.decode(tern.json.encode(r)) or not r.setup_origin or not setup_origin_ok(cx,pane,r) then return end
+ -- A repeated observation only repeats a read. No execution markers, owner or grant exist.
+ cx.session:event(pane,{ev='action',id='main.spawn-dispatch-response',act='spawn.setup_catalog',value=tern.json.encode({request_json=tern.json.encode(r),observation_id=projection.observation_id})})
+end
 local function origin_ok(cx,bridge,r,expected_claim)
+ if r.setup_origin then return false end
  local b=r.origin_binding;local host=cx.hosts:current();local session=cx.sessions:current()
  if not host or not session or host.state~='connected' or tostring(host.id)~=b.window_host_id or tostring(session.id)~=b.native_session_id or session.host~=host.id or cx:window_key()~=b.window_key then return false end
  local source=tonumber(r.controller_pane)
@@ -156,7 +182,7 @@ local function wake(cx,pane,projection)
  end
  mark(r,k..'/effect')
  local ok=pcall(function()
-  cx.agents:ask(tonumber(projection.pane_binding.pane_id),'Drain receipts in your already provisioned report-files-v1 mailbox using your durable producer journal first. Then consume the next complete immutable reply, if any, using your durable consumer journal. Validate the exact action/enrolment before recording reply_ack. An ACK-only notification needs no new reply, heartbeat or synthetic ACK; this wake is not receipt or permission for an unrelated effect.')
+  cx.agents:ask(tonumber(projection.pane_binding.pane_id),'Drain receipts in your already provisioned report-files-v1 mailbox using your durable producer journal first. Then consume the next complete immutable reply, if any, using your durable consumer journal. Validate the exact action/enrolment before recording reply_ack. If the producer journal confirms ACCEPTED acknowledged, continue any pending work in your original authorized assignment; do not wait for an extra assignment reply. Wait for coordinator_activation ONLY if your original transport preface explicitly includes COORDINATOR TRANSPORT ROLE; a coordinator-control-v1 capability alone does not confer that role. Other workers must not wait for coordinator activation. Review work still requires its review_request; landing and deployment still require their exact typed grants. An ACK-only notification needs no new reply, heartbeat or synthetic ACK; this wake is not receipt or permission for an unrelated effect. Return idle only when awaiting future control.')
  end)
  if origin_ok(cx,pane,r,projection.orch_claim) then event(cx,pane,r,'wakeresult',{status=if ok then 'submitted' else 'uncertain'},projection.orch_claim) end
 end
@@ -322,7 +348,7 @@ local function tick(cx)
   if bytes and bytes:sub(1,19)=='SPAWN_EXECUTION v1 ' then
    local projection=Codec.strict_decode(bytes:sub(20),65536)
    if projection and projection.schema==1 then
-    if projection.kind=='authorize' then authorize(cx,pane.pane,projection) elseif projection.kind=='wake' then wake(cx,pane.pane,projection) elseif projection.kind=='stop' then stop(cx,pane.pane,projection) elseif projection.kind=='adopt' then adopt(cx,pane.pane,projection) else execute(cx,pane.pane,projection) end
+    if projection.kind=='setup_catalog' then setup_catalog(cx,pane.pane,projection) elseif projection.kind=='authorize' then authorize(cx,pane.pane,projection) elseif projection.kind=='wake' then wake(cx,pane.pane,projection) elseif projection.kind=='stop' then stop(cx,pane.pane,projection) elseif projection.kind=='adopt' then adopt(cx,pane.pane,projection) else execute(cx,pane.pane,projection) end
    end
   end
  end
@@ -341,6 +367,7 @@ function M.start()
  timer=tern.timer(250,turn)
 end
 M.origin_ok=origin_ok
+M.setup_origin_ok=setup_origin_ok
 M.read_node=read_node
 -- Diagnostic: markers and stop observations this window VM still retains.
 function M.retained()

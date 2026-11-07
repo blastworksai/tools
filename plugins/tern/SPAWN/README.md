@@ -66,6 +66,21 @@ Open SPAWN from the command palette (**SPAWN**, **SPAWN: Config**, **SPAWN: Guid
 
 If a window request was interrupted (for example by a host restart) and the host's saved reply is a refusal, nothing ran, so SPAWN acknowledges it for you with an info toast and carries on with your next request. Any other interrupted request still waits for you under **Running agents → Transport review**; acknowledge it there, then try again.
 
+### Managed local setup
+
+Open **Config → Setup → Managed local setup** for SPAWN's native owner page. It works with an empty roster and needs no existing OMP setup agent. ORCH+'s setup link opens or focuses this same SPAWN page; SPAWN remains the roster and provisioning owner. The optional readiness link returns to ORCH+ through native pane navigation, not installed-plugin action dispatch inside a callback. Missing ORCH+ or a closed/stale source is a visible refusal, not permission to create another controller.
+
+1. Choose **Create a new managed record**, or select an existing saved record for explicit adoption. Adoption keeps its stable ID, unrelated records, ordinary launch/resume arguments and existing helper bundles; it is not a replacement roster import. For subsequent manual changes use **Configured agents → Full record JSON**, save, then **Approve reviewed command and settings**.
+2. Review the actual executable, fresh arguments, repository, execution account and mailbox root. The CLI must already be installed and authenticated as that account. Same-user setup requires neither SSH nor sudo; cross-user POSIX setup requires explicit existing `sudo -n` access and an accessible root. SPAWN creates no accounts and changes no permissions or execution policies.
+3. Prepare and inspect resources. Helpers are copied to stable, digest-specific `helper-bundles/<digest>` directories outside the installed package, with exact readback. Existing linked-package and helper paths are never overwritten. The prerequisites probe actual-account helper access and mailbox operations; they do not prove provider authentication or task readiness.
+4. Explicitly approve the native route diagnostic. Native OMP makes a disclosed small **real model turn**, preserving selected model/profile/authentication flags and changing only owned diagnostic session storage. It checks the exact startup body, native child argv/cwd and owned pane identity. The terminal alternative is offline: the owned helper proves literal argument/account readback through the native terminal route, not the configured provider CLI's semantics. Its approved observation lifetime is at most **45 seconds**, normally closed early after positive native identity. Incomplete, missing or ambiguous identity stays unresolved; output alone never authorizes retry or clearing an owned-pane obligation.
+5. Separately attest **I independently verified these exact CLI flags and fresh task input**, then attest the worker route (or **Attest and adopt existing setup**). Native route proof is not this operator attestation. Required setup completion and **Optional provider-backed readiness** are independent; the latter requires separate consent in ORCH+ for a real task, report, declared check and landing exercise. Dismissing setup does not claim either passed.
+
+Native OMP setup is POSIX-only. Windows managed local-terminal setup requires an explicit native `.exe` with the Windows CRT argv contract, not a batch/script or command-code substitute; Windows native OMP and cross-user setup are unsupported. PowerShell helper execution must already be allowed by the operator's policy: a policy refusal is a prerequisite failure. SPAWN ships no `RemoteSigned` override and does not claim default-policy Windows support.
+
+These routes run as the selected OS account, **not in a sandbox**. Labels, profiles and role prompts do not isolate identities or files. Ordinary standalone Guided setup, launch history and the updater flow above are unchanged. Setup observations are not full runtime qualification, completed landing/deployment evidence or desktop-updater acceptance.
+
+
 ### Launch modes
 
 | Mode | Use it for | How it runs |

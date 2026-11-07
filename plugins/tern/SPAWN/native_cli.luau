@@ -133,6 +133,11 @@ function Native.process(route, session, pane, options, callback)
 	local opts = { route = route, timeout_ms = if options then options.timeout_ms else 5000 }
 	execute(route.window, opts, { "process", target(route, session, pane), "--json" }, callback)
 end
+-- Read-only inspection in this host daemon; callers verify native window/session membership first.
+function Native.observe_process(window, session, pane, callback)
+	if not window_key(window) or not integer(session) or not integer(pane) then error("Invalid native diagnostic identity") end
+	execute(window, { timeout_ms = 5000 }, { "process", string.format("%.0f/%.0f", session, pane), "--json" }, callback)
+end
 function Native.wait_prompt(route, session, pane, options, callback)
 	local timeout = if options and options.timeout_ms then options.timeout_ms else 10000
 	local opts = { route = route, timeout_ms = timeout }

@@ -56,7 +56,7 @@ check(not authority:initialize(false).ok, "first-use confirmation is required")
 memory.fail_write = true
 check(authority:initialize(true).code == "persistence_failed" and authority.registry == nil and memory.value == nil, "failed initialization publishes no authority")
 memory.fail_write = false
-check(authority:initialize(true).ok and authority.registry.version == 2, "explicit initialization commits")
+check(authority:initialize(true).ok and authority.registry.version == 3, "explicit initialization commits")
 local registration = { kind = "register_session", request_id = "register", name = "Authority fixture" }
 local response = authority:apply(registration)
 check(response.ok, "registration commits")
@@ -189,7 +189,7 @@ capacity_authority:load()
 assert(capacity_authority:initialize(true).ok)
 local encoded_size = 8 * 1024 * 1024 - 512 * 1024 + 1
 fake.json.encode = function(value, pretty)
-	if type(value) == "table" and value.version == 2 then return string.rep("x", encoded_size) end
+	if type(value) == "table" and value.version == 3 then return string.rep("x", encoded_size) end
 	return runtime.json.encode(value, pretty)
 end
 local capacity_revision = capacity_authority.registry.revision
@@ -205,7 +205,7 @@ assert(capacity_authority:apply({ kind = "observe_owner", request_id = "capacity
 	status = "observed stopped before capacity threshold", owner_active = false, pending_executors = 0, evidence = "observed" }).ok)
 local capacity_reservation = capacity_authority:apply({ kind = "reserve_coordinator", request_id = "capacity-reservation", orch_session_id = capacity_session }).owner
 fake.json.encode = function(value, pretty)
-	if type(value) == "table" and value.version == 2 then return string.rep("x", encoded_size) end
+	if type(value) == "table" and value.version == 3 then return string.rep("x", encoded_size) end
 	return runtime.json.encode(value, pretty)
 end
 local bound = capacity_authority:apply({ kind = "bind_coordinator", request_id = "capacity-bind", orch_session_id = capacity_session,
@@ -276,6 +276,59 @@ local function click(view, cx, kind)
 end
 click(view1, cx1, "initialize-arm")
 click(view1, cx1, "initialize-confirm")
+do
+	local function setup_send(view, cx, fields, act)
+		fields.source_nonce = view.alias_nonce
+		definition.event(view, { ev = "action", act = act or "setup-command", value = runtime.json.encode(fields) }, cx)
+	end
+	local defaults = clone(ui_store.value.installation_defaults); defaults.revision = nil
+	defaults.policy.require_code_review = false
+	local input = { kind = "installation_defaults", request_id = "precontroller-defaults", expected_revision = 0, defaults = defaults }
+	local before = runtime.json.encode(ui_store.value)
+	ui_store.fail_write = true
+	setup_send(view1, cx1, clone(input))
+	check(view1.setup_result.code == "persistence_failed" and runtime.json.encode(ui_store.value) == before,
+		"failed precontroller defaults save exposes no committed settings")
+	ui_store.fail_write = false
+	setup_send(view1, cx1, clone(input))
+	check(view1.setup_result.ok and ui_store.value.next_owner_id == 0 and not ui_store.value.installation_defaults.policy.require_other_family,
+		"native setup writer saves before any controller and normalizes review-off")
+	local persisted_defaults = runtime.json.encode(ui_store.value)
+	setup_send(view2, cx2, clone(input))
+	check(view2.setup_result.code == "stale_revision" and runtime.json.encode(ui_store.value) == persisted_defaults,
+		"two actual host views cannot overwrite each other's installation defaults")
+	defaults = clone(ui_store.value.installation_defaults); defaults.revision = nil
+	defaults.repository = { cwd = "/repo", repo_root = "/repo", common_dir = "/repo/.git", target_ref = "refs/heads/main",
+		head_revision = string.rep("a", 40), queue_route = "orch_queue" }
+	setup_send(view1, cx1, { kind = "installation_defaults", request_id = "forged-repository", expected_revision = ui_store.value.installation_defaults.revision, defaults = defaults })
+	check(view1.setup_result.code == "repository_unverified" and runtime.json.encode(ui_store.value) == persisted_defaults,
+		"window cannot label free-text repository settings verified")
+	local original_process, calls = fake.process, {}
+	fake.process = { run = function(argv, options, callback)
+		table.insert(calls, clone(argv))
+		check(options.timeout_ms == 10000 and argv[1] == "git", "repository probe uses bounded host Git argv without a shell")
+		local output = ""
+		if table.find(argv, "--show-toplevel") then output = "/repo\n"
+		elseif table.find(argv, "--git-common-dir") then output = "/repo/.git\n"
+		elseif table.find(argv, "--verify") then output = string.rep("a", 40) .. "\n" end
+		callback({ status = 0, stdout = output, stderr = "" })
+	end }
+	setup_send(view1, cx1, { request_id = "host-repository", cwd = "/repo", target_ref = "refs/heads/main" }, "setup-repository-probe")
+	check(view1.setup_result.ok and #calls == 4 and view1.setup_repository.common_dir == "/repo/.git"
+		and runtime.json.encode(ui_store.value) == persisted_defaults, "actual host probe observation is transient until settings are saved")
+	setup_send(view1, cx1, { kind = "installation_defaults", request_id = "verified-repository", expected_revision = ui_store.value.installation_defaults.revision, defaults = defaults })
+	check(view1.setup_result.ok and ui_store.value.installation_defaults.repository.head_revision == string.rep("a", 40),
+		"host-observed repository is saved through the same revisioned settings writer")
+	fake.process = original_process
+	local writes_before_catalog = ui_store.writes
+	local origin = { host_pane_id = "11", window_key = "", window_epoch = "setup-window", native_session_id = "7", window_host_id = "1" }
+	local request = { schema = 1, origin = "orchplus", op = "catalog", request_id = "setup-catalog", action_id = "setup-action", setup_origin = origin }
+	setup_send(view1, cx1, { kind = "catalog_request", request_id = "show-catalog", expected_revision = ui_store.value.installation_defaults.revision, setup_origin = origin, request = request })
+	check(view1.setup_catalog_request.action_id == "setup-action" and ui_store.writes == writes_before_catalog and ui_store.value.next_owner_id == 0,
+		"precontroller catalog projection creates no owner, action or durable request")
+	setup_send(view1, cx1, { kind = "catalog_clear", request_id = "clear-catalog", setup_origin = origin })
+	check(view1.setup_catalog_request == nil and ui_store.writes == writes_before_catalog, "catalog query clears without authority writes")
+end
 click(view1, cx1, "register-arm")
 click(view1, cx1, "register-confirm")
 click(view2, cx2, "select")
@@ -367,7 +420,9 @@ check(continued_phase == "uncertain", "continuation marks the stopped old execut
 local transport = load("wire/codec")
 local body = { schema = 1, op = "catalog", request_id = retained_action.request.request_id, action_id = callback_action,
 	origin_binding = retained_action.request.origin_binding, controller_generation = retained_action.request.controller_generation,
-	status = "catalog", payload = { namespace = "fixture-spawn", host_key = "fixture-host", config_revision = 0, revision = 0, records = runtime.json.array() } }
+	status = "catalog", payload = { catalog_version = 2,
+		setup = { schema = 1, state = "not_started", config_revision = 0, readiness = { state = "not_run", config_revision = 0, summary = "" } },
+		namespace = "fixture-spawn", host_key = "fixture-host", config_revision = 0, revision = 0, records = runtime.json.array() } }
 local body_bytes = runtime.json.encode(body)
 local callback_frame = "SPAWN_DISPATCH v1 " .. runtime.json.encode({ schema = 1, op = body.op, request_id = body.request_id,
 	complete = true, body_bytes = #body_bytes, body_sha256 = transport.sha256(body_bytes), body_json = body_bytes })

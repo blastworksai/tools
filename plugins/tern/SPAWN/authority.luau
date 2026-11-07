@@ -3,7 +3,7 @@ local Config = require("./config")
 local Launch = require("./launch_state")
 local M = {}
 local MAX_BYTES = 120000
-local STORAGE_VERSION = 3
+local STORAGE_VERSION = 4
 local SNAPSHOT_PREFIX = "SPAWN_STATE_V2 "
 local ADMISSION_SECONDS = 30
 M.ADMISSION_SECONDS = ADMISSION_SECONDS
@@ -50,6 +50,21 @@ local function array(t, max)
 	if n > max then return false end
 	for k in pairs(t) do if not integer(k, 1) or k > n then return false end end
 	return true
+end
+local SETUP_STATES={not_started=true,in_progress=true,completed=true,dismissed=true,adopted_existing=true}
+local READINESS_STATES={not_run=true,passed=true,failed=true,unavailable=true}
+local function new_setup(revision,existing)
+	return {schema=1,state=if existing then "in_progress" else "not_started",config_revision=revision,
+		readiness={state="not_run",config_revision=revision,summary=""}}
+end
+local function readiness_valid(value,revision)
+	return fields(value,{state=true,config_revision=true,summary=true}) and READINESS_STATES[value.state]==true
+		and integer(value.config_revision,0) and value.config_revision<=revision
+		and type(value.summary)=="string" and #value.summary<=1024 and not value.summary:find("%c")
+end
+local function setup_valid(value,revision)
+	return fields(value,{schema=true,state=true,config_revision=true,readiness=true}) and value.schema==1
+		and SETUP_STATES[value.state]==true and value.config_revision==revision and readiness_valid(value.readiness,revision)
 end
 local function encoded(value)
 	local ok, json = pcall(tern.json.encode, value)
@@ -197,6 +212,31 @@ end
 local function bounded(value,maximum)
 	return type(value)=="string" and #value>0 and #value<=maximum and not value:find("%z")
 end
+-- One live cleanup obligation, not a history or permission to replay execution.
+local function setup_probe_valid(route,revision)
+	if not fields(route,{schema=true,nonce=true,config_revision=true,window=true,native_session=true,source_pane=true,native_conn=true,native_since=true,
+		backend=true,command=true,cwd=true,record_sha256=true,expected_arguments=true,prompt=true,output=true,
+		expected=true,worker_identity=true,user=true,host_os=true,status=true,pane=true,authority_id=true,origin_epoch=true}) or route.schema~=1
+		or not text(route.nonce,256) or not integer(route.config_revision,0) or route.config_revision>revision
+		or not text(route.authority_id,256) or route.origin_epoch~=nil and not text(route.origin_epoch,256)
+		or type(route.window)~="string" or #route.window>256 or route.window:find("%c")
+		or not integer(route.native_conn,0) or not integer(route.native_since,0)
+		or not integer(route.native_session,0) or not integer(route.source_pane,1)
+		or not bounded(route.command,64000) or not text(route.cwd,8192)
+		or type(route.record_sha256)~="string" or #route.record_sha256~=64 or not route.record_sha256:match("^[0-9a-f]+$")
+		or not text(route.worker_identity,4096) or route.user~=nil and not text(route.user,4096)
+		or route.host_os~="linux" and route.host_os~="macos" and route.host_os~="windows"
+		or route.status~="running" or route.pane~=nil and not integer(route.pane,1) then return false end
+	if route.backend=="native-agent" then
+		if not bounded(route.prompt,8192) or not array(route.expected_arguments,264) or route.output~=nil or route.expected~=nil then return false end
+		for _,word in ipairs(route.expected_arguments) do
+			if type(word)~="string" or #word>32000 or word:find("%z") then return false end
+		end
+		return true
+	end
+	return route.backend=="local-terminal" and text(route.output,8192) and bounded(route.expected,8192)
+		and route.prompt==nil and route.expected_arguments==nil
+end
 local function native_valid(value)
 	return fields(value,{pane=true,window_key=true,program=true,executable=true,socket=true})
 		and integer(value.pane,1) and type(value.window_key)=="string" and #value.window_key<=256 and not value.window_key:find("%c")
@@ -299,8 +339,16 @@ local function source_records(raw,host_key,label)
 	return sources
 end
 local function validate(root)
-	if not fields(root,{version=true,namespace=true,next_authority=true,host_key=true,config=true,config_revision=true,sessions=true,review=true,reviewed_sources=true}) or root.version ~= STORAGE_VERSION then return nil,"Unsupported or corrupt authority storage format; expected version 3. Preserve it and use a compatible version" end
+	if not fields(root,{version=true,namespace=true,next_authority=true,host_key=true,config=true,config_revision=true,sessions=true,review=true,reviewed_sources=true,setup=true,setup_adoption_required=true,setup_probe=true}) or root.version ~= STORAGE_VERSION then return nil,"Unsupported or corrupt authority storage format; expected version 4. Preserve it and use a compatible version" end
 	if not text(root.namespace,128) or not text(root.host_key,1024) or not integer(root.next_authority,1) or not integer(root.config_revision,0) or type(root.sessions)~="table" or type(root.reviewed_sources)~="table" then return nil,"Corrupt authority identity" end
+	if not setup_valid(root.setup,root.config_revision) or root.setup_adoption_required~=nil and (root.setup_adoption_required~=true or root.setup.state~="in_progress" and root.setup.state~="dismissed") then return nil,"Corrupt setup lifecycle or readiness" end
+	if root.setup_probe~=nil then
+		if not setup_probe_valid(root.setup_probe,root.config_revision) then return nil,"Corrupt unfinished setup probe; preserve it for native cleanup" end
+		local prefix=root.namespace..":"
+		local identity=root.setup_probe.authority_id
+		local generation=tonumber(identity:sub(#prefix+1))
+		if identity:sub(1,#prefix)~=prefix or not integer(generation,1) or generation>=root.next_authority then return nil,"Corrupt setup probe authority incarnation; preserve it for native cleanup" end
+	end
 	-- Stores written before duplicate_policy was retired still carry it on saved
 	-- records; strip it so the roster stays canonical instead of unreadable.
 	local bucket=if type(root.config)=="table" and type(root.config.hosts)=="table" then root.config.hosts[root.host_key] else nil
@@ -392,7 +440,13 @@ end
 M.validate=validate
 -- Only exact immutable bridge references establish managed purpose in v1.
 -- Unknown ordinary executions and pending old transport require their old writer.
-local function upgrade(raw)
+local function upgrade(raw,readonly)
+	if type(raw)=="table" and raw.version==3 and raw.setup==nil and raw.setup_adoption_required==nil then
+		local candidate=clone(raw)
+		candidate.version=STORAGE_VERSION
+		candidate.setup=new_setup(candidate.config_revision,true);candidate.setup_adoption_required=true
+		return validate(candidate)
+	end
 	if type(raw)~="table" or raw.version~=1 then return validate(raw) end
 	local registry,why=managed_registry();if registry==nil then return nil,why end
 	-- Never-created is distinct from lost initialized storage. Empty legacy
@@ -445,7 +499,9 @@ local function upgrade(raw)
 	end
 	for id,source in pairs(candidate.reviewed_sources) do candidate.reviewed_sources[id]={host_key=candidate.host_key,config=source} end
 	candidate.version=STORAGE_VERSION
+	candidate.setup=new_setup(candidate.config_revision,true);candidate.setup_adoption_required=true
 	local valid,err=validate(candidate);if not valid then return nil,err end
+	if readonly then return candidate end
 	local saved,problem=pcall(function()
 		local original=tern.kv.get("managed-v1-original")
 		if original~=nil and not equal(original,raw) then error("Original detached authority backup differs; preserve both before upgrading") end
@@ -454,11 +510,14 @@ local function upgrade(raw)
 	if not saved then return nil,"Could not preserve detached authority: "..tostring(problem) end
 	return candidate
 end
-local function read_root()
+local function read_root(readonly)
 	local ok,value=pcall(tern.kv.get,"authority")
 	if not ok then return nil,"Could not read authority: "..tostring(value) end
 	if value==nil then return nil,"Authority has not been initialized" end
-	return upgrade(value)
+	local root,why=upgrade(value,readonly);if not root then return nil,why end
+	local got,marker=pcall(tern.kv.get,"authority-initialized")
+	if not got or marker~=nil and marker~=root.namespace then return nil,"Authority initialization evidence is unreadable or differs; restore the matching store" end
+	return root
 end
 -- The host-restart notice is informational: how many ordinary attempts the sweep
 -- ended as "Host restarted" under the current daemon epoch. Nothing to act on.
@@ -476,7 +535,8 @@ end
 local function snapshot_value(root,key,host_epoch)
 	local scope=root.sessions[key]
 	local value={version=2,namespace=root.namespace,host_key=root.host_key,authority_id=scope.authority_id,session_key=key,
-		config_revision=root.config_revision,records=clone(root.config.hosts[root.host_key].agents),
+		config_revision=root.config_revision,records=clone(root.config.hosts[root.host_key].agents),setup=clone(root.setup),
+		adoption_required=root.setup_adoption_required,
 		attempt_revision=scope.launch.revision,attempts=clone(scope.launch.attempts),jobs=public_jobs(scope),
 		replies=clone(scope.replies),request_sequences=clone(scope.request_sequences),
 		host_os=tern.runtime.os,host_shell=tern.getenv("SHELL") or tern.getenv("ComSpec") or "unknown",
@@ -510,6 +570,7 @@ end
 -- Every write trims each session to its newest KEEP_FINISHED finished attempts
 -- (clear-history eligibility) in the same atomic persist, bounding state size.
 local function persist(root)
+	root.setup.config_revision=root.config_revision
 	local registry=managed_registry()
 	for key,scope in pairs(root.sessions) do
 		local removed,trim_err=Launch.trim_history(scope.launch,KEEP_FINISHED,settled_managed(registry,key,scope))
@@ -518,7 +579,14 @@ local function persist(root)
 	end
 	local valid,err=capacity(root)
 	if not valid then return false,err end
-	local ok,why=pcall(tern.kv.set,"authority",root)
+	local ok,why=pcall(function()
+		-- Write the loss fence first. An interrupted first save stays visibly
+		-- uninitialized/lost rather than permitting a second empty authority.
+		local marker=tern.kv.get("authority-initialized")
+		if marker~=nil and marker~=root.namespace then error("Authority namespace differs from its initialization marker; restore the matching store") end
+		if marker==nil then tern.kv.set("authority-initialized",root.namespace) end
+		tern.kv.set("authority",root)
+	end)
 	if not ok then return false,"Could not save authority; previous state retained: "..tostring(why) end
 	return true
 end
@@ -569,6 +637,21 @@ local function new_scope(root,key,native_session)
 	root.next_authority+=1;root.sessions[key]=scope
 	return scope
 end
+local function absent_authority()
+	for _,key in ipairs({"authority-initialized","dispatch-v1","dispatch-v1-initialized","migration-original","managed-v1-original"}) do
+		local ok,value=pcall(tern.kv.get,key)
+		if not ok then return false,"Could not inspect saved authority evidence: "..tostring(value) end
+		if value~=nil then return false,"Saved authority is missing; restore its original state instead of resetting reservations" end
+	end
+	return true
+end
+local function empty_root(host_key,native_session,config,existing)
+	-- Durable collision-resistant naming, not a credential or security token.
+	-- Monotonic VM time alone repeats when a fresh host runtime starts.
+	local namespace=string.format("host-%d-%08x-%08x-%08x-%s",os.time(),math.random(1,2147483647),math.random(1,2147483647),math.random(1,2147483647),tostring(native_session))
+	return {version=STORAGE_VERSION,namespace=namespace,next_authority=1,host_key=host_key,config=config,config_revision=0,
+		sessions={},reviewed_sources={},setup=new_setup(0,existing),setup_adoption_required=if existing then true else nil}
+end
 function M.open(host_key,native_session,client_config,origin_scope)
 	if not text(host_key,1024) or not integer(native_session,0) then return nil,"A verified execution host and native session are required" end
 	local ok,raw=pcall(tern.kv.get,"authority")
@@ -576,6 +659,7 @@ function M.open(host_key,native_session,client_config,origin_scope)
 	local root,err
 	if raw==nil then
 		if origin_scope~=nil then return nil,"Saved authority is missing; restore its original state instead of resetting reservations" end
+		local absent,why=absent_authority();if not absent then return nil,why end
 		local got,original=pcall(tern.kv.get,"config")
 		if not got then return nil,"Could not read original configuration: "..tostring(original) end
 		local sources; sources,err=source_records(original,host_key,"Execution host")
@@ -583,10 +667,7 @@ function M.open(host_key,native_session,client_config,origin_scope)
 		local migrated=Config.migrate(original,host_key)
 		local base=if migrated then migrated.store else {schema=2,hosts=clone(original.hosts)}
 		if not migrated then base.hosts[host_key]={schema=2,agents=sources[1].records} end
-		-- Durable collision-resistant naming, not a credential or security token.
-		-- Monotonic VM time alone repeats when a fresh host runtime starts.
-		local namespace=string.format("host-%d-%08x-%08x-%08x-%s",os.time(),math.random(1,2147483647),math.random(1,2147483647),math.random(1,2147483647),tostring(native_session))
-		root={version=STORAGE_VERSION,namespace=namespace,next_authority=1,host_key=host_key,config=base,config_revision=0,sessions={},reviewed_sources={}}
+		root=empty_root(host_key,native_session,base,original~=nil)
 		if original~=nil then
 			local backed,why=backup("migration-original",original)
 			if not backed then return nil,why end
@@ -629,6 +710,149 @@ function M.open(host_key,native_session,client_config,origin_scope)
 	local saved,why=persist(root)
 	if not saved then return nil,why end
 	return binding_for(root,key),nil
+end
+-- Installation reads never create scopes, expire tickets, or persist migrations.
+-- The native host is the writer; catalog callers only receive this projection.
+local function setup_snapshot_value(root)
+	return {namespace=root.namespace,host_key=root.host_key,config_revision=root.config_revision,
+		records=clone(records(root)),setup=clone(root.setup),adoption_required=root.setup_adoption_required,
+		ready=root.review==nil,migration=clone(root.review),
+		host_os=tern.runtime.os,host_shell=tern.getenv("SHELL") or tern.getenv("ComSpec") or "unknown"}
+end
+function M.setup_snapshot(host_key)
+	if host_key~=nil and not text(host_key,1024) then return nil,"Invalid execution host" end
+	local ok,raw=pcall(tern.kv.get,"authority")
+	if not ok then return nil,"Could not read authority: "..tostring(raw) end
+	if raw~=nil then
+		local root,why=upgrade(raw,true);if not root then return nil,why end
+		local got,marker=pcall(tern.kv.get,"authority-initialized")
+		if not got or marker~=nil and marker~=root.namespace then return nil,"Authority initialization evidence is unreadable or differs; restore the matching store" end
+		return setup_snapshot_value(root),nil
+	end
+	local absent,why=absent_authority();if not absent then return nil,why end
+	local got,original=pcall(tern.kv.get,"config")
+	if not got then return nil,"Could not read original configuration: "..tostring(original) end
+	if original~=nil then return nil,"Existing configuration requires Review existing setup in Config before managed setup" end
+	return {host_key=host_key,config_revision=0,records={},setup=new_setup(0,false),ready=true,
+		host_os=tern.runtime.os,host_shell=tern.getenv("SHELL") or tern.getenv("ComSpec") or "unknown"},nil
+end
+local function probed_record(data,root)
+	if not fields(data,{record=true,probe=true,attested=true}) or data.attested~=true then return nil,"Explicit operator attestation is required" end
+	local canonical,why=Config.validate_records({data.record});if not canonical or #canonical~=1 then return nil,why or "One managed record is required" end
+	local record=canonical[1];local probe=data.probe
+	if not fields(probe,{schema=true,passed=true,record_sha256=true,observations=true,bundle_digest=true,worker_identity=true,provision_handle=true})
+		or probe.schema~=1 or probe.passed~=true or not array(probe.observations,64) or #probe.observations==0
+		or not text(probe.worker_identity,4096) or not text(probe.provision_handle,256)
+		or type(probe.bundle_digest)~="string" or #probe.bundle_digest~=64 or not probe.bundle_digest:match("^[0-9a-f]+$") then return nil,"Successful prerequisite and provisioning probe required" end
+	local seen={}
+	for _,observation in ipairs(probe.observations) do
+		if not fields(observation,{id=true,state=true,summary=true}) or not text(observation.id,96) or seen[observation.id]
+			or observation.state~="passed" or not text(observation.summary,1024) then return nil,"Every prerequisite observation must have passed" end
+		seen[observation.id]=true
+	end
+	if not seen["native-route"] then return nil,"Successful native route execution proof required" end
+	local Codec=require("./wire/codec")
+	local encoded_ok,bytes=pcall(tern.json.encode,data.record)
+	if not encoded_ok or probe.record_sha256~=Codec.sha256(bytes) then return nil,"Probe does not match the exact approved record" end
+	if not record.mailbox or record.mailbox.verified~=false or record.mailbox.worker_identity~=probe.worker_identity then return nil,"Probe worker identity or unattested record differs" end
+	record.mailbox.verified=true
+	record.mailbox.evidence_ref="setup:"..probe.bundle_digest..":"..probe.provision_handle
+	local eligible,_,reasons=require("./mailbox_capabilities").eligibility(record,{
+		host_key=root.host_key,host_os=tern.runtime.os,host_shell=tern.getenv("SHELL") or tern.getenv("ComSpec") or "unknown"})
+	if not eligible then return nil,table.concat(reasons,"; ") end
+	return record
+end
+-- Expected configuration revision is captured before prompts/probes, not refreshed
+-- on delivery. A stale callback may inspect current state but never replay a write.
+function M.setup_edit(host_key,expected,operation,data)
+	if not text(host_key,1024) or not integer(expected,0) then return false,"Verified host and expected configuration revision required" end
+	local view,why=M.setup_snapshot(host_key);if not view then return false,why end
+	if expected~=view.config_revision then return false,"stale-config: settings were reloaded; review and repeat your edit" end
+	local root
+	if view.namespace==nil then
+		if operation~="begin" and operation~="dismiss" then return false,"Begin managed setup before saving configuration" end
+		local migrated,err=Config.migrate(nil,host_key);if not migrated then return false,err end
+		root=empty_root(host_key,"setup",migrated.store,false)
+	else
+		local err;root,err=read_root();if not root then return false,err end
+		if root.host_key~=host_key then return false,"Execution host differs from the configuration authority" end
+		root=clone(root)
+	end
+	if root.review then return false,"Complete migration/source review first" end
+	if root.config_revision>=MAX_INT then return false,"Configuration revision capacity exhausted" end
+	local state=root.setup.state
+	local complete=state=="completed" or state=="adopted_existing"
+	if operation=="begin" or operation=="dismiss" then
+		if not fields(data,{}) then return false,"Invalid setup lifecycle edit" end
+		if complete then return false,"Setup is already complete; use the managed record editor without reopening first-install setup" end
+		root.setup.state=if operation=="begin" then "in_progress" else "dismissed"
+	elseif operation=="commit" or operation=="adopt" then
+		if root.setup_probe~=nil then return false,"Verify native diagnostic cleanup before completing managed setup" end
+		if state~="in_progress" and not complete then return false,"Begin managed setup before saving configuration" end
+		if operation=="commit" and root.setup_adoption_required then return false,"Review and adopt existing setup explicitly" end
+		local record,err=probed_record(data,root);if not record then return false,err end
+		local combined=records(root);local found=false
+		for index,old in ipairs(combined) do if old.id==record.id then combined[index]=record;found=true;break end end
+		if operation=="adopt" and not found and #combined>0 then return false,"Adoption requires an existing record selected for review" end
+		if not found then table.insert(combined,record) end
+		local canonical,problem=Config.validate_records(combined);if not canonical then return false,problem end
+		root.config.hosts[root.host_key].agents=canonical
+		if not complete then root.setup.state=if operation=="adopt" then "adopted_existing" else "completed" end
+		root.setup_adoption_required=nil
+	elseif operation=="readiness" then
+		if not complete then return false,"Complete or adopt setup before the optional readiness exercise" end
+		if not fields(data,{state=true,summary=true}) then return false,"Invalid readiness result" end
+		local result={state=data.state,summary=data.summary,config_revision=root.config_revision+1}
+		if not readiness_valid(result,result.config_revision) then return false,"Invalid readiness result" end
+		root.setup.readiness=result
+	else return false,"Unknown setup operation" end
+	root.config_revision+=1
+	return persist(root)
+end
+-- Only host-native cleanup consumes this record. Reload never grants another
+-- launch, and neither pane binding nor cleanup changes configuration approval.
+function M.setup_probe_read(host_key)
+	if not text(host_key,1024) then return nil,"Verified execution host required" end
+	local view,why=M.setup_snapshot(host_key);if not view then return nil,why end
+	if view.namespace==nil then return nil,nil end
+	local root,err=read_root(true);if not root then return nil,err end
+	if root.host_key~=host_key then return nil,"Execution host differs from the configuration authority" end
+	return clone(root.setup_probe),nil
+end
+function M.setup_probe_claim(host_key,expected,route)
+	if not text(host_key,1024) or not integer(expected,0) or not setup_probe_valid(route,expected)
+		or route.config_revision~=expected or route.pane~=nil then return false,"Invalid initial setup probe obligation" end
+	local root,err=read_root();if not root then return false,err end
+	if root.host_key~=host_key then return false,"Execution host differs from the configuration authority" end
+	if root.config_revision~=expected then return false,"stale-config: native diagnostic was not admitted" end
+	local scope=root.sessions[root.namespace.."/session/"..tostring(route.native_session)]
+	if not scope or scope.authority_id~=route.authority_id then return false,"stale-authority: native diagnostic origin changed" end
+	if root.review then return false,"Complete migration/source review first" end
+	if root.setup_probe~=nil then return false,"An unfinished native setup probe requires cleanup before another diagnostic" end
+	local candidate=clone(root);candidate.setup_probe=clone(route)
+	return persist(candidate)
+end
+local function setup_probe_owner(host_key,nonce)
+	if not text(host_key,1024) or not text(nonce,256) then return nil,"Verified host and setup probe nonce required" end
+	local root,err=read_root();if not root then return nil,err end
+	if root.host_key~=host_key then return nil,"Execution host differs from the configuration authority" end
+	if not root.setup_probe or root.setup_probe.nonce~=nonce then return nil,"Setup probe obligation no longer matches this diagnostic" end
+	return root
+end
+function M.setup_probe_bind(host_key,nonce,pane)
+	if not integer(pane,1) then return false,"Verified native probe pane required" end
+	local root,err=setup_probe_owner(host_key,nonce);if not root then return false,err end
+	if root.setup_probe.pane~=nil then
+		if root.setup_probe.pane==pane then return true end
+		return false,"Setup probe pane identity is immutable"
+	end
+	local candidate=clone(root);candidate.setup_probe.pane=pane
+	return persist(candidate)
+end
+function M.setup_probe_clear(host_key,nonce)
+	local root,err=setup_probe_owner(host_key,nonce);if not root then return false,err end
+	local candidate=clone(root);candidate.setup_probe=nil
+	return persist(candidate)
 end
 
 local function dispatch(root,key,r,now)

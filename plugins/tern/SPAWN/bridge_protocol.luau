@@ -38,6 +38,9 @@ local B={logical_session_id=M.id,worker_id=M.id,worker_generation=positive,launc
 function M.binding(v)
  return M.fields(v,{logical_session_id=M.id,owner_id=M.id,owner_generation=positive,host_pane_id=opaque,alias_nonce=opaque,window_key=emptyopaque,window_epoch=M.id,native_session_id=opaque,window_host_id=opaque})
 end
+function M.setup_origin(v)
+ return M.fields(v,{host_pane_id=opaque,window_key=emptyopaque,window_epoch=M.id,native_session_id=opaque,window_host_id=opaque})
+end
 function M.pane(v) return M.fields(v,{pane_id=decimal,window_epoch=M.id,window_key=emptyopaque,native_session_id=opaque,window_host_id=opaque}) end
 local function enrolment(v)
  return M.fields(v,{worker_id=M.id,worker_generation=positive,enrolment_token=M.token,assignment_sha256=M.digest},{handover_id=M.id,handover_token=M.token,coordinator_owner_id=M.id,coordinator_generation=positive}) and ((v.handover_id==nil)==(v.handover_token==nil)) and ((v.coordinator_owner_id==nil)==(v.coordinator_generation==nil))
@@ -70,6 +73,10 @@ specs.mailbox_publish_reply.required.object_b64=function(v)return M.text(v,5464,
 function M.decode(bytes)
  local r,e=Codec.strict_decode(bytes,M.LIMIT);if not r then return nil,e end
  local spec=type(r)=='table' and specs[r.op];if not spec then return nil,{code='invalid_schema',message='Unsupported dispatch operation'} end
+ if r.op=='catalog' and r.setup_origin~=nil then
+  if not M.fields(r,{schema=common.schema,origin=common.origin,op=function(v)return v=='catalog'end,request_id=M.id,action_id=M.id,setup_origin=M.setup_origin},spec.optional) then return nil,{code='invalid_schema',message='Invalid read-only setup catalog request'} end
+  return r
+ end
  local required=table.clone(common);for k,v in pairs(spec.required) do required[k]=v end
  if r.op:sub(1,8)=='mailbox_' then for k,v in pairs(B) do required[k]=v end end
  if not M.fields(r,required,spec.optional) or r.controller_generation~=r.origin_binding.owner_generation then return nil,{code='invalid_schema',message='Invalid operation-specific dispatch request'} end
@@ -79,7 +86,7 @@ function M.decode(bytes)
  return r
 end
 function M.body(r,status,payload,error_value)
- return {schema=1,op=r.op,request_id=r.request_id,action_id=r.action_id,origin_binding=M.clone(r.origin_binding),controller_generation=r.controller_generation,status=status,payload=payload,error=error_value}
+ return {schema=1,op=r.op,request_id=r.request_id,action_id=r.action_id,setup_origin=M.clone(r.setup_origin),origin_binding=M.clone(r.origin_binding),controller_generation=r.controller_generation,status=status,payload=payload,error=error_value}
 end
 function M.reject(r,code,message) return M.body(r,'rejected',nil,{code=code,message=tostring(message):sub(1,512)}) end
 function M.encode(body)

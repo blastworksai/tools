@@ -283,7 +283,7 @@ end
 -- Landing proof (Contract H) replaces worker-attested checkpoint evidence.
 local source = string.rep("a", 40)
 local function proof_input(change)
-	local input = { enforce_cross_family = true, source_revision = source, builder_worker_id = "builder", builder_family = "anthropic",
+	local input = { require_code_review = true, require_other_family = true, source_revision = source, builder_worker_id = "builder", builder_family = "anthropic",
 		checks = list({ { check_id = "t1-c1", argv = list({ "true" }) } }),
 		check_results = { ["t1-c1"] = { check_id = "t1-c1", exit_code = 0, head = source, output_sha256 = zero_hash } },
 		review = { review_id = "review_1", reviewer_worker_id = "reviewer", reviewer_family = "openai", reviewer_role = "reviewer", artifact_revision = source, outcome = "approved" } }
@@ -297,9 +297,9 @@ local function review(change)
 end
 local proof = rules.verify_landing_proof(proof_input())
 check(proof and proof.mode == "cross_family_review" and proof.artifact_revision == source and proof.review_id == "review_1", "approved cross-family review proves landing")
-proof = rules.verify_landing_proof(proof_input({ check_results = { ["t1-c1"] = { check_id = "t1-c1", exit_code = 1, head = source, output_sha256 = zero_hash } } }))
-check(proof and proof.mode == "cross_family_review", "failed attested check is evidence only under cross-family review")
-proof = rules.verify_landing_proof(proof_input({ enforce_cross_family = false, review = review({ reviewer_family = "anthropic" }) }))
+proof, diagnostic = rules.verify_landing_proof(proof_input({ check_results = { ["t1-c1"] = { check_id = "t1-c1", exit_code = 1, head = source, output_sha256 = zero_hash } } }))
+check(proof == nil and diagnostic.code == "check_failed", "approved cross-family review never overrides a failed helper check")
+proof = rules.verify_landing_proof(proof_input({ require_other_family = false, review = review({ reviewer_family = "anthropic" }) }))
 check(proof and proof.mode == "helper_checks" and proof.check_refs[1] == "t1-c1:" .. zero_hash, "passing helper checks plus same-family review prove landing")
 for _, case in {
 	{ { review = false }, "review_required", "no review" },
@@ -308,17 +308,40 @@ for _, case in {
 	{ { review = review({ reviewer_worker_id = "builder" }) }, "reviewer_is_builder", "builder reviewed itself" },
 	{ { review = review({ reviewer_family = "anthropic" }) }, "family_same", "same family under cross-family" },
 	{ { review = review({ reviewer_family = false }) }, "family_unknown", "unknown reviewer family" },
-	{ { enforce_cross_family = false, checks = false }, "checks_undeclared", "no declared checks" },
-	{ { enforce_cross_family = false, check_results = {} }, "check_missing", "declared check never ran" },
-	{ { enforce_cross_family = false, check_results = { ["t1-c1"] = { check_id = "t1-c1", exit_code = 1, head = source, output_sha256 = zero_hash } } }, "check_failed", "failed check" },
-	{ { enforce_cross_family = false, check_results = { ["t1-c1"] = { check_id = "t1-c1", exit_code = 0, head = string.rep("b", 40), output_sha256 = zero_hash } } }, "check_stale", "check of another head" },
-	{ { enforce_cross_family = false, review = false }, "review_required", "passing checks still need a review" },
+	{ { check_results = {} }, "check_missing", "declared check never ran" },
+	{ { check_results = { ["t1-c1"] = { check_id = "t1-c1", exit_code = 1, head = source, output_sha256 = zero_hash } } }, "check_failed", "failed check" },
+	{ { check_results = { ["t1-c1"] = { check_id = "t1-c1", exit_code = 0, head = string.rep("b", 40), output_sha256 = zero_hash } } }, "check_stale", "check of another head" },
 } do
 	local input = proof_input()
 	for key, child in case[1] do input[key] = if child == false then nil else child end
 	if input.review and input.review.reviewer_family == false then input.review.reviewer_family = nil end
 	local value, problem = rules.verify_landing_proof(input)
 	check(value == nil and problem ~= nil and problem.code == case[2], "landing proof blocks: " .. case[3] .. " (" .. tostring(problem and problem.code) .. ")")
+end
+-- Every policy mode independently requires every declared check, never reviewer substitution.
+for _, mode in { { true, true, "cross_family_review" }, { true, false, "helper_checks" }, { false, false, "review_disabled" } } do
+	for _, state in { "empty", "passed", "failed", "missing", "stale" } do
+		for _, reviewer in { "absent", "same", "other" } do
+			local input = proof_input({ require_code_review = mode[1], require_other_family = mode[2] })
+			if reviewer == "absent" then input.review = nil
+			elseif reviewer == "same" then input.review.reviewer_family = input.builder_family end
+			if state == "empty" then input.checks = list(); input.check_results = {}
+			elseif state == "missing" then input.check_results = {}
+			elseif state == "failed" then input.check_results["t1-c1"].exit_code = 1
+			elseif state == "stale" then input.check_results["t1-c1"].head = string.rep("b", 40) end
+			local value, problem = rules.verify_landing_proof(input)
+			local checks_ok = state == "empty" or state == "passed"
+			local review_ok = not mode[1] or (reviewer ~= "absent" and (not mode[2] or reviewer == "other"))
+			local label = mode[3] .. "/" .. state .. "/" .. reviewer
+			check((value ~= nil) == (checks_ok and review_ok), label .. ": independent check and review predicates")
+			if value then
+				check(value.mode == mode[3] and #value.check_refs == (if state == "empty" then 0 else 1), label .. ": exact proof and check references")
+				check((value.review_id == nil) == (not mode[1]), label .. ": no invented review identity")
+			elseif not checks_ok then
+				check(problem.code == ({ failed = "check_failed", missing = "check_missing", stale = "check_stale" })[state], label .. ": checks block regardless of review")
+			end
+		end
+	end
 end
 
 local function reply(kind, payload)
@@ -334,6 +357,9 @@ for _, fixture in {
 		target_ref = "main", target_revision = "base", source_ref = "work/branch", source_revision = "abc",
 		builder_work_id = "work_1", review_id = "review_1", reviewer_family = "openai",
 		proof = { mode = "cross_family_review", artifact_revision = "abc", review_id = "review_1", check_refs = list() } } },
+	{ "landing_grant", { landing_id = "landing_1", grant_id = "grant_1", project_id = "project_1", checkpoint_id = "cp_1", repo_ref = "repo/ref",
+		target_ref = "main", target_revision = "base", source_ref = "work/branch", source_revision = "abc", builder_work_id = "work_1",
+		proof = { mode = "review_disabled", artifact_revision = "abc", check_refs = list() } } },
 	{ "review_request", { review_id = "review_1", round = 1, question_id = "implements_task_v1", builder_work_id = "work_1", task_ref = "task/ref",
 		plan_ref = "plan/ref", plan_revision = "3", source_ref = "work/branch", artifact_revision = "abc", scope_paths = list({ "a.luau" }), findings_prev = list() } },
 	{ "rework", { review_id = "review_1", round = 2, artifact_revision = "abc", failed_checks = list({ { check_id = "t1-c2", exit_code = 1 } }),
@@ -356,12 +382,27 @@ for _, fixture in {
 	local bad = clone(candidate); bad.payload.unexpected = true
 	check(transport.decode_reply(encode(bad), granted) == nil, "closed reply payload " .. candidate.kind)
 end
+do
+	local grant = reply("landing_grant", { landing_id = "landing_1", grant_id = "grant_1", project_id = "project_1", checkpoint_id = "cp_1", repo_ref = "repo/ref",
+		target_ref = "main", target_revision = "base", source_ref = "work/branch", source_revision = "abc", builder_work_id = "work_1",
+		proof = { mode = "review_disabled", artifact_revision = "abc", check_refs = list({ "unit:" .. zero_hash }) } })
+	check(transport.decode_reply(encode(grant), release_manager) ~= nil, "review-disabled grant retains real check references")
+	for _, field in { "review_id", "reviewer_family", "proof_review_id" } do
+		local bad = clone(grant)
+		if field == "proof_review_id" then bad.payload.proof.review_id = "invented" else bad.payload[field] = "invented" end
+		check(transport.decode_reply(encode(bad), release_manager) == nil, "review-disabled grant forbids invented " .. field)
+	end
+	for _, mode in { "helper_checks", "cross_family_review" } do
+		local bad = clone(grant); bad.payload.proof.mode = mode
+		check(transport.decode_reply(encode(bad), release_manager) == nil, "reviewed " .. mode .. " still requires review identity")
+	end
+end
 local review_reply = reply("review_request", { review_id = "review_1", round = 1, question_id = "score_v1", builder_work_id = "work_1", task_ref = "task/ref",
 	source_ref = "work/branch", artifact_revision = "abc", scope_paths = list(), findings_prev = list() })
 check(transport.decode_reply(encode(review_reply), granted) == nil, "review_request carries only the fixed judge question")
 local legacy_grant = reply("landing_grant", { landing_id = "landing_1", grant_id = "grant_1", project_id = "project_1", checkpoint_id = "cp_1", repo_ref = "repo/ref",
 	target_ref = "main", target_revision = "base", source_ref = "work/branch", source_revision = "abc" })
-check(transport.decode_reply(encode(legacy_grant), granted) == nil, "landing_grant requires builder, review and proof fields")
+check(transport.decode_reply(encode(legacy_grant), granted) == nil, "landing_grant requires builder and explicit proof fields")
 local reply_value = reply("owner_decision", { choice_id = "choice_1", answer = "Proceed" })
 value, diagnostic = transport.decode_reply(encode(reply_value), binding)
 rejected(value, diagnostic, "invalid_schema", "owner reply requires explicit gate revision")

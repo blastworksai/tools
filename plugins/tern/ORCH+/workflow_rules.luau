@@ -48,72 +48,53 @@ function M.verify_checkpoint(report: any, request_id: any): (any?, any?)
 	return { attestation = "worker-attested", checkpoint_id = p.checkpoint_id, artifact_revision = p.artifact_revision }, nil
 end
 
--- Proof rule H for landing (D1 × D3), pure over facts the reducer already holds. Checks are the
--- SPAWN helper's CHECK_RESULT facts (never worker-attested CHECKPOINT checks); a review is the
--- approved REVIEW_RESULT of an ORCH+ reviewer worker, recorded on its durable review, in BOTH
--- branches. input = { enforce_cross_family, source_revision, checks (declared {check_id, argv}[]),
--- check_results (check_id → CHECK_RESULT payload), builder_worker_id, builder_record_id?,
--- builder_family?, review? = { review_id, reviewer_worker_id, reviewer_record_id?, reviewer_family?,
--- reviewer_role, artifact_revision, outcome } }. Returns the stored/granted `proof` or a failure.
+-- Landing independently requires every declared helper check at the exact source revision.
+-- Review policy selects an additional proof predicate, never an alternative to those checks.
 function M.verify_landing_proof(input: any): (any?, any?)
 	local revision, results = input.source_revision, input.check_results or {}
 	local refs = tern.json.array()
-	local function review_problem(review: any): any?
-		if review.reviewer_worker_id == input.builder_worker_id then
-			return failure("reviewer_is_builder", "The review came from the builder itself; a different worker must review this revision.")
-		end
-		if review.reviewer_record_id ~= nil and review.reviewer_record_id == input.builder_record_id then
-			return failure("reviewer_record_is_builder", "The review came from the builder's own record; a reviewer on another record must review this revision.")
-		end
-		if review.artifact_revision ~= revision then
-			return failure("review_stale", "The approved review is for another artifact revision; the requested source revision needs its own review.")
-		end
-		if review.outcome ~= "approved" then
-			return failure("review_not_approved", "The latest review requires changes; landing waits for an approved review of this revision.")
-		end
-		return nil
-	end
-	if input.enforce_cross_family then
-		local review = input.review
-		if review == nil or review.reviewer_role ~= "reviewer" then
-			return nil, failure("review_required", "Cross-family review is enforced: an approved REVIEW_RESULT for this exact revision from an ORCH+ reviewer worker of a different provider family is the landing proof, and none exists yet.")
-		end
-		local problem = review_problem(review); if problem then return nil, problem end
-		if input.builder_family == nil or review.reviewer_family == nil then
-			return nil, failure("family_unknown", "The builder's or reviewer's provider family is not declared; map the record's family in Config before cross-family proof can hold.")
-		end
-		if input.builder_family == review.reviewer_family then
-			return nil, failure("family_same", "The reviewer's declared family equals the builder's; cross-family review needs a different provider family.")
-		end
-		-- Helper checks are evidence only in this mode.
-		for _, check in input.checks or {} do
-			local r = results[check.check_id]
-			if r and r.exit_code == 0 and r.head == revision then table.insert(refs, check.check_id .. ":" .. r.output_sha256) end
-		end
-		return { mode = "cross_family_review", artifact_revision = revision, review_id = review.review_id, check_refs = refs }, nil
-	end
-	if type(input.checks) ~= "table" or #input.checks == 0 then
-		return nil, failure("checks_undeclared", "Helper-run checks are the proof while cross-family review is off, but this work declares no checks; queue it with checks.")
-	end
-	for _, check in input.checks do
+	for _, check in input.checks or {} do
 		local r = results[check.check_id]
 		if r == nil then
-			return nil, failure("check_missing", "Declared check " .. check.check_id .. " has no helper-run CHECK_RESULT; the worker must run it with the SPAWN helper.")
+			return nil, failure("check_missing", "Declared check " .. check.check_id .. " has no helper-run CHECK_RESULT; run it with the SPAWN helper.")
 		end
 		if r.head ~= revision then
-			return nil, failure("check_stale", "Check " .. check.check_id .. " ran at " .. tostring(r.head) .. ", not at the requested source revision; run it again on this revision.")
+			return nil, failure("check_stale", "Check " .. check.check_id .. " ran at " .. tostring(r.head) .. ", not the requested source revision; run it again.")
 		end
 		if r.exit_code ~= 0 then
-			return nil, failure("check_failed", "Check " .. check.check_id .. " exited " .. tostring(r.exit_code) .. " at this revision; failed helper checks block landing.")
+			return nil, failure("check_failed", "Check " .. check.check_id .. " exited " .. tostring(r.exit_code) .. " at this revision; reviewer approval cannot override failed checks.")
 		end
 		table.insert(refs, check.check_id .. ":" .. r.output_sha256)
 	end
+	if not input.require_code_review then
+		return { mode = "review_disabled", artifact_revision = revision, check_refs = refs }, nil
+	end
 	local review = input.review
 	if review == nil or review.reviewer_role ~= "reviewer" then
-		return nil, failure("review_required", "Every declared check passed at this revision; landing also needs an approved REVIEW_RESULT from an ORCH+ reviewer worker other than the builder (same family allowed).")
+		return nil, failure("review_required", "Code review is required: an ORCH+ reviewer worker must approve this exact revision.")
 	end
-	local problem = review_problem(review); if problem then return nil, problem end
-	return { mode = "helper_checks", artifact_revision = revision, review_id = review.review_id, check_refs = refs }, nil
+	if review.reviewer_worker_id == input.builder_worker_id then
+		return nil, failure("reviewer_is_builder", "The builder cannot review its own revision.")
+	end
+	if review.reviewer_record_id ~= nil and review.reviewer_record_id == input.builder_record_id then
+		return nil, failure("reviewer_record_is_builder", "The reviewer must run on a record other than the builder's.")
+	end
+	if review.artifact_revision ~= revision then
+		return nil, failure("review_stale", "The approved review is for another artifact revision.")
+	end
+	if review.outcome ~= "approved" then
+		return nil, failure("review_not_approved", "The review requires changes; landing waits for approval of this revision.")
+	end
+	if input.require_other_family then
+		if input.builder_family == nil or review.reviewer_family == nil then
+			return nil, failure("family_unknown", "Declare both provider families in Config before cross-family proof can hold.")
+		end
+		if input.builder_family == review.reviewer_family then
+			return nil, failure("family_same", "Cross-family review requires a different declared provider family.")
+		end
+	end
+	return { mode = if input.require_other_family then "cross_family_review" else "helper_checks",
+		artifact_revision = revision, review_id = review.review_id, check_refs = refs }, nil
 end
 
 -- D5 signer rule, the release-manager half of Proof rule H (Contract H): the landing grant's

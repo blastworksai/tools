@@ -107,7 +107,7 @@ local function valid(root)
  for k,entry in pairs(root.requests) do
   if type(entry)~='table' or type(entry.request)~='table' or type(entry.body)~='table' then return nil,'Corrupt retained request' end
   local request=P.decode(tern.json.encode(entry.request))
-  if not request or key(request)~=k or entry.body.request_id~=request.request_id or entry.body.action_id~=request.action_id or not P.equal(entry.body.origin_binding,request.origin_binding) or not P.encode(entry.body) then return nil,'Corrupt retained outcome' end
+  if not request or request.setup_origin or key(request)~=k or entry.body.request_id~=request.request_id or entry.body.action_id~=request.action_id or not P.equal(entry.body.origin_binding,request.origin_binding) or not P.encode(entry.body) then return nil,'Corrupt retained outcome' end
   if entry.claim and not P.fields(entry.claim,{executor_id=P.id,boot=P.id}) then return nil,'Corrupt execution claim' end
   if entry.orch_claim and not orch_claim(entry.orch_claim) then return nil,'Corrupt ORCH+ action claim' end
   if entry.authorization and (not P.fields(entry.authorization,{nonce=P.id,boot=P.id,bridge=true,binding=true,session=true,deadline=deadline,new=true,phase=true},{base_body=true,window_executor=P.id}) or not P.integer(entry.authorization.bridge,1) or not P.integer(entry.authorization.session,0) or type(entry.authorization.new)~='boolean' or (entry.authorization.phase~='requested' and entry.authorization.phase~='consumed') or type(entry.authorization.binding)~='table' or entry.authorization.base_body and not P.encode(entry.authorization.base_body)) then return nil,'Corrupt live-action authorization' end
@@ -203,30 +203,13 @@ end
 local function identity(record)
  return {backend=record.backend,provider=record.provider,account_label=record.account_label,identity_status='configured_not_verified',model=record.model,profile=record.profile,variant_id=record.variant_id,capacity_binding=record.capacity_binding,capacity_limit=record.capacity_limit}
 end
-local function capability(record,snapshot)
- local c=Backend.eligibility(record)
- local reasons={}
- if record.backend=='ssh-command' then table.insert(reasons,'SSH-hop workers are not managed here; run ORCH+ on target host with its same-host SPAWN records') end
- if not c.fresh or not c.input or not c.target then table.insert(reasons,'Explicit fresh launch, target shell and initial input contract required') end
- local caps,why=Capabilities.validate(record)
- if not caps then caps={};table.insert(reasons,why) end
- if not record.enabled or record.review_required then table.insert(reasons,'Record disabled or awaiting owner review') end
- if not P.text(record.cwd,2048,false) then table.insert(reasons,'Managed work requires an explicit configured cwd of at most 2048 UTF-8 bytes') end
- if record.backend~='native-agent' and record.placement=='replace_if_alone' then table.insert(reasons,'Managed terminal replacement placement is unsupported; configure tab or split') end
- if snapshot then
-  local shell=Backend.shell_kind(snapshot.host_os,snapshot.host_shell)
-  if not shell or record.backend=='native-agent' and shell~='posix' then table.insert(reasons,'Native launch is unsupported on this execution-host shell') end
-  if record.backend~='ssh-command' and record.user and shell~='posix' then table.insert(reasons,'OS-user isolation is unsupported on this execution host') end
-  if record.backend~='ssh-command' and record.host and string.lower(record.host)~='local' and 'host:'..string.lower(record.host)~=snapshot.host_key then table.insert(reasons,'Configured execution host differs from canonical host authority') end
- end
- return #reasons==0,caps,reasons
-end
+local capability=Capabilities.eligibility
 local function catalog(r,snapshot)
  local cursor=r.cursor
  if cursor and cursor.revision~=snapshot.config_revision then return P.reject(r,'binding_mismatch','Catalog revision changed; select again') end
  local records={};local first=if cursor then cursor.index else 1
  if first>#snapshot.records+1 then return P.reject(r,'invalid_schema','Invalid catalog cursor') end
- local payload={revision=snapshot.config_revision,config_revision=snapshot.config_revision,namespace=snapshot.namespace,host_key=snapshot.host_key,records=records}
+ local payload={catalog_version=2,setup=P.clone(snapshot.setup),revision=snapshot.config_revision,config_revision=snapshot.config_revision,namespace=snapshot.namespace,host_key=snapshot.host_key,records=records}
  for index=first,#snapshot.records do
   local record=snapshot.records[index];local eligible,caps,reasons=capability(record,snapshot)
   local row={id=record.id,revision=snapshot.config_revision,provider=record.provider,account_label=record.account_label,backend=record.backend,enabled=record.enabled,eligible=eligible,capabilities=caps,unsupported=reasons,capability_evidence='configured_operator_attestation_not_runtime_proof',effective_identity=identity(record),cwd=record.cwd,placement=record.placement,model_variant=record.model,profile_variant=record.profile,selector_evidence=record.selector_evidence,capacity_binding=record.capacity_binding}
@@ -318,7 +301,9 @@ local function enrolment_brief(root,r,snapshot)
  local location=Mailbox.location(root.mailboxes,r.mailbox_handle)
  local brief='Literal assignment follows: SHA-256 covers ONLY its exact '..tostring(#r.prompt)..' UTF-8 bytes, excluding this transport preface.\n'
   ..'report-files-v1: '..tern.json.encode({mailbox_handle=r.mailbox_handle,binding=expected,root=location.root,producer_helper=location.producer_helper,assignment_sha256=r.enrolment.assignment_sha256,handover_id=r.enrolment.handover_id,handover_token=r.enrolment.handover_token,capabilities=caps})..'\n'
-  ..'Helper argv: POSIX sh,producer_helper,root,mailbox_handle,enrolment_token,mode; Windows powershell.exe -NoProfile -File producer_helper -Root: root -Handle: mailbox_handle -Owner: enrolment_token -Mode: mode. Each colon-ended name and its literal value are separate argv elements. init only new journals; replay restores. report reads {kind,payload,action_id?,action_revision?,handover_id?,handover_token?} stdin; supplies BE/seq/event_id. Emit ACCEPTED {assignment_sha256}, with paired handover only if supplied. Copy handover_id and handover_token verbatim from the report-files-v1 JSON above; never retype them. The helper verifies them against the provisioned handover digest and refuses a mismatch before publishing, naming the field; then report ACCEPTED again with the exact values. Check receipts/consume at checkpoints. With native-ask-v1, end the initial turn immediately after ACCEPTED and return idle before awaiting ACK/control; native notifications require idle. On notifications drain available receipts/replies, then return idle when awaiting more control; never keep the turn open polling or calling wait for another notification. Only worker-poll-v1 uses bounded wait while awaiting control. reply_ack precedes effects; claim/resolve retain uncertainty. Never reset or retry uncertain effects.\n'
+  ..'Helper argv: POSIX sh,producer_helper,root,mailbox_handle,enrolment_token,mode; Windows powershell.exe -NoProfile -File producer_helper -Root: root -Handle: mailbox_handle -Owner: enrolment_token -Mode: mode. Each colon-ended name and its literal value are separate argv elements. Invoke init once for a new journal BEFORE reporting ACCEPTED; never reinitialize an existing journal, use replay to restore. report reads {kind,payload,action_id?,action_revision?,handover_id?,handover_token?} stdin; supplies BE/seq/event_id. Emit ACCEPTED {assignment_sha256}, with paired handover only if supplied. Copy handover_id and handover_token verbatim from the report-files-v1 JSON above; never retype them. The helper verifies them against the provisioned handover digest and refuses a mismatch before publishing, naming the field; then report ACCEPTED again with the exact values. Check receipts/consume at checkpoints. With native-ask-v1, end the initial turn immediately after ACCEPTED and return idle before awaiting ACK/control; native notifications require idle. On notification drain receipts and consume. Once the producer journal confirms ACCEPTED acknowledged, continue this original authorized assignment; do not wait for another assignment reply. Required typed coordinator activation, landing grants and other control gates still apply. Return idle only when awaiting future control; never keep the turn open polling or calling wait for another notification. Only worker-poll-v1 uses bounded wait while awaiting control. reply_ack precedes effects; claim/resolve retain uncertainty. Never reset or retry uncertain effects.\n'
+ brief..=if r.enrolment.coordinator_owner_id then 'Your transport role is coordinator: await the exact typed coordinator_activation described below before coordinator work.\n'
+  else 'Your transport role is an ordinary worker, NOT a coordinator. Do not wait for coordinator_activation. A coordinator-control-v1 capability alone does not confer that role. After ACCEPTED is acknowledged, perform the original assignment within its existing authority. Review work still requires its review_request; landing and deployment still require their exact typed grants. No transport notification authorizes unrelated work.\n'
  if r.enrolment.coordinator_owner_id then
   brief..='COORDINATOR TRANSPORT ROLE: '..tern.json.encode({owner_id=r.enrolment.coordinator_owner_id,owner_generation=r.enrolment.coordinator_generation})..'\n'
    ..'Acknowledge the exact assignment bytes with ACCEPTED first, but do not perform coordinator work yet. Await control using the enrolled transport rule above, then drain receipts and consume the typed coordinator_activation reply for this exact owner/generation. The consumer durably records reply_ack before returning it; claim that exact reply before coordinator work. Retain its action ID/revision and activation token. Never independently orchestrate Tern. When the assigned task finishes or typed retirement requests stop, quiesce and report COORDINATOR_RELEASE with that owner/generation/token, quiescent:true and the activation (or issued retirement) action ID/revision. Idle alone is not task completion. Continue draining committed replies and receipts, including a delayed coordinator_retirement, without starting fresh work; native stop and mailbox retirement belong to ORCH+/SPAWN. The role and token are protocol fencing, not OS/account isolation.\n'
@@ -673,6 +658,7 @@ end
 -- Public writes first wait for a fresh, exact window-observed ORCH+ action.
 -- The nonce is issued only AFTER asynchronous host-membership verification.
 function M.stage(r,binding,session,bridge)
+ if r.setup_origin then return P.reject(r,'binding_mismatch','Setup catalog is read-only and cannot acquire execution authority') end
  -- owner_status is a read-only admission view: answered for any same-session binding, never staged or authorized.
  if r.op=='owner_status' then return M.request(r,binding,session,function()end) end
  local root,why=load();if not root then return P.reject(r,'storage_error',why) end
@@ -729,6 +715,12 @@ function M.authorize(r,nonce,bridge,changed,claim,executor_id)
 end
 
 function M.request(r,binding,session,changed,authorization_nonce,authorized_snapshot)
+ -- Setup queries never load the transport registry: even its read path initializes/recover-writes.
+ if r.op=='catalog' and r.setup_origin then
+  local snapshot,why=Authority.setup_snapshot()
+  if not snapshot then return P.reject(r,'storage_error',why) end
+  return catalog(r,snapshot)
+ end
  local root,why=load();if not root then return P.reject(r,'storage_error',why) end
  if r.op=='owner_status' then return P.body(r,'owner_status',{owner=owner_state(root,r,binding,session)}) end
  local admitted,owner_error=owner(root,r,binding,session,r.op~='catalog' and r.op~='status')
@@ -794,6 +786,7 @@ function M.request(r,binding,session,changed,authorization_nonce,authorized_snap
  else return mailbox(root,entry,snapshot,changed) end
 end
 local function execution_in(root,r,bridge)
+ if r.setup_origin then return nil end
  local entry=root.requests[if r.op=='status' then r.origin_binding.logical_session_id..'/'..r.target_request_id else key(r)]
  if entry and entry.authorization and entry.authorization.phase=='requested' and entry.authorization.boot==boot and entry.authorization.bridge==bridge and entry.authorization.deadline>=tern.now() and P.equal(entry.request.origin_binding,r.origin_binding) then
   local base=entry.authorization.base_body
@@ -822,6 +815,7 @@ local function execution_in(root,r,bridge)
 end
 function M.execution(r,bridge)
  if not P.integer(bridge,1) then return nil end
+ if r and r.setup_origin then return nil end
  local root=load();if not root then return nil end
  return execution_in(root,r,bridge)
 end
@@ -834,7 +828,21 @@ end
 -- held, so the bridge is never closed or reused.
 function M.bridge_lease(r,bridge)
  if not P.integer(bridge,1) then return nil,true end
- local root=load();if not root then return nil,true end
+ local root
+ if r and not r.setup_origin then
+  -- Existing controller projections keep their ordinary reload/recovery semantics.
+  root=load();if not root then return nil,true end
+ else
+  -- Rendering a fresh setup bridge must not initialize or recover-write dispatch storage.
+  if hold then return nil,true end
+  local ok;ok,root=pcall(tern.kv.get,KEY)
+  if not ok then return nil,true end
+  if root==nil then
+   local marked,marker=pcall(tern.kv.get,KEY..'-initialized')
+   return nil,not marked or marker~=nil
+  end
+  if not valid(root) then return nil,true end
+ end
  local held=false
  for _,entry in pairs(root.requests) do
   local a=entry.authorization

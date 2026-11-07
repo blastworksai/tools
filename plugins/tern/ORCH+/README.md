@@ -1,6 +1,6 @@
 # ORCH+ for Tern
 
-Run a team of AI agents from one controller in [Tern](https://docs.stencil.so/tern/): start a coordinator, hand out tasks or import a plan, watch health, have each change reviewed by a separate agent, roll tired agents over to fresh context and land their work one merge at a time. You decide what runs: each step needs your approval, or a session policy you set that approves chosen steps inside the plan's scope.
+Run a team of AI agents from one controller in [Tern](https://docs.stencil.so/tern/): start a coordinator, hand out tasks or import a plan, watch health, apply your chosen review policy, roll tired agents over to fresh context and land their work one merge at a time. You decide what runs: each step needs your approval, or a session policy you set that approves chosen steps inside the plan's scope.
 
 ORCH+ adds orchestration on top of native Tern and [SPAWN](../SPAWN/README.md). Tern gives you panes, sessions and native agents. SPAWN holds your roster of configured agent accounts and launches them. ORCH+ uses that roster to run managed workers:
 
@@ -17,10 +17,10 @@ Optionally, [USAGE](../USAGE/README.md) 2.1.0 or later supplies remaining-quota 
 
 - **One controller per logical session.** One ORCH+ view claims the controller for a logical session. Other views of the same session show the same facts read-only and can reveal the controller.
 - **Dispatch through SPAWN.** You pick a configured SPAWN record from a revision-pinned catalog and type the assignment, or start work from a plan file, a Tern board or an inbox folder. ORCH+ never sees commands, SSH settings or credentials and has no raw-command fallback.
-- **Roles.** Every worker has a role that ORCH+ sets: builder, reviewer, release manager, labeller or coordinator. Builders build; a separate reviewer judges each change; only the release manager merges and deploys.
+- **Roles.** Every worker has a role that ORCH+ sets: builder, reviewer, release manager, labeller or coordinator. Builders build; when review is required, a separate reviewer judges the change; only the release manager merges and deploys.
 - **Structured reports, not screen scraping.** Workers report through a private report mailbox (READY, HEARTBEAT, ASK, CHECKPOINT, DONE and others). Check results and checkout facts come from SPAWN's helper, not from the worker's word. ORCH+ never reads transcripts or terminal output and never types into a pane.
 - **Owner gates.** Questions, proposals, quota fallbacks, shared checkouts, out-of-scope changes, loop caps and landing approvals become durable gates. You answer them, or a session policy you chose answers in-scope proposals for you, visibly tagged as such.
-- **Proof before landing.** A change lands only with a recorded proof: by default an approved review from a different provider family; with that switched off, passing helper-run checks plus an approved review.
+- **Proof before landing.** Every declared check must pass through SPAWN's helper at the submitted revision in every mode. Require a different-family review (default), allow a same-family review, or explicitly disable code review without disabling checks.
 - **Loop caps.** Anything that would engage a model again (re-requests, rework, refreshes, retries) stops at a cap you set and asks you.
 - **Verified rollover.** A worker or coordinator close to its context limit hands over to a fresh successor through a checkpoint; no transcript is copied.
 - **Landing queue and deploys.** Merges are queued per project, repository and target branch, with one granted slot per target. The release manager merges under the repository's own rules, then deploys where those rules define a deploy.
@@ -80,9 +80,22 @@ All ORCH+ controls are native buttons, except the two reload recovery commands d
 
 Closing the controller pane does not release ownership. Reopen ORCH+, select the same session and use **Recheck**. To move ownership to a new pane, follow the recovery steps shown on the owner card. Each step asks you to confirm that the old owner and its executors have stopped.
 
+### Setup before a controller
+
+Open **ORCH+ Setup wizard** or **ORCH+ Installation defaults** from the palette, or choose **Setup wizard…** / **Edit Installation defaults…** in Config. Initialize a genuinely absent host authority through its first-use confirmation; restore/recheck an existing store instead of replacing it. Existing installations offer **Review existing setup…** for explicit adoption.
+
+1. Use **SPAWN managed setup…** first if records need provisioning. SPAWN owns the canonical roster, helper resources, launch routes and capability attestations; ORCH+ consumes its revision-pinned catalog, including all catalog pages. Native cross-links launch or focus the destination pane and send page-entry events; they do not dispatch installed-plugin actions from callbacks or create another roster.
+2. Choose the review policy explicitly. Enter the checkout path and existing target ref for Git verification on the execution host, then declare `repository_queue` or `orch_queue`. This selection does not install repository protection.
+3. Select enabled, eligible records with `report-files-v1`: a builder with `check-runner-v1`, and a distinct release manager with `release-manager-v1`. When review is required, select a reviewer distinct from both; different-family mode also needs known, different declared families. Coordinator (`coordinator-control-v1`), labeller and USAGE are optional.
+4. Save installation defaults and choose **Finish setup**, or keep the configuration and finish later. Saves have their own expected configuration revision; stale saves are refused and unchanged saves are no-ops. Dismissing setup leaves defaults available for later editing.
+
+Required setup completion is independent of **Optional readiness exercise…**. That exercise needs separate consent to launch real provider work in a disposable local repository, can incur provider usage, and passes only after the ordinary checks, applicable review, landing result and Git readback. It is not a deployment or full release qualification.
+
+Same-user, one-machine setup does not require SSH or sudo and does not establish account/identity isolation. Role text and declared families are guidance, not a sandbox. Native tool permissions, provider accounts and repository rules remain the owner's controls; setup does not automatically change permission or approval policy. Ordinary standalone SPAWN flow remains separate.
+
 ### Config page
 
-Every ORCH+ view has a **Config** button, and the Files-header button opens Config directly. **Open ORCH+ controller** takes you back. Only the active controller can edit settings. Other views show them read-only, with the reason.
+Every ORCH+ view has a **Config** button, and the Files-header button opens Config directly. **Open ORCH+ controller** takes you back. **Installation defaults** are editable before a controller exists and seed new logical sessions only. **Session overrides** require the active controller; other views show them read-only, with the reason. Changing installation defaults never overwrites existing session policy.
 
 Checkboxes and −/+ buttons edit a draft. **Save session settings** commits only the fields you changed, and is refused if the saved settings changed in the meantime (another save, or pause/resume). **Enter value…** and **Enter time…** accept a single bounded value. Lists, records, paths, templates and role guidance save one entry at a time.
 
@@ -108,7 +121,8 @@ Checkboxes and −/+ buttons edit a draft. **Save session settings** commits onl
 | Loops | Loop cap | 3 | 1–10 attempts per loop |
 | | Review rounds | 2 | 1–2 per piece of work |
 | | Stale-claim alert after | 30 min | 0 (off)–1440 min |
-| Review & proof | Enforce cross-family review | on | on/off |
+| Review & proof | Require code review before landing (`require_code_review`) | on | on/off |
+| | Require a different declared provider family (`require_other_family`) | on | on/off while review is enabled |
 | | Family map | empty | up to 24 records |
 | | Reviewer records (tried in order) | none | up to 8 |
 | Release | Release manager record | none | one record |
@@ -146,7 +160,7 @@ When work is done, **Finish ordinary worker…** stops the worker's exact pane a
 
 ORCH+ sets each worker's role; a worker never chooses it.
 
-- **Builder:** any task you assign or that comes from a plan, the board, the inbox or a template. It builds, runs its declared checks through SPAWN's helper, asks for review and requests landing. It never reviews its own work and never merges.
+- **Builder:** any task you assign or that comes from a plan, the board, the inbox or a template. It builds, runs every declared check through SPAWN's helper, requests review when required and requests landing. It never reviews its own work and never merges.
 - **Reviewer:** a fresh short-lived worker per review round, launched by ORCH+ on the first suitable record in **Reviewer records**. It answers one fixed question — does the change implement the task as specified, without changes outside its scope — with `approved` or `changes_required` and findings tied to file and line. No scores.
 - **Release manager:** the session's only merging actor, launched on **Release manager record** (which needs `release-manager-v1` and must differ from the builder's and the reviewer's records). It merges exactly the granted revision following the repository's own rules, then deploys where those rules define a deploy.
 - **Labeller:** a short-lived worker on **Labeller record** that picks a work class for intake without one (see [Work-class router](#work-class-router)).
@@ -173,14 +187,19 @@ ORCH+ cannot see the outside systems a task lists: workers and coordinators must
 
 ### Review and the proof rule
 
-When a builder reports REVIEW_READY, ORCH+ opens a review and launches a reviewer. With **Enforce cross-family review** on (the default), the reviewer must be on a record whose declared provider family differs from the builder's. `changes_required` sends the builder one `rework` reply with only the findings (and, with enforcement off, the checks that failed); the builder fixes those, publishes a new revision and asks for review again. **Review rounds** caps the rounds, then the owner decides. A new revision voids any earlier approval.
+`require_code_review` determines whether REVIEW_READY launches a separate reviewer; `require_other_family` determines whether that reviewer must have a different declared provider family. Turning review off also turns the family requirement off. Turning it back on does not restore the previous family preference. Failed-check repair is independent of review: typed `rework` carries the failed checks and any findings; no review ID is fabricated when no review exists. Rework and review loops remain capped. A new revision invalidates earlier approval and check proof.
 
 Landing needs proof for the exact revision:
 
-| Enforce cross-family review | Proof |
-| --- | --- |
-| on | an approved review from a reviewer of a different declared family (helper checks are kept as evidence) |
-| off | every declared check passed through SPAWN's helper on that revision, and an approved review by a reviewer other than the builder (same family allowed) |
+| `require_code_review` | `require_other_family` | Proof mode | Required proof at the exact source revision |
+| --- | --- | --- | --- |
+| true | true | `cross_family_review` | Every declared helper check passed, plus an approved separate, different-family review |
+| true | false | `helper_checks` | Every declared helper check passed, plus an approved separate review; same family allowed |
+| false | false | `review_disabled` | Every declared helper check passed; no reviewer or review request, and review IDs remain absent/nil |
+
+Fresh defaults are true/true. Legacy cross-family-on settings migrate to true/true; cross-family-off settings migrate to true/false, not review-disabled. In `review_disabled`, builders submit CHECKPOINT then LANDING_REQUEST without waiting for REVIEW_READY or a reviewer; explicit review proposals do not execute.
+
+Policy changes re-evaluate ungranted work, not immutable issued grants. Already-issued review/control replies must drain, and uncertain live work can block progress; changing policy never rewrites delivered proof or erases settlement obligations. The release manager remains distinct from the builder and, when present, the reviewer.
 
 Families come from the **Family map**, or else from the provider (Claude → anthropic, Codex → openai, Kimi → moonshot, Agy → google, Grok → xai, Muse → muse). OMP and unknown providers have no family until you map them.
 
@@ -192,7 +211,7 @@ An effect claimed for longer than **Stale-claim alert after** raises one `stale_
 
 ### Autonomy inside plan scope
 
-Approved proposals do something. Whether you approved them or your session policy did, ORCH+ carries each one out exactly once: `dispatch` queues the proposed record and prompt as new work that inherits only the parent's source and scope; `report` asks the worker for a report; `review` opens a review by a separate reviewer worker; `landing` approves the matching landing request.
+Approved proposals do something. Whether you approved them or your session policy did, ORCH+ carries each permitted one out exactly once: `dispatch` queues the proposed record and prompt as new work that inherits only the parent's source and scope; `report` asks the worker for a report; `review` opens a review by a separate reviewer worker only while code review is required; `landing` approves the matching landing request. Review-disabled policy does not authorize review execution.
 
 A proposal is **in scope** when its work:
 

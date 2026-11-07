@@ -61,9 +61,16 @@ local function fixture()
  end}
  cx.session={
   focused=function()return f.focus end,
-  pane=function(_,id)if id==55 and f.absent then return nil end return {block=if id==44 then 'orchplus.orchestrator' elseif id==45 or id==46 then 'spawn.dispatch' else 'agent',tab=1,kind=if id==55 then f.pane_kind or 'agent' else 'plugin',exited=if id==55 then f.exit_status else nil}end,
+  pane=function(_,id)if id==55 and f.absent then return nil end return {block=if id==44 or id==47 then 'orchplus.orchestrator' elseif id==45 or id==46 then 'spawn.dispatch' else 'agent',tab=if f.setup_parked and id==44 then nil else 1,kind=if id==55 then f.pane_kind or 'agent' else 'plugin',exited=if id==55 then f.exit_status else nil}end,
   tabs=function()return {{id=1,session=3}}end,
-  panes=function()return if f.second then {{pane=45,block='spawn.dispatch'},{pane=46,block='spawn.dispatch'}} else {{pane=45,block='spawn.dispatch'}}end,
+  panes=function()
+   if f.setup_query then
+    local out={{pane=45,block='spawn.dispatch'},{pane=44,block='orchplus.orchestrator'}}
+    if f.setup_duplicate then table.insert(out,{pane=47,block='orchplus.orchestrator'}) end
+    return out
+   end
+   return if f.second then {{pane=45,block='spawn.dispatch'},{pane=46,block='spawn.dispatch'}} else {{pane=45,block='spawn.dispatch'}}
+  end,
   surface=function(_,id,opts)
    -- An optional second dispatch pane carries its own exact launch action and request.
    local second=f.second
@@ -74,6 +81,16 @@ local function fixture()
     if opts.root=='main.dispatch-request-'..key then return surface('orchplus.orchestrator','dispatch-request-'..key,'orchplus.request',runtime.json.encode(second.request))end
    end
    if id==45 then return surface('spawn.dispatch','spawn-dispatch-execution','spawn.dispatch.execution','SPAWN_EXECUTION v1 '..runtime.json.encode(f.projection))end
+   if f.setup_query and opts.root=='main.setup-index' then
+    if f.missing_setup_index then return nil end
+    return surface('orchplus.orchestrator','setup-index','orchplus.setup',runtime.json.encode(f.setup_index))
+   end
+   if f.setup_query and opts.root=='main.setup-catalog-request' then
+    if f.missing_setup_request then return nil end
+    local out=surface('orchplus.orchestrator','setup-catalog-request','orchplus.setup.request',runtime.json.encode(f.current))
+    if f.setup_truncated then out.more=1 end
+    return out
+   end
    if opts.root=='main.dispatch-state'then return surface('orchplus.orchestrator','dispatch-state','orchplus.dispatch',runtime.json.encode(f.primary_state or state))end
    local action_key='dispatch-action-'..f.request.action_id
    if opts.root=='main.'..action_key then
@@ -222,6 +239,38 @@ check(#good.events==1 and good.events[1].act=='spawn.authorize','only exact live
 local observation=good.c.strict_decode(good.events[1].value,65536)
 check(good.p.equal(observation.orch_claim,good.claim) and observation.nonce=='challenge','nonce response carries exact observed action claim')
 good.tick();check(#good.events==1,'one window emits nonce once')
+do
+ local function setup_fixture()
+  local f=fixture()
+  local q={schema=1,origin='orchplus',op='catalog',request_id='setup-query',action_id='setup-action',setup_origin={host_pane_id='12',window_key='',window_epoch='setup-epoch',native_session_id='3',window_host_id='7'}}
+  f.setup_query=true;f.setup_index={version=1,host_pane_id='12',source_nonce='setup-alias'}
+  f.request=q;f.current=copy(q);f.projection={schema=1,kind='setup_catalog',request=copy(q),observation_id='fixture-observation'}
+  return f
+ end
+ local exact=setup_fixture();exact.tick()
+ check(#exact.events==1 and exact.events[1].act=='spawn.setup_catalog' and exact.p.equal(exact.c.strict_decode(exact.c.strict_decode(exact.events[1].value,65536).request_json,8192),exact.request),'native setup observation binds actual host/session/window, host-pane view and exact request')
+ local retained=exact.w.retained()
+ check(exact.asks==0 and exact.starts==0 and exact.action_reads==0 and retained.requests==0 and retained.markers==0,'setup observation creates no fake controller claim, execution marker or native effect')
+ check(not exact.w.origin_ok(exact.cx,45,exact.request),'setup origin cannot authorize ordinary dispatch effects')
+ for _,field in ipairs({'host_pane_id','window_key','window_epoch','native_session_id','window_host_id'}) do
+  local wrong=setup_fixture();wrong.projection.request.setup_origin[field]='other';wrong.tick()
+  check(#wrong.events==0,'setup refuses altered native origin '..field)
+ end
+ for _,field in ipairs({'missing_setup_index','missing_setup_request','setup_parked','setup_truncated'}) do
+  local hidden=setup_fixture();hidden[field]=true;hidden.tick()
+  check(#hidden.events==0,'setup requires actual visible untruncated source evidence: '..field)
+ end
+ local forged=setup_fixture();forged.setup_index.host_pane_id='other';forged.tick()
+ check(#forged.events==0,'copied setup request cannot override its actual host-pane view binding')
+ local duplicate=setup_fixture();duplicate.setup_duplicate=true;table.insert(duplicate.host.panes,47);duplicate.tick()
+ check(#duplicate.events==0,'ambiguous live source views refuse setup observation')
+ local moved=setup_fixture();moved.host.panes={45,55};moved.tick()
+ check(#moved.events==0,'setup source must be a member of the current native host')
+ local disconnected=setup_fixture();disconnected.host.state='disconnected';disconnected.tick()
+ check(#disconnected.events==0,'disconnected native host cannot bind setup')
+ local replaced=setup_fixture();replaced.current.request_id='new-query';replaced.tick()
+ check(#replaced.events==0,'replaced live setup query invalidates the earlier bridge projection')
+end
 local unrelated=fixture();unrelated.state.action.action_id='other-action';unrelated.tick()
 check(#unrelated.events==0,'copied owner and enrolment cannot authorize unrelated action')
 local changed=fixture();changed.current.message_id='different-message';changed.tick()
@@ -457,14 +506,14 @@ if section==nil or section=='window' then
   return {id=id,provider='custom',account_label=id,backend='local-terminal',command='ordinary-cli',arguments={},enabled=true,include_all=true,placement='tab'}
  end
  local function new_world(records)
-  return {kv={},blocks={},next_pane=100,host={id=1,state='connected',name='fixture',sessions={1},panes={}},
+  return {kv={},blocks={},next_pane=100,host={id=1,state='connected',name='fixture',kind='local',sessions={1},panes={}},
    authority={authority_id='authority-1',session_key='session-1',config_revision=1,records=records or {spawn_record('alpha')},replies={},request_sequences={}},
-   requests={},acks={},closes=0,opened=0}
+   requests={},contexts={},acks={},closes=0,opened=0}
  end
  local function add_block(world,opts)
   world.next_pane+=1
   local id=world.next_pane
-  world.blocks[id]={parked=opts~=nil and opts.parked==true,intents=opts and opts.intents or {}}
+  world.blocks[id]={parked=opts~=nil and opts.parked==true,intents=opts and opts.intents or {},page_context=opts and opts.page_context}
   table.insert(world.host.panes,id)
   return id
  end
@@ -478,7 +527,8 @@ if section==nil or section=='window' then
  end
  local read_node=load_pure('dispatch_window').read_node
  local window_chunk=assert(loadstring(runtime.fs.read(root..'/window.luau'),'window'))
- local function window(world)
+ local function window(world,window_key)
+  window_key=window_key or 'win'
   local f={timers={},commands={},toasts={},picks={}}
   local cx=nil
   local fake=setmetatable({
@@ -496,7 +546,15 @@ if section==nil or section=='window' then
    dispatch_window={start=function()end,read_node=read_node},
    ['updater/window']={register=function()end},
   }
-  local function load(name)name=name:gsub('^%./','');return stubs[name] or load_pure(name)end
+  local function load(name)
+   name=name:gsub('^%./','')
+   if name=='managed_route_window' and not stubs[name] then
+    local chunk=assert(loadstring(runtime.fs.read(root..'/'..name..'.luau'),name))
+    setfenv(chunk,setmetatable({tern=fake,require=load},{__index=environment}))
+    stubs[name]=chunk()
+   end
+   return stubs[name] or load_pure(name)
+  end
   local function info(id)
    local b=world.blocks[id];if not b then return nil end
    return {pane=id,block='spawn.spawner',kind='plugin',title='SPAWN',tab=if b.parked then nil else 1,parked=b.parked,focused=world.focus==id}
@@ -506,7 +564,7 @@ if section==nil or section=='window' then
    hosts={current=function()return world.host end,list=function()return {world.host}end},
    sessions={current=function()return {id=1,host=1}end,list=function()return {{id=1,host=1}}end},
    agents={list=function()return {}end},
-   window_key=function()return 'win' end,
+   window_key=function()return window_key end,
    toast=function(_,level,text,sub)table.insert(f.toasts,{level=level,text=text,sub=sub})end,
    pick=function(_,spec)local p={spec=spec};table.insert(f.picks,p);return {next=function(_,fn)p.fn=fn end}end,
    new_block=function(_,block,_,_,opts)
@@ -530,6 +588,7 @@ if section==nil or section=='window' then
    tabs=function()return {{id=1,session=1}}end,
    tab_of=function(_,id)local i=info(id);return i and i.tab end,
    focused=function()return world.focus end,
+   view=function(_,id)local b=world.blocks[id];return if b and not b.parked then node('main','root','') else nil end,
    surface=function(_,id,opts)
     local b=world.blocks[id];if not b then return nil end
     local a=world.authority
@@ -539,6 +598,8 @@ if section==nil or section=='window' then
      return node('spawn-state',nil,'SPAWN_STATE_V2 '..runtime.json.encode(state))
     end
     if opts.root=='main.spawn-launch-intent' and #b.intents>0 then return node('spawn-launch-intent','spawn.launch.intent',runtime.json.encode({schema=1,intents=b.intents}))end
+    if opts.root=='main.spawn-page-context' and b.page_context then return node('spawn-page-context','spawn.page.context',runtime.json.encode(b.page_context))end
+    if opts.root=='main.spawn-managed-route' and world.route then return node('spawn-managed-route','spawn.managed.route',runtime.json.encode(world.route))end
     return nil
    end,
    event=function(_,id,ev)
@@ -546,6 +607,10 @@ if section==nil or section=='window' then
     if ev.act=='spawn.launch-intent-ack' then
      table.insert(world.acks,ev.value)
      if not world.keep_intent then for i,queued in ipairs(b.intents)do if queued.intent_id==ev.value then table.remove(b.intents,i);break end end end
+    elseif ev.act=='spawn.page-context' then
+     table.insert(world.contexts,{pane=id,value=runtime.json.decode(ev.value)});b.page_context=nil
+    elseif ev.act=='managed-route-preflight' then
+     world.preflights=(world.preflights or 0)+1
     elseif ev.act=='spawn.request' then
      -- The host refuses every launch as disabled: a skip-only batch settles without a ticket.
      local r=runtime.json.decode(ev.value);table.insert(world.requests,r)
@@ -639,6 +704,29 @@ if section==nil or section=='window' then
  local hidden=new_world();local parked=add_block(hidden,{parked=true,intents={intent('parked-1','all')}})
  local h=window(hidden);h.ticks(3)
  check(#hidden.requests==0 and #hidden.acks==0 and hidden.blocks[parked]~=nil,'an intent on a parked Config is never run or acked')
+ local addressed=new_world();local navigation=intent('navigation-owner','readiness');navigation.native_window='another-window'
+ local addressedPane=add_block(addressed,{intents={navigation}})
+ local nw=window(addressed);nw.ticks(2)
+ check(#addressed.acks==0 and #addressed.requests==0 and #addressed.blocks[addressedPane].intents==1,'other windows neither consume nor settle an owner-addressed readiness click')
+ addressed.blocks[addressedPane].intents[1].native_window='win';nw.ticks(2)
+ check(addressed.acks[1]=='navigation-owner' and #addressed.requests==0 and #nw.toasts>0,'owner window reports unavailable ORCH navigation without creating a task')
+ local routeWorld=new_world();local diagnostic=intent('route-owner','route_probe');diagnostic.native_window='owner-window'
+ local routePane=add_block(routeWorld,{intents={diagnostic}})
+ routeWorld.route={schema=1,nonce='two-window-diagnostic',command='exact-offline-helper',cwd='/fixture',window='owner-window',native_session=1,source_pane=routePane,config_revision=1,status='running',cleanup_pending=true,native_conn=1,native_since=1,backend='local-terminal'}
+ local foreignWindow=window(routeWorld,'foreign-window');foreignWindow.ticks(2)
+ check(#routeWorld.acks==0 and routeWorld.kv['spawn.intents.v1']==nil and #routeWorld.blocks[routePane].intents==1 and routeWorld.preflights==nil,'foreign consumer leaves the owner route intent unjournalled, unacked and unstarted')
+ local ownerWindow=window(routeWorld,'owner-window');ownerWindow.ticks(2)
+ check(#routeWorld.acks==1 and routeWorld.acks[1]=='route-owner' and #routeWorld.blocks[routePane].intents==0 and routeWorld.preflights==1,'owning window consumes the still-pending route exactly once and requests native launch preflight')
+ foreignWindow.ticks(2);ownerWindow.ticks(2)
+ check(routeWorld.preflights==1 and #routeWorld.acks==1,'later foreign and owner ticks cannot replay the consumed native diagnostic')
+ local contextWorld=new_world();contextWorld.kv.config={schema=1,agents={spawn_record('owner-legacy')}}
+ local contextPane=add_block(contextWorld,{page_context={nonce='owner-context',entry={kind='page',page='managed',native_window='another-window'}}})
+ local cw=window(contextWorld);cw.ticks(2)
+ check(#contextWorld.contexts==0 and contextWorld.blocks[contextPane].page_context~=nil,'foreign window ignores a page-context request without reporting a false failure or consuming it')
+ contextWorld.blocks[contextPane].page_context.entry.native_window='win';cw.ticks(2)
+ local handoff=contextWorld.contexts[1]
+ check(#contextWorld.contexts==1 and handoff.pane==contextPane and handoff.value.nonce=='owner-context' and handoff.value.context.native_window=='win','own window hands native context to the exact visible SPAWN pane once')
+ check(handoff.value.context.host.id==1 and handoff.value.context.host.kind=='local' and handoff.value.context.client_config.agents[1].id=='owner-legacy' and #contextWorld.requests==0,'own context carries only SPAWN legacy settings through its existing owner builder, without launching')
  -- A click queued in a SPAWN-opened Config during a multi-agent Spawn all runs after the batch.
  local queued=new_world({spawn_record('alpha'),spawn_record('beta')});queued.hold=true
  local qw=window(queued)

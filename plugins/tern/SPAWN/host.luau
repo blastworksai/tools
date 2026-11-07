@@ -5,6 +5,8 @@ local Authority = require("./authority")
 local Native = require("./native_cli")
 local Executor = require("./host_executor")
 local Dispatch = require("./dispatch")
+local ManagedSetup = require("./managed_setup")
+local PageNavigation = require("./page_navigation")
 local MAX_WINDOWS = 16
 local live_blocks = {}
 local MAX_TEXT = 120000
@@ -20,8 +22,9 @@ local function host_key(discovery)
 	end
 	return nil
 end
-local function decode(value)
-	if type(value)~="string" or #value>MAX_TEXT then return nil,"JSON exceeds 120000 bytes" end
+local function decode(value,limit)
+	limit=limit or MAX_TEXT
+	if type(value)~="string" or #value>limit then return nil,"JSON exceeds "..tostring(limit).." bytes" end
 	local ok,result=pcall(tern.json.decode,value)
 	return if ok then result else nil,if ok then nil else tostring(result)
 end
@@ -128,12 +131,57 @@ local function live_sessions(state)
 	end
 	return live
 end
+local function setup_client(inventory,window)
+	local found=nil
+	for _,client in ipairs(if inventory then inventory.clients or {} else {}) do
+		if (client.kind=="window" or client.kind=="remote") and client.window==window then
+			if found or type(client.conn)~="number" or client.conn<0 or client.conn%1~=0 or type(client.since)~="number" or client.since<0 or client.since%1~=0 then return nil end
+			found=client
+		end
+	end
+	return found
+end
 local function reload(state)
 	if not state.binding then return false end
 	local snapshot,err=Authority.snapshot(state.binding,Executor.epoch())
 	if not snapshot then state.notice=err;state.transport_error=err;state.reload_error=err;state.snapshot=nil;return false end
 	if state.transport_error==state.reload_error then state.transport_error=nil end
 	state.reload_error=nil;state.snapshot=snapshot;state.config={schema=2,agents=snapshot.records}
+	local obligation,probe_error=Authority.setup_probe_read(state.host_key)
+	if probe_error then state.reload_error=probe_error;state.notice=probe_error;return false end
+	if obligation and (not state.managed_route or state.managed_route.nonce~=obligation.nonce) then
+		obligation.cleanup_only=true;state.managed_route=obligation
+	end
+	if state.managed_route then
+		local route=state.managed_route;route.cleanup_pending=obligation~=nil;route.owned_pane=nil;route.discovery_complete=nil;route.cleanup_blocked=nil
+		route.bound_pane=if obligation then obligation.pane else nil
+		if obligation and (route.authority_id~=state.binding.authority_id or route.config_revision~=snapshot.config_revision) then
+			route.cleanup_only=true;route.status="failed";route.error="Setup configuration or authority changed; only native cleanup is permitted"
+		end
+		if obligation and route.window==state.native_window and state.inventory then
+			local client=setup_client(state.inventory,route.window)
+			local incarnation_ok=client and client.conn==route.native_conn and client.since==route.native_since and (not route.origin_epoch or route.origin_epoch==Executor.epoch())
+			local matches=0;local found=nil;local scoped=false
+			for _,session in ipairs(state.inventory.sessions) do
+				if session.id==route.native_session then scoped=true end
+				for _,tab in ipairs(session.tabs or {}) do for _,block in ipairs(tab.blocks or {}) do
+					if block.command==route.command then
+						matches+=1
+						if session.id==route.native_session and block.cwd==route.cwd then found=block.id end
+					end
+				end end
+			end
+			if incarnation_ok and scoped and matches==0 and obligation.pane~=nil then route.discovery_complete=true
+			elseif incarnation_ok and scoped and matches==1 and found then
+				local bound,why=Authority.setup_probe_bind(state.host_key,route.nonce,found)
+				if bound then route.owned_pane=found;route.pane=found;route.bound_pane=found;route.discovery_complete=true else route.error=why end
+			elseif matches>0 then route.error="Native diagnostic command/cwd/scope is ambiguous; cleanup remains pending"
+			elseif incarnation_ok and scoped and obligation.pane==nil then route.error="No positive native pane evidence for this diagnostic; an uncertain start remains held" end
+			if not incarnation_ok then
+				route.discovery_complete=nil;route.owned_pane=nil;route.cleanup_blocked=true;route.status="failed";route.error="Native client/host incarnation changed or is unreadable; cleanup remains pending"
+			end
+		end
+	end
 	return true
 end
 -- Each freshly verified inventory forgets ended sessions; the authority keeps
@@ -298,6 +346,7 @@ local function setup_active(state)
 end
 local function setup_sections(state)
 	local rows={
+		action_row("setup-managed","Managed local setup",action(state,"managed-open"),"Standalone native wizard: create helpers and mailboxes, probe the actual account, then attest. No existing OMP record required."),
 		static_row("setup-host","Execution host",state.host_key or "Unknown","Settings belong to this host; labels do not isolate accounts."),
 		action_row("setup-flow","Guided setup",action(state,"launch-setup"),"A verified OMP setup agent reviews providers, accounts and approved launch settings. The SPAWN window starts it."),
 		action_row("setup-add-local","Add local record manually",action(state,"add-local"),"Adds a disabled-by-review record; approve its command in Config."),
@@ -323,6 +372,67 @@ local function setup_sections(state)
 		table.insert(rows,action_row("manual-confirm","Confirm import", "manual-confirm@"..tostring(state.import_review.revision),"Uses the same validator and import operation as Guided setup."))
 	end
 	return {{id="setup-guide",page="setup",title="Agent setup",rows=rows}}
+end
+local MANAGED_FIELDS={id=true,provider=true,account_label=true,backend=true,executable=true,arguments=true,task_argument_index=true,cwd=true,root=true,user=true}
+local function managed_draft(state)
+	if not state.managed_draft then state.managed_draft=ManagedSetup.defaults();state.managed_draft_revision=state.snapshot.config_revision end
+	return state.managed_draft
+end
+local function managed_change(state,field,value)
+	if not MANAGED_FIELDS[field] or type(value)~="string" or #value>32000 or value:find("%z") then return end
+	managed_draft(state)
+	if state.managed_draft_revision~=state.snapshot.config_revision then state.notice="stale-config: reselect the current record (or Create a new managed record) before editing this draft";return end
+	managed_draft(state)[field]=value;state.managed_probe=nil;state.managed_record=nil;state.managed_route=nil;state.managed_cli_attestation=nil;state.editing=nil
+end
+local function managed_sections(state)
+	local draft=managed_draft(state)
+	local setup=state.snapshot.setup or {state="not_started",readiness={state="not_run",config_revision=0,summary=""}}
+	local rows={
+		static_row("managed-state","Required setup",setup.state,"One authoritative roster. Resource probes are offline; a native OMP route diagnostic requires separate explicit inference consent."),
+		static_row("managed-host","Execution host/account",state.host_key.." · "..state.snapshot.host_os,"Same-user needs neither SSH nor sudo. Cross-user is explicit sudo -n only. Role text is guidance, not identity isolation."),
+		action_row("managed-begin","Begin / resume required setup",action(state,"managed-begin"),"Confirm setup on this host. Saved records and old helper bundles remain unchanged."),
+	}
+	if state.notice then table.insert(rows,static_row("managed-notice","Setup status","Review",state.notice)) end
+	local options={{value="",label="Create a new managed record"}}
+	for _,record in ipairs(state.config.agents) do table.insert(options,{value=record.id,label=record.provider.." — "..record.account_label}) end
+	table.insert(rows,choice_row("managed-existing","Review existing record",state.managed_existing or "",options,"Select to probe and explicitly adopt or upgrade a saved record without replacing other records."))
+	for _,field in ipairs({"id","provider","account_label","executable","arguments","task_argument_index","cwd","root","user"}) do
+		local labels={id="Stable record ID",provider="Provider label",account_label="Account label",executable="Worker CLI executable",arguments="Fresh launch arguments",task_argument_index="Task argument position",cwd="Repository folder",root="Owner-approved mailbox root",user="Cross-user account (optional)"}
+		local hints={arguments="Literal argv. Configure explicit fresh-session flags. No shell command string.",task_argument_index="Terminal only: one-based insertion position; empty appends the task after fresh arguments. Native OMP uses its native prompt channel.",root="Default is stable plugin data. Cross-user requires an owner-chosen accessible root. No permissions or Git trust are changed.",user="Empty uses the actual current account. Windows cross-user is unsupported.",executable="Windows requires a real native .exe using Windows CRT argv; native OMP is POSIX only."}
+		table.insert(rows,text_row("managed:"..field,labels[field],draft[field],hints[field]))
+	end
+	table.insert(rows,choice_row("managed:backend","Launch route",draft.backend,{{value="native-agent",label="Native OMP (POSIX)"},{value="local-terminal",label="Local terminal"}},"Separate context is not a separate OS identity. No managed SSH route."))
+	table.insert(rows,action_row("managed-probe","Create resources and probe",action(state,"managed-probe"),"Consent to copy exact packaged helpers into a new digest-specific data bundle, create the chosen root and a real probe mailbox. No provider task is launched."))
+	if state.managed_busy then table.insert(rows,static_row("managed-busy","Probe","Running","Wait for actual host/account/dependency/argv/helper observations.")) end
+	if state.managed_probe then
+		for index,observation in ipairs(state.managed_probe.observations) do table.insert(rows,static_row("managed-observation-"..index,observation.id,observation.state,observation.summary)) end
+		local candidate=state.managed_record
+		if candidate then
+			table.insert(rows,static_row("managed-identity","Actual worker identity",candidate.mailbox.worker_identity,"One OS account does not isolate provider identities."))
+			table.insert(rows,static_row("managed-helper","Reviewed target helper",candidate.mailbox.helper_path,"Exact packaged bytes in a stable, digest-specific bundle."))
+			table.insert(rows,static_row("managed-producer","Reviewed producer helper",candidate.mailbox.producer_helper_path,"Attest that this worker can invoke the durable journal/read/write/hash route."))
+			table.insert(rows,static_row("managed-capabilities","Managed capabilities",table.concat(candidate.mailbox.capabilities,", "),"Enabled record; "..candidate.mailbox.wake..". Provider authentication and task readiness are not inferred."))
+			table.insert(rows,static_row("managed-fresh","Fresh launch argv",candidate.fresh_executable.." "..Config.render_arguments(candidate.fresh_arguments),"Review provider fresh-session and permission flags explicitly; labels and role text grant no isolation."))
+			table.insert(rows,static_row("managed-cli-proof","Configured CLI semantics","Separate operator evidence","Native-route observation proves its observed boundary only. Independently verify these exact selected flags create a fresh task with the intended permissions; diagnostics do not replace semantic attestation."))
+		end
+		if state.managed_probe.passed then
+			table.insert(rows,static_row("managed-route-status","Required native route",if state.managed_route then (if state.managed_route.status=="observed" then "running" else state.managed_route.status) else "not_run",if state.managed_route then state.managed_route.error or state.managed_route.summary or "Native command, startup body and owned-pane cleanup must be observed." else "Run the separate consented diagnostic before attesting."))
+			if not state.managed_route then
+				table.insert(rows,action_row("managed-route-probe",if candidate and candidate.backend=="native-agent" then "Consent: run bounded native OMP diagnostic (may incur model usage)" else "Run offline native terminal diagnostic",action(state,"managed-route-probe"),"Native OMP preserves all selected model/profile/auth/tools/rules/extension flags. Only --session-dir is overridden with a unique private diagnostic directory under the approved mailbox root. Normal same-user permissions remain active: this is not a sandbox or a free/offline model probe. Sends one harmless startup body; native deadline/stop reaps only its owned agent. Terminal uses a packaged offline echo helper."))
+			end
+			table.insert(rows,action_row("managed-cli-attest","I independently verified these exact CLI flags and fresh task input",action(state,"managed-cli-attest"),"Explicit operator evidence, not a machine-observed CLI launch. Do not attest untested or invalid flags."))
+			table.insert(rows,action_row("managed-attest","I reviewed these observations and attest this worker route",action(state,"managed-attest"),"Requires separate exact-CLI attestation above. Confirms helper access, journal/read/write/hash and wake route; not provider-backed readiness."))
+			if state.managed_existing or state.snapshot.adoption_required then table.insert(rows,action_row("managed-adopt","Attest and adopt existing setup",action(state,"managed-adopt"),"Explicitly adopt this probed saved record; keep all other IDs and old bundles.")) end
+		end
+	end
+	if state.managed_route and state.managed_route.cleanup_only and not state.managed_probe then
+		table.insert(rows,static_row("managed-route-status","Interrupted diagnostic",state.managed_route.status,state.managed_route.error or "The owning native window must positively identify and close its diagnostic. No launch is replayed. Another probe remains blocked until native cleanup is observed."))
+	end
+	table.insert(rows,action_row("managed-dismiss","Dismiss required setup",action(state,"managed-dismiss"),"Preserves records/resources. Does not pretend setup or readiness passed."))
+	local readiness=setup.readiness
+	table.insert(rows,static_row("managed-readiness","Optional provider-backed readiness",readiness.state..(if readiness.config_revision~=state.snapshot.config_revision then " (stale)" else ""),readiness.summary.." Required setup completion is independent."))
+	table.insert(rows,action_row("managed-exercise","Open optional readiness exercise in ORCH+",action(state,"managed-exercise"),"Separate consent in ORCH+ before any real task/report/check/landing. ORCH+ must be installed; refusal never reopens setup."))
+	return {{id="managed-setup",page="managed",title="Managed local setup",rows=rows}}
 end
 local function record_sections(state)
 	local included=0;for _,record in ipairs(state.config.agents) do if record.include_all then included+=1 end end
@@ -365,7 +475,7 @@ local function record_sections(state)
 end
 -- Spawn agents: the rows only publish a launch intent; the SPAWN window runs
 -- the exact Spawn all / Spawn specific path with this Config as its origin.
-local PAGES={{id="setup",label="Setup",icon="sparkle"},{id="agents",label="Configured agents",icon="sparkle"},{id="spawn",label="Spawn agents",icon="sparkle"},{id="runtime",label="Running agents",icon="sparkle"}}
+local PAGES={{id="managed",label="Managed setup",icon="sparkle"},{id="setup",label="Setup",icon="sparkle"},{id="agents",label="Configured agents",icon="sparkle"},{id="spawn",label="Spawn agents",icon="sparkle"},{id="runtime",label="Running agents",icon="sparkle"}}
 local PAGE_IDS={};for _,page in ipairs(PAGES) do PAGE_IDS[page.id]=true end
 local INTENT_KEY,INTENT_ROLE="spawn-launch-intent","spawn.launch.intent"
 local MAX_INTENTS=16
@@ -377,10 +487,11 @@ local function publish_intent(state,cx,kind,revision,record_id)
 	state.intents=state.intents or {}
 	if #state.intents>=MAX_INTENTS then state.intent_refused=true;state.notice=QUEUE_FULL;return end
 	intent_sequence+=1
-	table.insert(state.intents,{intent_id=tostring(cx.pane)..":"..string.format("%.0f",tern.now())..":"..tostring(intent_sequence),kind=kind,record_id=record_id,config_revision=revision})
+	table.insert(state.intents,{intent_id=tostring(cx.pane)..":"..string.format("%.0f",tern.now())..":"..tostring(intent_sequence),kind=kind,record_id=record_id,config_revision=revision,native_window=if kind=="readiness" or kind=="route_probe" then state.native_window else nil})
 	state.intent_refused=nil
 	state.notice=if kind=="setup" then "Guided setup requested; the SPAWN window starts it."
 		elseif kind=="result" then "Setup result review requested in the SPAWN window."
+		elseif kind=="readiness" then "Optional readiness navigation requested in this Config's owner native window."
 		else "Spawn requested; the SPAWN window launches it."
 end
 local LAUNCH_LINE_MAX=160
@@ -471,6 +582,12 @@ local function runtime_sections(state)
 	end
 	return {{id="running",page="runtime",title="SPAWN launches",rows=live},{id="history",page="runtime",title="Failed/exited history",rows=history},{id="other",page="runtime",title="Other Tern sessions",rows=other},{id="transport",page="runtime",title="Transport review",rows=transport}}
 end
+local function request_page_context(state,entry)
+	state.page_only=true;state.page_entry=entry;state.page="managed";state.native_window=entry.native_window
+	state.page_context_active=nil
+	state.page_context_request={entry=entry,nonce=string.format("page-%d-%08x-%08x",os.time(),math.random(1,2147483647),math.random(1,2147483647))}
+	state.notice="Waiting for SPAWN's own native context. Navigation has not created resources or completed setup."
+end
 local function view(state)
 	local snapshot=if state.snapshot then Authority.clone(state.snapshot) else {version=2,host_key=state.host_key or "unknown",authority_id="unavailable",session_key="unknown",config_revision=0,records={},attempt_revision=0,attempts={},jobs={},replies={},request_sequences={},host_os=tern.runtime.os,host_shell=tern.getenv("SHELL") or tern.getenv("ComSpec") or "unknown",ready=false}
 	local replies=0;for _ in pairs(snapshot.replies) do replies+=1 end
@@ -487,10 +604,14 @@ local function view(state)
 	local sections={}
 	if state.snapshot then
 		if state.snapshot.migration then sections=review_sections(state)
+		elseif state.page=="managed" then sections=managed_sections(state)
 		elseif state.page=="setup" then sections=setup_sections(state)
 		elseif state.page=="spawn" then sections=spawn_sections(state)
 		elseif state.page=="runtime" then sections=runtime_sections(state)
 		else sections=record_sections(state) end
+	end
+	if not state.binding and state.page_only then
+		table.insert(sections,{id="managed-page-entry",page=state.page,title="Managed local setup",rows={static_row("managed-page-context","SPAWN owner context",if state.page_context_request then "Waiting" else "Unavailable",state.notice or "Refresh to request SPAWN's own Config context; no foreign plugin imports its legacy settings.")}})
 	end
 	table.insert(sections,{id="refresh",page=state.page,title="Authority",rows={action_row("refresh","Refresh saved settings and host membership","refresh","Refresh before editing an old panel. Stale forms never overwrite newer settings.")}})
 	local payload="SPAWN_STATE_V2 "..tern.json.encode(snapshot)
@@ -503,6 +624,14 @@ local function view(state)
 	if state.intents and #state.intents>0 then
 		local intent=ui.text(tern.json.encode({schema=1,intents=state.intents}));intent.p=intent.p or {};intent.p.key=INTENT_KEY;intent.p.role=INTENT_ROLE
 		table.insert(children,intent)
+	end
+	if state.managed_route then
+		local route=ui.text(tern.json.encode(state.managed_route));route.p=route.p or {};route.p.key="spawn-managed-route";route.p.role="spawn.managed.route"
+		table.insert(children,route)
+	end
+	if state.page_context_request then
+		local pending=ui.text(tern.json.encode(state.page_context_request));pending.p=pending.p or {};pending.p.key="spawn-page-context";pending.p.role="spawn.page.context"
+		table.insert(children,pending)
 	end
 	return {main=ui.col(children)}
 end
@@ -558,9 +687,11 @@ local function cursor_index(value,cursor)
 	for index,unit in ipairs(units) do if unit>=target then return index,unit end end
 	return #bytes,units[#units]
 end
-local function open(state,cx)
+local function open(state,cx,context_request)
+	if state.page_only and not state.binding and context_request==nil then state.notice="Waiting for SPAWN's own native context; refresh this page to retry";return end
 	verify(state,cx,function(session,err)
 		if not session then state.notice=err;return end
+		if context_request~=nil and state.page_context_active~=context_request then state.notice="The page entry changed during owner bootstrap; no old context was applied";return end
 		if state.binding then
 			local snapshot,why=Authority.snapshot(state.binding)
 			if not snapshot and type(why)=="string" and why:find("stale-authority",1,true) then
@@ -576,30 +707,63 @@ local function open(state,cx)
 			Executor.attach(binding)
 		end
 		state.transport_error=nil;state.queue_error=nil;reload(state)
+		if context_request~=nil then state.page_context_active=nil end
 	end)
 end
 local definition={
 	font="sans",
 	init=function(cx,args,saved)
 		local discovery=nil;if #args>0 then discovery=decode(args[1]) end
-		local state={config={schema=2,agents={}},host_key=host_key(discovery),page="agents",provider_filter="",label_filter="",import_text="",notice=nil,editing=nil,focus=nil}
+		local page_only=type(discovery)=="table" and discovery.kind=="page"
+		local state={config={schema=2,agents={}},host_key=if page_only then nil else host_key(discovery),page="agents",provider_filter="",label_filter="",import_text="",notice=nil,editing=nil,focus=nil}
 		if type(saved)=="table" then
 			if PAGE_IDS[saved.page] then state.page=saved.page end
 			if type(saved.origin_session)=="number" then state.origin_session=saved.origin_session end
 			if type(saved.origin_scope)=="string" then state.origin_scope=saved.origin_scope end
 			if not state.host_key and type(saved.host_key)=="string" then state.host_key=saved.host_key end
 		end
-		if type(discovery)=="table" then
+		if page_only then
+			state.page_only=true;state.page="managed"
+			local entry,why=PageNavigation.page(discovery,"managed")
+			if entry then request_page_context(state,entry) else state.notice=why end
+		elseif type(discovery)=="table" then
 			state.native_window=discovery.native_window
 			state.client_config=discovery.client_config
 			if PAGE_IDS[discovery.page] then state.page=discovery.page end
 		end
 		live_blocks[cx.pane]={state=state,cx=cx}
-		open(state,cx);return state
+		if not page_only then open(state,cx) end
+		return state
 	end,
 	view=function(state,_cx)return view(state) end,
 	event=function(state,event,cx)
 		local incoming=event
+		if event.ev=="action" and event.id=="main" and event.act=="page-entry" then
+			local entry,why=PageNavigation.page(event.value,"managed")
+			if not entry then state.notice=why;return end
+			if state.native_window~=nil and state.native_window~=entry.native_window then state.notice="This SPAWN pane belongs to another native window; no page was rebound";return end
+			if state.binding then state.page="managed";state.editing=nil;state.focus=nil;open(state,cx)
+			else request_page_context(state,entry) end
+			return
+		end
+		if event.ev=="action" and event.id=="main" and event.act=="spawn.page-context" then
+			local pending=state.page_context_request
+			local response=decode(event.value,MAX_TEXT+256)
+			if not pending or type(response)~="table" or response.nonce~=pending.nonce then state.notice="Stale SPAWN owner context was refused";return end
+			for key in pairs(response) do if key~="nonce" and key~="context" and key~="error" then state.notice="Unexpected SPAWN owner context field";return end end
+			if response.error~=nil then
+				if response.context~=nil or type(response.error)~="string" or #response.error>1024 then state.notice="Invalid SPAWN owner context failure";return end
+				state.page_context_request=nil;state.notice=response.error;return
+			end
+			local context,why=PageNavigation.context(response.context,pending.entry.native_window)
+			if not context then state.notice=why;return end
+			local key=host_key(context)
+			if not key or (state.host_key and state.host_key~=key) then state.notice="SPAWN owner context changed execution host; no settings were opened";return end
+			state.page_context_request=nil;state.page_context_active=pending
+			state.host_key=key;state.client_config=context.client_config;state.native_window=context.native_window
+			open(state,cx,pending)
+			return
+		end
 		if event.ev=="action" and event.id=="main" and event.act=="spawn.launch-intent-ack" then
 			for index,pending in ipairs(state.intents or {}) do
 				if pending.intent_id==event.value then table.remove(state.intents,index);state.intent_refused=nil;break end
@@ -624,6 +788,13 @@ local definition={
 		if event.ev=="change" then
 			if incoming.item=="agents-filter-provider" then state.provider_filter=text(incoming.value);state.editing=nil
 			elseif incoming.item=="manual-json" then state.import_text=text(incoming.value);state.import_review=nil
+			elseif incoming.item=="managed-existing" then
+				local record=record_by_id(state,incoming.value)
+				state.managed_existing=if record then record.id else nil
+				state.managed_draft=if record then ManagedSetup.from_record(record) else ManagedSetup.defaults()
+				state.managed_draft_revision=state.snapshot.config_revision
+				state.managed_probe=nil;state.managed_record=nil;state.managed_route=nil;state.managed_cli_attestation=nil;state.editing=nil
+			elseif type(incoming.item)=="string" and incoming.item:match("^managed:") then managed_change(state,incoming.item:sub(9),incoming.value)
 			else
 				local rid,rev=nil,nil
 				if type(incoming.item)=="string" then rid,rev=incoming.item:match("^review:(.+):(%d+)$") end
@@ -635,6 +806,11 @@ local definition={
 			if item=="agents-filter-provider" then state.focus=item;state.editing={row=item,option=state.provider_filter};return
 			elseif item=="agents-filter-label" then draft=state.label_filter
 			elseif item=="manual-json" then draft=state.import_text
+			elseif item=="managed-existing" then state.focus=item;state.editing={row=item,option=state.managed_existing or ""};return
+			elseif type(item)=="string" and item:match("^managed:") then
+				local field=item:sub(9)
+				if field=="backend" then state.focus=item;state.editing={row=item,option=managed_draft(state).backend};return end
+				if MANAGED_FIELDS[field] then draft=managed_draft(state)[field] end
 			else
 				local id,field,rev=parse_record_row(item);revision=rev
 				if id then
@@ -647,8 +823,83 @@ local definition={
 			end
 			if draft then state.focus=item;state.editing={row=item,draft=draft,cursor=utf16_length(draft),revision=revision} end
 		elseif event.ev=="action" then
-			if event.act=="page" and PAGE_IDS[event.value] then state.page=event.value;state.focus=nil;state.editing=nil;state.armed=nil;open(state,cx);return end
-			if event.act=="refresh" then open(state,cx);return end
+			if event.act=="page" and PAGE_IDS[event.value] then
+				if state.page_only and not state.binding then if state.page_entry then request_page_context(state,state.page_entry) end;return end
+				state.page=event.value;state.focus=nil;state.editing=nil;state.armed=nil;open(state,cx);return
+			end
+			if event.act=="refresh" then
+				if state.page_only and not state.binding then if state.page_entry then request_page_context(state,state.page_entry) else state.notice="Invalid page entry; reopen Managed local setup from SPAWN" end;return end
+				open(state,cx);return
+			end
+			if event.act=="managed-route-preflight" or event.act=="managed-route-started" or event.act=="managed-route-observed" or event.act=="managed-route-finished" then
+				local input=if type(event.value)=="string" and #event.value<=4096 then decode(event.value) else nil
+				local route=state.managed_route
+				if not route or type(input)~="table" or input.nonce~=route.nonce or input.window~=state.native_window or input.window~=route.window or type(input.pane)~="number" or input.pane<0 or input.pane%1~=0 then return end
+				verify(state,cx,function(session,why)
+					if not session or state.managed_route~=route or not reload(state) then state.notice=why or "Native probe origin changed";return end
+					if route.cleanup_pending==false then return end
+					if session~=route.native_session then route.status="failed";route.error="Diagnostic native session changed; cleanup remains pending";return end
+					if event.act=="managed-route-preflight" then
+						route.launch_ready=nil
+						local client=setup_client(state.inventory,route.window)
+						if route.cleanup_blocked or route.cleanup_only or route.status~="running" or route.bound_pane~=nil or not client or client.conn~=route.native_conn or client.since~=route.native_since then
+							route.status="failed";route.error="Native diagnostic launch preflight refused; no launch is authorized and cleanup remains held";return
+						end
+						route.observation_deadline=tern.now()+45000
+						route.launch_ready={nonce=route.nonce,config_revision=route.config_revision,native_conn=client.conn,native_since=client.since}
+						route.error=nil
+						return
+					end
+					if route.pane and input.pane~=0 and route.pane~=input.pane then route.status="failed";route.error="Diagnostic pane identity changed";return end
+					local members=pane_sessions(state.inventory,input.pane);local count=0
+					if members then for _ in pairs(members) do count+=1 end end
+					if event.act=="managed-route-finished" then
+						local retained=false
+						for _,native_session in ipairs(state.inventory.sessions) do for _,tab in ipairs(native_session.tabs or {}) do for _,block in ipairs(tab.blocks or {}) do
+							if block.command==route.command then retained=true end
+						end end end
+						if input.cleaned~=true or route.bound_pane==nil or input.pane~=route.bound_pane or not route.discovery_complete or not members or count~=0 or retained then route.status="failed";route.error="Owned diagnostic cleanup lacks positive bound-pane settlement; the obligation remains held";return end
+						local cleared,clear_error=Authority.setup_probe_clear(state.host_key,route.nonce)
+						if not cleared then route.status="failed";route.error=clear_error;return end
+						route.cleanup_pending=false
+						if route.observed and input.error==nil and not route.cleanup_only and state.snapshot.config_revision==route.config_revision and state.managed_probe and state.managed_probe.record_sha256==route.record_sha256 then
+							route.status="passed"
+							table.insert(state.managed_probe.observations,{id="native-route",state="passed",summary=route.summary})
+							state.notice="Native route and owned diagnostic cleanup observed. Separately attest CLI semantics, then the helper route."
+						else route.status="failed";route.error=route.error or tostring(input.error or "Native route observation did not pass"):gsub("%c"," "):sub(1,1024) end
+						return
+					end
+					if route.status~="running" or route.observing or not members or count~=1 or members[tostring(session)]~=session then return end
+					if input.pane==0 or route.cleanup_only or state.snapshot.config_revision~=route.config_revision or not state.managed_probe or state.managed_probe.record_sha256~=route.record_sha256 then route.status="failed";route.error="Configuration or probe changed; native cleanup is still required";return end
+					if route.owned_pane~=input.pane then route.status="failed";route.error="Exact native command/cwd ownership was not observed";return end
+					local bound,bind_error=Authority.setup_probe_bind(state.host_key,route.nonce,input.pane)
+					if not bound then route.status="failed";route.error=bind_error;return end
+					if input.pane>0 then route.pane=input.pane end
+					-- A terminal diagnostic may exit before another window round trip.
+					-- Its exact native identity is already bound; read its nonce-bound
+					-- output now. OMP still needs the window's startup-body observation.
+					if event.act=="managed-route-started" and route.backend=="native-agent" then return end
+					route.observing=true
+					local deadline=route.observation_deadline or (tern.now()+45000)
+					local function observe()
+						if state.closed or state.managed_route~=route or not reload(state) or route.cleanup_pending==false or route.cleanup_only or route.cleanup_blocked or route.status~="running" then return end
+						ManagedSetup.observe_route(route,session,input.pane,function(summary,err,pending)
+							if state.closed or state.managed_route~=route then return end
+							if not reload(state) or state.snapshot.config_revision~=route.config_revision then summary=nil;err="Configuration changed during native process readback";pending=false end
+							if state.managed_route~=route or route.cleanup_pending==false or route.cleanup_only or route.cleanup_blocked or route.status~="running" or not route.observing then return end
+							if pending and tern.now()<deadline then
+								route.summary="Native terminal observation is not complete; waiting within the diagnostic deadline"
+								cx:render();tern.timer(250,observe);return
+							end
+							route.observing=nil;route.observed=summary~=nil;route.summary=summary
+							route.status=if summary then "observed" else "failed"
+							route.error=if pending then "Native terminal output did not complete before the diagnostic deadline" elseif err then tostring(err):gsub("%c"," "):sub(1,1024) else nil
+							cx:render()
+						end)
+					end
+					observe()
+				end);return
+			end
 			local recovery_id,recovery_revision,recovery_mode=event.act:match("^bridge%-recover:([A-Za-z0-9_-]+):(%d+):(%a+)$")
 			if recovery_id then
 				verify(state,cx,function(session,why)
@@ -673,6 +924,70 @@ local definition={
 			local op,rev=event.act:match("^(.*)@(%d+)$");local expected=tonumber(rev)
 			if not op or not state.snapshot then return end
 			if expected~=state.snapshot.config_revision then reload(state);state.notice="stale-config: review the refreshed settings and repeat your action";return end
+			if op=="managed-open" then state.page="managed";return end
+			if op=="managed-exercise" then publish_intent(state,cx,"readiness",expected);return end
+			if op=="managed-cli-attest" then
+				if state.managed_probe_revision~=expected or not state.managed_probe or not state.managed_probe.passed or not state.managed_route or state.managed_route.status~="passed" then state.notice="Observe the actual native route for this draft before attesting its exact CLI contract";return end
+				state.managed_cli_attestation=state.managed_probe.record_sha256
+				state.notice="Exact CLI/fresh-task contract recorded as operator attestation, not machine proof. Now review and attest the helper route to save."
+				return
+			end
+			if op=="managed-begin" or op=="managed-dismiss" or op=="managed-attest" or op=="managed-adopt" or op=="managed-probe" or op=="managed-route-probe" then
+				if state.managed_busy then state.notice="A prerequisite probe is already running";return end
+				local binding=state.binding
+				verify(state,cx,function(session,why)
+					if not session or state.binding~=binding or not reload(state) then state.notice=why or "Setup origin changed";return end
+					if expected~=state.snapshot.config_revision then state.notice="stale-config: review refreshed setup before repeating";return end
+					if op=="managed-route-probe" then
+						if state.managed_route then state.notice="This consented diagnostic already ran or is running. Create a fresh resource probe before another native launch.";return end
+						if not state.managed_probe or not state.managed_probe.passed or state.managed_probe_revision~=expected then state.notice="Complete this revision's resource prerequisites first";return end
+						local route,err=ManagedSetup.route(state.managed_record,state.managed_probe,state.snapshot,expected,state.native_window)
+						if not route then state.notice=err;return end
+						route.status="running";route.native_session=session;route.source_pane=cx.pane
+						route.authority_id=state.binding.authority_id;route.origin_epoch=Executor.epoch()
+						local client=setup_client(state.inventory,state.native_window)
+						if not client then state.notice="Native window incarnation is missing or ambiguous; no diagnostic was launched";return end
+						route.native_conn=client.conn;route.native_since=client.since
+						local claimed,claim_error=Authority.setup_probe_claim(state.host_key,expected,route)
+						if not claimed then state.notice=claim_error;return end
+						route.cleanup_pending=true;state.managed_route=route
+						publish_intent(state,cx,"route_probe",expected)
+						return
+					end
+					if op=="managed-probe" then
+						local pending,pending_error=Authority.setup_probe_read(state.host_key)
+						if pending or pending_error then state.notice=pending_error or "The previous native diagnostic still requires observed cleanup; no new resources or worker were created";return end
+						if state.snapshot.setup.state=="not_started" or state.snapshot.setup.state=="dismissed" then state.notice="Begin required setup before creating resources";return end
+						managed_draft(state)
+						if state.managed_draft_revision~=expected then state.notice="stale-config: reselect the current record before probing; old drafts cannot overwrite manual changes";return end
+						if not state.managed_existing and record_by_id(state,managed_draft(state).id) then state.notice="That ID already exists. Select Review existing record; creation never overwrites a saved record.";return end
+						local draft=Authority.clone(managed_draft(state));state.managed_busy=true;state.managed_probe=nil;state.managed_cli_attestation=nil;state.managed_route=nil
+						ManagedSetup.prepare(draft,{host_os=state.snapshot.host_os,host_shell=state.snapshot.host_shell},function(record,probe,err)
+							state.managed_busy=nil
+							if state.closed then return end
+							if not reload(state) or state.snapshot.config_revision~=expected or not Dispatch.protocol.equal(draft,managed_draft(state)) then state.notice="Setup changed during probe; resources preserved. Probe the current draft again.";cx:render();return end
+							state.managed_record=record;state.managed_probe=probe;state.managed_probe_revision=expected
+							state.notice=err or (if probe and probe.passed then "Review every observation, then explicitly attest. No worker was launched." else "Prerequisites failed; inspect observations. No record was verified.")
+							cx:render()
+						end)
+						return
+					end
+					local operation=if op=="managed-begin" then "begin" elseif op=="managed-dismiss" then "dismiss" elseif op=="managed-adopt" then "adopt" else "commit"
+					local data={}
+					if operation=="commit" or operation=="adopt" then
+						if state.managed_probe_revision~=expected or not state.managed_probe or not state.managed_probe.passed then state.notice="Run and review current-revision prerequisites first";return end
+						if not state.managed_route or state.managed_route.status~="passed" then state.notice="Observe and clean up the required actual native route diagnostic first";return end
+						if state.managed_cli_attestation~=state.managed_probe.record_sha256 then state.notice="Independently verify and explicitly attest the exact CLI flags and fresh task input first; the echo probe is not CLI execution evidence";return end
+						data={record=state.managed_record,probe=state.managed_probe,attested=true}
+					end
+					local ok,err=Authority.setup_edit(state.host_key,expected,operation,data)
+					reload(state);state.notice=if ok then "Saved required setup. Optional provider-backed readiness remains separate." else err
+					if ok then
+						state.managed_probe=nil;state.managed_record=nil
+						if state.managed_draft_revision==expected then state.managed_draft_revision=state.snapshot.config_revision end
+					end
+				end);return
+			end
 			if op=="review-confirm" then mutate(state,cx,expected,"review-confirm",{});return end
 			if op=="manual-review" then
 				local payload,err=decode(state.import_text)
@@ -744,6 +1059,7 @@ local definition={
 		if key.name=="enter" then
 			if editing.row=="agents-filter-label" then state.label_filter=editing.draft
 			elseif editing.row=="manual-json" then state.import_text=editing.draft;state.import_review=nil
+			elseif editing.row:match("^managed:") then managed_change(state,editing.row:sub(9),editing.draft)
 			else local id,field,rev=parse_record_row(editing.row);if id then update_record(state,cx,id,field,editing.draft,rev) end end
 			state.editing=nil;state.focus=nil;return true
 		end
@@ -847,7 +1163,8 @@ local Codec=require("./wire/codec")
 local function dispatch_verify(state,cx,r,callback)
 	bridge_membership(state,cx,function(session,why)
 		if not session then callback(nil,why);return end
-		local controller=tonumber(r.origin_binding.host_pane_id)
+		local origin=r.setup_origin or r.origin_binding
+		local controller=tonumber(origin.host_pane_id)
 		local memberships=if controller then pane_sessions(state.inventory,controller) else nil
 		local n=0;if memberships then for _ in pairs(memberships) do n+=1 end end
 		if not memberships or n~=1 or memberships[tostring(session)]~=session then callback(nil,"Controller source is not on this bridge's host/session");return end
@@ -856,6 +1173,11 @@ local function dispatch_verify(state,cx,r,callback)
 			if pane.pane==controller and pane.program=="orchplus.orchestrator" then found=true end
 		end
 		if not found then callback(nil,"Controller source is not the admitted ORCH+ controller block");return end
+		if r.setup_origin then
+			-- No Authority.binding/open: even binding an existing store can create a session scope.
+			state.origin_session=session
+			callback(true,nil,session);return
+		end
 		local binding,err=Authority.binding(session)
 		if not binding then callback(nil,err);return end
 		state.origin_session=session;state.binding=binding
@@ -875,6 +1197,7 @@ local function bridge_creator(value)
 end
 local function lease_owner(state)
 	local r=state.request
+	if r and r.setup_origin then return nil end
 	if r then
 		local b=r.origin_binding
 		return {controller_pane=r.controller_pane,alias_nonce=b.alias_nonce,window_key=b.window_key,window_epoch=b.window_epoch}
@@ -885,7 +1208,8 @@ end
 local function bridge_line(state,held,live)
 	local body=state.body
 	local what=if body then tostring(body.op or "request").." "..tostring(body.status or "answered") elseif state.error then "last request refused" else "idle"
-	local note=if live then "executing an authorized ORCH+ effect"
+	local note=if state.setup_read then "checking the live native setup view"
+		elseif live then "executing an authorized ORCH+ effect"
 		elseif held then "holding a requested window authorization"
 		elseif state.restored then "restored view; reconcile through ORCH+, grants nothing"
 		elseif body and type(body.error)=="table" and Protocol.id(body.error.code) then body.error.code
@@ -896,12 +1220,18 @@ end
 local function response_view(state,cx)
 	local body=state.body
 	local line=if body then Protocol.encode(body) else nil
-	if not line and body and body.origin_binding then
+	if not line and body and (body.origin_binding or body.setup_origin) then
 		line=Protocol.encode(Protocol.reject(body,"oversize","Encoded bridge response exceeds 8192 bytes; no truncated response is valid"))
 	end
 	local node=ui.text(line or state.error or "SPAWN dispatch is awaiting a bounded request.")
 	node.p=node.p or {};node.p.key=Protocol.NODE;node.p.role=Protocol.ROLE
 	local execution,held=Dispatch.bridge_lease(state.request,cx.pane)
+	local setup=state.setup_read
+	if setup and setup.deadline<tern.now() then
+		state.setup_read=nil;state.body=Protocol.reject(setup.request,"target_unavailable","Live native setup view was not observed; refresh setup")
+		return response_view(state,cx)
+	end
+	if setup then execution={schema=1,kind="setup_catalog",request=setup.request,observation_id=setup.observation_id} end
 	local children={ui.text(ui.span(bridge_line(state,held,execution~=nil),"muted")),node}
 	if execution then
 		local bytes="SPAWN_EXECUTION v1 "..tern.json.encode(execution)
@@ -950,14 +1280,25 @@ tern.block.define("dispatch",{
 				state.body=Dispatch.import_config(migration);cx:render()
 			end);return
 		end
+		if event.act=="spawn.setup_catalog" then
+			local value=Codec.strict_decode(event.value,65536)
+			if not Protocol.fields(value,{request_json=function(v)return Protocol.text(v,Protocol.LIMIT,false)end,observation_id=Protocol.id}) then return end
+			local r=Protocol.decode(value.request_json);local pending=state.setup_read
+			if not r or not r.setup_origin or not pending or pending.observation_id~=value.observation_id or pending.deadline<tern.now() or not Protocol.equal(pending.request,r) or not Protocol.equal(state.request,r) then return end
+			-- The window just observed the exact live source after host membership verification.
+			-- This read-only observation is ephemeral; it grants no controller or native effects.
+			state.setup_read=nil
+			state.body=Dispatch.request(r,nil,state.origin_session,function()end)
+			cx:render();return
+		end
 		if event.act=="spawn.authorize" then
 			local value=Codec.strict_decode(event.value,65536)
 			if not Protocol.fields(value,{request_json=true,nonce=Protocol.id,executor_id=Protocol.id,orch_claim=true}) or type(value.request_json)~="string" then return end
-			local r=Protocol.decode(value.request_json);if not r then return end
+			local r=Protocol.decode(value.request_json);if not r or r.setup_origin then return end
 			-- Membership was verified before issuing this challenge. The SPAWN
 			-- window inspected the exact live grant after that async boundary.
 			-- Do not add another asynchronous gap before consuming the nonce.
-			state.request=r;state.restored=nil
+			state.request=r;state.restored=nil;state.setup_read=nil
 			state.body=Dispatch.authorize(r,value.nonce,cx.pane,function(body)
 				if state.request and Protocol.equal(state.request,r) then state.body=body;cx:render() end
 			end,value.orch_claim,value.executor_id)
@@ -970,7 +1311,7 @@ tern.block.define("dispatch",{
 			if not r or (r.op~="launch" and r.op~="adopt" and r.op~="stop" and r.op~="native_wake") then return end
 			dispatch_verify(state,cx,r,function(binding,why)
 				if not binding then state.body=Protocol.reject(r,"binding_mismatch",why);return end
-				state.request=r;state.restored=nil
+				state.request=r;state.restored=nil;state.setup_read=nil
 				state.body=if r.op=="launch" or r.op=="adopt" then Dispatch.claim(r,value.executor_id,event.act:sub(7),value.result) elseif r.op=="stop" then Dispatch.stop_claim(r,value.executor_id,event.act:sub(7),value.result) else Dispatch.wake_claim(r,value.executor_id,event.act:sub(7),value.result,value.orch_claim)
 				cx:save();cx:render()
 			end);return
@@ -979,8 +1320,11 @@ tern.block.define("dispatch",{
 		if not r or event.act~=r.op then state.error=if why then why.message else "Operation differs from request";return end
 		dispatch_verify(state,cx,r,function(binding,err,session)
 			if not binding then state.body=Protocol.reject(r,"binding_mismatch",err);return end
-			state.request=r;state.restored=nil
-			if r.op=="catalog" or r.op=="status" or r.op=="owner_status" then
+			state.request=r;state.restored=nil;state.setup_read=nil
+			if r.setup_origin then
+				state.setup_read={request=r,deadline=tern.now()+30000,observation_id=string.format("setup-%d-%08x-%08x",os.time(),math.random(1,2147483647),math.random(1,2147483647))}
+				state.body=Protocol.body(r,"pending")
+			elseif r.op=="catalog" or r.op=="status" or r.op=="owner_status" then
 				state.body=Dispatch.request(r,binding,session,function()end)
 			else
 				state.body=Dispatch.stage(r,binding,session,cx.pane)
@@ -988,5 +1332,5 @@ tern.block.define("dispatch",{
 			cx:save();cx:render()
 		end)
 	end,
-	save=function(state)return {request_json=if state.request then tern.json.encode(state.request) else nil,origin_session=state.origin_session,creator=state.creator}end,
+	save=function(state)return {request_json=if state.request and not state.request.setup_origin then tern.json.encode(state.request) else nil,origin_session=state.origin_session,creator=state.creator}end,
 })

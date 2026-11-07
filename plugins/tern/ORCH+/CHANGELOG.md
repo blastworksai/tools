@@ -5,6 +5,8 @@
 - Share the strict report-files-v1 codec with SPAWN; keep landing, signer and scope policy in `workflow_rules.luau`.
 - Assemble reports incrementally in ORCH+ without replaying the accepted prefix on each chunk. Persist JSON-safe slices, validate restored prefixes and legacy in-flight assemblies, and retain the four-assembly/64-KiB logical limits.
 - Keep final whole-message validation, rejected-message preservation and durable cursor-before-ACK ordering.
+- Separate `require_code_review` from `require_other_family`: `cross_family_review`, mandatory-review `helper_checks`, or `review_disabled` without reviewer requests or fabricated review IDs. Every declared check must pass at the submitted revision in every mode; check repair is independent of review, and live grants retain immutable proof.
+- Add precontroller setup/adoption and revision-fenced Installation defaults that seed new sessions without changing existing overrides. Reuse SPAWN's canonical provisioned roster through native page navigation; verify repository/role choices and keep optional, separately consented real-provider readiness distinct from required setup. Role guidance and declared families do not establish account or permission isolation.
 
 ## 0.5.0
 

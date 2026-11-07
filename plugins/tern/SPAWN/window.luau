@@ -5,6 +5,8 @@ local Config = require("./config")
 local Launch = require("./launch_state")
 local Native = require("./native_cli")
 local DispatchWindow = require("./dispatch_window")
+local ManagedRoute = require("./managed_route_window")
+local PageNavigation = require("./page_navigation")
 local BLOCK = "spawn.spawner"
 local PREFIX = "SPAWN_STATE_V2 "
 local MAX_QUEUE = 64
@@ -15,7 +17,7 @@ local BATCH_INTERVAL_MS = 5000
 -- oldest first. This window runs each once, in click order (journal shared by every window of this
 -- client), and acks it.
 local INTENT_NODE, INTENT_ROLE, INTENT_JOURNAL = "spawn-launch-intent", "spawn.launch.intent", "spawn.intents.v1"
-local INTENT_KINDS = { all = true, record = true, setup = true, result = true }
+local INTENT_KINDS = { all = true, record = true, setup = true, result = true, readiness = true, route_probe = true }
 -- Last saved-record count seen per host, so the menu knows setup is done while no Config is open.
 local RECORDS_SEEN = "spawn.records-seen.v1"
 -- Upgrade boundary: manual release requests from older versions are dropped, never replayed.
@@ -464,6 +466,30 @@ local function block_args(cx: any, origin: any): { string }
 	if #encoded > 120000 then error("Legacy client configuration is too large; preserve it and review Config manually") end
 	return { encoded }
 end
+local navigation_hooks = { capture = capture, context_error = context_error, member = pane_member }
+local page_context_attempts: any = {}
+local function poll_page_context(cx: any, pane: number, origin: any)
+	if not PageNavigation.visible(cx,pane,BLOCK,origin,navigation_hooks,true) then return end
+	local bytes=DispatchWindow.read_node(cx,pane,BLOCK,"spawn-page-context","spawn.page.context",2048)
+	if bytes==nil then page_context_attempts[pane]=nil;return end
+	local decoded,value=pcall(tern.json.decode,bytes)
+	local request=if decoded then PageNavigation.request(value) else nil
+	if not request then
+		if page_context_attempts[pane]~=bytes then page_context_attempts[pane]=bytes;fail(cx,"SPAWN page context request is invalid; no settings were opened") end
+		return
+	end
+	if request.entry.native_window~=cx:window_key() then return end
+	if page_context_attempts[pane]==request.nonce then return end
+	page_context_attempts[pane]=request.nonce
+	local handed,why=PageNavigation.handoff(cx,pane,request,block_args,navigation_hooks)
+	if not handed then
+		fail(cx,tostring(why)..". Refresh the SPAWN page to retry; nothing was provisioned.")
+		if context_error(cx,origin,true)==nil and PageNavigation.visible(cx,pane,BLOCK,origin,navigation_hooks,true) then
+			local reported,report_error=pcall(function() cx.session:event(pane,{ev="action",id="main",act="spawn.page-context",value=tern.json.encode({nonce=request.nonce,error=tostring(why):sub(1,1024)})}) end)
+			if not reported then fail(cx,"Could not report the refused owner context: "..tostring(report_error)) end
+		end
+	end
+end
 local function find_authority(cx: any, origin: any): number?
 	local key = tostring(origin.host) .. "/" .. tostring(origin.session)
 	local remembered = authority_panes[key]
@@ -505,6 +531,7 @@ end
 local function valid_intent(intent: any): boolean
 	if type(intent) ~= "table" or not identity(intent.intent_id, 256) or not INTENT_KINDS[intent.kind] or not integer(intent.config_revision) then return false end
 	if intent.kind == "record" then return identity(intent.record_id, 96) end
+	if (intent.kind == "readiness" or intent.kind == "route_probe") and (type(intent.native_window) ~= "string" or #intent.native_window > 256 or intent.native_window:find("[%z\1-\31\127]")) then return false end
 	return intent.record_id == nil
 end
 local function intent_journal(): any
@@ -599,14 +626,20 @@ local function with_authority(cx: any, callback: any, readonly: boolean?, target
 		read_ready(fresh)
 	end)
 end
-local function open_config(cx: any)
+local function open_config(cx: any, page: string?)
 	local origin, err = capture(cx)
 	if origin == nil then fail(cx, err); return end
 	local ok, pane = pcall(function()
 		local existing = find_authority(cx, origin)
-		if existing ~= nil then cx.layout:focus(existing); return existing end
+		if existing ~= nil then
+			cx.layout:focus(existing)
+			if page then cx.session:event(existing,{ev="action",id="main",act="page",value=page}) end
+			return existing
+		end
 		close_parked(cx, origin)
-		return cx:new_block(BLOCK, block_args(cx, origin), "beside", { focus = true })
+		local args=block_args(cx,origin)
+		if page then local context=tern.json.decode(args[1]);context.page=page;args[1]=tern.json.encode(context) end
+		return cx:new_block(BLOCK, args, "beside", { focus = true })
 	end)
 	if not ok or pane == nil then fail(cx, "Could not open Config: " .. tostring(pane))
 	else
@@ -615,6 +648,7 @@ local function open_config(cx: any)
 		authority_panes[tostring(origin.host) .. "/" .. tostring(origin.session)] = pane
 	end
 end
+local function open_managed_setup(cx: any) open_config(cx,"managed") end
 
 local function transport(origin: any): any
 	local value = observer.transports[origin.authority_id]
@@ -1319,6 +1353,7 @@ end
 local function menu(cx: any)
 	for _, message in icon_errors do fail(cx, "Provider icon registration failed: " .. message) end
 	local items = {}
+	table.insert(items, { label = "Managed local setup", detail = "Native wizard: helpers, actual prerequisites and explicit attestation", action = "managed" })
 	local saved = saved_records(cx)
 	if saved == nil or saved == 0 then table.insert(items, { label = "Guided setup", detail = "Verified OMP setup on the captured execution host", action = "setup" }) end
 	table.insert(items, { label = "Config", detail = "Saved records and manual Paste JSON import", action = "config" })
@@ -1329,6 +1364,7 @@ local function menu(cx: any)
 		if err ~= nil then fail(fresh, err); return end
 		if item == nil then return end
 		if item.action == "setup" then start_setup(fresh)
+		elseif item.action == "managed" then open_managed_setup(fresh)
 		elseif item.action == "config" then open_config(fresh)
 		elseif item.action == "all" then spawn_all(fresh)
 		elseif item.action == "specific" then spawn_specific(fresh) end
@@ -1344,10 +1380,15 @@ local function launch_busy(): boolean
 	end
 	return false
 end
+local route_hooks = { capture = capture, member = pane_member, startup = startup_delivered }
 local function run_intent(cx: any, intent: any, pane: number)
 	if intent.kind == "all" then spawn_all(cx, pane)
 	elseif intent.kind == "record" then spawn_specific(cx, pane, intent.record_id)
 	elseif intent.kind == "setup" then start_setup(cx, pane)
+	elseif intent.kind == "route_probe" then ManagedRoute.start(cx,pane,intent.config_revision,route_hooks)
+	elseif intent.kind == "readiness" then
+		local opened,why=PageNavigation.readiness(cx,pane,navigation_hooks)
+		if not opened then fail(cx,tostring(why)..". Required SPAWN setup remains saved.") end
 	else
 		ensure_observer(cx, function(ready, problem)
 			if problem then fail(ready, problem)
@@ -1362,13 +1403,18 @@ end
 local function poll_intents(cx: any)
 	local origin = capture(cx)
 	if origin == nil then return end
+	local live={}
+	for _,pane in cx.session:panes() do live[pane.pane]=true end
+	for pane in pairs(page_context_attempts) do if not live[pane] then page_context_attempts[pane]=nil end end
 	for _, pane in cx.session:panes() do
 		-- Nobody can click a parked or hidden Config; its node is never acted on.
 		if pane.block ~= BLOCK or pane.parked or not pane_member(cx, origin, pane.pane) then continue end
+		poll_page_context(cx,pane.pane,origin)
 		local journal = intent_journal()
 		local value: any = nil
 		for _, intent in ipairs(intent_queue(cx, pane.pane)) do
 			if not valid_intent(intent) then continue end
+			if (intent.kind == "readiness" or intent.kind == "route_probe") and intent.native_window ~= cx:window_key() then continue end
 			if not contains(journal, intent.intent_id) then
 				-- The user clicked in this Config; it is theirs and stays open, even while this
 				-- click waits for a running batch.
@@ -1395,10 +1441,16 @@ local function poll_intents(cx: any)
 			end
 			pcall(function() cx.session:event(pane.pane, { ev = "action", id = "main", act = "spawn.launch-intent-ack", value = intent.intent_id }) end)
 		end
+		local pending=false
+		for _,intent in ipairs(intent_queue(cx,pane.pane)) do
+			if intent.kind=="route_probe" and not contains(journal,intent.intent_id) then pending=true end
+		end
+		ManagedRoute.reconcile(cx,pane.pane,pending,route_hooks)
 	end
 end
 for _, command in ipairs({
 	{ id = "spawn_config", title = "SPAWN: Config", run = open_config },
+	{ id = "spawn_managed_setup", title = "SPAWN: Managed local setup", run = open_managed_setup },
 	{ id = "spawn_setup", title = "SPAWN: Guided setup", run = function(cx) start_setup(cx) end },
 	{ id = "spawn_menu", title = "SPAWN", run = menu },
 	{ id = "spawn_running", title = "SPAWN: Running agents", run = open_running },
@@ -1413,6 +1465,8 @@ tern.css("reset-danger", [[
 -- The launch intent node is machine-only.
 local launch_rules = {
 	'[data-surface="plugin.spawn.spawner"] [data-role="spawn.launch.intent"] { display: none; }',
+	'[data-surface="plugin.spawn.spawner"] [data-role="spawn.managed.route"] { display: none; }',
+	'[data-surface="plugin.spawn.spawner"] [data-role="spawn.page.context"] { display: none; }',
 	'[data-surface="plugin.spawn.spawner"] .pf-row[data-row^="spawn-launch:"] .pf-lbl .h { font-family: var(--mono, ui-monospace, monospace); font-size: 0.85em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }',
 }
 for program, color in pairs(COLORS) do

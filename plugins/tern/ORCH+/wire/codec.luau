@@ -508,10 +508,14 @@ function M.decode_reply(bytes: any, expected: any): (any?, any?)
 	elseif raw.kind == "owner_decision" then valid = object(p, { choice_id = id, answer = long }, {}, shapes)
 	elseif raw.kind == "coordinator_activation" then valid = object(p, { owner_id = id, owner_generation = positive, activation_token = digest, instructions = long }, {}, shapes)
 	elseif raw.kind == "coordinator_retirement" then valid = object(p, { owner_id = id, owner_generation = positive, activation_token = digest, reason = short }, {}, shapes)
-	elseif raw.kind == "landing_grant" then valid = object(p, { landing_id = id, grant_id = id, project_id = id, checkpoint_id = id, repo_ref = short,
-		target_ref = short, target_revision = short, source_ref = short, source_revision = short, builder_work_id = id, review_id = id, reviewer_family = family,
-		proof = function(v: any): boolean return object(v, { mode = enum("cross_family_review", "helper_checks"), artifact_revision = short, review_id = id,
-			check_refs = function(r: any): boolean return array(r, short, shapes, 0, 16) end }, {}, shapes) end }, {}, shapes)
+	elseif raw.kind == "landing_grant" then
+		valid = object(p, { landing_id = id, grant_id = id, project_id = id, checkpoint_id = id, repo_ref = short,
+			target_ref = short, target_revision = short, source_ref = short, source_revision = short, builder_work_id = id,
+			proof = function(v: any): boolean return object(v, { mode = enum("cross_family_review", "helper_checks", "review_disabled"), artifact_revision = short,
+				check_refs = function(r: any): boolean return array(r, short, shapes, 0, 16) end }, { review_id = id }, shapes) end },
+			{ review_id = id, reviewer_family = family }, shapes)
+			and (if p.proof.mode == "review_disabled" then p.review_id == nil and p.reviewer_family == nil and p.proof.review_id == nil
+				else p.review_id ~= nil and p.reviewer_family ~= nil and p.proof.review_id == p.review_id)
 	elseif raw.kind == "landing_refresh" then valid = object(p, { landing_id = id, project_id = id, repo_ref = short, target_ref = short,
 		expected_revision = short, current_revision = short, reason = short }, {}, shapes)
 	elseif raw.kind == "review_request" then

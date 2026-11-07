@@ -142,7 +142,7 @@ check(Resolution.select_user(user_resolution, "posix"), "shared resolver selects
 same(user_resolution.executable, "sudo", "unwrapped local identity uses sudo")
 same(table.concat(user_resolution.arguments, "|"), "-u|worker-account|-H|--|worker", "shared sudo wrapper keeps exact identity and command")
 same(Executor.render(user_record, "/bin/bash", "linux"), "SPAWN_PROVIDER=custom sudo -u worker-account -H -- worker", "ordinary host uses the shared exact user wrapper")
-same(assert(Backend.build(user_record, host, options())).command, "'sudo' '-u' 'worker-account' '-H' '--' 'worker' " .. Backend.posix_quote(task), "managed backend uses the same exact user wrapper")
+same(assert(Backend.build(user_record, host, options())).command, "'sudo' '-n' '-u' 'worker-account' '-H' '--' 'worker' " .. Backend.posix_quote(task), "managed backend never asks interactively for cross-user credentials")
 for _, selector in ipairs({ { "-u", "worker-account" }, { "--user", "worker-account" }, { "-uworker-account" }, { "--user=worker-account" } }) do
 	local argv = table.clone(selector)
 	for _, value in ipairs({ "-H", "--", "worker", "-u", "provider-option" }) do table.insert(argv, value) end
@@ -155,6 +155,7 @@ for _, selector in ipairs({ { "-u", "worker-account" }, { "--user", "worker-acco
 	end
 	check(Executor.render(wrapped, "/bin/bash", "linux") ~= nil, "ordinary matching sudo stays launchable")
 	check(Backend.build(wrapped, host, options()) ~= nil, "managed matching sudo stays launchable")
+	check(assert(Backend.build(wrapped,host,options())).command:find("'/usr/bin/sudo' '-n'",1,true)~=nil,"managed configured sudo also requires noninteractive execution")
 	same(#wrapped.arguments, #argv, "ordinary rendering leaves configured sudo argv unchanged")
 	same(#wrapped.fresh_arguments, #argv, "managed insertion leaves configured sudo argv unchanged")
 end
@@ -286,4 +287,87 @@ check(assert(Config.validate_record(record())).argv_contract == nil, "normalizer
 local absent = assert(Config.validate_record(record()))
 check(absent.mailbox == nil and absent.fresh_executable == nil and absent.fresh_native_default == nil, "missing capability declarations stay absent")
 check(not Backend.eligibility(saved).runtime_verified, "configured facts are never runtime proof")
+-- Pure wizard preparation boundaries; no provisioning/provider process runs here.
+local Setup,Prereq=load("managed_setup"),load("prereq")
+local setupDraft=Setup.from_record(saved)
+same(setupDraft.id,saved.id,"adoption keeps the stable record ID")
+same(setupDraft.task_argument_index,tostring(saved.task_argument_index),"adoption keeps the actual task argv insertion slot")
+same(setupDraft.source_record.profile,saved.profile,"adoption retains selectors in its review draft")
+check(setupDraft.source_record~=saved,"adoption draft cannot mutate the authoritative record")
+local rejectedSetup=nil
+setupDraft.id="different"
+Setup.prepare(setupDraft,host,function(value,probe,why) rejectedSetup={value=value,probe=probe,why=why} end)
+check(rejectedSetup and rejectedSetup.value==nil and rejectedSetup.probe==nil and rejectedSetup.why:find("immutable",1,true),"adoption cannot rename an existing stable ID before resource creation")
+setupDraft.id=saved.id;setupDraft.task_argument_index="0";rejectedSetup=nil
+Setup.prepare(setupDraft,host,function(value,probe,why) rejectedSetup={value=value,probe=probe,why=why} end)
+check(rejectedSetup and rejectedSetup.value==nil and rejectedSetup.why:find("position",1,true),"invalid task insertion refuses before effects")
+same(table.concat(Prereq.as_user({"id","-un"},"selected"),"|"),"sudo|-n|-u|selected|--|id|-un","prerequisites execute only noninteractive chosen-account checks")
+local sameUser={"id","-un"}
+check(Prereq.as_user(sameUser,nil)==sameUser,"same-user prerequisites do not add SSH or sudo")
+local Adapter=load("mailbox_adapter")
+check(Adapter.absolute_path("/work/a..b/helpers",false),"a literal basename containing two dots is not traversal")
+check(Adapter.absolute_path("C:\\work\\a..b\\helpers",true),"Windows literal two-dot basename is accepted")
+for _,path in ipairs({"/work/../helpers","/work/..","/work/./helpers","/work/.","/work//helpers"}) do
+ check(not Adapter.absolute_path(path,false),"POSIX traversal/repeated separators reject: "..path)
+end
+for _,path in ipairs({"C:\\work\\..\\helpers","C:\\work\\..","C:\\work\\.\\helpers","C:\\work\\."}) do
+ check(not Adapter.absolute_path(path,true),"Windows traversal segments reject: "..path)
+end
+-- Planning is offline; the required native boundary is separately consented.
+local routeRecord=assert(Config.validate_record(saved))
+routeRecord.backend="native-agent";routeRecord.provider="OMP";routeRecord.cwd="/fixture/repository"
+routeRecord.fresh_executable="omp";routeRecord.fresh_arguments={"--model","selected/model","--profile","selected-profile"}
+routeRecord.mailbox.permitted_root="/fixture/mail";routeRecord.mailbox.worker_identity="selected"
+routeRecord.mailbox.helper_path="/fixture/bundle/mailbox_target.sh"
+local routeProbe={provision_handle="setup-fixture",record_sha256=string.rep("a",64)}
+local diagnostic=assert(Setup.route(routeRecord,routeProbe,host,7,""))
+same(diagnostic.window,"","normal empty native window key is retained, never invented")
+same(diagnostic.config_revision,7,"native diagnostic captures exact config revision")
+same(diagnostic.expected_arguments[2],"selected/model","diagnostic keeps explicitly selected model")
+same(diagnostic.expected_arguments[4],"selected-profile","diagnostic keeps explicitly selected profile")
+same(#diagnostic.expected_arguments,#routeRecord.fresh_arguments+2,"only owned diagnostic session storage is added; no tool/rule/model/time flags are injected")
+for index,word in ipairs(routeRecord.fresh_arguments) do same(diagnostic.expected_arguments[index],word,"every selected CLI argument is preserved verbatim") end
+same(diagnostic.expected_arguments[#diagnostic.expected_arguments],"/fixture/mail/setup-fixture-route-native","unique diagnostic session path identifies uncertain starts")
+same(routeRecord.fresh_arguments[#routeRecord.fresh_arguments],"selected-profile","diagnostic controls never rewrite saved argv")
+check(diagnostic.prompt:find("setup-fixture-route",1,true)~=nil and diagnostic.prompt:find("Ω",1,true)~=nil,"startup body has exact unique literal sentinel")
+local Native=load("native_cli")
+local oldObserve=Native.observe_process
+local observedArgs={"bun","/fixture/omp.js"}
+for _,word in ipairs(diagnostic.expected_arguments) do table.insert(observedArgs,word) end
+table.insert(observedArgs,"--native-transport-fixture")
+Native.observe_process=function(window,session,pane,callback)
+ same(window,"","process readback retains originating empty window identity")
+ callback({status=0,timed_out=false,stdout=runtime.json.encode({pane=pane,child={argv=observedArgs,pid=123,cwd=diagnostic.cwd}})},nil)
+end
+local proof,proofError
+Setup.observe_route(diagnostic,4,9,function(value,why)proof=value;proofError=why end)
+check(proof~=nil and proofError==nil,"actual argv observation allows native transport suffix without dropping selected arguments")
+observedArgs[3]="--wrong-selected-flags"
+Setup.observe_route(diagnostic,4,9,function(value,why)proof=value;proofError=why end)
+check(proof==nil and proofError~=nil,"wrong actual child argv cannot manufacture native-route success")
+Native.observe_process=oldObserve
+routeRecord.backend="local-terminal";routeRecord.user="selected"
+local terminalDiagnostic=assert(Setup.route(routeRecord,routeProbe,host,7,"window"))
+check(terminalDiagnostic.command:find("setup_route.sh",1,true)~=nil and terminalDiagnostic.command:find("'-n'",1,true)~=nil,"offline terminal diagnostic uses packaged helper and noninteractive selected identity")
+check(terminalDiagnostic.prompt==nil and terminalDiagnostic.expected:find("\nselected\n",1,true)~=nil,"terminal readback binds literal bytes and actual worker identity, not a fabricated provider task")
+local originalRead=Prereq.run
+local fixtureBytes,fixtureError="SPAWN_ROUTE_PENDING",nil
+Prereq.run=function(_,_,callback)callback(fixtureBytes,fixtureError)end
+local terminalProof,terminalError,terminalPending
+local function observeTerminal()
+ Setup.observe_route(terminalDiagnostic,4,9,function(value,why,pending)terminalProof=value;terminalError=why;terminalPending=pending end)
+end
+observeTerminal()
+check(terminalProof==nil and terminalPending==true,"missing terminal publication is typed pending, not failure")
+fixtureBytes=terminalDiagnostic.expected:sub(1,17);observeTerminal()
+check(terminalProof==nil and terminalPending==true,"partially written matching terminal observation remains pending")
+fixtureBytes="";observeTerminal()
+check(terminalProof==nil and terminalPending==true,"new empty terminal observation remains pending while its producer writes")
+fixtureBytes=terminalDiagnostic.expected;observeTerminal()
+check(terminalProof~=nil and terminalPending~=true and terminalError==nil,"complete exact terminal publication succeeds after pending reads")
+fixtureBytes="foreign observation";observeTerminal()
+check(terminalProof==nil and terminalPending~=true and terminalError~=nil,"wrong complete terminal evidence is a failure, not a retryable publication")
+fixtureBytes=nil;fixtureError="Permission denied";observeTerminal()
+check(terminalProof==nil and terminalPending~=true and terminalError=="Permission denied","permanent read failures are not hidden by pending retries")
+Prereq.run=originalRead
 return string.format("PASS %d SPAWN backend checks", checks)

@@ -119,9 +119,172 @@ local function response(ok: boolean, code: string, message: string, extra: any?)
 	return result
 end
 
+local SETUP_STATES = { not_started = true, in_progress = true, completed = true, dismissed = true, adopted_existing = true }
+local function new_setup(existing: boolean): any
+	return { schema = 1, state = if existing then "in_progress" else "not_started", config_revision = 0,
+		review_existing = existing, readiness = { state = "not_run", config_revision = 0, summary = "" } }
+end
+
+local function new_defaults(): any
+	return { revision = 0, policy = dispatch.default_policy(), builder_record = "", coordinator_record = "" }
+end
+
+local function absolute(value: any): boolean
+	return text(value, 512) and (value:sub(1, 1) == "/" or value:match("^%a:[\\/]") ~= nil)
+end
+
+local function valid_repository(value: any): boolean
+	return fields(value, { cwd = true, repo_root = true, common_dir = true, target_ref = true, head_revision = true, queue_route = true })
+		and absolute(value.cwd) and absolute(value.repo_root) and absolute(value.common_dir)
+		and text(value.target_ref, 256) and value.target_ref:sub(1, 1) ~= "-"
+		and type(value.head_revision) == "string" and (#value.head_revision == 40 or #value.head_revision == 64)
+		and value.head_revision:match("^[a-f0-9]+$") ~= nil
+		and (value.queue_route == "repository_queue" or value.queue_route == "orch_queue")
+end
+
+local function valid_defaults(value: any): boolean
+	return fields(value, { revision = true, policy = true, builder_record = true, coordinator_record = true, repository = true })
+		and integer(value.revision, 0) and dispatch.valid_policy(value.policy)
+		and (value.builder_record == "" or text(value.builder_record, 96))
+		and (value.coordinator_record == "" or text(value.coordinator_record, 96))
+		and (absent(value.repository) or valid_repository(value.repository))
+end
+
+local function valid_readiness(value: any, revision: number): boolean
+	return fields(value, { state = true, config_revision = true, summary = true })
+		and (value.state == "not_run" or value.state == "passed" or value.state == "failed" or value.state == "unavailable")
+		and integer(value.config_revision, 0, revision) and type(value.summary) == "string" and #value.summary <= 1024
+		and value.summary:find("%c") == nil
+end
+
+local function valid_setup(value: any, revision: number, spawn: boolean?): boolean
+	local allowed = { schema = true, state = true, config_revision = true, readiness = true }
+	if not spawn then allowed.review_existing = true end
+	return fields(value, allowed) and value.schema == 1 and SETUP_STATES[value.state] == true
+		and value.config_revision == revision and valid_readiness(value.readiness, revision)
+		and (spawn or type(value.review_existing) == "boolean")
+end
+
+-- Catalog observations are consumed, never copied into ORCH's settings authority.
+local function setup_requirements(defaults: any, event: any): boolean
+	local p, setup = defaults.policy, event.spawn_setup
+	if defaults.repository == nil or defaults.builder_record == "" or p.release_manager_record == ""
+		or event.catalog_version ~= 2 or type(setup) ~= "table" or not integer(setup.config_revision, 0)
+		or not valid_setup(setup, setup.config_revision, true)
+		or (setup.state ~= "completed" and setup.state ~= "adopted_existing") then return false end
+	if type(event.records) ~= "table" or #event.records > 32 or count(event.records) ~= #event.records then return false end
+	local rows = {}
+	for _, row in event.records do
+		if type(row) ~= "table" or not text(row.id, 96) or (rows[row.id] ~= nil and not equal(rows[row.id], row)) or not integer(row.revision, 0)
+			or type(row.capabilities) ~= "table" or #row.capabilities > 32 or count(row.capabilities) ~= #row.capabilities then return false end
+		for _, capability in row.capabilities do if not text(capability, 96) then return false end end
+		rows[row.id] = row
+	end
+	local function eligible(id: string, capability: string?): boolean
+		local row = rows[id]
+		return row ~= nil and row.enabled == true and row.eligible == true
+			and table.find(row.capabilities, "report-files-v1") ~= nil
+			and (capability == nil or table.find(row.capabilities, capability) ~= nil)
+	end
+	if p.release_manager_record == defaults.builder_record
+		or not eligible(defaults.builder_record, "check-runner-v1") or not eligible(p.release_manager_record, "release-manager-v1")
+		or (defaults.coordinator_record ~= "" and not eligible(defaults.coordinator_record, "coordinator-control-v1"))
+		or (p.labeller_record ~= "" and not eligible(p.labeller_record)) then return false end
+	if p.require_code_review then
+		if #p.reviewer_records == 0 then return false end
+		local builder_family = p.family_map[defaults.builder_record] or dispatch.provider_family(rows[defaults.builder_record].provider)
+		local available = false
+		for _, id in p.reviewer_records do
+			if id == defaults.builder_record or id == p.release_manager_record then return false end
+			local row = rows[id]
+			local family = p.family_map[id] or (if row then dispatch.provider_family(row.provider) else nil)
+			if eligible(id)
+				and (not p.require_other_family or (text(builder_family, 96) and text(family, 96) and family ~= builder_family)) then available = true end
+		end
+		if not available then return false end
+	end
+	return true
+end
+
+local function apply_setup(registry: any, event: any, clock: any?): (any?, any)
+	local defaults, setup = registry.installation_defaults, registry.setup
+	local allowed = { kind = true, request_id = true, expected_revision = true }
+	if event.kind == "installation_defaults" then allowed.defaults = true
+	else
+		allowed.state = true; allowed.readiness = true; allowed.catalog_version = true
+		allowed.spawn_setup = true; allowed.records = true; allowed.readiness_policy = true
+	end
+	if not fields(event, allowed) or not text(event.request_id, 128) or not integer(event.expected_revision, 0) then
+		return nil, response(false, "invalid_event", "Setup requires a closed revision-fenced operation.")
+	end
+	if event.expected_revision ~= defaults.revision then
+		return nil, response(false, "stale_revision", "Installation defaults changed. Reload them before saving.", { config_revision = defaults.revision })
+	end
+	if defaults.revision == MAX_INTEGER or registry.revision == MAX_INTEGER or (type(clock) == "table" and clock.reserved_capacity == true) then
+		return nil, response(false, "capacity_reached", "Installation settings cannot consume reserved authority capacity.")
+	end
+	local next_defaults, next_setup = defaults, copy(setup)
+	if event.kind == "installation_defaults" then
+		if not fields(event.defaults, { policy = true, builder_record = true, coordinator_record = true, repository = true }) then
+			return nil, response(false, "invalid_defaults", "Installation defaults accept policy, role selections and a verified repository only.")
+		end
+		next_defaults = copy(event.defaults)
+		next_defaults.revision = defaults.revision
+		if type(next_defaults.policy) == "table" and next_defaults.policy.require_code_review == false then next_defaults.policy.require_other_family = false end
+		if not valid_defaults(next_defaults) then return nil, response(false, "invalid_defaults", "Installation defaults have invalid fields or bounds.") end
+		if equal(next_defaults, defaults) then return registry, response(true, "no_progress", "Installation defaults are unchanged.", { config_revision = defaults.revision }) end
+	else
+		if (event.state == nil) == (event.readiness == nil) then
+			return nil, response(false, "invalid_event", "Choose a lifecycle transition or an independent readiness result.")
+		end
+		if event.state ~= nil then
+			if event.readiness_policy ~= nil then return nil, response(false, "invalid_event", "Policy fences apply only to readiness results.") end
+			if not SETUP_STATES[event.state] or event.state == "not_started" then return nil, response(false, "invalid_setup", "Setup cannot be reset to first use.") end
+			if event.state == "completed" or event.state == "adopted_existing" then
+				if (event.state == "adopted_existing") ~= setup.review_existing or not setup_requirements(defaults, event) then
+					return nil, response(false, "setup_incomplete", "Verify the repository, SPAWN setup and required eligible roles: release manager must differ from builder; enabled review needs compatible reviewers on neither record.")
+				end
+				next_setup.review_existing = false
+			elseif event.catalog_version ~= nil or event.spawn_setup ~= nil or event.records ~= nil then
+				return nil, response(false, "invalid_event", "Only completion consumes SPAWN catalog observations.")
+			end
+			next_setup.state = event.state
+		else
+			if event.catalog_version ~= nil or event.spawn_setup ~= nil or event.records ~= nil or not valid_readiness(event.readiness, defaults.revision)
+				or event.readiness.config_revision ~= defaults.revision then
+				return nil, response(false, "invalid_readiness", "Readiness must describe an exercise of the current configuration.")
+			end
+			local fence = event.readiness_policy
+			if fence ~= nil and (not fields(fence, { logical_session_id = true, revision = true })
+				or not text(fence.logical_session_id, 96) or not integer(fence.revision, 0)) then
+				return nil, response(false, "invalid_readiness", "Readiness requires a closed session policy revision fence.")
+			end
+			if event.readiness.state == "passed" or fence ~= nil then
+				if not fence or not registry.sessions[fence.logical_session_id]
+					or dispatch.policy_revision(registry, fence.logical_session_id) ~= fence.revision
+					or not equal(dispatch.policy(registry, fence.logical_session_id), defaults.policy) then
+					return nil, response(false, "stale_policy", "Session policy changed during readiness; the original policy was not qualified.")
+				end
+			end
+			next_setup.readiness = copy(event.readiness)
+		end
+		if equal(next_setup, setup) then return registry, response(true, "no_progress", "Setup is unchanged.", { config_revision = defaults.revision }) end
+		next_defaults = if event.readiness ~= nil then defaults else table.clone(defaults)
+	end
+	if event.readiness == nil then
+		next_defaults.revision += 1
+		next_setup.config_revision = next_defaults.revision
+	end
+	local candidate = table.clone(registry)
+	candidate.revision += 1
+	candidate.setup, candidate.installation_defaults = next_setup, next_defaults
+	return candidate, response(true, "setup_saved", "Installation settings saved; existing sessions are unchanged.",
+		{ config_revision = next_defaults.revision, revision = candidate.revision })
+end
+
 function M.new_registry(): any
-	return { version = 2, revision = 0, next_session_id = 0, next_owner_id = 0,
-		execution_epoch = 1, sessions = {}, request_outcomes = {}, retired = {} }
+	return { version = 3, revision = 0, next_session_id = 0, next_owner_id = 0,
+		execution_epoch = 1, sessions = {}, request_outcomes = {}, retired = {}, setup = new_setup(false), installation_defaults = new_defaults() }
 end
 
 function M.new_session(input: any): any
@@ -235,10 +398,17 @@ local function valid_outcome(event: any, result: any, registry: any, owners: any
 end
 
 local function valid_registry(raw: any, legacy_catalog_cache: boolean?): boolean
-	if not fields(raw, { version = true, revision = true, next_session_id = true, next_owner_id = true,
-		execution_epoch = true, sessions = true, request_outcomes = true, retired = true, dispatch = true }) then return false end
-	if raw.version ~= 2 or not integer(raw.revision, 0) or not integer(raw.next_session_id, 0)
+	if type(raw) ~= "table" or raw == tern.json.null then return false end
+	local legacy = raw.version == 2 and legacy_catalog_cache == true
+	local allowed = { version = true, revision = true, next_session_id = true, next_owner_id = true,
+		execution_epoch = true, sessions = true, request_outcomes = true, retired = true, dispatch = true }
+	if not legacy then allowed.setup = true; allowed.installation_defaults = true end
+	if not fields(raw, allowed) then return false end
+	if (raw.version ~= 3 and not legacy) or not integer(raw.revision, 0) or not integer(raw.next_session_id, 0)
 		or not integer(raw.next_owner_id, 0) or not integer(raw.execution_epoch, 1) then return false end
+	if not legacy and (not valid_defaults(raw.installation_defaults)
+		or raw.installation_defaults.revision > raw.revision
+		or not valid_setup(raw.setup, raw.installation_defaults.revision)) then return false end
 	for key, maximum in { sessions = LIMITS.sessions, request_outcomes = LIMITS.requests, retired = LIMITS.retired } do
 		if type(raw[key]) ~= "table" or count(raw[key]) > maximum then return false end
 	end
@@ -302,8 +472,12 @@ end
 
 function M.rehydrate(raw: any): (any?, any?)
 	if absent(raw) then return nil, response(false, "state_missing", "Authority state is missing; explicit initialization or recovery is required.") end
-	if type(raw) == "table" and raw.version ~= 2 then
+	if type(raw) == "table" and raw.version ~= 2 and raw.version ~= 3 then
 		return nil, response(false, "migration_required", "Stored schema is unsupported; retain it for explicit migration.")
+	end
+	if type(raw) == "table" then
+		local problem = dispatch.migration_problem(raw.dispatch, raw.version == 2)
+		if problem then return nil, response(false, "migration_blocked", problem) end
 	end
 	if not valid_registry(raw, true) then return nil, response(false, "state_corrupt", "Authority state is invalid; no empty registry was substituted.") end
 	if raw.execution_epoch == MAX_INTEGER or raw.revision == MAX_INTEGER then
@@ -313,6 +487,12 @@ function M.rehydrate(raw: any): (any?, any?)
 	restored.execution_epoch += 1
 	restored.revision += 1
 	dispatch.restore(restored.dispatch)
+	if restored.version == 2 then
+		restored.version = 3
+		restored.setup, restored.installation_defaults = new_setup(true), new_defaults()
+		-- Preserve each old session's effective policy, including formerly implicit defaults.
+		for sid in restored.sessions do dispatch.seed_policy(restored, sid, dispatch.policy(restored, sid)) end
+	end
 	for _, session in restored.sessions do
 		for _, target in { "controller", "orchestrator" } do
 			local owner = session[target]
@@ -330,6 +510,7 @@ end
 
 
 function M.apply(registry: any, raw: any, clock: any?): (any?, any)
+	if type(raw) == "table" and (raw.kind == "installation_defaults" or raw.kind == "setup_lifecycle") then return apply_setup(registry, raw, clock) end
 	if type(raw) == "table" and raw.kind == "dispatch" then return dispatch.apply(registry, raw, clock, M.apply) end
 	if type(raw) == "table" and raw.kind == "dispatch_reconcile" then return dispatch.reconcile(registry, raw) end
 	if type(raw) == "table" and raw.kind == "workflow_tick" then return dispatch.tick(registry, raw, clock) end
@@ -500,6 +681,7 @@ function M.apply(registry: any, raw: any, clock: any?): (any?, any)
 		changed = M.new_session({ orch_session_id = "orch-" .. string.format("%.0f", next_state.next_session_id), name = event.name,
 			binding = event.binding, created_at_ms = now })
 		next_state.sessions[changed.orch_session_id] = changed
+		dispatch.seed_policy(next_state, changed.orch_session_id, registry.installation_defaults.policy)
 		code, message = "session_registered", "Logical session registered; no agent was started."
 	elseif kind == "admit_controller" or kind == "reserve_coordinator" then
 		next_state.next_owner_id += 1
@@ -561,8 +743,10 @@ function M.apply(registry: any, raw: any, clock: any?): (any?, any)
 end
 
 function M.project(registry: any, request: any?): any
-	local result: any = { version = 2, revision = registry.revision, execution_epoch = registry.execution_epoch,
-		sessions = tern.json.array(), retired_count = count(registry.retired), request_count = count(registry.request_outcomes) }
+	local result: any = { version = 3, revision = registry.revision, execution_epoch = registry.execution_epoch,
+		sessions = tern.json.array(), retired_count = count(registry.retired), request_count = count(registry.request_outcomes),
+		setup = copy(registry.setup), installation_defaults = copy(registry.installation_defaults) }
+	result.setup.readiness_stale = result.setup.readiness.state ~= "not_run" and result.setup.readiness.config_revision ~= result.setup.config_revision
 	local ids = {}
 	for id in registry.sessions do table.insert(ids, id) end
 	table.sort(ids)

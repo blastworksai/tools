@@ -156,6 +156,360 @@ local function by_id(view)
 end
 local OBSOLETE_NOTICE = "An old Mark-no-longer-running request was cleared; SPAWN now does this automatically"
 local sections = {}
+-- Probe fixtures exercise only the authority boundary, never claim runtime proof.
+local function setup_record(id)
+	local windows=runtime.runtime.os=="windows"
+	return record(id,{cwd=if windows then "C:/work" else "/work",
+		fresh_executable=if windows then "C:/tools/worker.exe" else "/usr/bin/worker",fresh_arguments={},task_argument_index=1,
+		target_os=if windows then "windows" else runtime.runtime.os,argv_contract=if windows then "windows-crt" else nil,
+		mailbox={permitted_root=if windows then "C:/mailboxes" else "/mailboxes",
+			helper_path=if windows then "C:/helpers/mailbox_target.ps1" else "/helpers/mailbox_target.sh",
+			producer_helper_path=if windows then "C:/helpers/mailbox_worker.ps1" else "/helpers/mailbox_worker.sh",
+			worker_identity="fixture-worker",verified=false,wake="worker-poll-v1",
+			producer={read=true,write=true,hash=true,journal=true,poll=true},capabilities={"report-files-v1","worker-poll-v1","argv-v1"}}})
+end
+local function setup_evidence(load,value)
+	return {record=copy(value),attested=true,probe={schema=1,passed=true,
+		record_sha256=load("wire/codec").sha256(runtime.json.encode(value)),bundle_digest=string.rep("a",64),
+		worker_identity="fixture-worker",provision_handle="fixture-provision",
+		observations={
+			{id="fixture-prerequisite",state="passed",summary="Deterministic authority fixture, not an actual runtime probe"},
+			{id="native-route",state="passed",summary="Deterministic authority fixture, not actual native route execution proof"},
+		}}}
+end
+local function setup_view(authority)
+	local view,why=authority.setup_snapshot("host-A")
+	assert(view,tostring(why))
+	return view
+end
+local function setup_write(authority,operation,data)
+	local ok,why=authority.setup_edit("host-A",setup_view(authority).config_revision,operation,data or {})
+	check(ok,"accept deliberate setup "..operation..": "..tostring(why))
+end
+
+sections.setup_lifecycle=function()
+	local db=boundary();local authority=modules(db)
+	local view=setup_view(authority)
+	check(view.setup.schema==1 and view.setup.state=="not_started" and view.config_revision==0 and #view.records==0,"genuinely absent authority has explicit empty not-started setup")
+	check(view.namespace==nil and view.setup.readiness.state=="not_run" and db.writes==0,"cold read allocates no namespace, scopes or persistence")
+	view.setup.state="completed";view.records[1]=record("injected")
+	check(setup_view(authority).setup.state=="not_started" and db.writes==0,"read-only projection is detached")
+	setup_write(authority,"begin")
+	view=setup_view(authority)
+	check(view.setup.state=="in_progress" and view.config_revision==1 and view.setup.config_revision==1,"begin persists lifecycle and revision")
+	check(next(db.peek("authority").sessions)==nil,"setup writer works without an ordinary scope")
+	local namespace=view.namespace
+	refused_unchanged(db,function()return authority.setup_edit("host-A",0,"dismiss",{})end,"second window cannot dismiss with stale setup revision")
+	setup_write(authority,"dismiss")
+	local reloaded=modules(db)
+	check(setup_view(reloaded).setup.state=="dismissed" and setup_view(reloaded).namespace==namespace,"explicit dismissal survives reload")
+	setup_write(reloaded,"begin")
+	check(setup_view(reloaded).setup.state=="in_progress","explicit begin resumes dismissed setup")
+	local binding=assert(reloaded.open("host-A",4))
+	edit(reloaded,binding,"replace-records",{records={record("ordinary")}})
+	view=snapshot(reloaded,binding)
+	check(view.setup.state=="in_progress" and view.setup.config_revision==view.config_revision,"ordinary records do not imply managed setup completion")
+	same(reloaded.managed_snapshot(binding).setup,view.setup,"ordinary and managed snapshots publish the same lifecycle")
+	local writes=db.writes
+	setup_view(reloaded)
+	check(db.writes==writes,"existing setup projection never writes")
+	local pending=submit(reloaded,binding,reserve_request(binding,"setup-read",1,view.config_revision,"ordinary")).result.attempt
+	db.now+=31
+	local before=db.image();writes=db.writes
+	setup_view(reloaded)
+	check(db.writes==writes,"catalog read never expires an overdue ordinary admission")
+	same(db.image(),before,"catalog read preserves overdue launch evidence exactly")
+	check(reloaded.execution_job(binding,pending.id).stage=="admitted","overdue ticket waits for its normal mutating path")
+end
+
+sections.setup_migration=function()
+	for _,roster in ipairs({{},{record("existing")}}) do
+		local db,_,binding=fresh(roster)
+		local seed=db.image();seed.authority.version=3;seed.authority.setup=nil;seed.authority.setup_adoption_required=nil
+		local legacy_db=boundary(seed);local legacy=modules(legacy_db)
+		local view=setup_view(legacy)
+		check(view.setup.state=="in_progress" and view.adoption_required==true and view.setup.readiness.state=="not_run","every old store requires explicit adoption, even an empty roster")
+		same(legacy_db.image(),seed,"read-only old-store projection never persists its migration")
+		assert(legacy.open("host-A",4,nil,binding.session_key))
+		local saved=legacy_db.peek("authority")
+		check(saved.version==4 and saved.setup.state=="in_progress" and saved.setup_adoption_required,"existing authority writer persists explicit setup migration")
+		same(saved.config,seed.authority.config,"setup migration preserves every approved record")
+		check(saved.namespace==seed.authority.namespace and saved.config_revision==seed.authority.config_revision,"migration does not rotate namespace or configuration approval")
+		setup_write(legacy,"dismiss")
+		check(legacy_db.peek("authority").setup_adoption_required==true,"dismissal does not silently approve existing setup")
+	end
+	local original={schema=1,agents={record("legacy")}}
+	local legacy_db=boundary({config=original});local legacy=modules(legacy_db)
+	refused_unchanged(legacy_db,function()return legacy.setup_snapshot("host-A")end,"legacy config-only store requests source review rather than empty first-use")
+	local binding=assert(legacy.open("host-A",4))
+	local view=snapshot(legacy,binding)
+	check(view.setup.state=="in_progress" and view.adoption_required and not view.ready,"legacy config review and setup adoption remain distinct")
+	refused_unchanged(legacy_db,function()return legacy.setup_edit("host-A",view.config_revision,"begin",{})end,"setup writer cannot bypass source review")
+	edit(legacy,binding,"review-choice",{id="legacy",source=1});edit(legacy,binding,"review-confirm",{})
+	check(setup_view(legacy).setup.state=="in_progress" and setup_view(legacy).adoption_required,"source review alone never completes setup")
+end
+
+sections.setup_commit=function()
+	local db=boundary();local authority,_,_,load=modules(db)
+	setup_write(authority,"begin")
+	local data=setup_evidence(load,setup_record("managed"))
+	local before=copy(data)
+	for _,mutate in ipairs({
+		function(d)d.attested=false end,
+		function(d)d.probe.passed=false end,
+		function(d)d.probe.observations={} end,
+		function(d)d.probe.observations[1].state="unavailable" end,
+		function(d)d.probe.observations[1].state="failed" end,
+		function(d)d.probe.observations[2]=nil end,
+		function(d)d.probe.observations[2].state="failed" end,
+		function(d)d.probe.observations[2].state="unavailable" end,
+		function(d)d.probe.observations[2].id="unrelated-route" end,
+		function(d)d.probe.record_sha256=string.rep("0",64) end,
+		function(d)d.probe.worker_identity="different-user" end,
+		function(d)d.probe.bundle_digest="not-a-digest" end,
+		function(d)d.probe.unexpected=true end,
+		function(d)d.record.command="changed-after-probe" end,
+	}) do
+		local changed=copy(data);mutate(changed)
+		refused_unchanged(db,function()return authority.setup_edit("host-A",1,"commit",changed)end,"unattested, failed or mismatched managed setup")
+	end
+	db.fail_after(1)
+	refused_unchanged(db,function()return authority.setup_edit("host-A",1,"commit",data)end,"failed commit preserves both roster and lifecycle")
+	db.fail_authority_at=nil
+	local writes=db.authority_writes
+	setup_write(authority,"commit",data)
+	local view=setup_view(authority)
+	check(db.authority_writes==writes+1 and view.setup.state=="completed" and #view.records==1,"record verification and completion persist in one atomic authority write")
+	check(view.records[1].mailbox.verified==true and view.records[1].mailbox.evidence_ref=="setup:"..data.probe.bundle_digest..":fixture-provision","only committed probe and attestation set mailbox verification")
+	check(view.setup.readiness.state=="not_run","required setup completes without optional provider-backed readiness")
+	same(data,before,"writer never rewrites caller probe or record")
+	check(next(db.peek("authority").sessions)==nil,"commit does not allocate an ordinary session or launch")
+	refused_unchanged(db,function()return authority.setup_edit("host-A",1,"commit",data)end,"delayed duplicate commit cannot replay under old revision")
+	for _,operation in ipairs({"begin","dismiss"}) do
+		refused_unchanged(db,function()return authority.setup_edit("host-A",view.config_revision,operation,{})end,"completed setup cannot be reopened by "..operation)
+	end
+	local reload=modules(db)
+	check(setup_view(reload).setup.state=="completed","completion survives reload without record inference")
+
+	local existing_db,_,binding=fresh({record("unrelated"),setup_record("managed")})
+	local seed=existing_db.image();seed.authority.version=3;seed.authority.setup=nil;seed.authority.setup_adoption_required=nil
+	local adopt_db=boundary(seed);local adopt,_,_,adopt_load=modules(adopt_db)
+	assert(adopt.open("host-A",4,nil,binding.session_key))
+	local adoption=setup_evidence(adopt_load,setup_record("managed"))
+	refused_unchanged(adopt_db,function()return adopt.setup_edit("host-A",1,"commit",adoption)end,"old store cannot bypass explicit adoption with commit")
+	refused_unchanged(adopt_db,function()return adopt.setup_edit("host-A",1,"adopt",{})end,"adoption never infers verification from saved records")
+	local wrong=setup_evidence(adopt_load,setup_record("missing"))
+	refused_unchanged(adopt_db,function()return adopt.setup_edit("host-A",1,"adopt",wrong)end,"adoption must identify an existing record")
+	local unexecuted=copy(adoption);unexecuted.probe.observations[2]=nil
+	refused_unchanged(adopt_db,function()return adopt.setup_edit("host-A",1,"adopt",unexecuted)end,"adoption requires native route execution proof independently of attestation")
+	setup_write(adopt,"adopt",adoption)
+	view=setup_view(adopt)
+	check(view.setup.state=="adopted_existing" and view.adoption_required==nil and #view.records==2,"probed and attested adoption preserves unrelated accounts")
+	same(view.records[1],record("unrelated"),"adoption never replaces unrelated ordinary records")
+	local empty_db,_,empty_binding=fresh()
+	local empty_seed=empty_db.image();empty_seed.authority.version=3;empty_seed.authority.setup=nil;empty_seed.authority.setup_adoption_required=nil
+	local empty_store=boundary(empty_seed);local empty_adopt,_,_,empty_load=modules(empty_store)
+	assert(empty_adopt.open("host-A",4,nil,empty_binding.session_key))
+	setup_write(empty_adopt,"adopt",setup_evidence(empty_load,setup_record("first-reviewed")))
+	check(setup_view(empty_adopt).setup.state=="adopted_existing" and #setup_view(empty_adopt).records==1,"explicit review of an old empty store can add its first probed record")
+end
+
+sections.setup_readiness=function()
+	local db=boundary();local authority,_,_,load=modules(db)
+	setup_write(authority,"begin")
+	refused_unchanged(db,function()return authority.setup_edit("host-A",1,"readiness",{state="passed",summary="fixture"})end,"optional readiness cannot complete required setup")
+	setup_write(authority,"commit",setup_evidence(load,setup_record("managed")))
+	setup_write(authority,"readiness",{state="unavailable",summary="Provider exercise declined"})
+	local view=setup_view(authority)
+	check(view.setup.state=="completed" and view.setup.readiness.state=="unavailable","declining optional exercise leaves required setup completed")
+	for _,state in ipairs({"passed","failed","not_run"}) do
+		setup_write(authority,"readiness",{state=state,summary="Deterministic fixture"})
+		view=setup_view(authority)
+		check(view.setup.readiness.config_revision==view.config_revision and view.setup.state=="completed","readiness is separately revision stamped without changing completion")
+	end
+	setup_write(authority,"readiness",{state="passed",summary="Deterministic fixture"})
+	local prior=setup_view(authority).setup.readiness
+	local binding=assert(authority.open("host-A",4))
+	edit(authority,binding,"replace-records",{records={record("manual")}})
+	view=snapshot(authority,binding)
+	check(view.setup.state=="completed" and view.setup.config_revision==view.config_revision and prior.config_revision<view.config_revision,"manual edit makes readiness visibly stale without reopening setup")
+	same(view.setup.readiness,prior,"manual edit preserves exact previous exercise outcome")
+	local reload=modules(db)
+	same(setup_view(reload).setup,view.setup,"stale readiness and completion survive reload")
+	for _,data in ipairs({{state="unknown",summary=""},{state="passed",summary=string.rep("x",1025)},{state="passed",summary="bad\nsummary"},{state="passed",summary="",config_revision=0}}) do
+		refused_unchanged(db,function()return authority.setup_edit("host-A",view.config_revision,"readiness",data)end,"malformed readiness cannot overwrite saved exercise")
+	end
+end
+
+sections.setup_invalid=function()
+	local db,_,binding=fresh()
+	local image=db.image()
+	for _,mutate in ipairs({
+		function(seed)seed.authority=nil end,
+		function(seed)seed.authority.setup=nil end,
+		function(seed)seed.authority.setup.state="ready" end,
+		function(seed)seed.authority.setup.schema=2 end,
+		function(seed)seed.authority.setup.config_revision=1 end,
+		function(seed)seed.authority.setup.readiness.config_revision=1 end,
+		function(seed)seed.authority.setup.readiness.state="unknown" end,
+		function(seed)seed.authority.setup.readiness.summary=false end,
+		function(seed)seed.authority.setup.extra=true end,
+		function(seed)seed.authority.setup_adoption_required=true end,
+		function(seed)seed["authority-initialized"]="wrong-namespace" end,
+	}) do
+		local seed=copy(image);mutate(seed)
+		local bad_db=boundary(seed);local bad=modules(bad_db)
+		refused_unchanged(bad_db,function()return bad.setup_snapshot("host-A")end,"lost or corrupt authority never looks not-started")
+		refused_unchanged(bad_db,function()return bad.setup_edit("host-A",0,"begin",{})end,"setup writer preserves lost or corrupt authority")
+		refused_unchanged(bad_db,function()return bad.snapshot(binding)end,"ordinary snapshot also rejects lost or corrupt setup")
+	end
+	for _,key in ipairs({"authority","authority-initialized","config","dispatch-v1"}) do
+		local failed_db=boundary();failed_db.fail_get=key;local failed=modules(failed_db)
+		refused_unchanged(failed_db,function()return failed.setup_snapshot("host-A")end,"unreadable "..key.." never looks absent")
+	end
+	local lost=copy(image);lost.authority=nil
+	local lost_db=boundary(lost);local lost_authority=modules(lost_db)
+	refused_unchanged(lost_db,function()return lost_authority.open("host-A",4)end,"ordinary fresh open cannot reset a lost initialized authority")
+	local fresh_db=boundary();fresh_db.fail_after(1);local interrupted=modules(fresh_db)
+	check(not interrupted.setup_edit("host-A",0,"begin",{}),"interrupted first authority save fails visibly")
+	check(fresh_db.peek("authority")==nil and fresh_db.peek("authority-initialized")~=nil,"interrupted creation retains loss fence rather than pretending absent")
+	refused_unchanged(fresh_db,function()return interrupted.setup_snapshot("host-A")end,"interrupted initialization cannot silently restart")
+	local denied_db=boundary();denied_db.fail_set="authority-initialized";local denied=modules(denied_db)
+	refused_unchanged(denied_db,function()return denied.setup_edit("host-A",0,"begin",{})end,"initialization marker must persist before the first authority save")
+end
+-- The native cleanup owner is injected evidence, not an executed process here.
+local function setup_route(backend,revision,nonce,binding)
+	local route={schema=1,nonce=nonce,config_revision=revision,window="",native_session=4,source_pane=9,native_conn=7,native_since=1700000000,
+		backend=backend,command="fixture-only "..nonce,cwd="/fixture/work",record_sha256=string.rep("b",64),
+		worker_identity="fixture-worker",host_os="linux",status="running",authority_id=binding.authority_id,
+		origin_epoch=if backend=="native-agent" then "fixture-boot:42:12345" else nil}
+	if backend=="native-agent" then
+		route.prompt="Deterministic diagnostic fixture\nNot actual native execution"
+		route.expected_arguments={"--session-dir","/fixture/"..nonce.."-native",""}
+	else
+		route.output="/fixture/"..nonce..".observation"
+		route.expected=nonce.."\nfixture-worker\n"
+	end
+	return route
+end
+
+sections.setup_probe=function()
+	local absent_db=boundary();local absent=modules(absent_db)
+	local none,why=absent.setup_probe_read("host-A")
+	check(none==nil and why==nil and absent_db.writes==0,"genuinely absent probe read creates no authority or cleanup journal")
+	for _,backend in ipairs({"native-agent","local-terminal"}) do
+		local db,authority,binding,_,_,load=fresh({record("preserved")})
+		setup_write(authority,"begin")
+		local revision=setup_view(authority).config_revision
+		local route=setup_route(backend,revision,"fixture-route",binding)
+		local baseline=db.image()
+		none,why=authority.setup_probe_read("host-A")
+		check(none==nil and why==nil,"existing store without probe has no cleanup obligation")
+		same(db.image(),baseline,"reading an absent optional obligation never rewrites the store")
+		refused_unchanged(db,function()return authority.setup_probe_claim("host-A",revision-1,route)end,"stale probe claimant")
+		refused_unchanged(db,function()return authority.setup_probe_claim("other-host",revision,route)end,"probe claimant from another host")
+		local foreign_session=copy(route);foreign_session.native_session=5
+		refused_unchanged(db,function()return authority.setup_probe_claim("host-A",revision,foreign_session)end,"diagnostic origin must match a current native session authority")
+		db.fail_after(1)
+		refused_unchanged(db,function()return authority.setup_probe_claim("host-A",revision,route)end,"failed atomic claim grants no execution obligation")
+		db.fail_authority_at=nil
+		local writes=db.authority_writes
+		check(authority.setup_probe_claim("host-A",revision,route),"host reserves a single persisted cleanup obligation")
+		check(db.authority_writes==writes+1,"claim commits in one existing authority write")
+		local expected=copy(baseline);expected.authority.setup_probe=copy(route)
+		same(db.image(),expected,"claim preserves full records, lifecycle, revisions and unrelated state")
+		check(setup_view(authority).setup_probe==nil and snapshot(authority,binding).setup_probe==nil,"private native command and prompt never enter public setup snapshots")
+		local reload=modules(db)
+		local retained=assert(reload.setup_probe_read("host-A"))
+		same(retained,route,"full cleanup identity survives VM reload before native pane binding")
+		retained.command="mutated projection"
+		same(reload.setup_probe_read("host-A"),route,"cleanup reads do not expose mutable durable aliases")
+		local another=setup_route(backend,revision,"another-window",binding)
+		another.native_conn=route.native_conn+1;another.native_since=route.native_since+1
+		for _,candidate in ipairs({route,another}) do
+			refused_unchanged(db,function()return reload.setup_probe_claim("host-A",revision,candidate)end,"another or repeated claimant cannot replay an unfinished diagnostic")
+		end
+		local commit=setup_evidence(load,setup_record("managed"))
+		refused_unchanged(db,function()return reload.setup_edit("host-A",revision,"commit",commit)end,"completion waits for verified native cleanup")
+		refused_unchanged(db,function()return reload.setup_probe_bind("host-A","wrong-nonce",41)end,"wrong nonce cannot bind another diagnostic")
+		refused_unchanged(db,function()return reload.setup_probe_bind("host-A",route.nonce,0)end,"native pane binding must be positive")
+		db.fail_after(1)
+		refused_unchanged(db,function()return reload.setup_probe_bind("host-A",route.nonce,41)end,"failed atomic pane binding preserves the unbound obligation")
+		db.fail_authority_at=nil
+		check(reload.setup_probe_bind("host-A",route.nonce,41),"host binds observed native pane once")
+		expected.authority.setup_probe.pane=41
+		same(db.image(),expected,"pane binding changes only the unfinished probe")
+		writes=db.writes
+		check(reload.setup_probe_bind("host-A",route.nonce,41) and db.writes==writes,"identical pane binding is read-only reconciliation")
+		refused_unchanged(db,function()return reload.setup_probe_bind("host-A",route.nonce,42)end,"probe pane identity cannot be replaced")
+		local cold=modules(db)
+		check(cold.setup_probe_read("host-A").pane==41,"pane binding survives another VM reload")
+		local original_authority=binding.authority_id
+		edit(cold,binding,"reset-transport",{})
+		check(binding.authority_id~=original_authority and cold.setup_probe_read("host-A").authority_id==original_authority,"transport rotation preserves original incarnation solely for cleanup")
+		edit(cold,binding,"replace-records",{records={record("manual-change")}})
+		local after_edit=db.image()
+		check(after_edit.authority.setup_probe.config_revision==revision and after_edit.authority.config_revision>revision,"manual edit preserves old cleanup obligation without granting renewed execution")
+		refused_unchanged(db,function()return cold.setup_probe_clear("host-A","wrong-nonce")end,"wrong nonce cannot clear native cleanup")
+		db.fail_after(1)
+		refused_unchanged(db,function()return cold.setup_probe_clear("host-A",route.nonce)end,"failed atomic cleanup retains the obligation")
+		db.fail_authority_at=nil
+		check(cold.setup_probe_clear("host-A",route.nonce),"verified cleanup owner clears its exact obligation")
+		after_edit.authority.setup_probe=nil
+		same(db.image(),after_edit,"cleanup changes neither newer records nor configuration or lifecycle revisions")
+		refused_unchanged(db,function()return cold.setup_probe_clear("host-A",route.nonce)end,"consumed cleanup nonce cannot clear an absent obligation")
+		local current=setup_view(cold).config_revision
+		local successor=setup_route(backend,current,"successor-route",binding)
+		check(cold.setup_probe_claim("host-A",current,successor),"a fresh diagnostic is claimable only after prior cleanup")
+		refused_unchanged(db,function()return cold.setup_probe_clear("host-A",route.nonce)end,"old cleanup cannot clear a successor obligation")
+		check(cold.setup_probe_clear("host-A",successor.nonce),"successor cleanup can finish independently")
+		local retired=copy(successor);retired.authority_id=original_authority
+		refused_unchanged(db,function()return cold.setup_probe_claim("host-A",current,retired)end,"retired authority incarnation cannot claim another diagnostic")
+	end
+	local db,authority,binding=fresh()
+	local route=setup_route("native-agent",0,"fixture-invalid",binding)
+	for _,mutate in ipairs({
+		function(value)value.schema=2 end,
+		function(value)value.unknown=true end,
+		function(value)value.nonce="" end,
+		function(value)value.authority_id=nil end,
+		function(value)value.authority_id="foreign:1" end,
+		function(value)value.origin_epoch=string.rep("x",257) end,
+		function(value)value.origin_epoch="invalid\nepoch" end,
+		function(value)value.native_conn=nil end,
+		function(value)value.native_since=nil end,
+		function(value)value.native_conn="7" end,
+		function(value)value.native_since="1700000000" end,
+		function(value)value.native_conn={7,8} end,
+		function(value)value.native_since=false end,
+		function(value)value.native_conn=-1 end,
+		function(value)value.native_since=-1 end,
+		function(value)value.native_conn=1.5 end,
+		function(value)value.native_since=1.5 end,
+		function(value)value.native_conn=9007199254740992 end,
+		function(value)value.native_since=math.huge end,
+		function(value)value.native_session=-1 end,
+		function(value)value.source_pane=0 end,
+		function(value)value.window=false end,
+		function(value)value.config_revision=1 end,
+		function(value)value.command="bad\0command" end,
+		function(value)value.status="passed" end,
+		function(value)value.backend="ssh-command" end,
+		function(value)value.expected_arguments[2]=nil end,
+		function(value)value.prompt=nil end,
+		function(value)value.output="/unexpected-terminal-output" end,
+	}) do
+		local invalid=copy(route);mutate(invalid)
+		refused_unchanged(db,function()return authority.setup_probe_claim("host-A",0,invalid)end,"invalid initial native obligation")
+		local image=db.image();image.authority.setup_probe=invalid
+		local corrupt_db=boundary(image);local corrupt=modules(corrupt_db)
+		refused_unchanged(corrupt_db,function()return corrupt.setup_probe_read("host-A")end,"corrupt saved diagnostic never disappears on reload")
+		refused_unchanged(corrupt_db,function()return corrupt.setup_probe_clear("host-A",route.nonce)end,"corrupt saved diagnostic requires explicit recovery, never blind deletion")
+	end
+	local image=db.image();image.authority=nil
+	local lost_db=boundary(image);local lost=modules(lost_db)
+	refused_unchanged(lost_db,function()return lost.setup_probe_read("host-A")end,"lost initialized authority never means no unfinished diagnostic")
+end
 
 sections.managed_coexistence=function()
 	local db,authority,binding,_,_,load=fresh({record("shared"),record("ordinary")})
@@ -364,14 +718,14 @@ end
 sections.managed_migration=function()
 	local db,_,binding,a=managed_fixture()
 	local image=db.image();local old=image.authority
-	old.version=1
+	old.version=1;old.setup=nil;old.setup_adoption_required=nil
 	local scope=old.sessions[binding.session_key]
 	scope.native_session=nil;scope.jobs=nil;scope.managed_authority_id=nil;scope.managed_imports=nil
 	scope.inbox={};scope.imports={};scope.launch.attempts[1].purpose=nil
 	local restored_db=boundary(image);local restored=modules(restored_db)
 	local current=assert(restored.open("host-A",4,nil,binding.session_key))
 	local migrated=restored_db.peek("authority")
-	check(migrated.version==3 and migrated.namespace==old.namespace and migrated.config_revision==old.config_revision,"exact v1 migration preserves roster and namespace identity")
+	check(migrated.version==4 and migrated.namespace==old.namespace and migrated.config_revision==old.config_revision,"exact v1 migration preserves roster and namespace identity")
 	local result=migrated.sessions[binding.session_key].launch.attempts[1]
 	local expected=copy(scope.launch.attempts[1]);expected.purpose="managed"
 	same(result,expected,"migration changes only explicit purpose, never observer/attempt/pane evidence")
@@ -397,7 +751,7 @@ sections.managed_migration=function()
 	refused_unchanged(absent_db,function()return absent.open("host-A",4,nil,binding.session_key)end,"never-created registry cannot justify a real saved attempt")
 
 	local function legacy_image(database,b,receipts)
-		local seed=database.image();seed.authority.version=1
+		local seed=database.image();seed.authority.version=1;seed.authority.setup=nil;seed.authority.setup_adoption_required=nil
 		local s=seed.authority.sessions[b.session_key]
 		s.native_session=nil;s.jobs=nil;s.managed_authority_id=nil;s.managed_imports=nil
 		s.inbox={};s.imports=copy(receipts or {})
@@ -408,7 +762,7 @@ sections.managed_migration=function()
 	local clean_seed=legacy_image(clean_db,clean_binding,receipts)
 	local empty_db=boundary(clean_seed);local empty=modules(empty_db)
 	local empty_binding=assert(empty.open("host-A",4,nil,clean_binding.session_key))
-	check(empty_db.peek("authority").version==3 and #snapshot(empty,empty_binding).records==0,"clean v1 without any bridge registry migrates without replaying obsolete ordinary setup")
+	check(empty_db.peek("authority").version==4 and #snapshot(empty,empty_binding).records==0,"clean v1 without any bridge registry migrates without replaying obsolete ordinary setup")
 	same(empty_db.peek("managed-v1-original"),clean_seed.authority,"obsolete ordinary receipts remain in exact original backup")
 	same(empty_db.peek("authority").sessions[clean_binding.session_key].managed_imports,{},"ordinary receipts do not become managed replay grants")
 	check(empty_db.peek("dispatch-v1")==nil,"clean migration does not invent a bridge registry")
@@ -1133,6 +1487,8 @@ local function host_block(db, authority, config)
 		if name == "./host_executor" then return { install = function() end, attach = function() end, epoch = function() return nil end } end
 		if name == "./dispatch" then return {recovery_view=function()return {}end,import_decode=function()return nil end} end
 		if name == "./wire/codec" then return load("wire/codec") end
+		if name == "./managed_setup" then return load("managed_setup") end
+		if name == "./page_navigation" then return load("page_navigation") end
 		error("Unexpected host dependency: " .. name)
 	end }, { __index = environment }))
 	chunk()

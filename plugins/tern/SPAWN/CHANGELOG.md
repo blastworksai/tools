@@ -6,6 +6,11 @@
 - Use native Base64 encoding and shared executable discovery while preserving distinct managed/ordinary PowerShell wrappers, UTF-16LE conversion and ordinary SSH argument handling.
 - Reject malformed Base64 and raw-NUL reply bytes before consumption. Drain Darwin `iconv` output while checking its status, so valid large UTF-8 replies are accepted and invalid bytes remain rejected.
 - Preserve ordinary/unmanaged automatic launch settlement and bounded Failed/Exited history.
+- Add the native **Managed local setup** owner page, standalone or linked from ORCH+, with explicit new-record creation/adoption, actual-account prerequisites and digest-specific stable helper bundles outside the installed package; preserve existing records and helper paths.
+- Separate required setup, exact native-route proof, configured-CLI operator attestation and optional provider-backed readiness. Disclose the small real OMP diagnostic turn; bound the offline terminal helper observation to 45 seconds and retain unresolved identity/cleanup obligations rather than retrying from output.
+- Support `review_disabled` landing proof without synthetic review IDs; retain mandatory declared-check references and passing current-revision checks in every review mode. `helper_checks` still requires review.
+- Keep POSIX native OMP and Windows native `.exe`/CRT limits explicit. Refuse unmet PowerShell execution-policy prerequisites without a policy override; setup does not sandbox accounts or certify full task/landing, deployment or desktop-updater acceptance.
+- Clarify native-agent continuation after ACCEPTED: ordinary workers resume only their original assignment; only explicit coordinator transport roles await activation. Review, landing and deployment retain their typed authorization gates.
 
 ## 0.5.0
 

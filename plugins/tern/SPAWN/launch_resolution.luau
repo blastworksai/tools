@@ -46,7 +46,7 @@ function Resolution.resolve(source: any, mode: string, shell: string): (any?, st
 	return { record = record, executable = executable, arguments = argv }, nil
 end
 local SUDO_FLAGS = { ["-H"] = true, ["-n"] = true, ["-E"] = true, ["-i"] = true, ["-s"] = true, ["-S"] = true, ["-k"] = true, ["-K"] = true, ["-b"] = true, ["-P"] = true }
-function Resolution.select_user(resolved: any, shell: string): (boolean, string?)
+function Resolution.select_user(resolved: any, shell: string, noninteractive: boolean?): (boolean, string?)
 	local record, executable, argv = resolved.record, resolved.executable, resolved.arguments
 	if record.backend == "ssh-command" or not nonblank(record.user) then return true, nil end
 	if shell ~= "posix" then return false, "Windows OS-user launch is unsupported; no current-user fallback" end
@@ -71,8 +71,10 @@ function Resolution.select_user(resolved: any, shell: string): (boolean, string?
 		if selected ~= record.user or argv[index] == nil or argv[index] == "" or argv[index]:find("=", 1, true) then
 			return false, "Configured sudo does not explicitly select the configured OS user"
 		end
+		if noninteractive then table.insert(argv,1,"-n") end
 	else
 		local wrapped = { "-u", record.user, "-H", "--", executable }
+		if noninteractive then table.insert(wrapped,1,"-n") end
 		for _, argument in ipairs(argv) do table.insert(wrapped, argument) end
 		resolved.executable, resolved.arguments = "sudo", wrapped
 	end

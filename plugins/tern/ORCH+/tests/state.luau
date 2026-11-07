@@ -50,7 +50,7 @@ for _, missing in { runtime.json.null, false, "broken" } do
 end
 local result, diagnostic = state.rehydrate(nil)
 check(result == nil and diagnostic.code == "state_missing", "nil store requires explicit initialization")
-for _, legacy in { { version = 1, actions = {} }, { version = 3 }, {} } do
+for _, legacy in { { version = 1, actions = {} }, { version = 4 }, {} } do
 	result, diagnostic = state.rehydrate(legacy)
 	check(result == nil and diagnostic.code == "migration_required", "unsupported state quarantines for migration")
 end
@@ -410,5 +410,151 @@ do
 	duplicate, duplicate_result = state.apply(byte_binding, owned("bind_coordinator", "byte-binding-repeat", "orch-1", reserved_owner, { pane_binding = binding }), reserve_clock)
 	check(duplicate == nil and duplicate_result.code == "not_reserved" and byte_binding.revision == bound_revision, "byte-reserved binding completion remains one-shot")
 	check(state.rehydrate(byte_binding) ~= nil, "byte-reserved binding outcome remains valid durable history")
+end
+do
+	local d = load("dispatch")
+	local fresh = state.new_registry()
+	check(fresh.version == 3 and fresh.setup.state == "not_started" and not fresh.setup.review_existing,
+		"fresh setup is explicit and not inferred from empty ownership")
+	check(fresh.installation_defaults.policy.require_code_review and fresh.installation_defaults.policy.require_other_family,
+		"fresh installation retains review and other-family defaults")
+	local function defaults_event(registry, policy)
+		local defaults = clone(registry.installation_defaults); defaults.revision = nil
+		if policy then defaults.policy = policy end
+		return { kind = "installation_defaults", request_id = "installation-save", expected_revision = registry.installation_defaults.revision, defaults = defaults }
+	end
+	local first = assert(state.apply(fresh, { kind = "register_session", request_id = "first-default-session", name = "First" }))
+	local event = defaults_event(first)
+	event.defaults.policy.require_code_review = false
+	local old = runtime.json.encode(first)
+	local saved, saved_result = state.apply(first, event)
+	check(saved ~= nil and saved_result.ok and not saved.installation_defaults.policy.require_other_family,
+		"precontroller writer normalizes review-off and needs no owner")
+	check(runtime.json.encode(first) == old and d.policy(saved, "orch-1").require_code_review,
+		"installation changes neither old authority input nor existing session override")
+	local conflict, conflict_result = state.apply(saved, event)
+	check(conflict == nil and conflict_result.code == "stale_revision", "second settings window cannot overwrite newer defaults")
+	local second = assert(state.apply(saved, { kind = "register_session", request_id = "second-default-session", name = "Second" }))
+	check(not d.policy(second, "orch-2").require_code_review and d.policy(second, "orch-1").require_code_review,
+		"new session snapshots installation policy while first session retains its own")
+	check(saved.dispatch.policies["orch-2"] == nil, "session seeding never mutates a failed-write predecessor")
+	event = defaults_event(second); event.defaults.policy.require_code_review = true
+	local reenabled = assert(state.apply(second, event))
+	check(not reenabled.installation_defaults.policy.require_other_family, "enabling review does not resurrect remembered family enforcement")
+	local projected = state.project(reenabled)
+	projected.installation_defaults.policy.require_other_family = true
+	projected.setup.state = "completed"
+	check(not reenabled.installation_defaults.policy.require_other_family and reenabled.setup.state == "not_started",
+		"setup/default projections cannot mutate saved authority")
+	local damaged = clone(reenabled); damaged.setup = nil
+	check(state.rehydrate(damaged) == nil, "missing setup in current schema is corruption, not first use")
+	damaged = clone(reenabled); damaged.installation_defaults.helper_path = "/copied/spawn/resource"
+	check(state.rehydrate(damaged) == nil, "SPAWN resources cannot enter the closed installation settings schema")
+	local legacy = clone(second); legacy.version = 2; legacy.setup = nil; legacy.installation_defaults = nil
+	for sid, p in legacy.dispatch.policies do
+		p.enforce_cross_family = sid == "orch-1"; p.require_code_review = nil; p.require_other_family = nil
+	end
+	local adopted = assert(state.rehydrate(legacy))
+	check(adopted.setup.review_existing and adopted.setup.state == "in_progress", "old authority prompts Review existing setup without destructive initialization")
+	check(d.policy(adopted, "orch-1").require_code_review and d.policy(adopted, "orch-1").require_other_family
+		and d.policy(adopted, "orch-2").require_code_review and not d.policy(adopted, "orch-2").require_other_family,
+		"old true migrates yes/yes and old false migrates yes/no")
+	local incomplete, incomplete_result = state.apply(saved, { kind = "setup_lifecycle", request_id = "incomplete", expected_revision = saved.installation_defaults.revision, state = "completed" })
+	check(incomplete == nil and incomplete_result.code == "setup_incomplete", "setup cannot complete from record presence or readiness alone")
+	event = defaults_event(saved)
+	event.defaults.builder_record = "builder"
+	event.defaults.policy.release_manager_record = "release"
+	event.defaults.repository = { cwd = "/repo", repo_root = "/repo", common_dir = "/repo/.git",
+		target_ref = "refs/heads/main", head_revision = string.rep("a", 40), queue_route = "orch_queue" }
+	local configured = assert(state.apply(saved, event))
+	local completion = { kind = "setup_lifecycle", request_id = "complete-setup", expected_revision = configured.installation_defaults.revision,
+		state = "completed", catalog_version = 2,
+		spawn_setup = { schema = 1, state = "completed", config_revision = 2, readiness = { state = "not_run", config_revision = 0, summary = "" } },
+		records = {
+			{ id = "builder", revision = 1, enabled = true, eligible = true, capabilities = { "report-files-v1", "check-runner-v1" } },
+			{ id = "release", revision = 1, enabled = true, eligible = true, capabilities = { "report-files-v1", "release-manager-v1" } },
+		} }
+	local missing_checks = clone(completion); missing_checks.records[1].capabilities = { "report-files-v1" }
+	local refused, refusal = state.apply(configured, missing_checks)
+	check(refused == nil and refusal.code == "setup_incomplete", "record eligibility alone cannot replace verified check-runner capability")
+	local incompatible = clone(completion); incompatible.catalog_version = 1
+	check(state.apply(configured, incompatible) == nil, "old catalog metadata never implies setup completion")
+	for _, case in {
+		{ name = "review off still separates signer from builder", review = false, family = false, signer = "builder", reviewers = {}, allowed = false },
+		{ name = "review on separates signer from builder", review = true, family = false, signer = "builder", reviewers = { "reviewer" }, allowed = false },
+		{ name = "signer cannot be the only reviewer", review = true, family = false, signer = "release", reviewers = { "release" }, allowed = false },
+		{ name = "builder cannot be the only reviewer", review = true, family = false, signer = "release", reviewers = { "builder" }, allowed = false },
+		{ name = "different-family policy needs a compatible reviewer", review = true, family = true, signer = "release", reviewers = { "reviewer" }, provider = "Claude", allowed = false },
+		{ name = "ineligible independent reviewer does not complete setup", review = true, family = false, signer = "release", reviewers = { "reviewer" }, ineligible = true, allowed = false },
+		{ name = "signer cannot precede an otherwise compatible reviewer", review = true, family = true, signer = "release", reviewers = { "release", "reviewer" }, allowed = false },
+		{ name = "one compatible independent reviewer suffices", review = true, family = true, signer = "release", reviewers = { "missing", "reviewer" }, allowed = true },
+		{ name = "review off ignores unused conflicting reviewers", review = false, family = false, signer = "release", reviewers = { "builder", "release", "missing" }, allowed = true },
+	} do
+		local settings = defaults_event(configured)
+		settings.defaults.policy.require_code_review = case.review
+		settings.defaults.policy.require_other_family = case.family
+		settings.defaults.policy.release_manager_record = case.signer
+		settings.defaults.policy.reviewer_records = runtime.json.array(clone(case.reviewers))
+		local candidate = assert(state.apply(configured, settings))
+		local attempt = clone(completion); attempt.expected_revision = candidate.installation_defaults.revision
+		attempt.records[1].provider = "Claude"
+		table.insert(attempt.records[1].capabilities, "release-manager-v1")
+		attempt.records[2].provider = "Codex"
+		table.insert(attempt.records, { id = "reviewer", revision = 1, provider = case.provider or "Codex", enabled = true,
+			eligible = not case.ineligible, capabilities = { "report-files-v1" } })
+		local before = runtime.json.encode(candidate)
+		local finished, result = state.apply(candidate, attempt)
+		check((finished ~= nil) == case.allowed and result.code == (if case.allowed then "setup_saved" else "setup_incomplete"), case.name)
+		check(runtime.json.encode(candidate) == before, case.name .. " leaves the previous authority unchanged")
+		if finished then
+			check(finished.setup.state == "completed" and finished.setup.readiness.state == "not_run", case.name .. " completes required setup without an exercise")
+		end
+	end
+	local adoption_settings = clone(event); adoption_settings.expected_revision = adopted.installation_defaults.revision
+	adopted = assert(state.apply(adopted, adoption_settings))
+	local adoption = clone(completion); adoption.state = "adopted_existing"; adoption.expected_revision = adopted.installation_defaults.revision
+	local adopted_done = assert(state.apply(adopted, adoption))
+	check(adopted_done.setup.state == "adopted_existing" and not adopted_done.setup.review_existing
+		and d.policy(adopted_done, "orch-1").require_other_family,
+		"explicit adoption preserves sessions and finishes only after current required observations")
+	local exercise_registry, exercise_session = state.apply(configured, { kind = "register_session", request_id = "readiness-session", name = "Readiness" })
+	assert(exercise_registry and exercise_session.ok)
+	local observation = { kind = "setup_lifecycle", request_id = "early-readiness", expected_revision = configured.installation_defaults.revision,
+		readiness = { state = "passed", config_revision = configured.installation_defaults.revision, summary = "Observed exercise." } }
+	local unfenced, unfenced_result = state.apply(exercise_registry, observation)
+	check(unfenced == nil and unfenced_result.code == "stale_policy", "passed readiness requires its exercised session policy fence")
+	observation.readiness_policy = { logical_session_id = "orch-1", revision = 0 }
+	local overridden, override_result = state.apply(exercise_registry, observation)
+	check(overridden == nil and override_result.code == "stale_policy", "a session override cannot qualify installation defaults")
+	observation.readiness_policy = { logical_session_id = exercise_session.orch_session_id, revision = 0 }
+	local readiness_only = assert(state.apply(exercise_registry, observation))
+	local duplicate, duplicate_result = state.apply(readiness_only, observation)
+	check(duplicate == readiness_only and duplicate_result.code == "no_progress", "unchanged fenced readiness preserves no-op semantics")
+	for _, invalid in { { logical_session_id = exercise_session.orch_session_id, revision = -1 },
+		{ logical_session_id = exercise_session.orch_session_id, revision = 0, extra = true } } do
+		local bad = clone(observation); bad.readiness_policy = invalid
+		local refused, problem = state.apply(exercise_registry, bad)
+		check(refused == nil and problem.code == "invalid_readiness", "readiness policy fence keeps closed fields and revision bounds")
+	end
+	check(readiness_only.setup.state == configured.setup.state and readiness_only.setup.config_revision == configured.setup.config_revision,
+		"even passed readiness does not manufacture setup completion or change the tested configuration")
+	local completed = assert(state.apply(configured, completion))
+	check(completed.setup.state == "completed" and completed.setup.readiness.state == "not_run"
+		and completed.installation_defaults.records == nil, "required setup completes without optional readiness and stores no SPAWN records")
+	local ready = assert(state.apply(completed, { kind = "setup_lifecycle", request_id = "readiness", expected_revision = completed.installation_defaults.revision,
+		readiness = { state = "unavailable", config_revision = completed.installation_defaults.revision, summary = "Provider exercise declined." } }))
+	check(ready.setup.state == "completed" and ready.setup.readiness.state == "unavailable" and not state.project(ready).setup.readiness_stale,
+		"independent readiness refusal preserves completed lifecycle")
+	event = defaults_event(ready); event.defaults.policy.require_code_review = true
+	local manual = assert(state.apply(ready, event))
+	check(manual.setup.state == "completed" and state.project(manual).setup.readiness_stale,
+		"manual edit marks previous readiness stale without reopening first-install setup")
+	local stale_readiness, stale_readiness_result = state.apply(manual, { kind = "setup_lifecycle", request_id = "stale-exercise",
+		expected_revision = ready.installation_defaults.revision,
+		readiness = { state = "passed", config_revision = ready.installation_defaults.revision, summary = "Old exercise." } })
+	check(stale_readiness == nil and stale_readiness_result.code == "stale_revision", "exercise of an older config cannot overwrite current readiness")
+	local restarted_setup = assert(state.rehydrate(manual))
+	check(restarted_setup.setup.state == "completed" and restarted_setup.installation_defaults.revision == manual.installation_defaults.revision,
+		"reload preserves installation revision and explicit completion")
 end
 return "PASS " .. tostring(checks) .. " ownership state checks"

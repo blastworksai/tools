@@ -316,6 +316,9 @@ end
 local function same_origin(left: any, right: any): boolean
 	return type(left) == "table" and type(right) == "table" and same_policy(left, right)
 end
+local setup_ui = require("./setup_window").new({ surface = surface_node, decode = decoded, host = host_for,
+	membership = tab_sessions, epoch = incarnation, same = same_policy, copy = plain, id = dispatch_id,
+	family = dispatch.provider_family, decode_setup_response = dispatch.decode_setup_response })
 -- Exact-entry prompts pre-check the reducer's bounds; the host reducer validates again.
 local POLICY_FIELDS = {
 	rollover_threshold_pct = { label = "Rollover threshold %", minimum = 1, maximum = 99 },
@@ -2249,6 +2252,7 @@ local function withdraw_step(cx: WindowCx)
 	end
 end
 local driver_turn = 0
+local readiness_ui: any
 local function arm()
 	if timer ~= nil then return end
 	timer = tern.timer(TICK_MS, function(fresh: WindowCx?)
@@ -2257,6 +2261,8 @@ local function arm()
 		arm() -- Rearm before work so an unexpected native-context failure cannot kill observation.
 		if fresh ~= nil then
 			-- Clicked window-side controls first: each published intent runs at most once here.
+			setup_ui.tick(fresh)
+			if readiness_ui then readiness_ui.tick(fresh) end
 			pcall(consume_intents, fresh)
 			local scheduled, failure = pcall(schedule, fresh)
 			if not scheduled then
@@ -2526,6 +2532,24 @@ local function drive(cx: WindowCx, source: number, origin: any, command: string,
 	if id then start_driver(source, origin, id, worker_id, true) end
 	return id
 end
+readiness_ui = require("./readiness_window").new({
+	id = dispatch_id, same = same_policy, snapshot = snapshot, current = current_origin,
+	consent_current = function(cx: WindowCx, source: number, origin: any): boolean
+		return cx.session:view(source, { nodes = 1, depth = 0, max_chars = 1 }) ~= nil and current_origin(cx, source, origin)
+	end,
+	open_controller = function(cx: WindowCx, source: number) cx.layout:focus(source) end,
+	setup = function(cx: WindowCx, source: number): any? return workflow_node(cx, source, "setup-index", "orchplus.setup") end,
+	flow = function(cx: WindowCx, source: number): any? return workflow_node(cx, source, "workflow-index", "orchplus.workflow") end,
+	observation = function(cx: WindowCx, source: number): any? return workflow_node(cx, source, "readiness-index", "orchplus.readiness") end,
+	origin = function(cx: WindowCx, source: number): any?
+		local data = snapshot(cx, source)
+		if not data then return nil end
+		local origin = origin_now(cx, source, { source_nonce = data.source_nonce, orch_session_id = data.orch_session_id })
+		return if origin and current_origin(cx, source, origin) and data.controller_phase == "active" then origin else nil
+	end,
+	catalog = function(cx: WindowCx, source: number, origin: any) drive(cx, source, origin, "catalog", {}) end,
+	queue = function(cx: WindowCx, source: number, origin: any, fields: any): string? return drive(cx, source, origin, "queue", fields) end,
+})
 local ORIGIN_LOST = "this window is no longer the controller's current execution origin, so nothing was sent or its answer cannot be followed here. Run ORCH+ Continue controller in this window, then retry."
 -- An owner pick: `done` runs for a choice with `key` set (when given) while `still` holds
 -- (default: this window is still the current execution origin).
@@ -2992,7 +3016,7 @@ guide_control = dispatch_control
 -- client of one window key shares key, session and focus), so a fresh incarnation continues only
 -- through the palette commands below. Assistance follows the same rule while the host stamps a live
 -- origin's window into the intent (`window`); unstamped, any window showing the controller may assist.
-local INTENT_KINDS = { dispatch = true, assist = true }
+local INTENT_KINDS = { dispatch = true, assist = true, setup = true }
 local ASSIST_KINDS = { inspect = true, recheck = true, reveal = true, stop = true }
 local intents_seen = fifo(256)
 local function stamped_window(cx: WindowCx, source: number, window: any): boolean
@@ -3000,18 +3024,44 @@ local function stamped_window(cx: WindowCx, source: number, window: any): boolea
 	return type(window) == "table" and host ~= nil and window.window_key == cx:window_key() and window.window_epoch == incarnation
 		and window.native_session_id == tostring(cx.sessions:current().id) and window.window_host_id == tostring(host.id)
 end
-local function intent_step(cx: WindowCx, source: number)
+local function native_page_current(cx: WindowCx, source: number, request: any): boolean
+	if request.command ~= "readiness" or type(request.native_window) ~= "string" or #request.native_window > 256
+		or utf8.len(request.native_window) == nil or request.native_window:find("%z") or request.native_window ~= cx:window_key() then return false end
+	for key in request do if key ~= "command" and key ~= "source_nonce" and key ~= "native_window" then return false end end
+	local host, current = host_for(cx, source), cx.hosts:current()
+	local pane, session = cx.session:pane(source), cx.sessions:current()
+	if not host or host.state ~= "connected" or current.state ~= "connected" or host.id ~= current.id
+		or not pane or not scanned_controller(pane, tab_sessions(cx), session)
+		or cx.session:view(source, { nodes = 1, depth = 0, max_chars = 1 }) == nil then return false end
+	local owner = alias(cx, source)
+	return owner ~= nil and owner.alias_nonce == request.source_nonce
+end
+local function intent_step(cx: WindowCx, source: number, current: boolean)
 	local node, bytes = surface_node(cx, source, BLOCK, "orchplus.intent", "operator-intent", codec.LIMITS.logical)
 	if not node or not bytes then return end
 	local intent = codec.strict_decode(bytes, codec.LIMITS.logical)
 	if type(intent) ~= "table" or intent.version ~= 1 or not INTENT_KINDS[intent.kind] or type(intent.source_nonce) ~= "string"
 		or type(intent.serial) ~= "string" or #intent.serial > 256 or type(intent.request) ~= "table"
 		or intent.request.source_nonce ~= intent.source_nonce then return end
+	local request = intent.request
+	local native_page = intent.kind == "setup" and request.native_window ~= nil
+	-- Read retained page intents even outside the current scope so moving a refused pane later
+	-- cannot turn navigation into a delayed action. Ordinary controller controls keep their gates.
+	if not native_page and not current then return end
 	local id = intent.source_nonce .. "|" .. intent.serial
 	if intents_seen.values[id] then return end
 	intents_seen.put(id, true)
-	local request = intent.request
-	if intent.kind == "dispatch" then
+	-- Another native window may be consuming its own addressed entry concurrently.
+	if native_page and request.native_window ~= cx:window_key() then return end
+	if native_page and not native_page_current(cx, source, request) then
+		cx.session:event(source, { ev = "action", id = node.id, act = "operator-intent-done",
+			value = tern.json.encode({ source_nonce = intent.source_nonce, serial = intent.serial }) })
+		cx:toast("info", "ORCH+ readiness page refused", "The native window, host, session or visible source changed. Nothing ran; this page entry will not retry.")
+		return
+	end
+	if intent.kind == "setup" then
+		if intent.window ~= nil and not stamped_window(cx, source, intent.window) then return end
+	elseif intent.kind == "dispatch" then
 		local origin = origin_now(cx, source, request)
 		if not origin or not current_origin(cx, source, origin) then return end
 	elseif request.version ~= 2 or (request.target ~= "controller" and request.target ~= "orchestrator") or not ASSIST_KINDS[request.kind]
@@ -3021,7 +3071,13 @@ local function intent_step(cx: WindowCx, source: number)
 	-- Settle before acting: a failing or prompting control is never re-run from the same intent.
 	cx.session:event(source, { ev = "action", id = node.id, act = "operator-intent-done",
 		value = tern.json.encode({ source_nonce = intent.source_nonce, serial = intent.serial }) })
-	if intent.kind == "dispatch" then
+	if native_page and cx.hosts:current().kind == "remote" then
+		cx:toast("info", "ORCH+ optional readiness", "This exercise requires the local execution host. Navigation did not change setup or readiness.")
+		return
+	end
+	if intent.kind == "setup" then
+		if request.command == "readiness" then readiness_ui.start(cx, source) else setup_ui.start(cx, source, request.command) end
+	elseif intent.kind == "dispatch" then
 		dispatch_control(cx, source, request)
 	else
 		local performed, failure = pcall(assist, cx, source, request)
@@ -3030,16 +3086,37 @@ local function intent_step(cx: WindowCx, source: number)
 end
 consume_intents = function(cx: WindowCx)
 	local host, session = cx.hosts:current(), cx.sessions:current()
-	if host.state ~= "connected" then return end
 	local membership = tab_sessions(cx)
-	for _, pane in panes_on(cx, host) do
-		if scanned_controller(pane, membership, session) then
-			local ok, failure = pcall(intent_step, cx, pane.pane)
+	for _, pane in cx.session:panes() do
+		if pane.block == BLOCK then
+			local current = host.state == "connected" and table.find(host.panes, pane.pane) ~= nil and scanned_controller(pane, membership, session)
+			local ok, failure = pcall(intent_step, cx, pane.pane, current)
 			if not ok then cx:toast("error", "ORCH+ control failed", tostring(failure):sub(1, 300)) end
 		end
 	end
 end
 tern.command({ id = "open", title = "ORCH+", icon = "flow", group = "ORCH+", run = function(cx: WindowCx) open(cx) end })
+local function setup_palette(cx: WindowCx, command: string)
+	local host, session = cx.hosts:current(), cx.sessions:current()
+	local membership, candidates = tab_sessions(cx), {}
+	for _, pane in panes_on(cx, host) do
+		if pane.block == BLOCK and pane.tab and membership[pane.tab] == session.id then table.insert(candidates, pane.pane) end
+	end
+	local source = if #candidates == 1 then candidates[1] else nil
+	if not source then
+		for _, pane in candidates do if pane == cx.session:focused() then source = pane end end
+	end
+	if source then
+		cx.layout:focus(source)
+		if command == "readiness" then readiness_ui.start(cx, source) else setup_ui.start(cx, source, command) end
+	else
+		open(cx, true)
+		cx:toast("info", "ORCH+ setup", "Initialize/recheck the host authority if needed, then choose Setup or Installation defaults in this view.")
+	end
+end
+tern.command({ id = "orch_setup", title = "ORCH+ Setup wizard", icon = "flow", group = "ORCH+", run = function(cx: WindowCx) setup_palette(cx, "wizard") end })
+tern.command({ id = "installation_defaults", title = "ORCH+ Installation defaults", icon = "flow", group = "ORCH+", run = function(cx: WindowCx) setup_palette(cx, "defaults") end })
+tern.command({ id = "orch_readiness", title = "ORCH+ Optional readiness exercise", icon = "flow", group = "ORCH+", run = function(cx: WindowCx) setup_palette(cx, "readiness") end })
 -- Palette continuation: the one input Tern attributes to the window it happened in. Targets this
 -- session's only controller with a recorded owner, else the focused one; dispatch_control re-validates it.
 local function palette_continuation(cx: WindowCx, command: string, title: string)

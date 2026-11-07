@@ -157,7 +157,7 @@ function Backend.build(record: any, host: any, options: any?): (any?, string?)
 		table.insert(resolved.arguments, slot, prompt)
 		table.insert(capabilities, "argv-v1")
 	end
-	local selected, user_error = Resolution.select_user(resolved, host_kind)
+	local selected, user_error = Resolution.select_user(resolved, host_kind, true)
 	if not selected then return nil, user_error end
 	-- Native/local cwd belongs to pane/start options, not a second cd.
 	-- Managed remote cwd is literal, unlike ordinary SSH's home shorthand.

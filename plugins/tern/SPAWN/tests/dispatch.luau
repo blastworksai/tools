@@ -13,10 +13,17 @@ local function fixture(seed,actual_mailbox)
  local record={id='worker',provider='omp',account_label='Configured display',backend='native-agent',command='omp',arguments={},cwd='/work',placement='tab',enabled=true,include_all=true,fresh_native_default=true,mailbox={permitted_root='/mail',helper_path='/tools/helper',worker_identity='fixture',verified=true,evidence_ref='fixture-only',wake='native-ask-v1',producer={read=true,write=true,hash=true,journal=true,poll=false},capabilities={'report-files-v1','native-ask-v1'}}}
  record.mailbox.producer_helper_path='/tools/worker-helper'
  local snapshot={ready=true,namespace='host',host_key='host:test',config_revision=0,records={record},host_os='linux',host_shell='/bin/sh'}
+ snapshot.setup={schema=1,state='completed',config_revision=0,readiness={state='not_run',config_revision=0,summary=''}}
  local binding={authority_id='host:1',managed_authority_id='host:1',session_key='host/session/1',host_key='host:test',native_session=1}
  local mailbox_binding,mailbox_handover=nil,nil
  local authority={snapshot=function()return copy(snapshot)end,managed_reserve=function(_,_,id,observer)effects.reserves+=1;return {id='attempt-1',record_id=id,observer_id=observer}end,managed_observe=function()effects.observations+=1;return true end,managed_retire=function(...)effects.retire_args={...};effects.retirements=(effects.retirements or 0)+1;return not effects.fail_retire,'injected retirement storage failure' end,managed_import=function()effects.imports+=1;return {imported=1}end}
  authority.managed_snapshot=authority.snapshot
+ authority.setup_snapshot=function()
+  effects.setup_reads=(effects.setup_reads or 0)+1
+  if effects.setup_error then return nil,effects.setup_error end
+  if effects.absent then return {config_revision=0,records={},setup={schema=1,state='not_started',config_revision=0,readiness={state='not_run',config_revision=0,summary=''}}} end
+  return copy(snapshot)
+ end
  authority.execution_bindings=function()return {} end
  local mailbox={empty=function()return {version=1,generations={}}end,validate=function(r)if type(r)~='table' or r.version~=1 then return nil,{status='rejected',error={code='journal_corrupt'}} end return r end,recover=copy,get=function()return {binding=copy(mailbox_binding),record_id='worker',record_revision=0,phase='provisioned',capabilities=copy(record.mailbox.capabilities),handover=copy(mailbox_handover)}end,location=function()return {root='/mail/private',helper='/tools/helper',producer_helper='/tools/worker-helper',wake=effects.wake_route or 'native-ask-v1'}end}
  mailbox.prepare=function(registry,_,_,context)
@@ -98,7 +105,7 @@ local function fixture(seed,actual_mailbox)
    local definitions={}
    injected.block={define=function(name,definition)definitions[name]=definition end}
    injected.pane={list=function()return {{pane=12,program='orchplus.orchestrator'}}end}
-   authority.binding=function()return copy(binding)end
+   authority.binding=function()effects.bindings=(effects.bindings or 0)+1;return copy(binding)end
    modules.native_cli={inspect=function(window,_,callback)
     effects.inspected=effects.inspected or {};table.insert(effects.inspected,if window==nil then '<host>' else window)
     local inventory=if effects.inspect then effects.inspect(window) else {clients={{kind='window',window='fixture'}},sessions={{id=1,tabs={{blocks={{id=77},{id=12}}}}}}}
@@ -125,7 +132,7 @@ local function fixture(seed,actual_mailbox)
   local cx={pane=77,save=function()end,render=function()end}
   local state=definition.init(cx,{},nil)
   definition.event(state,{ev='action',act=r.op,value=runtime.json.encode(r)},cx)
-  return state.body
+  return state.body,state,cx,definition
  end
  return {p=p,c=c,d=d,raw=raw,req=req,launch=launch,binding=binding,effects=effects,snapshot=snapshot,saved=saved,origin=origin,authority=authority,transport=transport,host_event=host_event,host_request=host_request,host=host,image=function()return copy(saved)end}
 end
@@ -148,8 +155,77 @@ check(f.p.decode('{"schema":null}')==nil,'null rejected')
 local wire=f.p.encode(f.p.body(r,'catalog',{revision=0,records={}}))
 check(f.p.unframe(wire).request_id=='catalog','exact body bytes/hash roundtrip')
 check(f.p.unframe(wire..'x')==nil,'trailing bytes rejected')
+do
+ local setup=fixture()
+ local q={schema=1,origin='orchplus',op='catalog',request_id='setup-catalog',action_id='setup-action',setup_origin={host_pane_id='12',window_key='',window_epoch='setup-epoch',native_session_id='3',window_host_id='7'}}
+ check(setup.p.decode(runtime.json.encode(q))~=nil,'precontroller catalog accepts the exact closed read-only shape, including an empty native window key')
+ for _,field in ipairs({'origin_binding','controller_generation','controller_pane','logical_session_id','command'}) do
+  local invalid=copy(q);invalid[field]=if field=='origin_binding' then copy(setup.origin) else 'forbidden'
+  check(setup.p.decode(runtime.json.encode(invalid))==nil,'precontroller catalog refuses controller/mutation field '..field)
+ end
+ for _,field in ipairs({'host_pane_id','window_key','window_epoch','native_session_id','window_host_id'}) do
+  local invalid=copy(q);invalid.setup_origin[field]=nil
+  check(setup.p.decode(runtime.json.encode(invalid))==nil,'precontroller catalog requires native identity '..field)
+ end
+ local invalid=copy(q);invalid.setup_origin.extra=true
+ check(setup.p.decode(runtime.json.encode(invalid))==nil,'setup origin is closed')
+ invalid=copy(q);invalid.op='owner_status'
+ check(setup.p.decode(runtime.json.encode(invalid))==nil,'setup origin never authorizes a controller operation')
+ local definition=setup.host();local cx={pane=77,save=function()end,render=function()end}
+ definition.view(definition.init(cx,{},nil),cx)
+ check(next(setup.saved)==nil,'opening and rendering a fresh bridge initializes no transport state')
+ setup.effects.absent=true
+ local before=setup.image()
+ local absent=setup.d.request(q,nil,nil,function()end)
+ check(absent.status=='catalog' and absent.payload.catalog_version==2 and absent.payload.setup.state=='not_started' and absent.payload.setup.readiness.state=='not_run' and #absent.payload.records==0 and absent.payload.revision==0 and absent.payload.namespace==nil and absent.payload.host_key==nil,'genuine absence exposes empty not_started setup without invented authority identity')
+ check(absent.origin_binding==nil and absent.controller_generation==nil and setup.p.equal(absent.setup_origin,q.setup_origin) and absent.action_id==q.action_id,'setup response correlates exact native origin and action without a fake controller')
+ check(setup.p.equal(setup.p.unframe(setup.p.encode(absent)),absent),'setup catalog retains bounded exact body framing')
+ check(setup.p.equal(before,setup.image()) and setup.effects.reserves==0 and setup.effects.observations==0 and setup.effects.imports==0 and setup.effects.bindings==nil,'setup catalog writes no owners, requests, grants, fences, history or authority scopes')
+ check(setup.raw.stage(q,nil,nil,77).status=='rejected' and setup.raw.execution(q,77)==nil and setup.p.equal(before,setup.image()),'setup requests cannot acquire a staged execution grant')
+ for _,message in ipairs({'Authority missing after initialization; restore it','Corrupt authority; restore it'}) do
+  setup.effects.setup_error=message
+  local refused=setup.d.request(q,nil,nil,function()end)
+  check(refused.status=='rejected' and refused.error.code=='storage_error' and refused.error.message==message and refused.payload==nil,'lost/corrupt authority never masquerades as first install')
+ end
+ setup.effects.setup_error=nil;setup.effects.absent=nil
+ setup.snapshot.setup.state='in_progress'
+ local adopted=setup.d.request(q,nil,nil,function()end)
+ check(adopted.payload.setup.state=='in_progress' and #adopted.payload.records==1,'existing records cannot imply setup completion')
+ setup.snapshot.config_revision=2;setup.snapshot.setup.state='completed';setup.snapshot.setup.config_revision=2
+ setup.snapshot.setup.readiness={state='passed',config_revision=1,summary='Earlier optional exercise'}
+ local current=setup.d.request(q,nil,nil,function()end)
+ check(current.payload.config_revision==2 and current.payload.setup.state=='completed' and current.payload.setup.readiness.config_revision==1,'read-only repeated setup request observes current metadata and preserves visibly stale optional readiness')
+ local page=copy(q);page.cursor={revision=0,index=1}
+ check(setup.d.request(page,nil,nil,function()end).error.code=='binding_mismatch','setup catalog pagination remains revision-fenced')
+ page.cursor={revision=2,index=3}
+ check(setup.d.request(page,nil,nil,function()end).error.code=='invalid_schema','setup catalog rejects out-of-range cursors')
+ local body,state,hcx,hdef=setup.host_request(q)
+ check(body.status=='pending' and setup.effects.bindings==nil,'host verifies native membership but never opens an authority scope for setup')
+ local read_count=setup.effects.setup_reads
+ local rendered=hdef.view(state,hcx);local projected=false
+ for _,child in ipairs(rendered.main.c) do if child.p and child.p.key=='spawn-dispatch-execution' then projected=true end end
+ check(projected and hdef.save(state).request_json==nil and setup.effects.setup_reads==read_count,'setup awaits an ephemeral native view observation without persisting its request')
+ local observation_id=state.setup_read.observation_id
+ hdef.event(state,{ev='action',act='spawn.setup_catalog',value=runtime.json.encode({request_json=runtime.json.encode(q),observation_id='invented-observation'})},hcx)
+ check(state.body.status=='pending' and setup.effects.setup_reads==read_count,'the public request alone cannot invent a private native view observation')
+ local wrong=copy(q);wrong.setup_origin.window_epoch='old-epoch'
+ hdef.event(state,{ev='action',act='spawn.setup_catalog',value=runtime.json.encode({request_json=runtime.json.encode(wrong),observation_id=observation_id})},hcx)
+ check(state.body.status=='pending' and setup.effects.setup_reads==read_count,'changed setup origin cannot consume a pending observation')
+ hdef.event(state,{ev='action',act='spawn.setup_catalog',value=runtime.json.encode({request_json=runtime.json.encode(q),observation_id=observation_id})},hcx)
+ check(state.body.status=='catalog' and setup.effects.setup_reads==read_count+1 and setup.p.equal(before,setup.image()),'exact live window observation reads catalog once without persistent dispatch writes')
+ hdef.event(state,{ev='action',act='spawn.setup_catalog',value=runtime.json.encode({request_json=runtime.json.encode(q),observation_id=observation_id})},hcx)
+ check(setup.effects.setup_reads==read_count+1,'a completed read has no reusable pending observation')
+ local renewed=hdef.init(hcx,{},hdef.save(state))
+ hdef.event(renewed,{ev='action',act='spawn.setup_catalog',value=runtime.json.encode({request_json=runtime.json.encode(q),observation_id=observation_id})},hcx)
+ check(renewed.body==nil and setup.effects.setup_reads==read_count+1,'host reload cannot restore a pending setup observation')
+ local foreign=copy(q);foreign.setup_origin.host_pane_id='999'
+ check(setup.host_request(foreign).status=='rejected','host refuses a source absent from actual native membership')
+ local _,expired,ecx,edef=setup.host_request(q)
+ setup.effects.now=1700030001.25;edef.view(expired,ecx)
+ check(expired.body.status=='rejected' and expired.body.error.code=='target_unavailable' and expired.setup_read==nil,'unobserved native setup origin expires visibly without history')
+end
 local cat=f.d.request(r,f.binding,1,function()end)
-check(cat.status=='catalog' and cat.payload.records[1].eligible,'configured catalog retained without inventing verified identity')
+check(cat.status=='catalog' and cat.payload.catalog_version==2 and f.p.equal(cat.payload.setup,f.snapshot.setup) and cat.payload.records[1].eligible,'postcontroller catalog exports explicit setup metadata without inventing verified identity')
 f.snapshot.config_revision=1
 check(f.d.request(r,f.binding,1,function()end).payload.revision==0,'same catalog request replays immutable revision')
 f.snapshot.config_revision=0

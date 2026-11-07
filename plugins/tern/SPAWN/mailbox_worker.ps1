@@ -562,13 +562,18 @@ function Receive {
    ValueType $p.answer 'long'
   }
   'landing_grant' {
-   Fields $p @('landing_id','grant_id','project_id','checkpoint_id','repo_ref','target_ref','target_revision','source_ref','source_revision','builder_work_id','review_id','reviewer_family','proof')
-   foreach ($key in @('landing_id','grant_id','project_id','checkpoint_id','builder_work_id','review_id')) { ValueType $p[$key] 'id' }
+   ObjectFields $p @('landing_id','grant_id','project_id','checkpoint_id','repo_ref','target_ref','target_revision','source_ref','source_revision','builder_work_id','proof') @('review_id','reviewer_family')
+   foreach ($key in @('landing_id','grant_id','project_id','checkpoint_id','builder_work_id')) { ValueType $p[$key] 'id' }
    foreach ($key in @('repo_ref','target_ref','target_revision','source_ref','source_revision')) { ValueType $p[$key] 'short' }
-   ValueType $p.reviewer_family 'family'
-   Fields $p.proof @('mode','artifact_revision','review_id','check_refs')
-   Choice $p.proof.mode @('cross_family_review','helper_checks'); ValueType $p.proof.artifact_revision 'short'; ValueType $p.proof.review_id 'id'
+   ObjectFields $p.proof @('mode','artifact_revision','check_refs') @('review_id')
+   Choice $p.proof.mode @('cross_family_review','helper_checks','review_disabled'); ValueType $p.proof.artifact_revision 'short'
    Values $p.proof.check_refs 'short' 0 16
+   if ($p.proof.mode -ceq 'review_disabled') {
+    if ($p.ContainsKey('review_id') -or $p.ContainsKey('reviewer_family') -or $p.proof.ContainsKey('review_id')) { Fail 'invalid_schema' }
+   } else {
+    ValueType $p.review_id 'id'; ValueType $p.reviewer_family 'family'; ValueType $p.proof.review_id 'id'
+    if ($p.proof.review_id -cne $p.review_id) { Fail 'invalid_schema' }
+   }
   }
   'review_request' {
    ObjectFields $p @('review_id','round','question_id','builder_work_id','task_ref','source_ref','artifact_revision','scope_paths','findings_prev') @('plan_ref','plan_revision')

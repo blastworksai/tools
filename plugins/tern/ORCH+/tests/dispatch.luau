@@ -36,6 +36,10 @@ local host, state, dispatch, codec, quota = load("host"), load("state"), load("d
 local checks, serial = 0, 0
 local function check(ok, why) assert(ok, why); checks += 1 end
 local function next_id() serial += 1; return "fixture-" .. tostring(serial) end
+local function catalog_setup(revision)
+	return { schema = 1, state = "completed", config_revision = revision,
+		readiness = { state = "not_run", config_revision = revision, summary = "Optional readiness exercise not run" } }
+end
 local function frame(request, status, payload, problem)
 	local body = { schema = 1, op = request.op, request_id = request.request_id, action_id = request.action_id,
 		origin_binding = clone(request.origin_binding), controller_generation = request.controller_generation, status = status, payload = payload, error = problem }
@@ -111,7 +115,7 @@ local function fixture(clock)
 	end
 	function f:catalog(revision, record_id, cwd)
 		local r = self:apply("catalog")
-		assert(self:finish(r.action_id, "catalog", { namespace = "fixture-spawn", host_key = "fixture-host", config_revision = revision, revision = revision, records = runtime.json.array({ { id = record_id or "native", revision = revision,
+		assert(self:finish(r.action_id, "catalog", { catalog_version = 2, setup = catalog_setup(revision), namespace = "fixture-spawn", host_key = "fixture-host", config_revision = revision, revision = revision, records = runtime.json.array({ { id = record_id or "native", revision = revision,
 			provider = "omp", account_label = "configured, not verified", backend = "native-agent", enabled = true, eligible = true,
 			capability_evidence = "configured_operator_attestation_not_runtime_proof", effective_identity = { provider = "omp", evidence = "configured" },
 			capabilities = runtime.json.array({ "report-files-v1", "native-ask-v1", "coordinator-control-v1" }), unsupported = runtime.json.array(), cwd = cwd or "/fixture", placement = "split" } }) }).ok)
@@ -719,7 +723,7 @@ do
 	check(displayed.result.action_id == queued_catalog.action_id and displayed.action.phase == "ready", "rendered dispatch result and selected action come from the same completed host transition")
 	local granted_catalog = command("claim", { action_id = queued_catalog.action_id, executor = "fixture-window" })
 	local retained = ui_value.dispatch.actions[queued_catalog.action_id]
-	local response_bytes = frame(retained.request, "catalog", { namespace = "fixture-spawn", host_key = "fixture-host", config_revision = 0, revision = 0, records = runtime.json.array() })
+	local response_bytes = frame(retained.request, "catalog", { catalog_version = 2, setup = catalog_setup(0), namespace = "fixture-spawn", host_key = "fixture-host", config_revision = 0, revision = 0, records = runtime.json.array() })
 	local event = { ev = "action", act = "dispatch-result/" .. granted_catalog.claim.grant_id .. "/" .. origin.window_epoch, value = response_bytes }
 	definition.event(views[11], event, contexts[11])
 	check(displayed.receipt.action_id == queued_catalog.action_id and displayed.receipt.grant_id == granted_catalog.claim.grant_id
@@ -784,7 +788,7 @@ do
 	local previous_receipt = clone(displayed.receipt)
 	local pending_catalog = command("catalog")
 	local pending_grant = command("claim", { action_id = pending_catalog.action_id, executor = "fixture-window" })
-	local failed_bytes = frame(ui_value.dispatch.actions[pending_catalog.action_id].request, "catalog", { namespace = "fixture-spawn", host_key = "fixture-host", config_revision = 0, revision = 0, records = runtime.json.array() })
+	local failed_bytes = frame(ui_value.dispatch.actions[pending_catalog.action_id].request, "catalog", { catalog_version = 2, setup = catalog_setup(0), namespace = "fixture-spawn", host_key = "fixture-host", config_revision = 0, revision = 0, records = runtime.json.array() })
 	local original_set = fake.kv.set
 	fake.kv.set = function() error("injected native observation commit failure") end
 	definition.event(views[11], { ev = "action", act = "dispatch-result/" .. pending_grant.claim.grant_id .. "/" .. origin.window_epoch, value = failed_bytes }, contexts[11])
@@ -1136,7 +1140,7 @@ local function window_consumer(mode)
 		table.insert(events, { op = ev.act, bytes = ev.value })
 		if ev.act == "catalog" then
 			catalog_sends += 1
-			local success = frame(request, "catalog", { namespace = "fixture-spawn", host_key = "fixture-host", config_revision = 0, revision = 0, records = runtime.json.array() })
+			local success = frame(request, "catalog", { catalog_version = 2, setup = catalog_setup(0), namespace = "fixture-spawn", host_key = "fixture-host", config_revision = 0, revision = 0, records = runtime.json.array() })
 			if held then
 				held_success = dispatch.decode_response(success, request)
 				bridge_bytes = frame(request, "pending", {})
@@ -2012,7 +2016,7 @@ if section == nil or section == "sweep_policy" then
 	-- A genuine pre-sweep policy also predates the rollover-routing, concurrency and Config v4 fields.
 	for _, key in { "worker_rollover_records", "worker_rollover_provider", "worker_rollover_account", "worker_rollover_model", "coordinator_rollover_records",
 		"coordinator_rollover_provider", "coordinator_rollover_account", "coordinator_rollover_model", "concurrency_limit",
-		"loop_cap", "review_rounds", "stale_claim_min", "enforce_cross_family", "family_map", "reviewer_records", "release_manager_record", "checkout_roots",
+		"loop_cap", "review_rounds", "stale_claim_min", "require_code_review", "require_other_family", "family_map", "reviewer_records", "release_manager_record", "checkout_roots",
 		"auto_approve_kinds", "glitch_integration", "default_work_source", "board_path", "board_lanes", "inbox_folder", "auto_launch_intake", "routes",
 		"labeller_record", "role_guidance", "templates" } do legacy.dispatch.policies[sid][key] = nil end
 	check(not dispatch.valid(legacy.dispatch, legacy), "a pre-sweep stored policy is accepted only at the restore boundary")
@@ -2080,7 +2084,7 @@ if section == nil or section == "command_retention" then
 	check(f.authority:apply(old).code == "stale_command" and runtime.json.encode(f.authority.registry) == before, "compacted old pause cannot restore stale owner intent")
 	check(f.authority:apply(progress).code == "stale_command" and f.authority:apply(noop).code == "stale_command"
 		and f.authority.registry.dispatch.workers[id].workflow.report_request == nil, "compacted old issued and no-effect progress intents cannot create another request cycle")
-	check(f:finish(read.action_id, "catalog", { namespace = "fixture-spawn", host_key = "fixture-host", config_revision = 0, revision = 0, records = runtime.json.array() }).ok, "newer control commands cannot make the original delayed effect result uncommittable")
+	check(f:finish(read.action_id, "catalog", { catalog_version = 2, setup = catalog_setup(0), namespace = "fixture-spawn", host_key = "fixture-host", config_revision = 0, revision = 0, records = runtime.json.array() }).ok, "newer control commands cannot make the original delayed effect result uncommittable")
 	local restored = state.rehydrate(clone(f.authority.registry))
 	check(restored ~= nil and restored.dispatch.command_cursors[f.origin.logical_session_id].seq > old.command_seq, "durable stale-command barrier survives restore independently of history")
 	local corrupt = clone(f.authority.registry); corrupt.dispatch.command_cursors = nil
@@ -2103,6 +2107,7 @@ if section == nil or section == "catalog_join" then
 	end
 	local legacy = clone(stored)
 	legacy.dispatch.catalogs[sid].namespace = nil; legacy.dispatch.catalogs[sid].host_key = nil; legacy.dispatch.catalogs[sid].config_revision = nil
+	legacy.dispatch.catalogs[sid].catalog_version = nil; legacy.dispatch.catalogs[sid].setup = nil
 	restored = assert(state.rehydrate(legacy))
 	check(restored.dispatch.catalogs[sid] == nil and restored.dispatch.workers[id].worker_id == id
 		and restored.dispatch.workers[id].enrolment_token == stored.dispatch.workers[id].enrolment_token
@@ -3786,7 +3791,7 @@ do
 	local function q_fixture(clock)
 		local f = fixture(function() return if clock then clone(clock) else { now_ms = QNOW } end)
 		local r = f:apply("catalog")
-		assert(f:finish(r.action_id, "catalog", { namespace = QJOIN.namespace, host_key = QJOIN.host_key, config_revision = 0, revision = 0, records = runtime.json.array({
+		assert(f:finish(r.action_id, "catalog", { catalog_version = 2, setup = catalog_setup(0), namespace = QJOIN.namespace, host_key = QJOIN.host_key, config_revision = 0, revision = 0, records = runtime.json.array({
 			q_row("native", "omp", "Work", "m1"), q_row("alt-same", "omp", "Work", "m1"), q_row("alt-early", "omp", "Work", "m1"),
 			q_row("alt-model", "omp", "Work", "m2"), q_row("alt-provider", "other", "Work", "m1") }) }).ok)
 		return f
@@ -3996,7 +4001,7 @@ do
 	-- Accepted unrouted worker plus the multi-record routing catalog; epoch clock for liveness.
 	local function q_catalog(f)
 		local r = f:apply("catalog")
-		assert(f:finish(r.action_id, "catalog", { namespace = QJOIN.namespace, host_key = QJOIN.host_key, config_revision = 0, revision = 0, records = runtime.json.array({
+		assert(f:finish(r.action_id, "catalog", { catalog_version = 2, setup = catalog_setup(0), namespace = QJOIN.namespace, host_key = QJOIN.host_key, config_revision = 0, revision = 0, records = runtime.json.array({
 			q_row("native", "omp", "Work", "m1"), q_row("alt-same", "omp", "Work", "m1"), q_row("alt-early", "omp", "Work", "m1"),
 			q_row("alt-model", "omp", "Work", "m2"), q_row("alt-provider", "other", "Work", "m1") }) }).ok)
 	end
@@ -4304,14 +4309,14 @@ do
 		check(state.rehydrate(clone(g.authority.registry)) ~= nil, "the strict launch state restores")
 	end
 end
--- Config v4 (CP1): 46 bounded keys, every historical store migrates, live saves stay strict.
+-- Config v4 (CP1): 47 bounded keys, every historical store migrates, live saves stay strict.
 local POLICY_V0 = { "paused", "poll_ms", "heartbeat_ms", "stale_ms", "automatic_reports" }
 local POLICY_V1 = { "auto_rollover", "rollover_threshold_pct", "rollover_include_coordinator", "quota_routing", "excluded_workers" }
 local POLICY_V2 = { "quota_reserve_pct", "quota_max_age_ms", "initial_dispatch_records", "initial_dispatch_provider", "initial_dispatch_account", "initial_dispatch_model" }
 local POLICY_V3 = { "sweep_enabled", "sweep_time" }
 local POLICY_V4 = { "worker_rollover_records", "worker_rollover_provider", "worker_rollover_account", "worker_rollover_model",
 	"coordinator_rollover_records", "coordinator_rollover_provider", "coordinator_rollover_account", "coordinator_rollover_model", "concurrency_limit" }
-local POLICY_NEW = { loop_cap = 3, review_rounds = 2, stale_claim_min = 30, enforce_cross_family = true, family_map = {}, reviewer_records = {},
+local POLICY_NEW = { loop_cap = 3, review_rounds = 2, stale_claim_min = 30, require_code_review = true, require_other_family = true, family_map = {}, reviewer_records = {},
 	release_manager_record = "", checkout_roots = {}, auto_approve_kinds = {}, glitch_integration = true, default_work_source = "glitch_plan",
 	board_path = "", board_lanes = { queued = "Todo", running = "Doing", review = "Review", done = "Done" }, inbox_folder = "", auto_launch_intake = false,
 	routes = {}, labeller_record = "", role_guidance = { builder = "", reviewer = "", release_manager = "", labeller = "", coordinator = "" }, templates = {} }
@@ -4332,13 +4337,51 @@ if section == nil or section == "policy_keys" then
 	local function saved() return dispatch.policy(f.authority.registry, sid) end
 	local function save(fields) return f:apply("policy", fields) end
 	local defaults = saved()
-	check(key_count(defaults) == 46, "a fresh session policy has exactly 46 keys")
+	check(key_count(defaults) == 47, "a fresh session policy has exactly 47 keys")
 	local new_ok = true
 	for key, value in POLICY_NEW do if not same_json(defaults[key], value) then new_ok = false end end
-	check(new_ok and key_count(POLICY_NEW) == 19, "every Contract B key starts at its documented default")
-	-- A fresh session has no stored policy yet; one save stores the full 46-key form.
-	check(save({ policy = { loop_cap = 4 } }).code == "policy_updated" and key_count(f.authority.registry.dispatch.policies[sid]) == 46, "the first save stores all 46 keys")
-	-- Migration: each historical store shape restores to all 46 keys with its own values kept.
+	check(new_ok and key_count(POLICY_NEW) == 20, "every Contract B key starts at its documented default")
+	-- A fresh session has no stored policy yet; one save stores the full 47-key form.
+	check(save({ policy = { loop_cap = 4 } }).code == "policy_updated" and key_count(f.authority.registry.dispatch.policies[sid]) == 47, "the first save stores all 47 keys")
+	check(saved().require_code_review and saved().require_other_family, "fresh sessions require review and another family")
+	for _, old in { true, false } do
+		local legacy = clone(f.authority.registry)
+		local p = legacy.dispatch.policies[sid]
+		p.require_code_review = nil; p.require_other_family = nil; p.enforce_cross_family = old
+		check(not dispatch.valid(legacy.dispatch, legacy), "obsolete policy is never a live schema")
+		local restored = assert(state.rehydrate(clone(legacy)))
+		local migrated = restored.dispatch.policies[sid]
+		check(migrated.require_code_review == true and migrated.require_other_family == old and migrated.enforce_cross_family == nil
+			and migrated.loop_cap == 4, "old family policy migrates without disabling review or changing unrelated settings")
+		check(state.rehydrate(clone(restored)) ~= nil, "migrated policy restores again without a legacy alias")
+	end
+	for _, patch in {
+		{ enforce_cross_family = false }, { enforce_cross_family = true },
+		{ require_code_review = false, require_other_family = true },
+		{ require_code_review = "no" }, { require_other_family = "yes" },
+	} do
+		local before = runtime.json.encode(f.authority.registry)
+		check(save({ policy = patch }).code == "invalid_policy" and runtime.json.encode(f.authority.registry) == before,
+			"obsolete, contradictory or non-boolean live policy is refused atomically")
+	end
+	for _, mutate in {
+		function(p) p.require_code_review = false; p.require_other_family = true end,
+		function(p) p.require_code_review = nil end,
+		function(p) p.require_other_family = nil end,
+		function(p) p.enforce_cross_family = false end,
+	} do
+		local invalid = clone(f.authority.registry); mutate(invalid.dispatch.policies[sid])
+		check(not dispatch.valid(invalid.dispatch, invalid) and state.rehydrate(invalid) == nil,
+			"partial, mixed or contradictory persisted review policy fails closed")
+	end
+	assert(save({ policy = { require_code_review = false } }).ok)
+	check(not saved().require_code_review and not saved().require_other_family, "turning review off also turns the family requirement off")
+	check(save({ policy = { require_other_family = true } }).code == "invalid_policy", "another family cannot be required while review is off")
+	assert(save({ policy = { require_code_review = true } }).ok)
+	check(saved().require_code_review and not saved().require_other_family, "reenabling review does not resurrect the previous family requirement")
+	assert(save({ policy = { require_other_family = true } }).ok)
+	check(saved().require_other_family, "the owner can explicitly enable another family again")
+	-- Migration: each historical store shape restores to all 47 keys with its own values kept.
 	local shapes, keys = {}, {}
 	for _, group in { POLICY_V0, POLICY_V1, POLICY_V2, POLICY_V3, POLICY_V4 } do
 		for _, key in group do table.insert(keys, key) end
@@ -4353,23 +4396,24 @@ if section == nil or section == "policy_keys" then
 		check(not dispatch.valid(legacy.dispatch, legacy), #shape .. "-key policy is not a live store shape")
 		local restored = state.rehydrate(clone(legacy))
 		local migrated = restored and restored.dispatch.policies[sid]
-		local filled = migrated ~= nil and key_count(migrated) == 46 and migrated.poll_ms == 2000
+		local filled = migrated ~= nil and key_count(migrated) == 47 and migrated.poll_ms == 2000
 		if filled then for key, value in POLICY_NEW do if not same_json(migrated[key], value) then filled = false end end end
-		check(filled, #shape .. "-key policy migrates at restore to 46 keys with the new defaults and its own values kept")
+		check(filled, #shape .. "-key policy migrates at restore to 47 keys with the new defaults and its own values kept")
 		local short = clone(legacy); short.dispatch.policies[sid].poll_ms = nil
 		check(state.rehydrate(short) == nil, #shape - 1 .. "-key policy (one key missing from the " .. #shape .. "-key form) is rejected, not defaulted")
 	end
 	local partial = clone(f.authority.registry); partial.dispatch.policies[sid].loop_cap = nil
-	check(state.rehydrate(partial) == nil and not dispatch.valid(partial.dispatch, partial), "a 45-key store is rejected at restore and live")
+	check(state.rehydrate(partial) == nil and not dispatch.valid(partial.dispatch, partial), "a 46-key store is rejected at restore and live")
 	local extra = clone(f.authority.registry); extra.dispatch.policies[sid].deploy_hold = true
-	check(state.rehydrate(extra) == nil, "a 47-key store with an unknown key is rejected")
-	check(dispatch.valid(f.authority.registry.dispatch, f.authority.registry) and state.rehydrate(clone(f.authority.registry)) ~= nil, "the 46-key store is valid live and restores")
+	check(state.rehydrate(extra) == nil, "a 48-key store with an unknown key is rejected")
+	check(dispatch.valid(f.authority.registry.dispatch, f.authority.registry) and state.rehydrate(clone(f.authority.registry)) ~= nil, "the 47-key store is valid live and restores")
 	-- Bounds: each limit refused one past, accepted at the edge; refusals change nothing.
 	local cases = {
 		{ "loop_cap", { 0, 11, 2.5, "3", true }, { 1, 10 } },
 		{ "review_rounds", { 0, 3, 1.5 }, { 1, 2 } },
 		{ "stale_claim_min", { -1, 1441, 0.5, "30" }, { 0, 1440 } },
-		{ "enforce_cross_family", { "yes", 1, runtime.json.null }, { false, true } },
+		{ "require_code_review", { "yes", 1, runtime.json.null }, { false, true } },
+		{ "require_other_family", { "yes", 1, runtime.json.null }, { false, true } },
 		{ "glitch_integration", { "no", 0 }, { false, true } },
 		{ "auto_launch_intake", { "true" }, { true, false } },
 		{ "default_work_source", { "jira", "", 1 }, { "board", "glitch_plan" } },
@@ -4401,7 +4445,7 @@ if section == nil or section == "policy_keys" then
 		end
 		for _, value in good do
 			local outcome = save({ policy = { [key] = value } })
-			check(outcome.code == "policy_updated" and same_json(saved()[key], value), key .. " = " .. runtime.json.encode(value) .. " is accepted")
+			check(outcome.ok and same_json(saved()[key], value), key .. " = " .. runtime.json.encode(value) .. " is accepted, including an already-saved value")
 		end
 	end
 	-- Reviewer records keep the owner's order; a repeated id is dropped on save, refused in a store.
@@ -4653,7 +4697,7 @@ if section == nil or section == "loop_caps" then
 		check(state.rehydrate(clone(f.authority.registry)) ~= nil, "the report loop restores")
 	end
 	-- Landing refresh cycles (stale_target) at cap 1 and cap 3, and the transport bound of 8 grants.
-	-- Grants need Rule H proof (enforce_cross_family=false: a passing helper CHECK_RESULT for every
+	-- Grants need Rule H proof (review required, other family optional: a passing helper CHECK_RESULT for every
 	-- declared check at the source revision plus an approved review from a reviewer worker) and go to
 	-- the session's release manager (record "release", provisioned with release-manager-v1), never the
 	-- builder. Every cycle requests the same proven revision; a refresh voids the review, so a cycle
@@ -4661,7 +4705,7 @@ if section == nil or section == "loop_caps" then
 	local LREV = string.rep("c", 40)
 	local LCAPS = { "report-files-v1", "native-ask-v1", "coordinator-control-v1", "check-runner-v1", "release-manager-v1" }
 	local function lcp(cp_id)
-		return { checkpoint_id = cp_id, task_ref = "task:fixture", project_id = "project-one", worktree_ref = "worktree:fixture", artifact_revision = LREV,
+		return { checkpoint_id = cp_id, task_ref = "task:fixture", project_id = "project-one", worktree_ref = "/fixture", artifact_revision = LREV,
 			completed = runtime.json.array({ "Implemented the assigned change" }), remaining = runtime.json.array(), holds = runtime.json.array(),
 			checks = runtime.json.array({ { check_id = "unit", artifact_revision = LREV, outcome = "passed", evidence_ref = "unit:log" } }) }
 	end
@@ -4675,8 +4719,8 @@ if section == nil or section == "loop_caps" then
 				capability_evidence = "configured_operator_attestation_not_runtime_proof", effective_identity = { provider = "omp", evidence = "configured" },
 				capabilities = runtime.json.array(LCAPS), unsupported = runtime.json.array(), cwd = "/fixture", placement = "split" })
 		end
-		assert(f:finish(r.action_id, "catalog", { namespace = "fixture-spawn", host_key = "fixture-host", config_revision = 0, revision = 0, records = runtime.json.array(records) }).ok)
-		assert(f:apply("policy", { policy = { enforce_cross_family = false, reviewer_records = runtime.json.array({ "reviewer" }), release_manager_record = "release" } }).ok)
+		assert(f:finish(r.action_id, "catalog", { catalog_version = 2, setup = catalog_setup(0), namespace = "fixture-spawn", host_key = "fixture-host", config_revision = 0, revision = 0, records = runtime.json.array(records) }).ok)
+		assert(f:apply("policy", { policy = { require_code_review = true, require_other_family = false, reviewer_records = runtime.json.array({ "reviewer" }), release_manager_record = "release" } }).ok)
 		return f
 	end
 	local function lstart(f, coordinator, pane)
@@ -4723,6 +4767,8 @@ if section == nil or section == "loop_caps" then
 	-- A builder whose LREV already carries the full Rule H proof.
 	local function lbuilder(f, pane)
 		local id = lstart(f, false, pane)
+		assert(send_report(f, id, "CHECKOUT", { worktree_path = "/fixture", common_dir = "/fixture/.git", branch = "refs/heads/work", head = LREV,
+			changed_files = runtime.json.array(), changed_overflow = false, changed_total = 0, dirty = false }).ok)
 		assert(send_report(f, id, "CHECKPOINT", lcp("cp-0")).ok)
 		assert(send_report(f, id, "CHECK_RESULT", { check_id = "unit", argv_sha256 = codec.sha256("argv"), exit_code = 0, output_sha256 = codec.sha256("unit output"),
 			head = LREV, ran_at_ms = 1 }).ok)
@@ -4788,6 +4834,39 @@ if section == nil or section == "loop_caps" then
 		return send_report(f, rm, "LANDING_RESULT", { landing_id = lid, grant_id = gr.grant_id, project_id = it.request.project_id, repo_ref = it.request.repo_ref,
 			target_ref = it.request.target_ref, target_revision = gr.target_revision, source_revision = gr.source_revision, outcome = "stale_target",
 			observed_target_revision = observed, evidence = runtime.json.array({ "log:fixture" }) }, { action_id = gr.action_id, action_revision = gr.action_revision })
+	end
+	do
+		local f = lfixture(); local id = lbuilder(f, "9002")
+		local lid = landing_cycle(f, id, "migration", "head-0")
+		local grant = item(f, lid).grants[1]
+		check(grant ~= nil and state.rehydrate(clone(f.authority.registry)) ~= nil,
+			"a current-policy outstanding grant survives ordinary restore")
+		local function historical(registry, old)
+			local legacy = clone(registry)
+			local p = legacy.dispatch.policies[f.origin.logical_session_id]
+			p.require_code_review = nil; p.require_other_family = nil; p.enforce_cross_family = old
+			return legacy
+		end
+		for _, old in { true, false } do
+			local legacy = historical(f.authority.registry, old)
+			local exact = runtime.json.encode(legacy)
+			local restored, problem = state.rehydrate(legacy)
+			check(restored == nil and type(problem) == "table" and problem.code == "migration_blocked",
+				"an outstanding immutable grant visibly blocks legacy policy migration")
+			check(runtime.json.encode(legacy) == exact and legacy.dispatch.landing.items[lid].grants[1].bytes == grant.bytes,
+				"blocked migration neither rewrites grant bytes nor partially migrates its input")
+		end
+		local prior = clone(f.authority.registry); prior.version = 2
+		local restored, problem = state.rehydrate(prior)
+		check(restored == nil and type(problem) == "table" and problem.code == "migration_blocked",
+			"pre-cutover registry with an outstanding grant also blocks even without an obsolete policy field")
+		assert(stale(f, id, lid, "head-1").ok)
+		local drained = historical(f.authority.registry, false)
+		local migrated = assert(state.rehydrate(drained))
+		check(migrated.dispatch.policies[f.origin.logical_session_id].require_code_review
+			and not migrated.dispatch.policies[f.origin.logical_session_id].require_other_family
+			and migrated.dispatch.landing.items[lid].grants[1].bytes == grant.bytes,
+			"a conclusively stale-target grant permits migration while retaining its exact immutable bytes")
 	end
 	for _, cap in { 1, 3 } do
 		local f = lfixture(); local id = lbuilder(f, "9002")

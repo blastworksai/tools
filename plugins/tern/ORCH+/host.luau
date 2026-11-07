@@ -91,7 +91,8 @@ local function new_authority(storage: any, clock: any?): any
 		local candidate, diagnostic = state.rehydrate(raw)
 		if candidate == nil then
 			self.status = "quarantined"
-			return problem(if type(diagnostic) == "table" then diagnostic.code else "invalid_store", "Stored authority is quarantined; restore a valid schema-2 backup. Legacy data needs a later explicit migration.")
+			return problem(if type(diagnostic) == "table" then diagnostic.code else "invalid_store",
+				if type(diagnostic) == "table" then diagnostic.message else "Stored authority is quarantined; restore a valid backup. No empty authority was substituted.")
 		end
 		local full, _, encoded = capacity(candidate, false)
 		if full ~= nil then
@@ -273,7 +274,7 @@ local SWITCHES = { automatic_reports = true, auto_rollover = true, rollover_incl
 	initial_dispatch_provider = true, initial_dispatch_account = true, initial_dispatch_model = true, sweep_enabled = true,
 	worker_rollover_provider = true, worker_rollover_account = true, worker_rollover_model = true,
 	coordinator_rollover_provider = true, coordinator_rollover_account = true, coordinator_rollover_model = true,
-	enforce_cross_family = true, glitch_integration = true, auto_launch_intake = true }
+	require_code_review = true, require_other_family = true, glitch_integration = true, auto_launch_intake = true }
 -- Draft-edited choice sets: `approve:<kind>` toggles auto_approve_kinds (stored in this canonical
 -- order); `work_source:<value>` is a radio.
 local APPROVE_ORDER = { "dispatch", "report", "review", "landing" }
@@ -362,6 +363,8 @@ local function config_change(view: any, name: string, checked: boolean)
 		draft.values.default_work_source = work_source
 	else
 		draft.values[name] = checked
+		if name == "require_code_review" and not checked then draft.values.require_other_family = false end
+		if name == "require_other_family" and not draft.values.require_code_review then draft.values.require_other_family = false end
 	end
 end
 local function bounded_text(value: any, maximum: number, empty: boolean?): boolean
@@ -383,6 +386,157 @@ local function session_panes(input: any): any?
 	end
 	return input
 end
+local function setup_decode(value: any): any?
+	if type(value) ~= "string" or #value > INTENT_LIMIT then return nil end
+	local input = codec.strict_decode(value, INTENT_LIMIT)
+	return if type(input) == "table" then input else nil
+end
+local function setup_fields(value: any, allowed: { string }): boolean
+	if type(value) ~= "table" then return false end
+	for key in value do if not table.find(allowed, key) then return false end end
+	return true
+end
+local function publish_intent(view: any, entry: any)
+	local intent = { version = 1, source_nonce = view.alias_nonce, serial = nonce(),
+		kind = if entry.kind == "operator-intent" then "dispatch" elseif entry.kind == "setup-intent" then "setup" else "assist",
+		request = if entry.kind == "setup-intent" then { command = entry.command, source_nonce = view.alias_nonce, native_window = entry.native_window } else entry.request,
+		window = if entry.kind == "assist-intent" then assist_window(view) else nil }
+	local ok, bytes = pcall(tern.json.encode, intent)
+	if not ok or #bytes > INTENT_LIMIT then
+		view.notice = "REFUSED: this control's request exceeds the " .. tostring(INTENT_LIMIT) .. "-byte intent bound; nothing ran."
+		return
+	end
+	view.operator_intent = intent; view.operator_intent_at = tern.now()
+end
+local function page_entry(view: any, value: any)
+	local page = decode(value)
+	if not setup_fields(page, { "kind", "page", "native_window" }) or page.kind ~= "page" or page.page ~= "readiness"
+		or not bounded_text(page.native_window, 256, true) or page.native_window:find("%z") then
+		view.notice = "REFUSED: invalid native readiness page entry; nothing ran."
+		return
+	end
+	view.config_open = true
+	publish_intent(view, { kind = "setup-intent", command = "readiness", native_window = page.native_window })
+end
+local function setup_catalog_cursor(value: any): boolean
+	-- Match SPAWN's closed catalog cursor, not an opaque text token.
+	if not setup_fields(value, { "revision", "index" }) then return false end
+	return type(value.revision) == "number" and value.revision >= 0 and value.revision <= 9007199254740991 and value.revision % 1 == 0
+		and type(value.index) == "number" and value.index >= 1 and value.index <= 9007199254740991 and value.index % 1 == 0
+end
+local function setup_origin(value: any, view: any): boolean
+	if not setup_fields(value, { "host_pane_id", "window_key", "window_epoch", "native_session_id", "window_host_id" })
+		or value.host_pane_id ~= tostring(view.pane) then return false end
+	for _, key in { "host_pane_id", "window_key", "native_session_id", "window_host_id" } do
+		if not bounded_text(value[key], 256, key == "window_key") or value[key]:find("%z") then return false end
+	end
+	return bounded_text(value.window_epoch, 96) and value.window_epoch:match("^[A-Za-z0-9_-]+$") ~= nil
+end
+local function setup_result(view: any, input: any, result: any)
+	view.setup_result = table.clone(result)
+	view.setup_result.request_id = input.request_id
+	view.notice = tostring(result.message or result.code)
+	render_all()
+end
+
+-- The host probes its own Git, never the desktop's possibly different machine.
+-- Probe observations are view-local until the ordinary expected-revision writer saves them.
+local function probe_repository(view: any, input: any)
+	local function refuse(message: string)
+		setup_result(view, input, { ok = false, code = "repository_unavailable", message = message })
+	end
+	if not setup_fields(input, { "source_nonce", "request_id", "cwd", "target_ref" })
+		or not bounded_text(input.cwd, 512) or input.cwd:find("%c")
+		or not (input.cwd:sub(1, 1) == "/" or input.cwd:match("^%a:[\\/]"))
+		or not bounded_text(input.target_ref, 256) or input.target_ref:find("%c") or input.target_ref:sub(1, 1) == "-" then
+		refuse("Choose an absolute repository directory and a named target branch."); return
+	end
+	view.setup_repository = nil
+	view.setup_probe = input.request_id
+	local repository = { cwd = input.cwd, target_ref = input.target_ref }
+	local target = if input.target_ref:sub(1, 5) == "refs/" then input.target_ref else "refs/heads/" .. input.target_ref
+	local steps = {
+		{ argv = { "git", "check-ref-format", target } },
+		{ argv = { "git", "-C", input.cwd, "rev-parse", "--show-toplevel" }, field = "repo_root" },
+		{ argv = { "git", "-C", input.cwd, "rev-parse", "--path-format=absolute", "--git-common-dir" }, field = "common_dir" },
+		{ argv = { "git", "-C", input.cwd, "rev-parse", "--verify", "--end-of-options", target .. "^{commit}" }, field = "head_revision" },
+	}
+	local function run(index: number)
+		if view.setup_probe ~= input.request_id or contexts[view.pane] == nil then return end
+		local step = steps[index]
+		if step == nil then
+			view.setup_probe = nil
+			view.setup_repository = repository
+			setup_result(view, input, { ok = true, code = "repository_verified", repository = repository,
+				message = "Repository and target branch verified by Git on the execution host." })
+			return
+		end
+		local ok, failure = pcall(function()
+			tern.process.run(step.argv, { timeout_ms = 10000 }, function(result: any)
+				if view.setup_probe ~= input.request_id or contexts[view.pane] == nil then return end
+				if result.status ~= 0 then
+					view.setup_probe = nil
+					refuse("Git could not verify this repository/target: " .. tostring(result.stderr or ""):gsub("%c", " "):sub(1, 512))
+					return
+				end
+				if step.field then
+					local value = (result.stdout or ""):gsub("[\r\n]+$", "")
+					if not bounded_text(value, 512) or value:find("%c")
+						or (step.field == "head_revision" and ((#value ~= 40 and #value ~= 64) or not value:match("^[a-f0-9]+$")))
+						or (step.field ~= "head_revision" and not (value:sub(1, 1) == "/" or value:match("^%a:[\\/]"))) then
+						view.setup_probe = nil; refuse("Git returned unsupported repository evidence."); return
+					end
+					repository[step.field] = value
+				end
+				run(index + 1)
+			end)
+		end)
+		if not ok then view.setup_probe = nil; refuse("Git probe could not start: " .. tostring(failure):gsub("%c", " "):sub(1, 512)) end
+	end
+	run(1)
+end
+
+local function setup_command(view: any, input: any)
+	if input.setup_origin ~= nil and not setup_origin(input.setup_origin, view) then
+		setup_result(view, input, { ok = false, code = "invalid_origin", message = "Setup origin does not identify this native host view." }); return
+	end
+	if input.kind == "catalog_request" then
+		local request = input.request
+		if not setup_fields(input, { "kind", "source_nonce", "request_id", "request", "expected_revision", "setup_origin" })
+			or not setup_fields(request, { "schema", "origin", "op", "request_id", "action_id", "setup_origin", "cursor" })
+			or request.schema ~= 1 or request.origin ~= "orchplus" or request.op ~= "catalog"
+			or not bounded_text(request.request_id, 128) or not bounded_text(request.action_id, 128)
+			or not setup_origin(request.setup_origin, view)
+			or (input.setup_origin ~= nil and not same_value(input.setup_origin, request.setup_origin, 0))
+			or (request.cursor ~= nil and not setup_catalog_cursor(request.cursor)) then
+			setup_result(view, input, { ok = false, code = "invalid_catalog_request", message = "Setup catalog requires the exact live native view origin." }); return
+		end
+		view.setup_catalog_request = request
+		setup_result(view, input, { ok = true, code = "catalog_requested" })
+		return
+	elseif input.kind == "catalog_clear" then
+		if not setup_fields(input, { "kind", "source_nonce", "request_id", "expected_revision", "setup_origin" }) then return end
+		view.setup_catalog_request = nil
+		setup_result(view, input, { ok = true, code = "catalog_cleared" })
+		return
+	end
+	if input.kind ~= "installation_defaults" and input.kind ~= "setup_lifecycle" then return end
+	if input.kind == "installation_defaults" and type(input.defaults) == "table" and input.defaults.repository ~= nil then
+		if type(input.defaults.repository) ~= "table" then
+			setup_result(view, input, { ok = false, code = "invalid_defaults", message = "Repository settings must contain host-verified evidence." }); return
+		end
+		local repository = table.clone(input.defaults.repository)
+		repository.queue_route = nil
+		local saved = if authority.registry then authority.registry.installation_defaults.repository else nil
+		if saved then saved = table.clone(saved); saved.queue_route = nil end
+		if not same_value(repository, view.setup_repository, 0) and not same_value(repository, saved, 0) then
+			setup_result(view, input, { ok = false, code = "repository_unverified", message = "Run the execution-host repository probe before saving changed repository settings." }); return
+		end
+	end
+	local event = table.clone(input); event.source_nonce = nil; event.setup_origin = nil
+	setup_result(view, input, authority:apply(event))
+end
+
 local function handle(view: any, ev: any, cx: any)
 	if ev.ev == "change" then
 		if type(ev.name) == "string" and #ev.name <= 512 and type(ev.checked) == "boolean" then
@@ -392,6 +546,19 @@ local function handle(view: any, ev: any, cx: any)
 		return
 	end
 	if ev.ev ~= "action" then return end
+	if ev.act == "page-entry" then
+		if ev.id == "main" then page_entry(view, ev.value) end
+		return
+	end
+	if ev.act == "setup-command" or ev.act == "setup-repository-probe" then
+		local input = setup_decode(ev.value)
+		if not input or input.source_nonce ~= view.alias_nonce or not bounded_text(input.request_id, 128) then return end
+		if authority.status ~= "ready" then
+			setup_result(view, input, { ok = false, code = "authority_unavailable", message = "Initialize genuinely absent authority, or restore the existing authority before setup." })
+		elseif ev.act == "setup-repository-probe" then probe_repository(view, input)
+		else setup_command(view, input) end
+		return
+	end
 	if ev.act == "config-open-request" then
 		-- Files-pane entry: display mode only; edits still require the admitted controller.
 		view.config_open = true
@@ -575,18 +742,10 @@ local function handle(view: any, ev: any, cx: any)
 		return
 	end
 	view.refusal = nil
-	if entry.kind == "operator-intent" or entry.kind == "assist-intent" then
+	if entry.kind == "operator-intent" or entry.kind == "assist-intent" or entry.kind == "setup-intent" then
 		-- Window-side controls (pickers, prompts, panes) run in the window. Publish the exact stored
 		-- request as a bounded one-shot intent; the window re-validates everything before acting.
-		local intent = { version = 1, source_nonce = view.alias_nonce, serial = nonce(),
-			kind = if entry.kind == "operator-intent" then "dispatch" else "assist", request = entry.request,
-			window = if entry.kind == "assist-intent" then assist_window(view) else nil }
-		local ok, bytes = pcall(tern.json.encode, intent)
-		if not ok or #bytes > INTENT_LIMIT then
-			view.notice = "REFUSED: this control's request exceeds the " .. tostring(INTENT_LIMIT) .. "-byte intent bound; nothing ran."
-			return
-		end
-		view.operator_intent = intent; view.operator_intent_at = tern.now()
+		publish_intent(view, entry)
 		return
 	end
 	if entry.kind == "config-open" or entry.kind == "config-close" then
@@ -761,6 +920,8 @@ local definition: BlockDef<any> = {
 			if saved.pane == cx.pane and type(saved.alias_nonce) == "string" and #saved.alias_nonce <= 128 then view.alias_nonce = saved.alias_nonce end
 			if type(saved.orch_session_id) == "string" and #saved.orch_session_id <= 128 then view.orch_session_id = saved.orch_session_id end
 		end
+		-- Native page args are a one-shot launch request, never restored from saved block args.
+		if saved == nil and view.config_open and args[2] ~= nil then page_entry(view, args[2]) end
 		contexts[cx.pane] = { cx = cx, view = view }
 		return view
 	end,

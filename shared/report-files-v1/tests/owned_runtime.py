@@ -2,11 +2,25 @@
 from datetime import datetime
 import os
 from pathlib import Path
+import sys
 import time
 
 
-def owned_runtime(lib, base, name, evidence, processes):
+def owned_runtime(lib, base, name, evidence, processes, capture_desktop=False, provider_agent_dir=None):
     class OwnedTern(lib.Tern):
+        def start(self):
+            if not capture_desktop:
+                return super().start()
+            self.spawn([lib.TERN, 'daemon', '--socket', str(self.sock)])
+            lib.wait_for(self.sock.exists, 'private daemon socket', 20)
+            self.capture_metadata = self.root/'owned-display.json'
+            self.spawn(['xvfb-run', '-a', '-s', '-screen 0 1920x1080x24',
+                        sys.executable, str(Path(__file__).with_name('owned_window.py')),
+                        str(self.capture_metadata), lib.TERN, '--control', str(self.control)], cwd=self.root)
+            lib.wait_for(self.control.exists, 'private capture window control socket', 40)
+            self.command('ctl', '--control', self.control, 'state', timeout=45)
+            lib.WAKERS.append(self.poke)
+
         def assert_running(self):
             ended = [(entry['argv'], entry['process'].poll()) for entry in self.own if entry['process'].poll() is not None]
             if ended:
@@ -53,6 +67,13 @@ def owned_runtime(lib, base, name, evidence, processes):
                     env[key] = self.env[key]
                 env.update({key: str(directory) for key, directory in directories.items()})
                 env.update(SHELL='/bin/bash', no_proxy='127.0.0.1', NO_PROXY='127.0.0.1')
+                if provider_agent_dir is not None:
+                    directory = Path(provider_agent_dir)
+                    if not directory.is_absolute() or not directory.is_dir():
+                        raise RuntimeError('explicit provider auth-in-place directory must exist and be absolute')
+                    # Explicit approved provider mode only. Authentication stays
+                    # in the existing native directory; never copy/export it.
+                    env['PI_CODING_AGENT_DIR'] = str(directory)
                 if not Path(env['SHELL']).is_file() or not os.access(env['SHELL'], os.X_OK):
                     raise RuntimeError('isolated Linux native scenario requires executable /bin/bash')
                 self.env = env

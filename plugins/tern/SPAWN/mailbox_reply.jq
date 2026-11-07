@@ -104,11 +104,13 @@ def reply:
  elif .kind=="owner_decision" then
   (.gate_id|id) and (.gate_revision|positive) and (.payload|fields(["choice_id","answer"]) and (.choice_id|id) and (.answer|text(32768)))
  elif .kind=="landing_grant" then
-  .payload|fields(["landing_id","grant_id","project_id","checkpoint_id","repo_ref","target_ref","target_revision","source_ref","source_revision","builder_work_id","review_id","reviewer_family","proof"]) and
+  .payload|shape(["landing_id","grant_id","project_id","checkpoint_id","repo_ref","target_ref","target_revision","source_ref","source_revision","builder_work_id","proof"];["review_id","reviewer_family"]) and
   (.landing_id|id) and (.grant_id|id) and (.project_id|id) and (.checkpoint_id|id) and (.repo_ref|text(1024)) and (.target_ref|text(1024)) and
   (.target_revision|text(1024)) and (.source_ref|text(1024)) and (.source_revision|text(1024)) and
-  (.builder_work_id|id) and (.review_id|id) and (.reviewer_family|family) and
-  (.proof|fields(["mode","artifact_revision","review_id","check_refs"]) and (.mode|IN("cross_family_review","helper_checks")) and (.artifact_revision|text(1024)) and (.review_id|id) and (.check_refs|entries(0;16;text(1024))))
+  (.builder_work_id|id) and optional("review_id";id) and optional("reviewer_family";family) and
+  (.proof|shape(["mode","artifact_revision","check_refs"];["review_id"]) and (.mode|IN("cross_family_review","helper_checks","review_disabled")) and (.artifact_revision|text(1024)) and optional("review_id";id) and (.check_refs|entries(0;16;text(1024)))) and
+  (if .proof.mode=="review_disabled" then (has("review_id")|not) and (has("reviewer_family")|not) and (.proof|has("review_id")|not)
+   else has("review_id") and has("reviewer_family") and (.proof.review_id==.review_id) end)
  elif .kind=="review_request" then
   .payload|shape(["review_id","round","question_id","builder_work_id","task_ref","source_ref","artifact_revision","scope_paths","findings_prev"];["plan_ref","plan_revision"]) and
   (.review_id|id) and (.round|positive) and .question_id=="implements_task_v1" and (.builder_work_id|id) and (.task_ref|text(1024)) and

@@ -9,9 +9,11 @@ local running = 0
 local assembly_reserved = 0
 -- Codec diagnostics keep their bounded message so the owner sees why bytes were refused.
 local function rejected(code,message) return {status='rejected',error={code=code,message=message}} end
-local function absolute(path,windows)
+function M.absolute_path(path,windows)
  if type(path)~='string' or #path==0 or #path>4096 or path:find('[%z\r\n]') then return false end
- if path:find('..',1,true) then return false end
+ local components=if windows then path:gsub('\\','/') else path
+ if components:find('//',1,true) then return false end
+ for component in components:gmatch('[^/]+') do if component=='.' or component=='..' then return false end end
  return if windows then path:match('^[A-Za-z]:[\\/]')~=nil else path:sub(1,1)=='/'
 end
 function M.validate_target(t)
@@ -19,7 +21,7 @@ function M.validate_target(t)
  local fields={root=true,helper=true,producer_helper=true,worker_identity=true,os=true,shell=true,kind=true,backend=true,host=true,user=true,key_path=true,host_os=true,host_shell=true}
  for key in pairs(t) do if not fields[key] then return false end end
  if t.backend~='native-agent' and t.backend~='local-terminal' and t.backend~='ssh-command' then return false end
- if not absolute(t.root,t.os=='windows') or not absolute(t.helper,t.os=='windows') or not absolute(t.producer_helper,t.os=='windows') or Backend.shell_kind(t.os,t.shell)~=t.kind or (t.kind~='posix' and t.kind~='powershell') or not Backend.shell_kind(t.host_os,t.host_shell) then return false end
+ if not M.absolute_path(t.root,t.os=='windows') or not M.absolute_path(t.helper,t.os=='windows') or not M.absolute_path(t.producer_helper,t.os=='windows') or Backend.shell_kind(t.os,t.shell)~=t.kind or (t.kind~='posix' and t.kind~='powershell') or not Backend.shell_kind(t.host_os,t.host_shell) then return false end
  if type(t.worker_identity)~='string' or #t.worker_identity==0 or #t.worker_identity>256 or t.worker_identity:find('[%z\r\n]') then return false end
  for _,key in ipairs({'host','user','key_path'}) do if t[key]~=nil and (type(t[key])~='string' or #t[key]>4096 or t[key]:find('[%z\r\n]')) then return false end end
  if t.backend=='ssh-command' then
@@ -34,7 +36,7 @@ function M.target(record,context)
  local os=context.host_os
  local shell=context.host_shell
  local kind=Backend.shell_kind(os,shell)
- if not kind or not absolute(cfg.permitted_root,os=='windows') or not absolute(cfg.helper_path,os=='windows') or type(cfg.worker_identity)~='string' or cfg.worker_identity=='' or #cfg.worker_identity>256 or cfg.worker_identity:find('[%z\r\n]') then return nil,'unsupported_capability' end
+ if not kind or not M.absolute_path(cfg.permitted_root,os=='windows') or not M.absolute_path(cfg.helper_path,os=='windows') or type(cfg.worker_identity)~='string' or cfg.worker_identity=='' or #cfg.worker_identity>256 or cfg.worker_identity:find('[%z\r\n]') then return nil,'unsupported_capability' end
  if os=='windows' and record.user and record.user~='' then return nil,'unsupported_capability' end
  local target={root=cfg.permitted_root,helper=cfg.helper_path,producer_helper=cfg.producer_helper_path,worker_identity=cfg.worker_identity,os=os,shell=shell,kind=kind,backend=record.backend,host=record.host,user=record.user,key_path=record.key_path,host_os=context.host_os,host_shell=context.host_shell}
  if not M.validate_target(target) then return nil,'unsupported_capability' end

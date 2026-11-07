@@ -13,7 +13,7 @@ local function clone(value)
  if type(value)~='table' then return value end
  local out={};for key,item in pairs(value) do out[key]=clone(item) end;return out
 end
-local inventory={clients={{kind='window',window='fixture-window'}},sessions={{id=1,tabs={{blocks={{id=7}}}}}}}
+local inventory={clients={{kind='window',window='fixture-window',conn=1,since=1700000000000}},sessions={{id=1,tabs={{blocks={{id=7}}}}}}}
 local fake=setmetatable({
  now=function()return 1700000000 end,
  kv={get=function(key)return clone(saved[key]) end,set=function(key,value)writes+=1;saved[key]=clone(value) end},
@@ -45,6 +45,17 @@ check(sweepTimer~=nil and sweepTimer.ms==1,'host load arms the first settlement 
 local A,P,C=load('authority'),load('bridge_protocol'),load('config')
 local definition=assert(definitions.spawner)
 local cx={pane=7,save=function()end,render=function()end,action=function()error('Editor launched a window action') end}
+local beforeNavigation=clone(saved)
+local publicPage={kind='page',page='managed',native_window='fixture-window'}
+local inertPage=definition.init(cx,{runtime.json.encode(publicPage)},nil)
+check(inertPage.binding==nil and inertPage.client_config==nil and inertPage.page=='managed' and P.equal(saved,beforeNavigation),'public page-only arguments remain inert until SPAWN supplies its own context')
+local pageNode=definition.view(inertPage,cx).main.children[3]
+check(pageNode.p.key=='spawn-page-context' and pageNode.p.role=='spawn.page.context' and P.equal(runtime.json.decode(pageNode.text).entry,publicPage),'inert page requests only a view-local owner context')
+local invalidPublic=clone(publicPage);invalidPublic.client_config={schema=1,agents={}}
+local invalidPage=definition.init(cx,{runtime.json.encode(invalidPublic)},nil)
+check(invalidPage.binding==nil and invalidPage.page_context_request==nil and P.equal(saved,beforeNavigation),'foreign page arguments cannot carry or import legacy client configuration')
+local inertSaved=definition.save(inertPage)
+check(inertSaved.page_context_request==nil and inertSaved.client_config==nil and inertSaved.page_entry==nil,'owner context handoff is never a durable protocol or second settings store')
 local state=definition.init(cx,{runtime.json.encode({host={name='fixture'},native_window='fixture-window'})},nil)
 check(state.binding~=nil and state.snapshot~=nil,'host opens through original native membership boundary')
 local function snapshot()return assert(A.snapshot(state.binding)) end
@@ -168,10 +179,10 @@ local function rendered_pages()
  for _,page in ipairs(prefs().pages) do state.page=page.id;table.insert(text,runtime.json.encode(definition.view(state,cx))) end
  return table.concat(text,'\n')
 end
--- Pages: Setup, Configured agents, Spawn agents, Running agents; saved and discovered restore accept spawn.
+-- Managed setup is prominent without removing ordinary Setup/Spawn/Running pages.
 local pageIds,pageLabels={},{}
 for _,page in ipairs(prefs().pages) do table.insert(pageIds,page.id);pageLabels[page.id]=page.label end
-check(P.equal(pageIds,{'setup','agents','spawn','runtime'}) and pageLabels.spawn=='Spawn agents','Config pages are setup, agents, spawn, runtime with a Spawn agents page')
+check(P.equal(pageIds,{'managed','setup','agents','spawn','runtime'}) and pageLabels.spawn=='Spawn agents','Config exposes standalone managed setup alongside every ordinary page')
 local restoreCx={pane=8,save=function()end,render=function()end}
 check(definition.init(restoreCx,{runtime.json.encode({host={name='fixture'},native_window='fixture-window'})},{page='spawn'}).page=='spawn','saved page restore accepts spawn')
 local discoverCx={pane=9,save=function()end,render=function()end}
@@ -278,4 +289,219 @@ definition.event(state,{ev='action',act='launch-result@'..rev},cx)
 local setupQueue=intents()
 check(#setupQueue==2 and setupQueue[2].kind=='result','Review setup result click queues a result intent after the setup intent')
 refresh()
+-- Native setup drafts/probes are not a second settings store. These injected
+-- observations exercise UI fencing only; real platform probes belong to smoke.
+for _,pending in ipairs(intents() or {}) do ack(pending.intent_id) end
+definition.event(state,{ev='change',item='managed-existing',value=''},cx)
+local managedRows=rows_of('managed')
+check(managedRows['managed-begin']~=nil and managedRows['managed-probe']~=nil and managedRows['managed-attest']==nil,'cold native setup offers creation/probe, never an unearned attestation')
+before=clone(saved)
+definition.event(state,{ev='change',item='managed:cwd',value='/fixture/repository'},cx)
+definition.event(state,{ev='change',item='managed:executable',value='/fixture/worker'},cx)
+check(P.equal(before,saved) and state.managed_draft.cwd=='/fixture/repository','native typed fields are disposable drafts, not authority writes')
+for _,op in ipairs({'managed-probe','managed-attest','managed-adopt','managed-route-probe'}) do
+ definition.event(state,{ev='action',act=op..'@'..state.snapshot.config_revision},cx)
+ local refusal=rows_of('managed')['managed-notice']
+ check(P.equal(before,saved) and refusal and not state.managed_busy and state.managed_route==nil,'managed prerequisite refusal is visible on its owner page and changes no authority or native obligation: '..op)
+end
+definition.event(state,{ev='action',act='managed-begin@'..state.snapshot.config_revision},cx)
+check(snapshot().setup.state=='in_progress','native begin uses the canonical setup authority writer')
+local managedModule=modules.managed_setup
+local originalPrepare=managedModule.prepare
+local pendingProbe=nil
+managedModule.prepare=function(draft,context,callback)
+ check(draft.cwd=='/fixture/repository' and context.host_os~=nil,'native probe receives selected draft and actual host context')
+ pendingProbe=callback
+end
+local probeRevision=state.snapshot.config_revision
+definition.event(state,{ev='action',act='managed-probe@'..probeRevision},cx)
+check(state.managed_busy and pendingProbe~=nil,'probe waits for actual asynchronous observations')
+definition.event(state,{ev='action',act='managed-probe@'..probeRevision},cx)
+check(state.managed_busy,'a second click cannot duplicate an in-flight probe')
+local concurrentRoster=clone(snapshot().records);concurrentRoster[1].account_label='manual-edit-during-probe'
+check(A.edit(state.binding,probeRevision,'replace-records',{records=concurrentRoster}),'manual authority writer advances the same config revision')
+before=clone(saved)
+pendingProbe(nil,{passed=true,observations={}},nil)
+check(not state.managed_busy and state.managed_probe==nil and P.equal(before,saved),'concurrent manual edit invalidates probe results without overwriting records')
+definition.event(state,{ev='action',act='managed-probe@'..state.snapshot.config_revision},cx)
+check(not state.managed_busy and state.notice:find('stale%-config'),'refreshing the form cannot rebase an old draft onto manual changes')
+definition.event(state,{ev='change',item='managed-existing',value='editable'},cx)
+check(state.managed_draft.account_label=='manual-edit-during-probe' and state.managed_draft_revision==state.snapshot.config_revision,'explicit selection adopts current saved values and revision')
+managedModule.prepare=function(_,_,callback)callback(nil,nil,'Fixture resource permission denied')end
+before=clone(saved)
+definition.event(state,{ev='action',act='managed-probe@'..state.snapshot.config_revision},cx)
+check(P.equal(before,saved) and state.managed_probe==nil and not state.managed_busy and rows_of('managed')['managed-notice'],'actual resource failure reaches native Managed setup preferences without creating an attested record')
+managedModule.prepare=originalPrepare
+-- Actual native boundary proof is asynchronous; only Authority retains its cleanup obligation.
+state.managed_record=clone(snapshot().records[1])
+state.managed_probe={schema=1,passed=true,record_sha256=string.rep('a',64),observations={},provision_handle='setup-fixture-native'}
+state.managed_probe_revision=state.snapshot.config_revision
+local nativeRevision=state.snapshot.config_revision
+definition.event(state,{ev='action',act='managed-route-probe@'..nativeRevision},cx)
+local nativeRoute=state.managed_route
+check(nativeRoute and saved.authority.setup_probe and saved.authority.setup_probe.nonce==nativeRoute.nonce,'native launch consent persists one exact cleanup obligation before window effects')
+check(snapshot().config_revision==nativeRevision and intents()[1].kind=='route_probe' and intents()[1].native_window=='fixture-window','native runtime obligation addresses only its owner window without bumping settings revision or launching through host process.run')
+local routeIntent=intents()[1].intent_id
+local function routeEvent(act,extra)
+ local value={nonce=nativeRoute.nonce,window='fixture-window',pane=9}
+ for key,item in pairs(extra or {}) do value[key]=item end
+ definition.event(state,{ev='action',act=act,value=runtime.json.encode(value)},cx)
+end
+routeEvent('managed-route-preflight',{pane=0})
+check(nativeRoute.launch_ready and nativeRoute.launch_ready.native_conn==1 and nativeRoute.launch_ready.native_since==1700000000000,'fresh read-only preflight captures the exact current native client incarnation')
+table.insert(inventory.sessions[1].tabs[1].blocks,{id=9,command=nativeRoute.command,cwd=nativeRoute.cwd})
+local originalObserve=managedModule.observe_route
+local pendingNative
+managedModule.observe_route=function(route,session,pane,callback)
+ check(route.nonce==nativeRoute.nonce and session==1 and pane==9,'actual observer is fenced to original native scope')
+ pendingNative=callback
+end
+routeEvent('managed-route-started')
+check(saved.authority.setup_probe.pane==9 and nativeRoute.owned_pane==9,'exact native command/cwd/client membership binds the owned diagnostic')
+routeEvent('managed-route-observed')
+check(pendingNative~=nil and saved.authority.setup_probe~=nil,'provider boundary readback does not discard unfinished cleanup')
+pendingNative(nil,'Fixture observation is only partially published',true)
+local nextNativeRead=timers[#timers]
+check(nativeRoute.status=='running' and nativeRoute.observing and nextNativeRead.ms==250,'partial terminal output remains pending and schedules only bounded readback')
+pendingNative=nil;nextNativeRead.callback()
+check(pendingNative~=nil and nativeRoute.status=='running' and snapshot().config_revision==nativeRevision,'slow terminal producer is reread without another launch or settings revision')
+local changedDuringNative=clone(snapshot().records);changedDuringNative[1].account_label='manual-edit-during-native'
+check(A.edit(state.binding,nativeRevision,'replace-records',{records=changedDuringNative}),'concurrent manual edit advances settings while native cleanup remains owed')
+pendingNative('Explicit deterministic native-boundary test observation',nil)
+check(nativeRoute.status=='failed' and saved.authority.setup_probe~=nil,'late native observation cannot bless a changed config or clear its worker obligation')
+table.remove(inventory.sessions[1].tabs[1].blocks)
+routeEvent('managed-route-finished',{cleaned=true,error='Configuration changed'})
+check(saved.authority.setup_probe==nil and nativeRoute.status=='failed' and snapshot().setup.state=='in_progress','independent native absence clears only the obligation, never fabricates setup completion')
+managedModule.observe_route=originalObserve
+ack(routeIntent)
+definition.event(state,{ev='change',item='managed-existing',value='editable'},cx)
+local function nextNativeFixture(handle)
+ definition.event(state,{ev='change',item='managed-existing',value='editable'},cx)
+ state.managed_record=clone(snapshot().records[1])
+ state.managed_probe={schema=1,passed=true,record_sha256=string.rep('a',64),observations={},provision_handle=handle}
+ state.managed_probe_revision=state.snapshot.config_revision
+ definition.event(state,{ev='action',act='managed-route-probe@'..state.snapshot.config_revision},cx)
+ nativeRoute=state.managed_route
+ return intents()[1].intent_id
+end
+local unboundIntent=nextNativeFixture('setup-fixture-unbound')
+inventory.clients[1].conn=2
+routeEvent('managed-route-preflight',{pane=0})
+check(nativeRoute.cleanup_blocked and nativeRoute.launch_ready==nil and saved.authority.setup_probe~=nil,'changed native incarnation refuses preflight before authorizing an effect')
+inventory.clients[1].conn=1
+routeEvent('managed-route-finished',{pane=0,cleaned=true,error='No pane currently visible'})
+check(saved.authority.setup_probe~=nil and saved.authority.setup_probe.pane==nil and not nativeRoute.discovery_complete,'zero inventory cannot settle an unbound uncertain native start')
+table.insert(inventory.sessions[1].tabs[1].blocks,{id=9,command=nativeRoute.command,cwd=nativeRoute.cwd})
+routeEvent('managed-route-started')
+check(saved.authority.setup_probe.pane==9,'late positively discovered native command is bound even for cleanup-only recovery')
+table.remove(inventory.sessions[1].tabs[1].blocks)
+routeEvent('managed-route-finished',{cleaned=true,error='Uncertain owned actor settled'})
+check(saved.authority.setup_probe==nil,'positive binding followed by native absence can settle the formerly uncertain obligation')
+ack(unboundIntent)
+for _,identity in ipairs({'wrong-command','wrong-cwd','absent'}) do
+ local falseIntent=nextNativeFixture('setup-fixture-'..identity)
+ routeEvent('managed-route-preflight',{pane=0})
+ if identity~='absent' then
+  table.insert(inventory.sessions[1].tabs[1].blocks,{id=9,command=if identity=='wrong-command' then 'unrelated-live-command' else nativeRoute.command,cwd=if identity=='wrong-cwd' then '/foreign-cwd' else nativeRoute.cwd})
+ end
+ before=clone(saved)
+ managedModule.observe_route=function()error('Unverified diagnostic must not read output')end
+ routeEvent('managed-route-started')
+ check(P.equal(before,saved) and saved.authority.setup_probe.pane==nil and nativeRoute.pane==nil and nativeRoute.owned_pane==nil and not nativeRoute.observing,'unverified started event cannot persist or cache native ownership or read output: '..identity)
+ if identity~='absent' then table.remove(inventory.sessions[1].tabs[1].blocks) end
+ routeEvent('managed-route-finished',{cleaned=true})
+ check(P.equal(before,saved) and saved.authority.setup_probe.pane==nil and not nativeRoute.discovery_complete,'later empty inventory cannot settle a rejected native identity: '..identity)
+ table.insert(inventory.sessions[1].tabs[1].blocks,{id=9,command=nativeRoute.command,cwd=nativeRoute.cwd})
+ refresh()
+ check(saved.authority.setup_probe.pane==9 and nativeRoute.owned_pane==9,'owner reload can still positively bind the exact late diagnostic for cleanup: '..identity)
+ table.remove(inventory.sessions[1].tabs[1].blocks)
+ routeEvent('managed-route-finished',{cleaned=true,error='Rejected start later positively recovered'})
+ check(saved.authority.setup_probe==nil and nativeRoute.status=='failed','positive recovery and native absence clear cleanup without blessing rejected output: '..identity)
+ managedModule.observe_route=originalObserve
+ ack(falseIntent)
+end
+local deadlineIntent=nextNativeFixture('setup-fixture-deadline')
+routeEvent('managed-route-preflight',{pane=0})
+table.insert(inventory.sessions[1].tabs[1].blocks,{id=9,command=nativeRoute.command,cwd=nativeRoute.cwd})
+local observationReads=0
+managedModule.observe_route=function(_,_,_,callback)observationReads+=1;callback(nil,'Incomplete fixture bytes',true)end
+routeEvent('managed-route-started')
+routeEvent('managed-route-observed')
+local deadlineRead=timers[#timers];local originalNow=fake.now;local deadlineNow=originalNow()+45001
+fake.now=function()return deadlineNow end
+deadlineRead.callback()
+check(observationReads==2 and nativeRoute.status=='failed' and saved.authority.setup_probe~=nil,'terminal read-only pending state ends at the existing diagnostic deadline without clearing cleanup')
+fake.now=originalNow;managedModule.observe_route=originalObserve
+table.remove(inventory.sessions[1].tabs[1].blocks)
+routeEvent('managed-route-finished',{cleaned=true,error='Diagnostic observation deadline elapsed'})
+check(saved.authority.setup_probe==nil,'deadline failure still requires positively owned native settlement')
+ack(deadlineIntent)
+local exitedIntent=nextNativeFixture('setup-fixture-exited')
+routeEvent('managed-route-preflight',{pane=0})
+local exitedRead
+managedModule.observe_route=function(_,_,_,callback)exitedRead=callback end
+table.insert(inventory.sessions[1].tabs[1].blocks,{id=9,command=nativeRoute.command,cwd=nativeRoute.cwd})
+routeEvent('managed-route-started')
+check(exitedRead~=nil and nativeRoute.observing,'positively bound terminal starts output observation without a second window event')
+table.remove(inventory.sessions[1].tabs[1].blocks)
+exitedRead('Exact terminal output observed after native exit',nil)
+routeEvent('managed-route-finished',{cleaned=true})
+check(nativeRoute.status=='passed' and saved.authority.setup_probe==nil,'fast terminal exit after positive binding settles only after exact output and independent native absence')
+managedModule.observe_route=originalObserve
+ack(exitedIntent)
+definition.event(state,{ev='change',item='managed-existing',value='editable'},cx)
+-- Injected serializer success is deliberately not configured-CLI execution proof.
+state.managed_probe={passed=true,record_sha256=string.rep('a',64),observations={}}
+state.managed_probe_revision=state.snapshot.config_revision
+state.managed_cli_attestation=nil
+before=clone(saved)
+definition.event(state,{ev='action',act='managed-attest@'..state.snapshot.config_revision},cx)
+check(P.equal(before,saved) and state.notice:find('actual native route',1,true),'serializer success cannot substitute for the required actual native route')
+definition.event(state,{ev='action',act='managed-cli-attest@'..state.snapshot.config_revision},cx)
+check(state.managed_cli_attestation==nil,'operator CLI attestation cannot bypass actual native route proof')
+-- Explicit deterministic window-proof fixture, not a runtime probe fallback.
+state.managed_route={status='passed',nonce='fixture-native-route'}
+definition.event(state,{ev='action',act='managed-attest@'..state.snapshot.config_revision},cx)
+check(P.equal(before,saved) and state.notice:find('echo probe',1,true),'native route proof still requires independent exact-CLI semantic attestation')
+definition.event(state,{ev='action',act='managed-cli-attest@'..state.snapshot.config_revision},cx)
+check(state.managed_cli_attestation==state.managed_probe.record_sha256 and P.equal(before,saved),'exact-CLI operator attestation binds the reviewed fingerprint but creates no machine evidence or saved record')
+definition.event(state,{ev='change',item='managed:arguments',value='--changed-flags'},cx)
+definition.event(state,{ev='action',act='managed-attest@'..state.snapshot.config_revision},cx)
+check(state.managed_probe==nil and P.equal(before,saved),'editing CLI flags invalidates the probe and prior attestation route')
+definition.event(state,{ev='action',act='managed-exercise@'..state.snapshot.config_revision},cx)
+check(intents()[1].kind=='readiness' and intents()[1].native_window=='fixture-window' and snapshot().setup.readiness.state=='not_run','optional readiness is an owner-window-addressed native intent, never a fabricated success')
+-- Owner-only page receiver: native handoff follows ordinary Config bootstrap gates.
+local pageBefore=clone(saved);local pageSnapshotBefore=snapshot();local setupBefore=clone(pageSnapshotBefore.setup)
+local pageState=definition.init(cx,{runtime.json.encode(publicPage)},definition.save(state))
+check(pageState.binding==nil and P.equal(saved,pageBefore),'opening the public page cannot initialize or import an authority')
+local oldContextNonce=pageState.page_context_request.nonce
+definition.event(pageState,{ev='action',act='refresh'},cx)
+check(pageState.page_context_request.nonce~=oldContextNonce and P.equal(saved,pageBefore),'explicit refresh requests a new view-local owner context without writes')
+local ownerLegacy={schema=1,agents={record('owner-window-legacy')}}
+local ownerContext={kind='context',native_window='fixture-window',host={id=0,name='fixture',kind='local'},client_config=ownerLegacy}
+definition.event(pageState,{ev='action',id='main',act='spawn.page-context',value=runtime.json.encode({nonce=oldContextNonce,context=ownerContext})},cx)
+check(pageState.binding==nil and P.equal(saved,pageBefore),'stale context responses cannot open or import settings')
+local wrongContext=clone(ownerContext);wrongContext.native_window='foreign-window'
+definition.event(pageState,{ev='action',id='main',act='spawn.page-context',value=runtime.json.encode({nonce=pageState.page_context_request.nonce,context=wrongContext})},cx)
+check(pageState.binding==nil and P.equal(saved,pageBefore),'foreign native context is refused before owner bootstrap')
+holdInspection=true
+definition.event(pageState,{ev='action',id='main',act='spawn.page-context',value=runtime.json.encode({nonce=pageState.page_context_request.nonce,context=ownerContext})},cx)
+check(deferred~=nil and pageState.binding==nil,'owner bootstrap waits for actual native membership verification')
+definition.event(pageState,{ev='action',id='main',act='page-entry',value=runtime.json.encode(publicPage)},cx)
+holdInspection=false;local obsoleteContext=deferred;deferred=nil
+obsoleteContext({status=0,timed_out=false,stdout=runtime.json.encode(inventory)},nil)
+check(pageState.binding==nil and P.equal(saved,pageBefore),'new page entry invalidates a context callback still awaiting native membership')
+local ownerOpen=A.open;local receivedLegacy
+A.open=function(host,session,client,scope)receivedLegacy=clone(client);return ownerOpen(host,session,client,scope)end
+definition.event(pageState,{ev='action',id='main',act='spawn.page-context',value=runtime.json.encode({nonce=pageState.page_context_request.nonce,context=ownerContext})},cx)
+A.open=ownerOpen
+check(pageState.binding~=nil and P.equal(receivedLegacy,ownerLegacy),'only SPAWN owner context reaches its existing authoritative bootstrap writer')
+local pageSnapshot=assert(A.snapshot(pageState.binding))
+check(pageSnapshot.setup.schema==setupBefore.schema and pageSnapshot.setup.state==setupBefore.state and P.equal(pageSnapshot.setup.readiness,setupBefore.readiness) and pageSnapshot.adoption_required==pageSnapshotBefore.adoption_required,'owner page bootstrap preserves lifecycle, adoption and observed readiness')
+check(#pageSnapshot.attempts==#pageSnapshotBefore.attempts and P.equal(pageSnapshot.jobs,pageSnapshotBefore.jobs),'owner page bootstrap creates no attempts or execution jobs')
+check(pageSnapshot.setup.config_revision==pageSnapshot.config_revision and pageSnapshot.config_revision>pageSnapshotBefore.config_revision,'legacy source review advances the authoritative setup revision fence')
+check(not pageSnapshot.ready and pageSnapshot.migration~=nil and P.equal(pageSnapshot.records,pageSnapshotBefore.records),'owner legacy copy enters normal migration review without replacing host records')
+local afterOwner=clone(saved)
+definition.event(pageState,{ev='action',id='main',act='page-entry',value=runtime.json.encode({kind='page',page='managed',native_window='foreign-window'})},cx)
+check(P.equal(saved,afterOwner) and pageState.native_window=='fixture-window','existing Config refuses a foreign native-window page entry instead of rebinding')
 return 'PASS host_editor '..tostring(checks)

@@ -2,7 +2,7 @@
 local root, selection = ...
 assert(type(root) == "string" and root ~= "", "pass the plugin directory")
 assert(type(selection) == "string" and selection ~= "", "pass bounded group/section selections; run the remaining groups in separate callbacks")
-local allowed = { state = true, transport = true, authority = true, dispatch = true, reports = true, gates = true, health = true, workflow = true }
+local allowed = { state = true, transport = true, authority = true, dispatch = true, reports = true, gates = true, health = true, workflow = true, setup_ui = true, readiness_ui = true }
 local groups, seen = {}, {}
 for selector in string.gmatch(selection, "[^,]+") do
 	local name, section = string.match(selector, "^([a-z0-9_]+)/([a-z0-9_]+)$")

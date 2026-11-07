@@ -152,7 +152,8 @@ local function remember(d: any, event: any, answer: any, revision: number)
 		d.command_cursors = d.command_cursors or {}
 		local prior = d.command_cursors[event.orch_session_id]
 		d.command_cursors[event.orch_session_id] = { origin = clone(event.origin), controller_pane = event.controller_pane, seq = event.command_seq,
-			continued_epoch = if prior and equal(prior.origin, event.origin) then prior.continued_epoch else nil }
+			continued_epoch = if prior and equal(prior.origin, event.origin) then prior.continued_epoch else nil,
+			policy_revision = if answer.code == "policy_updated" then revision else (if prior then prior.policy_revision else nil) }
 	end
 	prune_effects(d)
 	local settled = {}
@@ -245,14 +246,17 @@ function M.unresolved(registry: any, session_id: string, owner_id: string): bool
 	end
 	return false
 end
-function M.decode_response(bytes: any, request: any): (any?, any?)
+local function decode_frame(bytes: any, request: any): (any?, any?)
 	if type(bytes) ~= "string" or #bytes > 8192 or bytes:sub(1, #PREFIX) ~= PREFIX then return fail("bridge_incompatible", "Install a compatible SPAWN dispatch bridge; complete SPAWN_DISPATCH v1 data is required.") end
 	local frame, err = codec.strict_decode(bytes:sub(#PREFIX + 1), 8192)
 	if err then return nil, err end
 	if not closed(frame, "schema op request_id complete body_bytes body_sha256 body_json") or frame.schema ~= 1 or frame.complete ~= true
 		or frame.op ~= request.op or frame.request_id ~= request.request_id or not str(frame.body_json, 8192)
 		or frame.body_bytes ~= #frame.body_json or frame.body_sha256 ~= codec.sha256(frame.body_json) then return fail("bridge_incomplete", "SPAWN response framing/hash/correlation mismatch; no effect accepted.") end
-	local body, diagnostic = codec.strict_decode(frame.body_json, 8192)
+	return codec.strict_decode(frame.body_json, 8192)
+end
+function M.decode_response(bytes: any, request: any): (any?, any?)
+	local body, diagnostic = decode_frame(bytes, request)
 	if diagnostic then return nil, diagnostic end
 	if not closed(body, "schema op request_id action_id origin_binding controller_generation status payload error") or body.schema ~= 1
 		or body.op ~= request.op or body.request_id ~= request.request_id or body.action_id ~= request.action_id
@@ -285,15 +289,58 @@ local function pane_binding(v: any, origin: any): boolean
 		and v.window_epoch == origin.window_epoch and v.window_key == origin.window_key and v.native_session_id == origin.native_session_id and v.window_host_id == origin.window_host_id
 end
 local function catalog(v: any, legacy_cache: boolean?): boolean
-	if not closed(v, "revision records next_cursor namespace host_key config_revision") or not (v.revision == 0 or pos(v.revision)) or type(v.records) ~= "table" or #v.records > 256 then return false end
-	local legacy = legacy_cache == true and v.namespace == nil and v.host_key == nil and v.config_revision == nil
-	if not legacy and (not str(v.namespace, 256) or not str(v.host_key, 256) or v.config_revision ~= v.revision) then return false end
+	if not closed(v, "catalog_version setup revision records next_cursor namespace host_key config_revision")
+		or not (v.revision == 0 or pos(v.revision)) or type(v.records) ~= "table" or #v.records > 256 then return false end
+	local legacy = legacy_cache == true and v.catalog_version == nil and v.setup == nil
+	if not legacy then
+		local setup = v.setup
+		if v.catalog_version ~= 2 or not closed(setup, "schema state config_revision readiness") or setup.schema ~= 1
+			or not table.find({ "not_started", "in_progress", "completed", "dismissed", "adopted_existing" }, setup.state)
+			or setup.config_revision ~= v.config_revision then return false end
+		local readiness = setup.readiness
+		if not closed(readiness, "state config_revision summary")
+			or not table.find({ "not_run", "passed", "failed", "unavailable" }, readiness.state)
+			or not (readiness.config_revision == 0 or pos(readiness.config_revision))
+			or not str(readiness.summary, 1024, true) then return false end
+	end
+	if not (legacy and v.namespace == nil and v.host_key == nil and v.config_revision == nil)
+		and (not str(v.namespace, 256) or not str(v.host_key, 256) or v.config_revision ~= v.revision) then return false end
 	if v.next_cursor ~= nil and (not closed(v.next_cursor, "revision index") or v.next_cursor.revision ~= v.revision or not pos(v.next_cursor.index)) then return false end
 	for _, r in v.records do
 		if not closed(r, "id revision provider account_label backend enabled eligible capabilities unsupported model_variant profile_variant selector_evidence capacity_binding cwd placement capability_evidence effective_identity")
 			or not str(r.id, 96) or not (r.revision == 0 or pos(r.revision)) or type(r.eligible) ~= "boolean" or type(r.capabilities) ~= "table" or type(r.unsupported) ~= "table" then return false end
 	end
 	return true
+end
+-- Setup has no controller authority. Keep its closed response variant separate.
+function M.decode_setup_response(bytes: any, request: any): (any?, any?)
+	if not closed(request, "schema origin op request_id action_id setup_origin cursor") or request.schema ~= 1
+		or request.origin ~= "orchplus" or request.op ~= "catalog" or not id(request.request_id) or not id(request.action_id) then
+		return fail("invalid_schema", "Setup requires a closed read-only catalog request.")
+	end
+	local origin, cursor = request.setup_origin, request.cursor
+	if not closed(origin, "host_pane_id window_key window_epoch native_session_id window_host_id")
+		or not str(origin.host_pane_id, 256) or not str(origin.window_key, 256, true) or not id(origin.window_epoch)
+		or not str(origin.native_session_id, 256) or not str(origin.window_host_id, 256)
+		or (cursor ~= nil and (not closed(cursor, "revision index") or not (cursor.revision == 0 or pos(cursor.revision)) or not pos(cursor.index))) then
+		return fail("invalid_schema", "Setup catalog requires its exact native origin and bounded cursor.")
+	end
+	local body, diagnostic = decode_frame(bytes, request)
+	if diagnostic then return nil, diagnostic end
+	if not closed(body, "schema op request_id action_id setup_origin status payload error") or body.schema ~= 1
+		or body.op ~= request.op or body.request_id ~= request.request_id or body.action_id ~= request.action_id
+		or not equal(body.setup_origin, origin) or not str(body.status, 96) then
+		return fail("binding_mismatch", "SPAWN setup response belongs to a different immutable request.")
+	end
+	if body.error ~= nil and (not closed(body.error, "code message detail") or not str(body.error.code, 96)
+		or (body.error.message ~= nil and not str(body.error.message, 512, true))
+		or (body.error.detail ~= nil and not str(body.error.detail, 512, true))) then
+		return fail("invalid_schema", "SPAWN error detail is not a bounded public prerequisite.")
+	end
+	if body.status == "catalog" and not catalog(body.payload) then
+		return fail("invalid_catalog", "SPAWN returned an incompatible setup catalog.")
+	end
+	return body, nil
 end
 local request_fields = {
 	catalog = "cursor",
@@ -406,7 +453,7 @@ local DEFAULT_POLICY = { paused = false, poll_ms = 5000, heartbeat_ms = 60000, s
 	initial_dispatch_account = false, initial_dispatch_model = false, sweep_enabled = true, sweep_time = "03:00",
 	worker_rollover_records = {}, worker_rollover_provider = false, worker_rollover_account = false, worker_rollover_model = false,
 	coordinator_rollover_records = {}, coordinator_rollover_provider = false, coordinator_rollover_account = false, coordinator_rollover_model = false,
-	concurrency_limit = 0, loop_cap = 3, review_rounds = 2, stale_claim_min = 30, enforce_cross_family = true, family_map = {},
+	concurrency_limit = 0, loop_cap = 3, review_rounds = 2, stale_claim_min = 30, require_code_review = true, require_other_family = true, family_map = {},
 	reviewer_records = {}, release_manager_record = "", checkout_roots = {}, auto_approve_kinds = {}, glitch_integration = true,
 	default_work_source = "glitch_plan", board_path = "", board_lanes = { queued = "Todo", running = "Doing", review = "Review", done = "Done" },
 	inbox_folder = "", auto_launch_intake = false, routes = {}, labeller_record = "",
@@ -459,7 +506,7 @@ config.keys.cp3 = config.keys.cp2 .. " auto_rollover rollover_threshold_pct roll
 config.keys.quota = "poll_ms heartbeat_ms stale_ms automatic_reports auto_rollover rollover_threshold_pct rollover_include_coordinator quota_routing excluded_workers quota_reserve_pct quota_max_age_ms initial_dispatch_records initial_dispatch_provider initial_dispatch_account initial_dispatch_model"
 config.keys.sweep = config.keys.quota .. " sweep_enabled sweep_time"
 config.keys.v3 = config.keys.sweep .. " worker_rollover_records worker_rollover_provider worker_rollover_account worker_rollover_model coordinator_rollover_records coordinator_rollover_provider coordinator_rollover_account coordinator_rollover_model concurrency_limit"
-config.keys.editable = config.keys.v3 .. " loop_cap review_rounds stale_claim_min enforce_cross_family family_map reviewer_records release_manager_record checkout_roots auto_approve_kinds glitch_integration default_work_source board_path board_lanes inbox_folder auto_launch_intake routes labeller_record role_guidance templates"
+config.keys.editable = config.keys.v3 .. " loop_cap review_rounds stale_claim_min require_code_review require_other_family family_map reviewer_records release_manager_record checkout_roots auto_approve_kinds glitch_integration default_work_source board_path board_lanes inbox_folder auto_launch_intake routes labeller_record role_guidance templates"
 local REPORT_KINDS = { "REGISTER", "ACCEPTED", "reply_ack", "COORDINATOR_RELEASE", "READY", "HEARTBEAT", "WAITING", "BLOCKED", "ASK",
 	"CHECKPOINT", "REVIEW_READY", "REVIEW_RESULT", "DONE", "ROLLOVER_REQUEST", "LANDING_REQUEST", "LANDING_RESULT", "COORDINATOR_PROPOSAL",
 	"CHECK_RESULT", "CHECKOUT", "LABEL", "DEPLOY_RESULT" }
@@ -468,8 +515,12 @@ config.APPROVABLE = { "dispatch", "report", "review", "landing" }
 config.MAX_BYTES = 49152 -- Aggregate bound on the canonical encoding (quota.canonical).
 local function policy(d: any, session: string): any return (d.policies or {})[session] or DEFAULT_POLICY end
 local function migrate_policy(p: any): any
-	-- Stored 5/10/16/18/27-key policies predate later Config fields; fill only the documented defaults.
-	local out = clone(DEFAULT_POLICY); for k, v in p do out[k] = clone(v) end; return out
+	local out = clone(DEFAULT_POLICY)
+	for k, v in p do if k ~= "enforce_cross_family" then out[k] = clone(v) end end
+	if p.enforce_cross_family ~= nil then
+		out.require_code_review = true; out.require_other_family = p.enforce_cross_family
+	end
+	return out
 end
 -- Tagged gate-answer sources: policy answers exist only on coordinator proposals (rule = the
 -- proposal's kind) and landing approvals; ORCH+'s own refusals only as a coordinator proposal's
@@ -545,7 +596,9 @@ end
 function config.valid_v4(p: any): boolean
 	if not (pos(p.loop_cap) and p.loop_cap <= 10 and pos(p.review_rounds) and p.review_rounds <= 2
 		and (p.stale_claim_min == 0 or pos(p.stale_claim_min)) and p.stale_claim_min <= 1440
-		and type(p.enforce_cross_family) == "boolean" and type(p.glitch_integration) == "boolean" and type(p.auto_launch_intake) == "boolean"
+		and type(p.require_code_review) == "boolean" and type(p.require_other_family) == "boolean"
+		and (p.require_code_review or not p.require_other_family)
+		and type(p.glitch_integration) == "boolean" and type(p.auto_launch_intake) == "boolean"
 		and config.records_ordered(p.reviewer_records, 8) and (p.release_manager_record == "" or config.record(p.release_manager_record))
 		and (p.labeller_record == "" or config.record(p.labeller_record)) and (p.default_work_source == "glitch_plan" or p.default_work_source == "board")
 		and (p.board_path == "" or config.absolute(p.board_path, 512)) and (p.inbox_folder == "" or config.absolute(p.inbox_folder, 512))) then return false end
@@ -589,6 +642,9 @@ local function valid_policy(p: any, legacy: boolean?): boolean
 	if legacy and ((closed(p, keys.cp2) and count(p) == 5) or (closed(p, keys.cp3) and count(p) == 10)
 		or (closed(p, "paused " .. keys.quota) and count(p) == 16) or (closed(p, "paused " .. keys.sweep) and count(p) == 18)
 		or (closed(p, "paused " .. keys.v3) and count(p) == 27)) then p = migrate_policy(p) end
+	if legacy and type(p) == "table" and type(p.enforce_cross_family) == "boolean"
+		and closed(p, "paused " .. keys.editable:gsub("require_code_review require_other_family", "enforce_cross_family"))
+		and count(p) == count(DEFAULT_POLICY) - 1 and p.require_code_review == nil and p.require_other_family == nil then p = migrate_policy(p) end
 	if type(p) ~= "table" or p == tern.json.null then return false end
 	for _, scope in { "initial_dispatch", "worker_rollover", "coordinator_rollover" } do
 		if not record_set(p[scope .. "_records"], quota.MAX_RECORDS) or type(p[scope .. "_provider"]) ~= "boolean"
@@ -605,6 +661,18 @@ local function valid_policy(p: any, legacy: boolean?): boolean
 		and type(p.sweep_enabled) == "boolean" and sweep_clock(p.sweep_time) and config.valid_v4(p) and config.fits(p)
 end
 function M.policy(registry: any, session_id: string): any return clone(policy(registry.dispatch or fresh(), session_id)) end
+function M.policy_revision(registry: any, session_id: string): number
+	local cursor = ((registry.dispatch or {}).command_cursors or {})[session_id]
+	return if cursor then cursor.policy_revision or 0 else 0
+end
+function M.default_policy(): any return clone(DEFAULT_POLICY) end
+function M.valid_policy(p: any): boolean return valid_policy(p) end
+function M.seed_policy(registry: any, session_id: string, p: any)
+	assert(valid_policy(p), "invalid installation policy")
+	registry.dispatch = if registry.dispatch then table.clone(registry.dispatch) else fresh()
+	registry.dispatch.policies = table.clone(registry.dispatch.policies or {})
+	registry.dispatch.policies[session_id] = clone(p)
+end
 local function stamp(clock: any): any
 	local out = { at_ms = if type(clock) == "table" then clock.now_ms or 0 elseif type(clock) == "number" then clock else 0 }
 	if type(clock) == "table" and id(clock.epoch) and type(clock.mono_ms) == "number" and clock.mono_ms >= 0 and clock.mono_ms <= MAX then
@@ -823,13 +891,25 @@ local function reclaim_workers(registry: any)
 			for action_id, action in d.actions do
 				if action.worker_id == key then d.actions[action_id] = nil end
 			end
+			-- Cancelled reviews have no approval to preserve. Reclaim their settled obligation
+			-- with its evidence-bearing worker, before removing the only settlement evidence.
+			for review_id, rv in d.reviews or {} do
+				if rv.reviewer_worker_id == key and rv.status == "cancelled" and rv.result == nil
+					and not config.cancelled_review_pending(d, rv) then d.reviews[review_id] = nil end
+			end
 			-- Monotonic IDs and command_cursors survive settled-record reclamation.
 			d.workers[key] = nil
 		end
 	end
 	-- Exclusions name durable workers only; drop entries whose settled worker was reclaimed.
-	for _, p in d.policies or {} do
-		for i = #p.excluded_workers, 1, -1 do if not d.workers[p.excluded_workers[i]] then table.remove(p.excluded_workers, i) end end
+	for sid, p in d.policies or {} do
+		for i = #p.excluded_workers, 1, -1 do
+			if not d.workers[p.excluded_workers[i]] then
+				table.remove(p.excluded_workers, i)
+				local cursor = (d.command_cursors or {})[sid]
+				if cursor then cursor.policy_revision = registry.revision end
+			end
+		end
 	end
 end
 local function new_gate(d: any, w: any, kind: string, question: string, options: any, evidence: any, clock: any, proposal: any?): (any?, any?)
@@ -902,6 +982,7 @@ end
 -- Declared provider families (Contract A): owner map first, then the built-in provider table.
 -- OMP and unknown providers stay unmapped (absent) until the owner maps the record.
 config.PROVIDER_FAMILIES = { Claude = "anthropic", Codex = "openai", Kimi = "moonshot", Agy = "google", Grok = "xai", Muse = "muse" }
+function M.provider_family(provider: string): string? return config.PROVIDER_FAMILIES[provider] end
 function config.family_of(d: any, w: any): string?
 	local row
 	for _, candidate_row in (d.catalogs[w.logical_session_id] or {}).records or {} do
@@ -914,8 +995,8 @@ function config.bind_family(d: any, w: any) w.family = config.family_of(d, w) en
 -- for the successor's record; checkout, check results and usage readings are never inherited.
 -- base_ref completes the manifest inputs (Contract G); launch_gates lists the queue-time
 -- shared_checkout/file_overlap gates (and a work source's intake gate) that hold a never-provisioned worker before launch.
--- review_id binds a reviewer worker to the review it serves; check_rework is the N-mode helper-check
--- rework loop { count, gate_id?, state?, key? } (key: digest of the last failed set sent).
+-- review_id binds a reviewer worker to the review it serves; check_rework independently tracks
+-- repair in every mode { count, gate_id?, state?, key? } (key: digest of the last repaired revision).
 -- scope_accepted { changed_digest, gate_id, at_ms } is the owner's durable accept of the exact
 -- out-of-scope change set (config.scope_problem digest), written in the answer's commit; landing
 -- reads it, never gate existence, so gate reclamation cannot re-block an accepted change set.
@@ -1024,9 +1105,19 @@ function config.new_worker(d: any, event: any, sid: string, row: any, prompt: st
 end
 -- D14: the session's Config role guidance for `role`, prepended to an assignment ORCH+ sends.
 -- Guidance only; ORCH+ never restricts tools by role.
+function config.review_guidance(p: any): string
+	return "ORCH+ review policy at assignment: require_code_review=" .. tostring(p.require_code_review)
+		.. "; require_other_family=" .. tostring(p.require_other_family)
+		.. ". Every declared check requires successful helper CHECK_RESULT at the submitted revision in every mode. "
+		.. (if p.require_code_review then "Submit CHECKPOINT then REVIEW_READY for independent review before landing."
+			else "Code review is disabled: submit CHECKPOINT then LANDING_REQUEST without waiting for a reviewer; do not propose review.")
+		.. " The host rechecks current policy and all evidence before every grant. Role text is guidance, not permission isolation."
+end
 function config.guided(d: any, sid: string, role: string, text: string): string
-	local guidance = policy(d, sid).role_guidance[role] or ""
+	local p = policy(d, sid)
+	local guidance = p.role_guidance[role] or ""
 	return (if guidance ~= "" then guidance .. "\n\n" else "") .. text
+		.. (if role == "builder" or role == "coordinator" then "\n\n" .. config.review_guidance(p) else "")
 end
 -- Provisions a release-manager, reviewer or labeller worker and records its assignment; a hold on failure.
 function config.provision_role(d: any, w: any, noun: string, clock: any): any?
@@ -1493,8 +1584,11 @@ local function valid_landing(d: any, registry: any, legacy: boolean?): boolean
 		if item.verification ~= nil and (not legacy or not closed(item.verification, "attestation checkpoint_id artifact_revision") or item.verification.attestation ~= "worker-attested"
 			or not id(item.verification.checkpoint_id) or item.verification.artifact_revision ~= r.source_revision) then return false end
 		local proof = item.proof
-		if proof ~= nil and (not closed(proof, "mode artifact_revision review_id check_refs") or (proof.mode ~= "cross_family_review" and proof.mode ~= "helper_checks")
-			or proof.artifact_revision ~= r.source_revision or not id(proof.review_id) or not config.texts(proof.check_refs, 16, 1024)) then return false end
+		if proof ~= nil and (not closed(proof, "mode artifact_revision review_id check_refs")
+			or not table.find({ "cross_family_review", "helper_checks", "review_disabled" }, proof.mode)
+			or proof.artifact_revision ~= r.source_revision
+			or (if proof.mode == "review_disabled" then proof.review_id ~= nil else not id(proof.review_id))
+			or not config.texts(proof.check_refs, 16, 1024)) then return false end
 		if item.hold ~= nil and (not closed(item.hold, "code message") or not str(item.hold.code, 96) or not wire_text(item.hold.message, 1024)) then return false end
 		if item.refresh_required ~= nil and item.refresh_required ~= true then return false end
 		if (item.refresh_loop ~= nil and not loops.valid(item.refresh_loop, { "target_moved", "stale_target" }))
@@ -1680,8 +1774,9 @@ function M.valid(d: any, registry: any, legacy_catalog_cache: boolean?): boolean
 	if d.command_cursors ~= nil then
 		if type(d.command_cursors) ~= "table" or d.command_cursors == tern.json.null or count(d.command_cursors) > 64 then return false end
 		for sid, cursor in d.command_cursors do
-			if not registry.sessions[sid] or not closed(cursor, "origin controller_pane seq continued_epoch") or not M.origin(cursor.origin)
+			if not registry.sessions[sid] or not closed(cursor, "origin controller_pane seq continued_epoch policy_revision") or not M.origin(cursor.origin)
 				or cursor.origin.logical_session_id ~= sid or not pos(cursor.seq) or not str(cursor.controller_pane, 96) or not cursor.controller_pane:match("^%d+$")
+				or (cursor.policy_revision ~= nil and (not pos(cursor.policy_revision) or cursor.policy_revision > registry.revision))
 				or (cursor.continued_epoch ~= nil and (not pos(cursor.continued_epoch) or cursor.continued_epoch > registry.execution_epoch)) then return false end
 		end
 	end
@@ -1891,6 +1986,38 @@ function M.valid(d: any, registry: any, legacy_catalog_cache: boolean?): boolean
 	for _, r in d.rollovers or {} do if not valid_rollover_quota(d, r) then return false end end
 	return valid_workflow(d, registry, legacy_catalog_cache)
 end
+-- Pre-cutover immutable grants must settle under their original policy interpretation.
+-- This runs before restore validation and never changes a published byte.
+function M.migration_problem(d: any, legacy_registry: boolean?): string?
+	if type(d) ~= "table" then return nil end
+	local old = legacy_registry == true
+	if type(d.policies) == "table" then
+		for _, p in d.policies do if type(p) == "table" and p.enforce_cross_family ~= nil then old = true end end
+	end
+	if type(d.landing) ~= "table" or type(d.landing.items) ~= "table" then return nil end
+	for _, item in d.landing.items do
+		if type(item) ~= "table" or type(item.grants) ~= "table" then continue end
+		for _, grant in item.grants do
+			if type(grant) ~= "table" then continue end
+			if (grant.result ~= nil and type(grant.result) ~= "table")
+				or (grant.reconciliation ~= nil and type(grant.reconciliation) ~= "table") then continue end
+			if landing_released(grant) or grant.reconciliation ~= nil
+				or (grant.result ~= nil and grant.result.outcome ~= "uncertain" and grant.uncertain == nil) then continue end
+			local incompatible = old
+			if not incompatible and type(grant.bytes) == "string" then
+				local raw = codec.strict_decode(grant.bytes, codec.LIMITS.logical)
+				local payload = if type(raw) == "table" then raw.payload else nil
+				if type(payload) == "table" and type(payload.proof) == "table"
+					and payload.proof.mode ~= "review_disabled" and payload.proof.review_id ~= payload.review_id then incompatible = true end
+			end
+			if incompatible then
+				return "Drain or reconcile outstanding immutable landing grant " .. tostring(grant.grant_id)
+					.. " under the previous compatible ORCH+/SPAWN pair before upgrading. Its bytes were not rewritten."
+			end
+		end
+	end
+	return nil
+end
 function M.restore(d: any)
 	if d == nil then return end
 	-- Retained sequenced observations and polls (pre-retention-rule stores) are behind the
@@ -1901,7 +2028,7 @@ function M.restore(d: any)
 	prune_effects(d)
 	-- Pre-join catalogs are validated at restore, then invalidated once. They
 	-- cannot authorize new work; exact retained actions and workers survive.
-	for sid, c in d.catalogs do if c.namespace == nil then d.catalogs[sid] = nil end end
+	for sid, c in d.catalogs do if c.catalog_version ~= 2 then d.catalogs[sid] = nil end end
 	-- USAGE evidence leases are at most minutes long; a restart always needs a fresh snapshot.
 	d.capacity = nil
 	for _, a in d.actions do if a.phase == "claimed" then a.phase = "uncertain" end end
@@ -2534,8 +2661,14 @@ function config.answer_checkout_gate(registry: any, n: any, w: any, g: any, even
 	end
 	if withdraw then
 		for key, other in d.gates do if other.worker_id == w.worker_id then d.gates[key] = nil end end
-		for _, p in d.policies or {} do
-			for i = #p.excluded_workers, 1, -1 do if p.excluded_workers[i] == w.worker_id then table.remove(p.excluded_workers, i) end end
+		for sid, p in d.policies or {} do
+			for i = #p.excluded_workers, 1, -1 do
+				if p.excluded_workers[i] == w.worker_id then
+					table.remove(p.excluded_workers, i)
+					local cursor = (d.command_cursors or {})[sid]
+					if cursor then cursor.policy_revision = n.revision end
+				end
+			end
 		end
 		d.workers[w.worker_id] = nil
 		return result("work_cancelled", { worker_id = w.worker_id, work_id = w.work_id }), nil
@@ -3132,7 +3265,12 @@ local function landing_problem(n: any, item: any, q: any, clock: any): any?
 	if config.scope_blocked(w) then
 		return landing_hold("scope_open", "The latest CHECKOUT changes files outside the declared scope (or the helper's changed-file list overflowed); answer its scope gate to accept the changes, or bring the checkout back in scope.")
 	end
-	local proof, problem = rules.verify_landing_proof({ enforce_cross_family = policy(d, w.logical_session_id).enforce_cross_family, source_revision = r.source_revision,
+	if not d.catalogs[w.logical_session_id] or d.catalogs[w.logical_session_id].catalog_version ~= 2 then
+		return landing_hold("catalog_incompatible", "Refresh a compatible SPAWN catalog version 2 before authorizing a new landing grant.")
+	end
+	local current_policy = policy(d, w.logical_session_id)
+	local proof, problem = rules.verify_landing_proof({ require_code_review = current_policy.require_code_review,
+		require_other_family = current_policy.require_other_family, source_revision = r.source_revision,
 		checks = w.checks, check_results = w.check_results, builder_worker_id = w.worker_id, builder_record_id = w.record_id,
 		builder_family = w.family or config.family_of(d, w), review = config.review_for(d, w) })
 	if not proof then return landing_hold(problem.code, problem.message) end
@@ -3182,11 +3320,14 @@ local function grant_landing(n: any, q: any, item: any, rm: any, event: any, clo
 	if not thread_room(rm) then return landing_hold("full", "The release manager's durable thread is full of unresolved items; no grant was issued.") end
 	local grant_id = next_id(d, "landing-grant-")
 	local proof = item.proof
-	local review = (d.reviews or {})[proof.review_id]
+	local review = if proof.review_id then (d.reviews or {})[proof.review_id] else nil
 	local payload = { landing_id = item.id, grant_id = grant_id, project_id = r.project_id, checkpoint_id = latest_checkpoint(w).payload.checkpoint_id,
 		repo_ref = r.repo_ref, target_ref = r.target_ref, target_revision = r.target_revision, source_ref = r.source_ref, source_revision = r.source_revision,
-		builder_work_id = w.work_id, review_id = proof.review_id, reviewer_family = (if review then review.reviewer_family else nil) or "unknown",
-		proof = { mode = proof.mode, artifact_revision = proof.artifact_revision, review_id = proof.review_id, check_refs = tern.json.array(clone(proof.check_refs)) } }
+		builder_work_id = w.work_id, proof = { mode = proof.mode, artifact_revision = proof.artifact_revision,
+			review_id = proof.review_id, check_refs = tern.json.array(clone(proof.check_refs)) } }
+	if proof.mode ~= "review_disabled" then
+		payload.review_id = proof.review_id; payload.reviewer_family = (if review then review.reviewer_family else nil) or "unknown"
+	end
 	local delivery, err = issue_reply(d, rm, "landing_grant", payload)
 	if err then return landing_hold(err.code, err.message .. " No landing grant was issued.") end
 	table.insert(item.grants, { grant_id = grant_id, worker_id = rm.worker_id, action_id = delivery.action_id, action_revision = delivery.action_revision,
@@ -3229,17 +3370,21 @@ local function landing_refresh(n: any, q: any, item: any, hold: any, clock: any)
 	end
 	if type(clock) == "table" and clock.reserved_capacity then return deferred("authority capacity is at its settlement reserve.") end
 	if not thread_room(w) then return deferred("the worker's durable thread is full of unresolved items.") end
+	local next_steps = "Rebase or rebuild onto current_revision, publish a fresh CHECKPOINT and rerun every declared helper check for the new revision"
+		.. (if policy(d, item.logical_session_id).require_code_review then ", publish REVIEW_READY for a fresh review (the earlier approval is void)"
+			else "; code review is disabled, so do not request a reviewer")
+		.. ", then publish a fresh LANDING_REQUEST expecting current_revision; it needs new owner approval. Builders never merge: the release manager lands it."
 	local payload = { landing_id = item.id, project_id = r.project_id, repo_ref = r.repo_ref, target_ref = r.target_ref,
 		expected_revision = r.target_revision, current_revision = q.head.revision,
 		reason = (if cause == "target_moved" then "Target moved (" else "The release manager found the target moved (") .. q.head.source .. " via " .. q.head.landing_id
-			.. "). Rebase or rebuild onto current_revision, publish a fresh CHECKPOINT, REVIEW_READY for the new revision (its earlier approval is void) and a fresh LANDING_REQUEST expecting current_revision; it needs new owner approval. Builders never merge: the release manager lands it." }
+			.. "). " .. next_steps }
 	local delivery, err = issue_reply(d, w, "landing_refresh", payload)
 	if err then return deferred(err.message) end
 	item.refresh = { worker_id = w.worker_id, worker_generation = w.worker_generation, expected_revision = r.target_revision, current_revision = q.head.revision, action_id = delivery.action_id,
 		action_revision = delivery.action_revision, reply_seq = delivery.reply_seq, message_id = delivery.message_id, bytes = delivery.bytes,
 		published = false, acknowledged = false, revision = n.revision }
 	append(d, w, "landing_refresh", bounded("Landing " .. item.id .. " needs a refresh: " .. r.target_ref .. " moved from " .. r.target_revision
-		.. " to " .. q.head.revision .. ". Rebase, get the new revision reviewed, then publish a fresh CHECKPOINT and LANDING_REQUEST expecting the new head.", 32768), clock,
+		.. " to " .. q.head.revision .. ". " .. next_steps, 32768), clock,
 		{ action_id = delivery.action_id })
 	-- The refresh voids on the moved target head (void.target_revision); a newer checkpoint voids on
 	-- the builder's new artifact revision (void.artifact_revision, also every pre-8C record).
@@ -3346,7 +3491,7 @@ local function landing_request(n: any, w: any, report: any, clock: any): (any?, 
 	local landing_id = if existing then existing.id else next_id(d, "landing-")
 	local question = "Approve landing " .. landing_id .. " (request report seq " .. tostring(report.seq) .. ")? Work " .. w.work_id .. " asks to land "
 		.. p.source_ref .. "@" .. p.source_revision .. " (checkpoint " .. p.checkpoint_id .. ") onto " .. p.repo_ref .. " " .. p.target_ref
-		.. " expecting head " .. p.target_revision .. ". Approval binds only this exact request; a refresh voids it. The grant is issued in queue order once proof rule H holds for this revision (helper-run checks and review, or cross-family review). The session's release manager (never the builder) merges it under the repository's own rules; ORCH+ never runs git or infers a merge."
+		.. " expecting head " .. p.target_revision .. ". Approval binds only this exact request; a refresh voids it. Every declared helper check must pass at this revision; code review and a different declared family are additionally required only when enabled in Config. The session's release manager (never the builder) merges under the repository's own rules; ORCH+ never runs git or infers a merge."
 	local gate, err = new_gate(d, w, "landing_approval", question, { { id = "approve", label = "Approve this exact landing" }, { id = "reject", label = "Reject" } },
 		{ "landing:" .. landing_id, "request_event:" .. report.event_id, "checkpoint:" .. p.checkpoint_id,
 			bounded("source:" .. p.source_ref .. "@" .. p.source_revision, 1024), bounded("target:" .. p.repo_ref .. " " .. p.target_ref .. "@" .. p.target_revision, 1024) }, clock)
@@ -3481,7 +3626,7 @@ function config.signer_problem(d: any, item: any, w: any): any?
 			return landing_hold("release_manager_refused", "Release manager record " .. record .. " is absent from the current catalog, disabled or ineligible, or does not carry release-manager-v1; no release manager is launched and no grant is issued." .. config.RM_CONFIG)
 		end
 	end
-	local review = if item.proof then (d.reviews or {})[item.proof.review_id] else nil
+	local review = if item.proof and item.proof.review_id then (d.reviews or {})[item.proof.review_id] else nil
 	local problem = rules.verify_signer({ release_manager_record_id = record, builder_record_id = w.record_id, reviewer_record_id = if review then review.reviewer_record_id else nil })
 	if problem then return landing_hold(problem.code, problem.message .. config.RM_CONFIG) end
 	return nil
@@ -3848,7 +3993,8 @@ end
 function config.landing_extras(d: any, item: any, out: any)
 	local b = d.workers[item.worker_id]
 	out.builder = config.worker_ref(d, item.worker_id)
-	local rv = (if item.proof then (d.reviews or {})[item.proof.review_id] else nil) or (if b then config.review_for(d, b) else nil)
+	local rv = if item.proof and item.proof.review_id then (d.reviews or {})[item.proof.review_id]
+		else (if b and policy(d, item.logical_session_id).require_code_review then config.review_for(d, b) else nil)
 	out.reviewer = if rv then { review_id = rv.review_id, worker_id = rv.reviewer_worker_id, record_id = rv.reviewer_record_id, family = rv.reviewer_family } else nil
 	local h = item.holder
 	local hw = if h then d.workers[h.worker_id] else nil
@@ -3865,7 +4011,7 @@ end
 -- oldest first unless it is still its work's latest review while the work is alive.
 config.REVIEW_STATUSES = { "queued", "requested", "approved", "changes_required", "capped", "cancelled" }
 config.REVIEW_OPEN = { queued = true, requested = true, changes_required = true }
-config.REVIEW_KEYS = "review_id revision logical_session_id builder_worker_id builder_work_id builder_family builder_record_id reviewer_worker_id reviewer_record_id reviewer_family round artifact_revision checkpoint_id task_ref source_ref plan_ref plan_revision scope_paths status result findings refusal gate_id loop hold request rework void trigger at_ms"
+config.REVIEW_KEYS = "review_id revision logical_session_id builder_worker_id builder_work_id builder_family builder_record_id reviewer_worker_id reviewer_record_id reviewer_family round artifact_revision checkpoint_id task_ref source_ref worktree_path plan_ref plan_revision scope_paths status result findings refusal gate_id loop hold request rework void trigger at_ms"
 -- The fixed judge question (Contract D): one question, no score, no confidence.
 config.JUDGE_QUESTION = "Does the change at %s@%s implement %s as specified, without changes outside %s? Answer approved, or changes_required with findings tied to file and line."
 function config.review_serial(rv: any): number return tonumber(tostring(rv.review_id):match("(%d+)$") or "0") or 0 end
@@ -3890,11 +4036,21 @@ function config.review_builder(d: any, rv: any): any?
 	end
 	return best
 end
+-- Disabling review cancels its authority, not an already-issued reviewer's settlement obligation.
+-- The existing report evidence settles it; it never becomes an approved/completed review result.
+function config.cancelled_review_pending(d: any, rv: any): boolean
+	if rv.status ~= "cancelled" or not rv.hold or rv.hold.code ~= "review_disabled" or not rv.request or rv.result then return false end
+	local w = d.workers[rv.reviewer_worker_id]
+	local bytes = w and w.workflow and w.workflow.evidence.REVIEW_RESULT
+	local report = if bytes then codec.decode_report(bytes, w) else nil
+	return not report or report.action_id ~= rv.request.action_id or report.action_revision ~= rv.request.action_revision
+		or report.payload.review_id ~= rv.review_id or report.payload.round ~= rv.round or report.payload.artifact_revision ~= rv.artifact_revision
+end
 function config.review_pinned(d: any, w: any): boolean
 	for _, rv in d.reviews or {} do
 		if rv.logical_session_id == w.logical_session_id then
 			if config.REVIEW_OPEN[rv.status] and rv.builder_work_id == w.work_id then return true end
-			if rv.reviewer_worker_id == w.worker_id and (rv.status == "queued" or rv.status == "requested") then return true end
+			if rv.reviewer_worker_id == w.worker_id and (rv.status == "queued" or rv.status == "requested" or config.cancelled_review_pending(d, rv)) then return true end
 		end
 	end
 	return false
@@ -3903,7 +4059,7 @@ function config.review_room(d: any): boolean
 	d.reviews = d.reviews or {}
 	return config.make_room(d.reviews, 64, function(rv)
 		local needed = config.review_of(d, { work_id = rv.builder_work_id, logical_session_id = rv.logical_session_id }) == rv and config.review_builder(d, rv) ~= nil
-		return not config.REVIEW_OPEN[rv.status] and not needed
+		return not config.REVIEW_OPEN[rv.status] and not needed and not config.cancelled_review_pending(d, rv)
 	end, config.review_serial)
 end
 -- Binds a review round to the builder generation and checkpoint that asked for it.
@@ -3912,6 +4068,7 @@ function config.review_bind(d: any, rv: any, w: any, cp: any)
 	rv.builder_worker_id = w.worker_id; rv.builder_record_id = w.record_id; rv.builder_family = w.family or config.family_of(d, w)
 	rv.artifact_revision = p.artifact_revision; rv.checkpoint_id = p.checkpoint_id; rv.task_ref = p.task_ref
 	rv.source_ref = if w.checkout and w.checkout.branch ~= "" then w.checkout.branch else p.worktree_ref
+	rv.worktree_path = if w.checkout and w.checkout.head == p.artifact_revision and not config.checkout_mismatch(w, cp) then w.checkout.worktree_path else nil
 	rv.plan_ref = p.plan_ref; rv.plan_revision = p.plan_revision
 	rv.scope_paths = clone(if w.scope and #w.scope.paths > 0 then w.scope.paths else (w.files or {}))
 	rv.reviewer_worker_id = nil; rv.reviewer_record_id = nil; rv.reviewer_family = nil
@@ -3920,6 +4077,9 @@ end
 -- One open review per builder work. Returns the review, a non-fatal note (nothing new opened), or a problem.
 function config.open_review(n: any, w: any, cp: any, trigger: string, clock: any): (any?, string?, any?)
 	local d = n.dispatch
+	if not policy(d, w.logical_session_id).require_code_review then
+		return nil, "Code review is disabled in this session; enable Require code review in Config to request review.", nil
+	end
 	local p = cp.payload
 	local latest = config.review_of(d, w)
 	if latest and config.REVIEW_OPEN[latest.status] then
@@ -3954,6 +4114,7 @@ end
 -- Builder REVIEW_READY: opens (or advances) this work's review. Other roles only record evidence.
 function config.review_ready(n: any, w: any, checkpoint: any, clock: any): any?
 	if w.role ~= "builder" then return nil end
+	if not policy(n.dispatch, w.logical_session_id).require_code_review then config.settle_review_ready(w); return nil end
 	local rv, note, problem = config.open_review(n, w, checkpoint, "review_ready", clock)
 	if problem then return problem end
 	if note then local _, err = append(n.dispatch, w, "attention", note, clock); if err then return err end end
@@ -3991,13 +4152,15 @@ function config.review_result(n: any, w: any, report: any, correlation: any, clo
 	if not rv or rv.reviewer_worker_id ~= w.worker_id or not rv.request or rv.request.action_id ~= report.action_id or rv.request.action_revision ~= report.action_revision then
 		return config.refusal("action_mismatch", "REVIEW_RESULT must echo the exact review_request this reviewer worker received.")
 	end
-	if rv.status ~= "requested" then
+	if rv.status ~= "requested" and not (rv.status == "cancelled" and rv.hold and rv.hold.code == "review_disabled") then
 		return config.refusal("review_closed", "Review " .. rv.review_id .. " is " .. rv.status .. "; it no longer accepts a result.")
 	end
 	if p.review_id ~= rv.review_id or p.round ~= rv.round or p.artifact_revision ~= rv.artifact_revision then
 		return config.refusal("review_mismatch", "REVIEW_RESULT must name review " .. rv.review_id .. ", round " .. tostring(rv.round) .. " and artifact revision " .. rv.artifact_revision .. " exactly.")
 	end
-	local enforced = policy(d, w.logical_session_id).enforce_cross_family
+	-- Consume a correctly correlated late result without reopening a policy-disabled review.
+	if rv.status == "cancelled" then return nil end
+	local enforced = policy(d, w.logical_session_id).require_other_family
 	local b = config.review_builder(d, rv)
 	if b then rv.builder_family = b.family or config.family_of(d, b) end
 	local family = w.family or config.family_of(d, w)
@@ -4036,7 +4199,7 @@ function config.review_acked(d: any, reply: any)
 end
 function config.select_reviewer(d: any, rv: any): (any?, string?, string?, string?)
 	local p, c = policy(d, rv.logical_session_id), d.catalogs[rv.logical_session_id]
-	local enforced = p.enforce_cross_family
+	local enforced = p.require_other_family
 	if #p.reviewer_records == 0 then
 		return nil, nil, "reviewer_unavailable", "No reviewer records are configured; add one under Config → Review & proof."
 	end
@@ -4083,6 +4246,13 @@ end
 function config.review_cancel(d: any, rv: any, code: string, message: string)
 	rv.status = "cancelled"; rv.hold = { code = code, message = bounded(message, 1024) }; rv.revision += 1
 	config.review_ungate(d, rv)
+	local gate = if rv.loop then loops.gate(d, rv.loop) else nil
+	if gate then
+		gate.phase = "superseded"; gate.revision += 1
+		local builder = d.workers[gate.worker_id]
+		if builder then settle_entries(builder, "gate_id", gate.id) end
+	end
+	rv.loop = nil
 end
 function config.answer_review_gate(_: any, n: any, w: any, g: any, event: any, clock: any): (any?, any?)
 	local d = n.dispatch
@@ -4129,6 +4299,9 @@ end
 -- 32-worker cap: a full cap holds the review with backpressure; it is never dropped.
 function config.queue_reviewer(n: any, rv: any, row: any, family: string?, event: any, clock: any): any?
 	local d = n.dispatch
+	if not rv.worktree_path then
+		return { code = "review_location_unverified", message = "Review needs a helper CHECKOUT at the checkpoint's artifact revision and matching worktree_ref. Publish those facts and REVIEW_READY again; the configured launch cwd is not a substitute." }
+	end
 	if count(d.workers) >= 32 then reclaim_workers(n) end
 	if count(d.workers) >= 32 then
 		return { code = "full", message = "Managed generation capacity (32 workers, reviewers included) is full; this review waits and launches its reviewer when a slot frees. Nothing was dropped." }
@@ -4140,6 +4313,7 @@ function config.queue_reviewer(n: any, rv: any, row: any, family: string?, event
 	local scope = if #rv.scope_paths > 0 then bounded(table.concat(rv.scope_paths, ", "), 2048) else "the declared scope (none declared)"
 	local question = string.format(config.JUDGE_QUESTION, rv.source_ref, rv.artifact_revision, rv.task_ref, scope)
 	local prompt = config.guided(d, sid, "reviewer", "You are an ORCH+ reviewer worker for review " .. rv.review_id .. ", round " .. tostring(rv.round) .. ", of builder work " .. rv.builder_work_id
+		.. ". Review only in the verified repository/worktree " .. rv.worktree_path .. "; your configured launch cwd is not the task repository. Keep this location distinct from source_ref " .. rv.source_ref .. " and artifact_revision " .. rv.artifact_revision
 		.. ". After ACCEPTED, wait for the review_request reply and answer only its fixed question, once: " .. question
 		.. " Report exactly one REVIEW_RESULT echoing the review_request action_id/action_revision, review_id, round and artifact_revision; findings name a file and line; no scores, no confidence. ORCH+ finishes this worker once the result settles.")
 	local w = config.new_worker(d, event, sid, row, prompt, rv.review_id .. ":" .. tostring(rv.round) .. ":", "reviewer")
@@ -4159,7 +4333,7 @@ function config.request_review(d: any, rv: any, r: any): any?
 	return nil
 end
 function config.send_rework(d: any, rv: any, b: any, clock: any): any?
-	local failed = if policy(d, rv.logical_session_id).enforce_cross_family then {} else config.failed_checks(b, rv.artifact_revision)
+	local failed = config.failed_checks(b, rv.artifact_revision)
 	local delivery, err = issue_reply(d, b, "rework", { review_id = rv.review_id, round = rv.round, artifact_revision = rv.artifact_revision,
 		failed_checks = tern.json.array(failed), findings = tern.json.array(clone(rv.findings)) })
 	if err then return { code = err.code, message = bounded("The rework reply could not be issued to " .. b.worker_id .. ": " .. err.message, 1024) } end
@@ -4177,6 +4351,10 @@ function config.reviews_held(d: any, sid: string, clock: any): any?
 end
 function config.advance_review(n: any, rv: any, event: any, clock: any)
 	local d = n.dispatch
+	if not policy(d, rv.logical_session_id).require_code_review then
+		config.review_cancel(d, rv, "review_disabled", "Code review is disabled in this session; no reviewer or review rework is requested.")
+		return
+	end
 	local b = config.review_builder(d, rv)
 	if rv.status == "capped" then
 		local loop = rv.loop
@@ -4239,29 +4417,32 @@ function config.auto_finish(n: any, w: any, clock: any)
 	w.finish = { request_id = next_id(n.dispatch, "auto-finish-"), seq = w.accepted_seq, revision = n.revision, source = { kind = "policy", rule = "auto_finish:" .. w.role } }
 	config.usage_end(n.dispatch, w, clock)
 	for _, entry in flow(w).thread do entry.state = "settled" end
-	append(n.dispatch, w, "finish", "ORCH+ finishes this " .. w.role .. " automatically: its result is recorded on its " .. (if w.role == "labeller" then "intake" else "review")
-		.. " and its receipts and replies are settled.", clock)
+	append(n.dispatch, w, "finish", "ORCH+ finishes this " .. w.role .. " automatically: its result evidence is recorded and its receipts and replies are settled.", clock)
 end
--- Helper-check rework (cross-family review off, D4): a new set of failed declared checks issues one
--- rework (failed checks only), counted against loop_cap; all checks passing ends the loop.
+-- Failed declared checks request check-only repair in every review mode, once per revision.
 function config.check_rework(n: any, w: any, clock: any)
 	local d = n.dispatch
 	local p = policy(d, w.logical_session_id)
-	if w.role ~= "builder" or w.coordinator_owner_id or not w.checks or #w.checks == 0 or p.enforce_cross_family then return end
-	local failed = config.failed_checks(w, nil)
+	if w.role ~= "builder" or w.coordinator_owner_id or not w.checks or #w.checks == 0 then return end
+	local cp = latest_checkpoint(w)
+	local revision = if cp then cp.payload.artifact_revision else (if w.checkout then w.checkout.head else nil)
+	if revision == nil then return end
+	local failed = config.failed_checks(w, revision)
 	if #failed == 0 then
+		for _, check in w.checks do
+			local evidence = (w.check_results or {})[check.check_id]
+			if not evidence or evidence.head ~= revision or evidence.exit_code ~= 0 then return end
+		end
 		if w.check_rework then
 			local g = loops.gate(d, w.check_rework)
 			if g then g.phase = "superseded"; g.revision += 1; settle_entries(w, "gate_id", g.id) end
-			w.check_rework = nil
+			w.check_rework.state = nil; w.check_rework.gate_id = nil; w.check_rework.count = 0
 		end
 		return
 	end
-	local parts, ids = {}, {}
-	for _, f in failed do
-		table.insert(parts, f.check_id .. ":" .. string.format("%.0f", f.exit_code) .. ":" .. w.check_results[f.check_id].head); table.insert(ids, f.check_id)
-	end
-	local key = codec.sha256(table.concat(parts, "\n"))
+	local ids = {}
+	for _, f in failed do table.insert(ids, f.check_id) end
+	local key = codec.sha256(revision)
 	local loop = w.check_rework or { count = 0 }
 	if loop.key == key or loop.state == "stopped" or p.paused or (type(clock) == "table" and clock.reserved_capacity)
 		or w.phase ~= "accepted" or w.finish or w.release or w.stopped or w.mailbox_retired or w.continuation_required or not w.mailbox_handle then return end
@@ -4271,7 +4452,7 @@ function config.check_rework(n: any, w: any, clock: any)
 			.. tostring(p.loop_cap) .. ") and declared checks still fail: " .. table.concat(ids, ", ") .. ". Allow more rework rounds or keep it stopped.", 32768), p.loop_cap, clock, true)
 		return
 	end
-	local delivery, err = issue_reply(d, w, "rework", { round = loop.count + 1, artifact_revision = w.check_results[failed[1].check_id].head,
+	local delivery, err = issue_reply(d, w, "rework", { round = loop.count + 1, artifact_revision = revision,
 		failed_checks = tern.json.array(failed), findings = tern.json.array() })
 	if err then return end
 	loop.count += 1; loop.key = key; w.check_rework = loop
@@ -4355,6 +4536,7 @@ end
 -- delivered as one owner_decision, so the coordinator's report lane keeps moving and nothing waits
 -- for the owner. The coordinator may propose again, even with the same proposal id.
 config.REFUSALS = {
+	review_disabled = "code review is disabled in this session; enable Require code review in Config before proposing review. Nothing was asked of the owner or executed.",
 	session_paused = "the session is paused; nothing was asked of the owner or executed. Propose again after the owner resumes the session.",
 	scope_mismatch = "the named work retains no CHECKPOINT of that project (and checkpoint_id) in this session; nothing was asked of the owner or executed. Propose again after that checkpoint is registered.",
 }
@@ -4490,6 +4672,9 @@ function config.execute_landing(n: any, g: any, p: any, sid: string, clock: any)
 end
 function config.proposal_effect(registry: any, n: any, w: any, g: any, p: any, event: any, clock: any, reserve: any): (string, string, string)
 	local d, sid = n.dispatch, w.logical_session_id
+	if p.kind == "review" and not policy(d, sid).require_code_review then
+		return "refused", "review_disabled", "Code review is disabled in this session; enable Require code review in Config before proposing review."
+	end
 	if policy(d, sid).paused then return "pending", "session_paused", "Session is paused; the approved " .. p.kind .. " runs after resume." end
 	if type(clock) == "table" and clock.reserved_capacity then
 		return "pending", "capacity_reached", "Authority capacity is at its settlement reserve; the approved " .. p.kind .. " runs on a later commit."
@@ -4542,12 +4727,29 @@ function config.advance_proposals(registry: any, n: any, event: any, clock: any,
 	local d, sid = n.dispatch, event.orch_session_id
 	local function oldest(a: string, b: string): boolean return (tonumber(a:match("%d+$")) or 0) < (tonumber(b:match("%d+$")) or 0) end
 	local sp = policy(d, sid)
+	if not sp.require_code_review then
+		for _, g in d.gates or {} do
+			if g.logical_session_id == sid and g.kind == "coordinator_proposal" and g.phase == "pending" then
+				local worker = d.workers[g.worker_id]
+				local proposal = if worker then codec.decode_report(g.proposal, worker) else nil
+				if proposal and proposal.payload.kind == "review" then
+					local message = "ORCH+ refused review proposal: " .. config.REFUSALS.review_disabled
+					local _, problem = append(d, worker, "answer", message, clock, { state = "pending", gate_id = g.id })
+					if not problem then
+						g.answer = { choice_id = "reject", answer = message, source = { kind = "refusal", code = "review_disabled" }, at_ms = stamp(clock).at_ms }
+						g.phase = "answered"
+					end
+				end
+			end
+		end
+	end
 	if event.command == "resume" and not sp.paused then
 		for _, key in config.sorted_keys(d.gates or {}, function(_, g) return g.logical_session_id == sid and g.kind == "coordinator_proposal" and g.phase == "pending"
 			and table.find(g.evidence, "scope:in") ~= nil end, oldest) do
 			local g = d.gates[key]; local w = d.workers[g.worker_id]
 			local p = codec.decode_report(g.proposal, w).payload
-			if p.kind ~= "rollover" and table.find(sp.auto_approve_kinds, p.kind) and config.in_scope(d, sid, p.work_id, p.kind, p) then config.policy_answer(d, w, g, p.kind, clock) end
+			if p.kind ~= "rollover" and (p.kind ~= "review" or sp.require_code_review) and table.find(sp.auto_approve_kinds, p.kind)
+				and config.in_scope(d, sid, p.work_id, p.kind, p) then config.policy_answer(d, w, g, p.kind, clock) end
 		end
 	end
 	for _, key in config.sorted_keys(d.gates or {}, function(_, g) return g.logical_session_id == sid and g.kind == "coordinator_proposal" and g.answer
@@ -4586,6 +4788,7 @@ function config.valid_reviews(d: any, registry: any): boolean
 			or (rv.reviewer_worker_id ~= nil and not id(rv.reviewer_worker_id)) or (rv.reviewer_record_id ~= nil and not config.record(rv.reviewer_record_id))
 			or (rv.reviewer_worker_id ~= nil) ~= (rv.reviewer_record_id ~= nil) or not pos(rv.round) or rv.round > 2
 			or not wire_text(rv.artifact_revision, 1024) or not id(rv.checkpoint_id) or not wire_text(rv.task_ref, 1024) or not wire_text(rv.source_ref, 1024)
+			or (rv.worktree_path ~= nil and (not str(rv.worktree_path, 4096) or not (rv.worktree_path:sub(1, 1) == "/" or rv.worktree_path:match("^%a:[\\/]") or rv.worktree_path:sub(1, 2) == "\\\\")))
 			or (rv.plan_ref == nil) ~= (rv.plan_revision == nil) or (rv.plan_ref ~= nil and (not wire_text(rv.plan_ref, 1024) or not wire_text(rv.plan_revision, 1024)))
 			or not config.texts(rv.scope_paths, 64, 256) or not table.find(config.REVIEW_STATUSES, rv.status)
 			or not config.list(rv.findings, 32) or (rv.trigger ~= "review_ready" and rv.trigger ~= "proposal") or not (rv.at_ms == 0 or pos(rv.at_ms))
@@ -4656,7 +4859,7 @@ function config.work_lane(d: any, sid: string, work_id: string): string?
 	if w.stopped or w.mailbox_retired then return nil end
 	if w.phase ~= "accepted" then return "queued" end
 	local rv = config.review_of(d, w)
-	if open or (rv and (config.REVIEW_OPEN[rv.status] or (rv.status == "approved" and rv.void == nil))) then return "review" end
+	if open or (policy(d, sid).require_code_review and rv and (config.REVIEW_OPEN[rv.status] or (rv.status == "approved" and rv.void == nil))) then return "review" end
 	return "running"
 end
 -- Routed record (Contract G): routes[class], plan tasks and templates fall back to the "build"
@@ -4712,7 +4915,7 @@ function config.source_launch(registry: any, n: any, sid: string, row: any, text
 	config.bind_family(d, w)
 	local invalid = config.assign(w, fields)
 	if invalid then return nil, config.hold(invalid.code, invalid.message) end
-	config.source_prompt(w, p.role_guidance.builder, text, config.source_header(fields))
+	config.source_prompt(w, p.role_guidance.builder, text, config.source_header(fields) .. "\n" .. config.review_guidance(p))
 	if #tern.json.encode(launch_request(w, string.rep("h", 96))) > 8192 then
 		return nil, config.hold("oversize", "The assignment plus its immutable launch binding cannot fit the 8192-byte bridge; nothing was provisioned.")
 	end
@@ -5599,7 +5802,8 @@ local function semantic(n: any, w: any, report: any, bytes: string, clock: any):
 			if cp.payload.project_id == p.project_id and (p.checkpoint_id == nil or cp.payload.checkpoint_id == p.checkpoint_id) then target_checkpoint = cp end
 		end
 		-- Paused sessions and proposals naming no retained checkpoint scope are refused definitely.
-		refused = if policy(d, w.logical_session_id).paused then "session_paused" elseif not target_checkpoint then "scope_mismatch" else nil
+		refused = if p.kind == "review" and not policy(d, w.logical_session_id).require_code_review then "review_disabled"
+			elseif policy(d, w.logical_session_id).paused then "session_paused" elseif not target_checkpoint then "scope_mismatch" else nil
 		local _, problem
 		if refused then _, problem = config.refuse_proposal(d, w, p, bytes, refused, clock)
 		else _, problem = config.open_proposal(d, w, p, bytes, target_checkpoint, clock) end
@@ -6550,7 +6754,8 @@ function M.apply(registry: any, event: any, clock: any, reserve: any): (any?, an
 		local owner = n.sessions[event.orch_session_id].controller
 		owner.phase = "active"; owner.owner_active = true
 		d.command_cursors = d.command_cursors or {}
-		d.command_cursors[event.orch_session_id] = { origin = clone(event.origin), controller_pane = event.controller_pane, seq = event.command_seq, continued_epoch = registry.execution_epoch }
+		d.command_cursors[event.orch_session_id] = { origin = clone(event.origin), controller_pane = event.controller_pane, seq = event.command_seq, continued_epoch = registry.execution_epoch,
+			policy_revision = M.policy_revision(registry, event.orch_session_id) ~= 0 and M.policy_revision(registry, event.orch_session_id) or nil }
 		rebind_unlaunched(d, event)
 		fence_unexecuted(d, event, n.revision)
 		answer = result("controller_continued")
@@ -6608,6 +6813,10 @@ function M.apply(registry: any, event: any, clock: any, reserve: any): (any?, an
 		if event.command == "policy" and event.policy ~= nil then
 			if not closed(event.policy, config.keys.editable) or next(event.policy) == nil then return fail("invalid_policy", "Policy accepts only the documented session settings.") end
 			for key, value in event.policy do p[key] = clone(value) end
+			if p.require_code_review == false and event.policy.require_other_family == true then
+				return fail("invalid_policy", "Enable Require code review before requiring another provider family.")
+			end
+			if p.require_code_review == false then p.require_other_family = false end
 			-- Canonical storage for set-valued settings; duplicates and unknown entries still fail validation.
 			local function strings(list: any): boolean
 				if type(list) ~= "table" or list == tern.json.null then return false end
@@ -6929,8 +7138,14 @@ function M.apply(registry: any, event: any, clock: any, reserve: any): (any?, an
 				for _, a in d.actions do if a.worker_id == w.worker_id then return fail("settlement_pending", "This work has retained effects; it cannot be cancelled here.") end end
 			end
 			for key, g in d.gates or {} do if g.worker_id == w.worker_id then d.gates[key] = nil end end
-			for _, p in d.policies or {} do
-				for i = #p.excluded_workers, 1, -1 do if p.excluded_workers[i] == w.worker_id then table.remove(p.excluded_workers, i) end end
+			for sid, p in d.policies or {} do
+				for i = #p.excluded_workers, 1, -1 do
+					if p.excluded_workers[i] == w.worker_id then
+						table.remove(p.excluded_workers, i)
+						local cursor = (d.command_cursors or {})[sid]
+						if cursor then cursor.policy_revision = n.revision end
+					end
+				end
 			end
 			d.workers[w.worker_id] = nil
 			answer = result("work_cancelled", { worker_id = event.worker_id, work_id = w.work_id })
@@ -7630,6 +7845,7 @@ function M.project(registry: any, session_id: string, origin_nonce: string, curr
 	-- Stored USAGE evidence is projected only while it matches the current catalog join.
 	-- policy_sha256 is the stale-editor fence the policy command expects (quota.digest of the saved policy).
 	local workflow = { policy = clone(policy(d, session_id)), policy_sha256 = quota.digest(policy(d, session_id)), workers = {}, threads = {}, gates = {}, rollovers = {}, landing = {},
+		policy_revision = M.policy_revision(registry, session_id),
 		capacity = clone(current_evidence(d, session_id)), sweep = clone((d.sweeps or {})[session_id]), reviews = {} }
 	config.sources_view(d, session_id, workflow)
 	for _, rv in d.reviews or {} do if rv.logical_session_id == session_id then table.insert(workflow.reviews, config.review_view(rv)) end end
@@ -7719,6 +7935,7 @@ function M.project(registry: any, session_id: string, origin_nonce: string, curr
 				if not action or (action.phase == "ready" and not action.claim) then wake_unstarted += 1
 				elseif action.phase == "claimed" or action.phase == "uncertain" then wake_uncertain += 1 end
 			end
+			local checkpoint = latest_checkpoint(w)
 			table.insert(workflow.workers, { worker_id = w.worker_id, work_id = w.work_id, worker_generation = w.worker_generation,
 				origin_binding = clone(control_origin(w)), pane_binding = clone(control_binding(w)),
 				launch_origin_binding = clone(w.origin_binding), launch_pane_binding = clone(w.pane_binding),
@@ -7742,6 +7959,7 @@ function M.project(registry: any, session_id: string, origin_nonce: string, curr
 				role = w.role, family = w.family or config.family_of(d, w), class = w.class, template_id = w.template_id,
 				files_count = if w.files then #w.files else 0, checks_count = if w.checks then #w.checks else 0,
 				scope = if w.scope then { paths = #w.scope.paths, systems = #w.scope.systems } else nil, source = clone(w.source),
+				artifact_revision = if checkpoint then checkpoint.payload.artifact_revision else nil,
 				checkout = clone(w.checkout), check_results = clone(w.check_results), report_loop = clone(f.report_loop),
 				-- Latest review of a builder's work (Task 3B card); a reviewer names the review it serves.
 				review = if w.role == "builder" and config.review_of(d, w) then config.review_view(config.review_of(d, w) :: any) else nil,

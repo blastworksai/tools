@@ -54,7 +54,7 @@ function W.catalog(f, rows)
 			capabilities = W.arr(W.CAPS), unsupported = W.arr(), cwd = "/fixture", placement = "split" })
 	end
 	local r = f:apply("catalog"); assert(r.ok, r.message)
-	assert(f:finish(r.action_id, "catalog", { namespace = "fixture-spawn", host_key = "fixture-host", config_revision = 0, revision = 0, records = W.arr(records) }).ok)
+	assert(f:finish(r.action_id, "catalog", { catalog_version = 2, setup = { schema = 1, state = "completed", config_revision = 0, readiness = { state = "not_run", config_revision = 0, summary = "" } }, namespace = "fixture-spawn", host_key = "fixture-host", config_revision = 0, revision = 0, records = W.arr(records) }).ok)
 end
 -- A fresh store with the family catalog and a Config v4 policy patch. The session's release manager
 -- record defaults to "kimi" (Kimi: no other fixture role uses it); a patch may override it, "" = none.
@@ -90,7 +90,7 @@ function W.builder(f, record, fields)
 	return W.start(f, queued.worker_id, queued.action_id)
 end
 function W.cp(cp_id, revision)
-	return { checkpoint_id = cp_id, task_ref = "task:fixture", project_id = "project-one", worktree_ref = "worktree:fixture", artifact_revision = W.hx(revision),
+	return { checkpoint_id = cp_id, task_ref = "task:fixture", project_id = "project-one", worktree_ref = "/fixture/worktree", artifact_revision = W.hx(revision),
 		completed = W.arr({ "Implemented the assigned change" }), remaining = W.arr(), holds = W.arr(),
 		checks = W.arr({ { check_id = "unit", artifact_revision = W.hx(revision), outcome = "passed", evidence_ref = "unit:log" } }) }
 end
@@ -110,9 +110,15 @@ function W.settle(f, id, full)
 	end
 	if next(W.worker(f, id).receipts) ~= nil then assert(f:watermark(id).ok) end
 end
+function W.checkout(f, id, revision, path)
+	return W.send(f, id, "CHECKOUT", { worktree_path = path or "/fixture/worktree", common_dir = "/fixture/repository/.git",
+		branch = "refs/heads/fixture-work", head = W.hx(revision), base = W.hx("base"), changed_files = W.arr(),
+		changed_overflow = false, changed_total = 0, dirty = false })
+end
 -- Checkpoint (and optionally a helper check result) then REVIEW_READY for that revision.
 function W.ready(f, id, cp_id, revision, exit_code)
-	W.settle(f, id)
+	W.settle(f, id, true)
+	assert(W.checkout(f, id, revision).ok)
 	local sent = W.send(f, id, "CHECKPOINT", W.cp(cp_id, revision)); assert(sent.ok, sent.message)
 	if exit_code ~= nil then
 		sent = W.send(f, id, "CHECK_RESULT", { check_id = "unit", argv_sha256 = api.codec.sha256("argv"), exit_code = exit_code, output_sha256 = api.codec.sha256("check output"),
@@ -188,7 +194,7 @@ function W.result(f, reviewer_id, request, outcome, findings, fields)
 end
 -- One whole review round: REVIEW_READY → reviewer → result. Returns the review record and reviewer id.
 function W.round(f, builder_id, cp_id, revision, outcome, findings, exit_code)
-	local ready = W.ready(f, builder_id, cp_id, revision, exit_code); assert(ready.ok, ready.message)
+	local ready = W.ready(f, builder_id, cp_id, revision, if exit_code == nil then 0 else exit_code); assert(ready.ok, ready.message)
 	local r = assert(W.review(f, builder_id), "REVIEW_READY opened no review")
 	local reviewer, request = W.open(f, r)
 	local sent = W.result(f, reviewer, request, outcome, findings); assert(sent.ok, sent.message)
@@ -316,17 +322,19 @@ function W.rule_h(f)
 		if #it.grants > 0 and not it.legacy then
 			local p, b = it.proof, d.workers[it.worker_id]
 			assert(p ~= nil and p.artifact_revision == it.request.source_revision, "grant without proof for its revision: " .. lid)
-			local r = assert((d.reviews or {})[p.review_id], "grant proof names no reviewer-worker review: " .. lid)
-			assert(r.status == "approved" and r.artifact_revision == p.artifact_revision and r.builder_worker_id == it.worker_id, "grant proof review not approved for the revision: " .. lid)
-			assert(r.reviewer_worker_id ~= nil and r.reviewer_worker_id ~= it.worker_id and r.reviewer_record_id ~= b.record_id, "grant proof reviewed by its builder: " .. lid)
-			if p.mode == "cross_family_review" then
-				assert(r.builder_family ~= nil and r.reviewer_family ~= nil and r.builder_family ~= r.reviewer_family, "cross-family proof without different declared families: " .. lid)
+			if p.mode == "review_disabled" then
+				assert(p.review_id == nil, "review-disabled proof invents a review: " .. lid)
 			else
-				assert(p.mode == "helper_checks" and #b.checks > 0, "helper-checks proof without declared checks: " .. lid)
-				for _, c in b.checks do
-					local res = b.check_results and b.check_results[c.check_id]
-					assert(res and res.exit_code == 0 and res.head == p.artifact_revision, "helper-checks proof without a passing check at the revision: " .. lid)
-				end
+				local r = assert((d.reviews or {})[p.review_id], "grant proof names no reviewer-worker review: " .. lid)
+				assert(r.status == "approved" and r.artifact_revision == p.artifact_revision and r.builder_worker_id == it.worker_id, "grant proof review not approved for the revision: " .. lid)
+				assert(r.reviewer_worker_id ~= nil and r.reviewer_worker_id ~= it.worker_id and r.reviewer_record_id ~= b.record_id, "grant proof reviewed by its builder: " .. lid)
+				if p.mode == "cross_family_review" then
+					assert(r.builder_family ~= nil and r.reviewer_family ~= nil and r.builder_family ~= r.reviewer_family, "cross-family proof without different declared families: " .. lid)
+				else assert(p.mode == "helper_checks", "unknown reviewed proof mode: " .. lid) end
+			end
+			for _, c in b.checks do
+				local res = b.check_results and b.check_results[c.check_id]
+				assert(res and res.exit_code == 0 and res.head == p.artifact_revision, "grant without a passing declared check at the revision: " .. lid)
 			end
 		end
 	end
@@ -523,7 +531,7 @@ if section == nil or section == "review_cross_family" then
 	local b = W.builder(f)
 	check(f.authority.registry.dispatch.reviews == nil or next(f.authority.registry.dispatch.reviews) == nil, "a fresh store has no review records")
 	check(W.worker(f, b).family == "anthropic", "the builder's declared family resolves from its catalog provider")
-	check(W.ready(f, b, "cp-1", "rev-1").ok, "REVIEW_READY is accepted")
+	check(W.ready(f, b, "cp-1", "rev-1", 0).ok, "REVIEW_READY is accepted")
 	local r = W.review(f, b)
 	check(r ~= nil and r.round == 1 and r.artifact_revision == W.hx("rev-1") and r.builder_family == "anthropic" and r.builder_worker_id == b,
 		"cold start: the first REVIEW_READY on a fresh store opens round 1 for the exact revision")
@@ -553,11 +561,11 @@ if section == nil or section == "review_cross_family" then
 
 	-- Same family refused at the result: a same-family reviewer chosen while enforcement was off answers
 	-- after the owner turns enforcement on (declared families are fixed when each worker is queued).
-	local s = W.fixture({ enforce_cross_family = false, reviewer_records = W.arr({ "claude2" }) })
+	local s = W.fixture({ require_other_family = false, reviewer_records = W.arr({ "claude2" }) })
 	local sb = W.builder(s); assert(W.ready(s, sb, "cp-1", "rev-1", 0).ok)
 	local sr = W.review(s, sb); local sv, sreq = W.open(s, sr)
 	check(W.worker(s, sv).family == "anthropic", "the same-family reviewer was eligible while enforcement was off")
-	assert(s:apply("policy", { policy = { enforce_cross_family = true } }).ok)
+	assert(s:apply("policy", { policy = { require_other_family = true } }).ok)
 	check(W.result(s, sv, sreq, "approved").ok, "the same-family reviewer's report is accepted as evidence")
 	sr = s.authority.registry.dispatch.reviews[sr.review_id]
 	check(sr.status ~= "approved" and sr.result == nil and sr.refusal ~= nil and sr.refusal.code == "family_same" and sr.reviewer_worker_id ~= sv,
@@ -591,23 +599,52 @@ if section == nil or section == "review_cross_family" then
 	W.rule_h(h); W.rule_h(k); check(W.restores(h) and W.restores(k), "family gates restore")
 
 	-- Enforcement off: same family is allowed, but never the builder's own record.
-	local m = W.fixture({ enforce_cross_family = false, reviewer_records = W.arr({ "builder", "claude2" }) })
+	local m = W.fixture({ require_other_family = false, reviewer_records = W.arr({ "builder", "claude2" }) })
 	local mb = W.builder(m)
 	local mr = W.round(m, mb, "cp-1", "rev-1", "approved", nil, 0)
 	check(mr.status == "approved" and mr.reviewer_record_id == "claude2" and mr.reviewer_family == "anthropic",
 		"enforcement off: the builder's own record is skipped and a same-family reviewer is accepted")
 	local ml = W.request(m, mb, "cp-1", "rev-1"); assert(W.approve(m, ml).ok)
 	check(W.item(m, ml).status == "granted" and W.item(m, ml).proof.mode == "helper_checks", "same-family review plus passing helper checks grants with enforcement off")
-	local n = W.fixture({ enforce_cross_family = false, reviewer_records = W.arr({ "builder" }) })
+	local n = W.fixture({ require_other_family = false, reviewer_records = W.arr({ "builder" }) })
 	local nb = W.builder(n)
 	check(W.ready(n, nb, "cp-1", "rev-1").ok and #W.gates(n, "reviewer_unavailable") == 1, "reviewer record = builder record is never eligible")
 	W.rule_h(m); W.rule_h(n); check(W.restores(m) and W.restores(n), "enforcement-off reviews restore")
+
+	-- Turning review off during an active availability hold closes the gate immediately.
+	do
+		local t = W.fixture({ reviewer_records = W.arr({ "claude2" }) })
+		local tb = W.builder(t)
+		assert(W.ready(t, tb, "cp-toggle", "rev-toggle", 0).ok)
+		local gate = W.gates(t, "reviewer_unavailable")[1]
+		assert(gate and gate.phase == "pending", "toggle fixture needs a pending reviewer availability gate")
+		assert(t:apply("policy", { policy = { require_code_review = false } }).ok)
+		local p = t.authority.registry.dispatch.policies[t.origin.logical_session_id]
+		check(not p.require_code_review and not p.require_other_family, "disabling review clears the active family's requirement")
+		check(#W.gates(t, "reviewer_unavailable") == 0 and #W.gates(t, "family_unknown") == 0,
+			"disabling review closes the pending reviewer availability gate")
+		check(table.find({ "resolved", "cancelled", "superseded" }, t.authority.registry.dispatch.gates[gate.id].phase) ~= nil,
+			"the original availability gate is terminal, not merely hidden")
+		assert(W.ready(t, tb, "cp-off", "rev-off", 0).ok)
+		assert(t.authority:apply({ kind = "workflow_tick" }))
+		for _, w in t.authority.registry.dispatch.workers do check(w.role ~= "reviewer", "reports and ticks while review is off spawn no reviewer") end
+		check(#W.gates(t, "reviewer_unavailable") == 0 and #W.gates(t, "family_unknown") == 0, "off reports never reopen review availability gates")
+		check(W.restores(t), "active review-off transition restores")
+		assert(t:apply("policy", { policy = { require_code_review = true } }).ok)
+		p = t.authority.registry.dispatch.policies[t.origin.logical_session_id]
+		check(p.require_code_review and not p.require_other_family, "reenabling review does not remember the old family requirement")
+		assert(W.ready(t, tb, "cp-on", "rev-on", 0).ok)
+		local review = assert(W.review(t, tb))
+		check(review.reviewer_record_id == "claude2" and W.reviewer_of(t, review) ~= nil,
+			"reenabled review actually queues the formerly ineligible same-family reviewer")
+		check(W.restores(t), "reenabled same-family review restores")
+	end
 end
 
 if section == nil or section == "review_rounds" then
 	local f = W.fixture({ reviewer_records = W.arr({ "codex" }) })
 	local b = W.builder(f)
-	local r1, v1 = W.round(f, b, "cp-1", "rev-1", "changes_required", W.findings(2), 1)
+	local r1, v1 = W.round(f, b, "cp-1", "rev-1", "changes_required", W.findings(2), 0)
 	check(r1.status == "changes_required" and r1.round == 1 and #r1.findings == 2 and v1 ~= b, "round 1 changes_required keeps its findings")
 	local rework = W.replies(f, b, "rework")
 	check(#rework == 1, "changes_required issues exactly one rework reply to the builder")
@@ -615,7 +652,7 @@ if section == nil or section == "review_rounds" then
 	local keys = {}; for key in p do table.insert(keys, key) end; table.sort(keys)
 	check(table.concat(keys, ",") == "artifact_revision,failed_checks,findings,review_id,round" and p.review_id == r1.review_id and p.round == 1
 		and p.artifact_revision == W.hx("rev-1") and #p.failed_checks == 0 and #p.findings == 2 and p.findings[1].finding_id == "f1" and p.findings[2].line == 2,
-		"the rework payload carries only the review's findings (cross-family mode: no failed checks, no summary, no score)")
+		"review rework carries only findings when the independent helper checks pass")
 	-- Round 2 on a new revision: the same review, a fresh reviewer worker, the previous findings attached.
 	local ready = W.ready(f, b, "cp-2", "rev-2", 0); assert(ready.ok, ready.message)
 	local r2 = W.review(f, b)
@@ -635,17 +672,17 @@ if section == nil or section == "review_rounds" then
 	local voided = f.authority.registry.dispatch.reviews[r2.review_id]
 	check(voided.void ~= nil and voided.void.artifact_revision == W.hx("rev-3"), "new revision voids approval: the approved review records the void")
 	local l3 = W.request(f, b, "cp-3", "rev-3", "refs/heads/next"); assert(W.approve(f, l3).ok)
-	check(#W.item(f, l3).grants == 0 and W.item(f, l3).proof == nil and W.item(f, l3).hold.code == "review_required",
-		"landing the new revision waits for its own review")
+	check(#W.item(f, l3).grants == 0 and W.item(f, l3).proof == nil and W.item(f, l3).hold.code == "check_stale",
+		"landing the new revision waits for fresh checks as well as its own review")
 	W.rule_h(f); check(W.restores(f), "rework rounds and voided approvals restore")
-	-- Helper-checks mode (enforcement off): rework names the failed checks as well.
-	local n = W.fixture({ enforce_cross_family = false, reviewer_records = W.arr({ "codex" }) })
+	-- Same-family-allowed mode retains the independent review findings loop.
+	local n = W.fixture({ require_other_family = false, reviewer_records = W.arr({ "codex" }) })
 	local nb = W.builder(n)
-	W.round(n, nb, "cp-1", "rev-1", "changes_required", W.findings(1), 1)
+	W.round(n, nb, "cp-1", "rev-1", "changes_required", W.findings(1), 0)
 	local nrework = W.replies(n, nb, "rework")
 	local np = nrework[#nrework].reply.payload
-	check(#np.failed_checks == 1 and np.failed_checks[1].check_id == "unit" and np.failed_checks[1].exit_code == 1 and #np.findings == 1,
-		"helper-checks mode: rework carries the findings and the failed helper checks")
+	check(#np.failed_checks == 0 and #np.findings == 1,
+		"same-family mode keeps review findings separate from passing checks")
 	W.rule_h(n); check(W.restores(n), "helper-checks rework restores")
 
 	-- Round cap at review_rounds: changes_required on the last allowed round caps the review with one loop_cap gate.
@@ -709,84 +746,201 @@ if section == nil or section == "auto_finish" then
 	check(W.worker(g, gv).finish ~= nil and W.worker(g, gv).finish.source.rule == "auto_finish:reviewer", "a changes_required reviewer also auto-finishes once settled")
 	check(W.worker(g, gb).finish == nil and #W.replies(g, gb, "rework") == 1, "the builder keeps its rework and is never finished")
 	W.rule_h(g); check(W.restores(g), "the settled auto-finish restores")
+	-- An acknowledged request still owes a result when the owner turns review off.
+	for _, outcome in { "approved", "changes_required" } do
+		local t = W.fixture({ reviewer_records = W.arr({ "codex" }) })
+		local tb = W.builder(t); assert(W.ready(t, tb, "cp-off", "rev-off", 0).ok)
+		local review = assert(W.review(t, tb)); local reviewer_id, issued = W.open(t, review)
+		W.settle(t, reviewer_id, true)
+		check(next(W.worker(t, reviewer_id).replies) == nil and next(W.worker(t, reviewer_id).receipts) == nil,
+			"late " .. outcome .. ": request ACK and receipt lane are settled before disabling review")
+		assert(t:apply("policy", { policy = { require_code_review = false } }).ok)
+		check(W.worker(t, reviewer_id).finish == nil and t.authority.registry.dispatch.reviews[review.review_id].status == "cancelled",
+			"late " .. outcome .. ": cancellation removes review authority but preserves the issued reviewer's settlement obligation")
+		check(W.restores(t), "late " .. outcome .. ": cancelled outstanding review restores before its result")
+		local accepted = W.result(t, reviewer_id, issued, outcome, W.findings(1))
+		check(accepted.ok and W.worker(t, reviewer_id).rejected_report == nil
+			and W.worker(t, reviewer_id).workflow.evidence.REVIEW_RESULT ~= nil,
+			"late " .. outcome .. ": exact correlated result is consumed, not rejected as worker_retiring")
+		local cancelled = t.authority.registry.dispatch.reviews[review.review_id]
+		check(cancelled.status == "cancelled" and cancelled.result == nil and #W.reviews(t) == 1
+			and #W.replies(t, tb, "rework") == 0,
+			"late " .. outcome .. ": consumption neither approves/reopens the review nor creates completed review history or rework")
+		W.settle(t, reviewer_id, true)
+		check(W.worker(t, reviewer_id).finish ~= nil, "late " .. outcome .. ": normal automatic retirement resumes after actual result settlement")
+		check(W.restores(t), "late " .. outcome .. ": consumed cancellation and retirement restore")
+		local stop = t:apply("poll", { worker_id = reviewer_id })
+		assert(stop.ok and stop.action_id and t:action(stop.action_id).request.op == "stop")
+		assert(t:finish(stop.action_id, "stopped", { pane_binding = api.clone(t:action(stop.action_id).request.pane_binding), observation = "absent" }).ok)
+		local retire = t:apply("poll", { worker_id = reviewer_id })
+		assert(retire.ok and retire.action_id and t:action(retire.action_id).request.mode == "retire")
+		assert(t:finish(retire.action_id, "retired", {}).ok)
+		W.builder(t) -- Ordinary queue reclaims settled workers and their cancelled obligations.
+		check(W.worker(t, reviewer_id) == nil and t.authority.registry.dispatch.reviews[review.review_id] == nil,
+			"late " .. outcome .. ": worker reclamation also removes its settled cancellation, without retaining result history")
+		assert(t:apply("policy", { policy = { require_code_review = true } }).ok)
+		assert(W.ready(t, tb, "cp-next", "rev-next", 0).ok)
+		local next_review = assert(W.review(t, tb))
+		check(next_review.review_id ~= review.review_id and next_review.reviewer_worker_id ~= nil and #W.reviews(t) == 1,
+			"late " .. outcome .. ": further review uses a fresh record rather than leaking a permanently pending cancellation")
+		check(W.restores(t), "late " .. outcome .. ": reclaimed cancellation and further review restore")
+	end
+end
+
+if section == nil or section == "review_reclamation" then
+	local f = W.fixture({ reviewer_records = W.arr({ "codex" }) })
+	local b = W.builder(f, nil, { checks = W.arr() })
+	local first_review, first_worker
+	for index = 1, 65 do
+		assert(f:apply("policy", { policy = { require_code_review = true } }).ok)
+		assert(W.ready(f, b, "cp-cycle", "rev-cycle").ok)
+		local review = assert(W.review(f, b))
+		local rid, request = W.open(f, review)
+		first_review = first_review or review.review_id; first_worker = first_worker or rid
+		W.settle(f, rid, true)
+		assert(f:apply("policy", { policy = { require_code_review = false } }).ok)
+		assert(W.result(f, rid, request, if index % 2 == 0 then "approved" else "changes_required", W.findings(1)).ok)
+		check(W.review(f, b).status == "cancelled" and W.review(f, b).result == nil,
+			"cycle " .. index .. ": cancelled result is settlement only, never review approval/history")
+		W.settle(f, rid, true)
+		local stop = f:apply("poll", { worker_id = rid })
+		assert(stop.ok and stop.action_id and f:action(stop.action_id).request.op == "stop")
+		assert(f:finish(stop.action_id, "stopped", { pane_binding = api.clone(f:action(stop.action_id).request.pane_binding), observation = "absent" }).ok)
+		local retire = f:apply("poll", { worker_id = rid })
+		assert(retire.ok and retire.action_id and f:action(retire.action_id).request.mode == "retire")
+		assert(f:finish(retire.action_id, "retired", {}).ok)
+	end
+	check(W.worker(f, first_worker) == nil and f.authority.registry.dispatch.reviews[first_review] == nil and #W.reviews(f) < 32,
+		"ordinary worker-cap reclamation removes settled cancellations and allows more than 64 consecutive reviews")
+	check(W.restores(f), "post-cap cancelled-review reclamation restores with bounded current state")
+end
+
+if section == nil or section == "review_location" then
+	for _, task in { "task:ordinary", "task:orch-readiness" } do
+		local f = W.fixture({ reviewer_records = W.arr({ "codex" }) })
+		local b = W.builder(f)
+		local cp = W.cp("cp-location", "rev-location")
+		cp.task_ref = task; cp.worktree_ref = "/disposable/review-repository"
+		assert(W.send(f, b, "CHECKPOINT", cp).ok)
+		assert(W.send(f, b, "REVIEW_READY", { checkpoint_id = cp.checkpoint_id, artifact_revision = cp.artifact_revision }).ok)
+		local review = assert(W.review(f, b))
+		check(review.reviewer_worker_id == nil and review.hold.code == "review_location_unverified",
+			task .. ": a checkpoint alone cannot substitute the configured cwd for an actual review location")
+		assert(W.checkout(f, b, "rev-location", "/different/repository").ok)
+		assert(W.send(f, b, "REVIEW_READY", { checkpoint_id = cp.checkpoint_id, artifact_revision = cp.artifact_revision }).ok)
+		check(W.review(f, b).reviewer_worker_id == nil, task .. ": contradictory helper location never launches a reviewer")
+		W.settle(f, b, true)
+		assert(W.checkout(f, b, "rev-old", cp.worktree_ref).ok)
+		assert(W.send(f, b, "REVIEW_READY", { checkpoint_id = cp.checkpoint_id, artifact_revision = cp.artifact_revision }).ok)
+		check(W.review(f, b).reviewer_worker_id == nil, task .. ": checkout for another revision cannot verify the location")
+		assert(W.checkout(f, b, "rev-location", cp.worktree_ref).ok)
+		assert(W.send(f, b, "REVIEW_READY", { checkpoint_id = cp.checkpoint_id, artifact_revision = cp.artifact_revision }).ok)
+		local rid, request = W.open(f, W.review(f, b))
+		local reviewer = W.worker(f, rid)
+		check(reviewer.cwd == "/fixture" and reviewer.prompt:find(cp.worktree_ref, 1, true) ~= nil
+			and request.payload.source_ref == "refs/heads/fixture-work" and request.payload.artifact_revision == cp.artifact_revision,
+			task .. ": actual delivered reviewer assignment names the verified worktree separately from branch and artifact, despite another launch cwd")
+		check(W.result(f, rid, request, "approved").ok and W.review(f, b).status == "approved",
+			task .. ": the location-bearing assignment retains ordinary correlated review behavior")
+		check(W.restores(f), task .. ": verified review location restores")
+	end
+end
+
+if section == nil or section == "policy_revision" then
+	local f = W.fixture()
+	local sid = f.origin.logical_session_id
+	local function flow() return api.dispatch.project(f.authority.registry, sid, f.origin.alias_nonce).workflow end
+	local original = flow()
+	assert(f:apply("policy", { policy = { require_code_review = original.policy.require_code_review } }).code == "no_progress")
+	check(flow().policy_revision == original.policy_revision, "a no-op policy save does not invalidate the current policy fence")
+	assert(f:apply("policy", { policy = { require_code_review = false } }).ok)
+	local changed = flow()
+	assert(f:apply("policy", { policy = { require_code_review = true, require_other_family = true } }).ok)
+	local restored = flow()
+	check(same(restored.policy, original.policy) and restored.policy_revision > changed.policy_revision
+		and changed.policy_revision > original.policy_revision, "away-and-back edits retain a monotonic policy fence despite identical final policy")
+	assert(f:apply("catalog").ok)
+	check(flow().policy_revision == restored.policy_revision, "ordinary dispatch commands preserve the latest policy-change revision")
+	local registry = assert(api.state.rehydrate(api.clone(f.authority.registry)))
+	check(api.dispatch.policy_revision(registry, sid) == restored.policy_revision, "the current fence survives restore without retaining policy history")
+	registry.installation_defaults.policy = api.clone(original.policy)
+	local function result(revision)
+		return api.state.apply(registry, { kind = "setup_lifecycle", request_id = "qualified-readiness", expected_revision = registry.installation_defaults.revision,
+			readiness_policy = { logical_session_id = sid, revision = revision },
+			readiness = { state = "passed", config_revision = registry.installation_defaults.revision, summary = "Fixture landed and read back." } })
+	end
+	local rejected, problem = result(original.policy_revision)
+	check(rejected == nil and problem.code == "stale_policy", "commit rejects the original readiness fence after temporary policy edits, even with restored equality")
+	local accepted = assert(result(restored.policy_revision))
+	check(accepted.setup.readiness.state == "passed", "unchanged current policy can attach its passed readiness result")
+	local invalid = api.clone(registry)
+	invalid.dispatch.command_cursors[sid].policy_revision = invalid.revision + 1
+	check(api.state.rehydrate(invalid) == nil, "a future policy fence cannot restore")
 end
 
 if section == nil or section == "proof_rule" then
-	-- Grid {enforce on/off} × {review approved/changes_required/none} × {checks pass/fail/missing}.
-	-- One builder per review row holds an ungranted landing request on its own target; the declared
-	-- helper check moves missing → fail → pass and every state is evaluated under both policies (the
-	-- proof is recomputed on each commit; a proven request waits only for owner approval). A second
-	-- approved builder ("surprise") carries the two surprising cells through an actual owner approval.
-	local EXPECT = {
-		on = { approved = { missing = "proven", fail = "proven", pass = "proven" },
-			changes_required = { missing = "review_not_approved", fail = "review_not_approved", pass = "review_not_approved" },
-			none = { missing = "review_required", fail = "review_required", pass = "review_required" } },
-		off = { approved = { missing = "check_missing", fail = "check_failed", pass = "proven" },
-			changes_required = { missing = "check_missing", fail = "check_failed", pass = "review_not_approved" },
-			none = { missing = "check_missing", fail = "check_failed", pass = "review_required" } },
-	}
-	local ROWS = { "approved", "changes_required", "none" }
-	local f = W.fixture({ reviewer_records = W.arr({ "codex" }) })
-	local rows, enforced = {}, true
-	for _, outcome in { "approved", "changes_required", "none", "surprise" } do
-		local b = W.builder(f); local cp_id, revision = "cp-" .. outcome, "rev-" .. outcome
-		if outcome == "none" then W.settle(f, b); assert(W.send(f, b, "CHECKPOINT", W.cp(cp_id, revision)).ok)
-		else W.round(f, b, cp_id, revision, if outcome == "changes_required" then "changes_required" else "approved", if outcome == "changes_required" then W.findings(1) else nil) end
-		rows[outcome] = { builder = b, revision = revision, lid = W.request(f, b, cp_id, revision, "refs/heads/" .. outcome) }
-	end
-	local function mode(on)
-		if on ~= enforced then local saved = f:apply("policy", { policy = { enforce_cross_family = on } }); assert(saved.ok, saved.message); enforced = on end
-	end
-	local function sweep(state)
-		for _, on in { true, false } do
-			mode(on)
-			for _, outcome in ROWS do
-				local it, want = W.item(f, rows[outcome].lid), EXPECT[if on then "on" else "off"][outcome][state]
-				local label = "enforce " .. (if on then "on" else "off") .. " × review " .. outcome .. " × checks " .. state
-				if want == "proven" then
-					check(it.hold ~= nil and it.hold.code == "approval_pending" and it.proof ~= nil and #it.grants == 0
-						and it.proof.mode == (if on then "cross_family_review" else "helper_checks"), label .. ": Rule H holds; only the owner approval remains")
-				else
-					check(it.hold ~= nil and it.hold.code == want and it.proof == nil and #it.grants == 0,
-						label .. ": held " .. want .. " (got " .. tostring(it.hold and it.hold.code) .. ")")
+	for _, mode in { { true, true, "cross_family_review" }, { true, false, "helper_checks" }, { false, false, "review_disabled" } } do
+		for _, state in { "empty", "passed", "failed", "missing", "stale" } do
+			local label = mode[3] .. "/" .. state
+			local f = W.fixture({ require_code_review = mode[1], require_other_family = mode[2],
+				reviewer_records = W.arr(if mode[1] then { if mode[2] then "codex" else "claude2" } else {}) })
+			local b = W.builder(f, nil, { checks = if state == "empty" then W.arr() else W.unit() })
+			assert(W.ready(f, b, "cp-1", "rev-1", if state == "passed" then 0 elseif state == "failed" then 1 else nil).ok)
+			if state == "stale" then
+				assert(W.send(f, b, "CHECK_RESULT", { check_id = "unit", argv_sha256 = api.codec.sha256("argv"), exit_code = 0,
+					output_sha256 = api.codec.sha256("check output"), head = W.hx("rev-old"), ran_at_ms = 1 }).ok)
+			end
+			if mode[1] then
+				local reviewer, request = W.open(f, assert(W.review(f, b)))
+				assert(W.result(f, reviewer, request, "approved").ok)
+			else
+				check(#W.reviews(f) == 0 and #W.gates(f, "reviewer_unavailable") == 0 and #W.gates(f, "family_unknown") == 0,
+					label .. ": no automatic review or reviewer availability gate")
+				for _, w in f.authority.registry.dispatch.workers do check(w.role ~= "reviewer", label .. ": no reviewer worker") end
+			end
+			local lid = W.request(f, b, "cp-1", "rev-1"); assert(W.approve(f, lid).ok)
+			local it = W.item(f, lid)
+			if state == "empty" or state == "passed" then
+				check(it.status == "granted" and it.proof.mode == mode[3] and #it.proof.check_refs == (if state == "empty" then 0 else 1),
+					label .. ": independent predicates allow exact grant")
+				local issued = assert(api.codec.decode_reply(W.grant(f, lid).bytes, W.worker(f, W.holder(f, lid))))
+				check((issued.payload.review_id == nil) == (not mode[1]) and (issued.payload.reviewer_family == nil) == (not mode[1])
+					and (issued.payload.proof.review_id == nil) == (not mode[1]), label .. ": review identity absent only when disabled")
+				if not mode[1] then
+					W.land(f, lid, "head-disabled")
+					check(W.item(f, lid).status == "landed" and #W.reviews(f) == 0, label .. ": release manager lands without a reviewer")
+				end
+			else
+				check(#it.grants == 0 and it.proof == nil and it.hold.code == ({ failed = "check_failed", missing = "check_missing", stale = "check_stale" })[state],
+					label .. ": owner and reviewer approval cannot override checks")
+			end
+			local repairs = W.replies(f, b, "rework")
+			check(#repairs == (if state == "failed" then 1 else 0), label .. ": only failed current checks trigger repair")
+			if state == "failed" then
+				local p = repairs[1].reply.payload
+				check(p.review_id == nil and #p.findings == 0 and #p.failed_checks == 1 and p.failed_checks[1].check_id == "unit",
+					label .. ": check-only repair never invents review findings or identity")
+				local repair_seq = W.worker(f, b).reply_seq
+				W.drain(f, b); W.settle(f, b)
+				assert(W.send(f, b, "CHECK_RESULT", { check_id = "unit", argv_sha256 = api.codec.sha256("argv"), exit_code = 2,
+					output_sha256 = api.codec.sha256("different failure"), head = W.hx("rev-1"), ran_at_ms = 2 }).ok)
+				assert(f.authority:apply({ kind = "workflow_tick" }))
+				check(W.worker(f, b).reply_seq == repair_seq, label .. ": unchanged revision never launches repeated repair after consumption")
+				check(#W.item(f, lid).grants == 0, label .. ": repeated failure remains blocked")
+				if not mode[1] then
+					assert(W.ready(f, b, "cp-2", "rev-2", 1).ok)
+					check(W.worker(f, b).reply_seq == repair_seq + 1, label .. ": a new failed revision permits one new repair")
+					W.settle(f, b)
+					assert(W.send(f, b, "CHECK_RESULT", { check_id = "unit", argv_sha256 = api.codec.sha256("argv"), exit_code = 0,
+						output_sha256 = api.codec.sha256("repaired"), head = W.hx("rev-2"), ran_at_ms = 3 }).ok)
+					check(W.request(f, b, "cp-2", "rev-2") == lid, label .. ": repaired revision rebinds the held item")
+					assert(W.approve(f, lid).ok)
+					check(W.item(f, lid).status == "granted" and #W.reviews(f) == 0, label .. ": repair advances without review")
 				end
 			end
-			W.rule_h(f)
+			W.rule_h(f); check(W.restores(f), label .. ": state restores")
 		end
 	end
-	local function helper_check(exit_code)
-		for _, outcome in { "approved", "changes_required", "none", "surprise" } do
-			local b = rows[outcome].builder; W.settle(f, b)
-			assert(W.send(f, b, "CHECK_RESULT", { check_id = "unit", argv_sha256 = api.codec.sha256("argv"), exit_code = exit_code, output_sha256 = api.codec.sha256("check output"),
-				head = W.hx(rows[outcome].revision), ran_at_ms = 1 }).ok)
-		end
-	end
-	local surprise = function() return W.item(f, rows.surprise.lid) end
-	sweep("missing")
-	assert(W.approve(f, rows.surprise.lid).ok)
-	check(surprise().approval ~= nil and surprise().hold.code == "check_missing" and #surprise().grants == 0,
-		"surprising: enforcement off + approved review + owner-approved landing + missing helper checks is held")
-	helper_check(1)
-	check(surprise().hold.code == "check_failed" and #surprise().grants == 0, "enforcement off: a failed helper check holds the owner-approved request")
-	-- Enforcement on makes the surprise row grantable: ORCH+ queues the release manager, which is launched.
-	mode(true); W.rm(f)
-	sweep("fail")
-	check(surprise().status == "granted" and surprise().proof.mode == "cross_family_review" and #surprise().proof.check_refs == 0,
-		"surprising: enforcement on + failed helper check + approved cross-family review is granted (helper checks are evidence only)")
-	helper_check(0)
-	sweep("pass")
-	for _, outcome in ROWS do assert(W.approve(f, rows[outcome].lid).ok) end
-	for _, on in { false, true } do
-		mode(on)
-		for _, outcome in ROWS do
-			local it = W.item(f, rows[outcome].lid)
-			check((#it.grants == 1) == (outcome == "approved"), "enforce " .. (if on then "on" else "off") .. " × review " .. outcome .. " × checks pass, owner-approved: granted only when Rule H holds")
-		end
-		W.rule_h(f)
-	end
-	check(W.item(f, rows.approved.lid).proof.mode == "helper_checks" and #W.item(f, rows.approved.lid).proof.check_refs == 1,
-		"enforcement off grants the approved, all-passing row with its helper-check proof")
-	check(W.restores(f), "every grid state restores")
 end
 
 -- Checkpoint 4: landing to the release manager (Contract I, Task 4A) and the fail-closed 0.3.0 upgrade.
@@ -826,6 +980,14 @@ if section == nil or section == "release_config" then
 		check(it.hold ~= nil and it.hold.code == case[2] and #it.grants == 0 and W.rm_id(f) == nil,
 			"release manager record '" .. case[1] .. "': held " .. case[2] .. " (got " .. tostring(it.hold and it.hold.code) .. "), nothing launched or granted")
 		check(W.restores(f), "a " .. case[2] .. " hold restores")
+	end
+	for _, case in { { "", "release_manager_missing" }, { "builder", "release_manager_is_builder" } } do
+		local f = W.fixture({ require_code_review = false, reviewer_records = W.arr(), release_manager_record = case[1] })
+		local b = W.builder(f); assert(W.ready(f, b, "cp-disabled", "rev-disabled", 0).ok)
+		local lid = W.request(f, b, "cp-disabled", "rev-disabled"); assert(W.approve(f, lid).ok)
+		check(W.item(f, lid).hold.code == case[2] and #W.item(f, lid).grants == 0 and #W.reviews(f) == 0,
+			"review disabled: signer validation is nil-safe and still refuses " .. case[2])
+		check(W.restores(f), "review-disabled signer refusal restores")
 	end
 end
 if section == nil or section == "release_launch" then
@@ -870,13 +1032,16 @@ if section == nil or section == "release_refresh" then
 	W.land(f, la, "head-1")
 	check(W.item(f, lb).hold.code == "target_moved" and W.refreshes(f, b) == 1 and W.refreshes(f, rm) == 0,
 		"target_moved sends exactly one landing_refresh, to the builder")
+	local reviewed_refresh = W.replies(f, b, "landing_refresh")[1].reply.payload.reason
+	check(reviewed_refresh:find("REVIEW_READY", 1, true) ~= nil and reviewed_refresh:find("helper check", 1, true) ~= nil,
+		"enabled review refresh instructs a fresh review and independent current-revision helper checks")
 	local void = f.authority.registry.dispatch.reviews[rv_b.review_id].void
 	check(void ~= nil and void.target_revision == "head-1" and void.artifact_revision == nil,
 		"the refresh voids the builder's review approval on the moved target head (void.target_revision), not as an artifact revision")
 	W.settle(f, b); assert(W.send(f, b, "HEARTBEAT", { state = "working" }).ok)
 	check(W.refreshes(f, b) == 1, "later commits never duplicate the refresh")
 	W.settle(f, b); assert(W.send(f, b, "CHECKPOINT", W.cp("cp-b2", "rev-b2")).ok)
-	check(W.request(f, b, "cp-b2", "rev-b2", nil, "head-1") == lb and table.find({ "review_required", "review_stale" }, W.item(f, lb).hold.code) ~= nil
+	check(W.request(f, b, "cp-b2", "rev-b2", nil, "head-1") == lb and W.item(f, lb).hold.code == "check_stale"
 		and W.item(f, lb).approval == nil and #W.item(f, lb).grants == 0, "the refreshed revision needs a fresh review before any grant")
 	W.round(f, b, "cp-b2", "rev-b2", "approved")
 	check(W.item(f, lb).hold.code == "approval_pending", "after the fresh review only the owner approval remains")
@@ -891,7 +1056,7 @@ if section == nil or section == "release_refresh" then
 	check(W.refreshes(f, b) == 2 and void2 ~= nil and void2.target_revision == "head-7" and void2.artifact_revision == nil,
 		"stale_target sends exactly one more landing_refresh to the builder and voids its approval on the observed head")
 	W.settle(f, b); assert(W.send(f, b, "CHECKPOINT", W.cp("cp-b3", "rev-b3")).ok)
-	check(W.request(f, b, "cp-b3", "rev-b3", nil, "head-7") == lb and table.find({ "review_required", "review_stale" }, W.item(f, lb).hold.code) ~= nil
+	check(W.request(f, b, "cp-b3", "rev-b3", nil, "head-7") == lb and W.item(f, lb).hold.code == "check_stale"
 		and #W.item(f, lb).grants == 1, "the stale_target refresh also requires a fresh review")
 	check(W.restores(f), "refreshed and regranted release state restores")
 	-- Restore validates each void pattern: {artifact_revision} (new checkpoint, and every pre-8C record) or {target_revision}.
@@ -903,6 +1068,29 @@ if section == nil or section == "release_refresh" then
 		"a stored void restores in either pattern (artifact_revision keeps its pre-8C meaning)")
 	check(not with_void({ artifact_revision = "x", target_revision = "head-1", at_ms = 0 }) and not with_void({ at_ms = 0 }) and not with_void({ target_revision = 7, at_ms = 0 }),
 		"a void naming both, neither or a malformed revision is refused at restore")
+	-- With review off, the same stale-target workflow uses checks and owner approval, never review.
+	do
+		local t = W.fixture({ require_code_review = false, reviewer_records = W.arr() })
+		local tb = W.builder(t); assert(W.ready(t, tb, "cp-off", "rev-off", 0).ok)
+		local lid = W.request(t, tb, "cp-off", "rev-off"); assert(W.approve(t, lid).ok)
+		local holder = W.holder(t, lid); assert(W.ack(t, holder, W.grant(t, lid)).ok)
+		assert(W.landing_result(t, holder, lid, "stale_target", { observed_target_revision = "head-off" }).ok)
+		local refresh = W.replies(t, tb, "landing_refresh")[1].reply.payload.reason
+		check(refresh:find("CHECKPOINT", 1, true) ~= nil and refresh:find("LANDING_REQUEST", 1, true) ~= nil
+			and refresh:find("helper check", 1, true) ~= nil and refresh:find("REVIEW_READY", 1, true) == nil,
+			"disabled review refresh instructs checkpoint, fresh helper checks and landing request without requesting a reviewer")
+		W.settle(t, tb); assert(W.send(t, tb, "CHECKPOINT", W.cp("cp-off-new", "rev-off-new")).ok)
+		check(W.request(t, tb, "cp-off-new", "rev-off-new", nil, "head-off") == lid
+			and W.item(t, lid).hold.code == "check_stale" and #W.item(t, lid).grants == 1,
+			"disabled review refresh still refuses the old revision's passing helper check")
+		assert(W.send(t, tb, "CHECK_RESULT", { check_id = "unit", argv_sha256 = api.codec.sha256("argv"), exit_code = 0,
+			output_sha256 = api.codec.sha256("check output"), head = W.hx("rev-off-new"), ran_at_ms = 1 }).ok)
+		assert(W.approve(t, lid).ok)
+		check(W.item(t, lid).status == "granted" and #W.item(t, lid).grants == 2 and #W.reviews(t) == 0
+			and W.item(t, lid).proof.mode == "review_disabled" and W.grant(t, lid).target_revision == "head-off",
+			"fresh checks and owner approval regrant the new revision directly without any reviewer")
+		check(W.restores(t), "review-disabled refresh and regrant restore")
+	end
 end
 
 if section == nil or section == "release_holder" then
@@ -937,6 +1125,34 @@ if section == nil or section == "release_holder" then
 			"a legacy 0.3.0 granted item restores as legacy_grant_outstanding with one owner gate")
 		check(lit.holder ~= nil and lit.holder.worker_id == lbid, "the legacy grant's holder is the builder generation it was addressed to, never re-addressed")
 		check(W.restores(g), "the upgraded legacy store restores")
+	end
+	-- A reviewed grant with inconsistent immutable review identities must block before validation.
+	do
+		local g = W.fixture({ reviewer_records = W.arr({ "codex" }) })
+		local _, lid = W.granted(g, "cp-mismatch")
+		local stored = api.clone(g.memory.value)
+		local grant = stored.dispatch.landing.items[lid].grants[1]
+		local raw = runtime.json.decode(grant.bytes)
+		raw.payload.review_id = "review-mismatched"
+		local bytes = runtime.json.encode(raw)
+		grant.bytes = bytes
+		local retained = stored.dispatch.workers[grant.worker_id].replies[tostring(grant.reply_seq)]
+		retained.bytes = bytes; retained.sha256 = api.codec.sha256(bytes)
+		local chunks = {}; for offset = 1, #bytes, 2048 do table.insert(chunks, bytes:sub(offset, offset + 2047)) end
+		retained.frames = { manifest = retained.frames.manifest, chunks = chunks, message_sha256 = retained.sha256, message_bytes = #bytes }
+		local exact = runtime.json.encode(stored)
+		local restored, problem = api.state.rehydrate(stored)
+		check(restored == nil and problem ~= nil and problem.code == "migration_blocked"
+			and problem.message:find(grant.grant_id, 1, true) ~= nil and problem.message:find("reconcile", 1, true) ~= nil,
+			"review identity mismatch visibly blocks restore with the exact grant and drain/reconcile guidance")
+		check(runtime.json.encode(stored) == exact and grant.bytes == bytes and retained.bytes == bytes,
+			"blocked restore leaves the complete snapshot and both immutable grant copies unchanged")
+		g.memory.value = api.clone(stored)
+		local writes = g.memory.writes
+		g.authority = api.host.new_authority(g.memory)
+		local loaded = g.authority:load()
+		check(not loaded.ok and loaded.code == "migration_blocked", "cold authority load exposes the immutable grant migration block")
+		check(g.memory.writes == writes and runtime.json.encode(g.memory.value) == exact, "blocked authority load never rewrites the persisted grant")
 	end
 end
 
@@ -1088,7 +1304,7 @@ if section == nil or string.sub(section, 1, 5) == "grid_" then
 					local it = W.item(f, lid)
 					if status == "queued" or status == "approved" then
 						check(sent.ok and it.approval == nil and it.proof == nil and it.request.source_revision == W.hx("rev-new") and #it.grants == 0
-							and table.find({ "review_required", "review_stale" }, it.hold.code) ~= nil, label .. ": the same item rebinds, approval voided, fresh review required")
+							and it.hold.code == "check_stale", label .. ": the same item rebinds, approval voided, fresh checks and review required")
 					elseif status == "granted" then
 						check(sent.code == "landing_in_progress" and #it.grants == grants0 and it.request.source_revision == it0.request.source_revision,
 							label .. ": refused while the release manager holds the grant")
@@ -1243,7 +1459,8 @@ function W.autonomy_cell(kind, scoped, auto)
 	check(e ~= nil and e.gate_revision == g.revision and (e.at_ms == 0 or e.at_ms > 0), label .. ": a durable execution record is written with the answer")
 	if kind == "dispatch" then
 		local new = e.effect_ref and f.authority.registry.dispatch.workers[e.effect_ref:match("^worker:(.+)$") or ""]
-		check(e.state == "done" and new ~= nil and new.record_id == "claude2" and new.prompt == "Implement the follow-on planned task."
+		check(e.state == "done" and new ~= nil and new.record_id == "claude2"
+			and new.prompt:find("Implement the follow-on planned task.\n\nORCH+ review policy at assignment:", 1, true) == 1
 			and runtime.json.encode(new.source) == runtime.json.encode(bw.source) and runtime.json.encode(new.scope) == runtime.json.encode(bw.scope),
 			label .. ": dispatch queues the proposed record/prompt inheriting the parent's source and scope")
 	elseif kind == "report" then
@@ -1275,6 +1492,49 @@ if section == nil or section == "autonomy" or W.AUTONOMY[section] then
 				for _, auto in { true, false } do W.autonomy_cell(kind, scoped, auto) end
 			end
 		end
+	end
+end
+if section == nil or section == "autonomy" or section == "autonomy_review" then
+	local f = W.fixture({ require_code_review = false, reviewer_records = W.arr(), auto_approve_kinds = W.arr({ "review" }) })
+	local b = W.builder(f, nil, { source = W.PLAN, files = W.arr({ "src/feature.luau" }) })
+	assert(W.ready(f, b, "cp-disabled", "rev-disabled", 0).ok)
+	local cid = W.coordinator(f)
+	local before = W.effects(f)
+	local sent = W.propose(f, cid, "review", W.worker(f, b).work_id, { checkpoint_id = "cp-disabled" })
+	check(sent.ok and W.worker(f, cid).rejected_report == nil, "disabled review proposal is a committed refusal, not a held report")
+	local g = W.proposal_gate(f)
+	check(g.answer ~= nil and g.answer.choice_id == "reject" and g.answer.source.kind == "refusal"
+		and g.answer.source.code == "review_disabled" and g.execution == nil and #g.answer.answer > 0,
+		"disabled review proposal receives a clear policy refusal even when review auto-approval is enabled")
+	check(W.effects(f) == before and #W.reviews(f) == 0, "explicit disabled review proposal creates no reviewer or review")
+	check(W.restores(f), "disabled review refusal restores")
+
+	-- An already-approved review proposal can be pending execution when policy changes.
+	do
+		local t = W.fixture({ reviewer_records = W.arr({ "codex" }) })
+		local tb = W.builder(t, nil, { source = W.PLAN, files = W.arr({ "src/feature.luau" }) })
+		assert(W.send(t, tb, "CHECKPOINT", W.cp("cp-pending", "rev-pending")).ok)
+		local tc = W.coordinator(t)
+		assert(W.propose(t, tc, "review", W.worker(t, tb).work_id, { checkpoint_id = "cp-pending" }).ok)
+		local pending = W.proposal_gate(t)
+		assert(pending.phase == "pending" and pending.execution == nil)
+		assert(t:apply("pause").ok)
+		assert(t:apply("answer", { gate_id = pending.id, gate_revision = pending.revision, choice_id = "approve", answer = "Review after resume." }).ok)
+		local execution = t.authority.registry.dispatch.gates[pending.id].execution
+		check(execution ~= nil and execution.state == "pending" and execution.effect_ref == "session_paused",
+			"approved review proposal is pending execution while paused")
+		local before = W.effects(t)
+		assert(t:apply("policy", { policy = { require_code_review = false } }).ok)
+		assert(t:apply("resume").ok)
+		execution = t.authority.registry.dispatch.gates[pending.id].execution
+		check(execution ~= nil and execution.state == "refused" and execution.effect_ref == "review_disabled",
+			"pending explicit review execution is visibly refused after review is disabled")
+		check(W.effects(t) == before and #W.reviews(t) == 0, "pending proposal creates no review or reviewer after disabling review")
+		assert(t:apply("policy", { policy = { require_code_review = true } }).ok)
+		check(W.effects(t) == before and t.authority.registry.dispatch.gates[pending.id].execution.state == "refused",
+			"reenabling review never resurrects the refused pending proposal")
+		W.idempotent(t, "review disabled before pending execution", pending.id, nil)
+		check(W.restores(t), "disabled pending proposal execution restores")
 	end
 end
 
@@ -1937,7 +2197,10 @@ if section == nil or section == "role_guidance" then
 	end
 	local function guided(id, role, text)
 		local w = W.worker(f, id)
-		return w ~= nil and w.prompt:sub(1, #G[role] + 2) == G[role] .. "\n\n" and (text == nil or w.prompt == G[role] .. "\n\n" .. text)
+		local prefix = G[role] .. "\n\n" .. (text or "")
+		return w ~= nil and w.prompt:sub(1, #prefix) == prefix
+			and (text == nil or (if role == "builder" or role == "coordinator"
+				then w.prompt:find("\n\nORCH+ review policy at assignment:", #prefix + 1, true) == #prefix + 1 else w.prompt == prefix))
 			and w.assignment_sha256 == api.codec.sha256(w.prompt)
 	end
 	local typed = f:apply("queue", { record_id = "builder", record_revision = 0, catalog_revision = 0, prompt = "Typed fixture task.", cwd = "/fixture", placement = "split", coordinator = false })
@@ -1967,6 +2230,18 @@ if section == nil or section == "role_guidance" then
 	check(e ~= nil and e.state == "done" and new ~= nil and guided(new, "builder", "Implement the follow-on planned task."),
 		"an approved dispatch proposal's new work starts with the builder guidance (" .. tostring(e and e.effect_ref) .. ")")
 	check(W.restores(f), "guided assignments restore")
+	for _, mode in { { true, true }, { true, false }, { false, false } } do
+		assert(f:apply("policy", { policy = { require_code_review = mode[1], require_other_family = mode[2] } }).ok)
+		local task = f:apply("queue", { record_id = "builder", record_revision = 0, catalog_revision = 0,
+			prompt = "Policy snapshot fixture.", cwd = "/fixture", placement = "split", coordinator = false })
+		assert(task.ok, task.message)
+		local prompt = W.worker(f, task.worker_id).prompt
+		check(prompt:find("require_code_review=" .. tostring(mode[1]) .. "; require_other_family=" .. tostring(mode[2]), 1, true) ~= nil
+			and prompt:find("Every declared check requires successful helper CHECK_RESULT", 1, true) ~= nil,
+			"assignment gives the worker both policy flags and independent helper-check requirement")
+		check(prompt:find(if mode[1] then "CHECKPOINT then REVIEW_READY" else "CHECKPOINT then LANDING_REQUEST", 1, true) ~= nil,
+			"assignment exposes the appropriate review or direct-landing path")
+	end
 end
 
 -- Poll the coordinator until gate `gid`'s owner_decision is published; returns the delivered reply.
