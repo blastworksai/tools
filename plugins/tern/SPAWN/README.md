@@ -14,8 +14,8 @@ SPAWN keeps one saved launch record per provider account (Claude, Codex, Kimi, M
 
 - **One record per account.** Provider, account suffix (`Work`, `Personal`, …), command, arguments, working directory and placement. Optionally an OS user, an SSH destination and, for OMP, a startup prompt.
 - **Spawn all / Spawn specific.** Spawn all starts every enabled record you included, one after another, 5 seconds apart. Spawn specific starts one account.
-- **No accidental duplicates.** With the default duplicate policy (`skip`), an account that is already running, or whose last launch is still unresolved, is skipped rather than started twice. `allow` is an explicit per-record choice.
-- **Honest outcomes.** Every launch is reported as `Starting`, `Running`, `Waiting for input`, `Exited`, `Failed` or `Unknown`. A closed pane is never counted as a successful exit. `Unknown` stays visible until you resolve it.
+- **As many copies as you want.** Every Spawn starts a new launch with its own pane, even when the same account is already running. Disabled records are skipped.
+- **Honest outcomes.** Every launch is reported as `Starting`, `Running`, `Waiting for input`, `Exited` or `Failed`. A closed pane is never counted as a successful exit, and a launch is shown as live only while its pane exists.
 - **Output is kept.** Terminal launches run inside an ordinary shell, so a failing command leaves its error and exit status on screen.
 - **Native OMP.** OMP records start as genuine native Tern OMP sessions with their saved startup prompt, which is delivered once per launch and never resent on reload.
 - **Tabs you can tell apart.** Tabs are named `ProviderSuffix` (for example `CodexWork`), coloured per provider, and show the provider's icon on local and remote hosts.
@@ -55,14 +55,14 @@ Open SPAWN from the command palette (**SPAWN**, **SPAWN: Config**, **SPAWN: Guid
 
 ![The SPAWN button in the Files pane header, with its tooltip](assets/screenshots/files-button.png)
 
-![The SPAWN menu: Guided setup, Config, Spawn all, Spawn specific, Running agents and Review setup result](assets/screenshots/menu.png)
+![The SPAWN menu: Guided setup, Config, Spawn all and Spawn specific](assets/screenshots/menu.png)
 
 1. **Set up the roster.** Run **Guided setup**, or open **Config** and add records on the Setup page. Every command and argument is shown for review before anything is saved; importing never launches anything.
 2. **Choose what Spawn all includes.** On **Configured agents**, mark records as enabled and included.
-3. **Spawn.** Pick **Spawn all** or **Spawn specific** from the SPAWN menu. Launches go into the Tern session you are in when you start the batch, and changing focus mid-batch cannot redirect them. Spawn all waits 5 seconds after each launch reaches the host before starting the next, so agent start-up memory spikes don't stack. Skipped, duplicate and disabled records don't wait, and the first launch (including Spawn specific) starts at once.
-4. **Watch.** **Running agents** lists this session's SPAWN launches, failed and exited history, and other Tern sessions (read-only). When a batch finishes cleanly, SPAWN hides its Config view; Config and the SPAWN menu bring it back.
-5. **Resolve.** If a launch ends up `Unknown`, inspect its pane first, then choose **Mark no longer running**. That releases the reservation only; it never closes or kills anything.
-6. **After a host restart.** If the execution host's Tern daemon restarted, SPAWN shows one notice ("Host restarted — N SPAWN agents were lost") instead of N separate problems. After checking, choose **Running agents → Host restart → Mark all lost agents no longer running** (or the same action on Config's Running agents page, which asks you to click twice). It releases exactly those reservations so the accounts can be spawned again; it never closes a pane or stops a program.
+3. **Spawn.** The SPAWN menu offers **Guided setup** (until the first record is saved), **Config**, **Spawn all** and **Spawn specific**. Config's **Spawn agents** page has one **Spawn all** button and one button per saved record, showing its provider logo, `Provider — Suffix` and its command, arguments and working directory; disabled records and records needing review are greyed with the reason. Launches go into the Tern session you are in when you start the batch, and changing focus mid-batch cannot redirect them. Spawn all waits 5 seconds after each launch reaches the host before starting the next, so agent start-up memory spikes don't stack. Disabled records don't wait, and the first launch (including Spawn specific) starts at once.
+4. **Spawn again whenever you like.** There is no limit on copies of one agent: each press starts another launch of that record with its own pane and its own entry.
+5. **Watch.** **Running agents** (Config page, or **SPAWN: Running agents** in the palette) lists this session's SPAWN launches, failed and exited history, and other Tern sessions (read-only). When a batch finishes cleanly, SPAWN closes the Config view it opened for that batch; a Config you opened yourself, or are looking at, stays.
+6. **Finished launches clear themselves.** There is nothing to mark by hand. The SPAWN host checks its panes on load, every 15 seconds and after each observation, and moves a launch to history on its own: `Exited` with "Pane closed" when its pane is gone, `Failed` with "Never started (ticket not claimed)" when no pane claimed it within 30 seconds, and `Exited` with "Host restarted" 20 seconds after the execution host's Tern daemon restarted. Agents Tern reruns within those 20 seconds in their pane after a restart are re-adopted as `Running`. A host restart shows one line, "Host restarted: N SPAWN agents ended (cleared automatically)". Settlement only rewrites SPAWN's own records; it never closes a pane or stops a program.
 
 If a window request was interrupted (for example by a host restart) and the host's saved reply is a refusal, nothing ran, so SPAWN acknowledges it for you with an info toast and carries on with your next request. Any other interrupted request still waits for you under **Running agents → Transport review**; acknowledge it there, then try again.
 
@@ -87,7 +87,6 @@ If a window request was interrupted (for example by a host restart) and the host
 | `host`, `key_path` | SSH destination and optional key file path (never the key itself). |
 | `prompt` | OMP startup prompt. Native OMP needs a non-empty prompt. |
 | `enabled`, `include_all` | Whether the record can be launched, and whether Spawn all includes it. |
-| `duplicate_policy` | `skip` (default) or `allow`. |
 | `placement` | `tab`, `split` or `replace_if_alone`. |
 
 ![SPAWN Config, Configured agents page: overview counts, filters and one record's fields](assets/screenshots/configured-agents.png)
@@ -103,8 +102,7 @@ Example for **Config → Paste JSON**:
     {
       "id": "codex-work", "provider": "Codex", "account_label": "Work",
       "backend": "local-terminal", "enabled": true, "include_all": true,
-      "command": "codex", "arguments": [], "cwd": "~",
-      "duplicate_policy": "skip", "placement": "tab"
+      "command": "codex", "arguments": [], "cwd": "~", "placement": "tab"
     }
   ]
 }
@@ -127,7 +125,7 @@ Everything is stored in Tern's per-plugin key-value store on the execution host;
 The saved state has a 120,000-byte ceiling (about 1.6 KB per launch). SPAWN keeps itself under it automatically:
 
 - History of Tern sessions that no longer exist is forgotten when Config refreshes. A session that still has an active launch is always kept.
-- Each session keeps only its 26 most recent finished launches. Running launches and unresolved `Unknown` launches are never trimmed.
+- Each session keeps only its 26 most recent finished launches. Running launches are never trimmed.
 
 **Clear history** on the Running agents page removes finished entries by hand.
 
@@ -142,10 +140,9 @@ The saved state has a 120,000-byte ceiling (about 1.6 KB per launch). SPAWN keep
 
 - Custom colour artwork for Kimi, Muse, Agy and Grok appears only on local panes. Remote tabs show Tern's built-in provider icons, because remote pane IDs cannot yet be matched to tab elements ([tern-sdk#221](https://github.com/stencil-hq/tern-sdk/issues/221)).
 - A provider tab shows its icon while the provider is running; after it exits, the tab shows the shell icon again.
-- Closing a provider pane can leave its launch shown as `Running` until the SPAWN host reloads, which then marks it `Unknown` for you to resolve.
-- After a client restart, Config opens a new view instead of reusing a previously hidden one. After a host reload, a hidden Config view stops updating until Config is reopened.
+- A Config view SPAWN opens to run a batch closes once the batch settles, unless you are looking at it; a Config you opened yourself stays. Leftover hidden SPAWN Config blocks from older versions are closed when the window loads, unless one still has a pending request.
 - Native OMP needs a non-empty startup prompt; Tern's start API rejects blank ones ([tern-sdk#213](https://github.com/stencil-hq/tern-sdk/issues/213)).
-- The host-restart notice needs a host whose daemon identity can be read (Linux). On other hosts, or for a launch that never recorded its daemon identity, each lost attempt must be inspected and marked individually.
+- Host restarts are recognised only on hosts whose daemon identity can be read (Linux). On other hosts the restart epoch is unverifiable, so only the pane rule applies: a launch settles when its pane is gone.
 - `Running` means the process is alive. It does not prove the provider is signed in or its model is ready.
 
 ## Managed dispatch bridge (for ORCH+)
@@ -188,7 +185,7 @@ Mailbox helper regressions run outside Tern: `python3 tests/mailbox_posix.py` on
 - `host.luau`: Config, setup and Running agents block on the execution host
 - `authority.luau`: saved configuration, reservations and request handling (the only writer of SPAWN's state)
 - `host_executor.luau`: tickets, shell detection, command rendering and submission, outcome observation
-- `launch_state.luau`: launch phases, duplicate decisions and history trimming
+- `launch_state.luau`: launch phases, automatic settlement and history trimming
 - `launch_resolution.luau`: shared record validation, ordinary/fresh argv selection, OS-user and SSH identity resolution
 - `config.luau`: record validation, migration and the guided-setup prompt
 - `native_cli.luau`: bounded calls to Tern's own CLI for session inspection

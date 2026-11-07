@@ -172,7 +172,12 @@ local function acknowledge_transient(state,input)
 		end
 	end
 end
-Executor.install(Authority,function(binding,err)
+-- Ordinary attempts settle themselves: the host diffs its own panes against
+-- every binding on load, every SWEEP_MS and after each observation. It never
+-- needs an open Config block and never closes or kills anything.
+local SWEEP_MS=15000
+local sweep_queued=false
+local function refresh_blocks(binding,err)
 	for _,block in pairs(live_blocks) do
 		local state,cx=block.state,block.cx
 		if state.binding and (binding==nil or state.binding.session_key==binding.session_key) then
@@ -181,7 +186,32 @@ Executor.install(Authority,function(binding,err)
 			cx:render()
 		end
 	end
+end
+local function sweep()
+	sweep_queued=false
+	local bindings=Authority.execution_bindings()
+	local ok,list=pcall(tern.pane.list)
+	if not bindings or not ok or type(list)~="table" then return end
+	local panes={}
+	for _,info in ipairs(list) do if type(info.pane)=="number" and info.pane%1==0 then panes[info.pane]={title=info.title} end end
+	local epoch,now=Executor.epoch(),os.time()
+	for _,binding in ipairs(bindings) do
+		local changed,err=Authority.sweep(binding,panes,epoch,now)
+		if err or (changed and changed>0) then refresh_blocks(binding,err) end
+	end
+end
+local function queue_sweep()
+	if sweep_queued then return end
+	sweep_queued=true;tern.timer(1,sweep)
+end
+local function periodic_sweep()
+	sweep();tern.timer(SWEEP_MS,periodic_sweep)
+end
+Executor.install(Authority,function(binding,err)
+	refresh_blocks(binding,err)
+	queue_sweep()
 end)
+tern.timer(1,periodic_sweep)
 tern.on("pane_exited",function(event)
 	local block=live_blocks[event.pane]
 	if block then block.state.closed=true;block.state.inspect_queue={};live_blocks[event.pane]=nil end
@@ -259,10 +289,17 @@ local function review_sections(state)
 	table.insert(rows,action_row("review-confirm","Confirm selected migration",action(state,"review-confirm"),review.reason))
 	return {{id="migration",page=state.page,title="Review saved sources",rows=rows}}
 end
+-- An active setup run is a setup helper attempt that has not ended.
+local function setup_active(state)
+	for _,a in ipairs(state.snapshot.attempts) do
+		if a.purpose=="setup" and a.phase~="Exited" and a.phase~="Failed" then return true end
+	end
+	return false
+end
 local function setup_sections(state)
 	local rows={
 		static_row("setup-host","Execution host",state.host_key or "Unknown","Settings belong to this host; labels do not isolate accounts."),
-		action_row("setup-flow","Guided setup","setup","A verified OMP setup agent reviews providers, accounts and approved launch settings."),
+		action_row("setup-flow","Guided setup",action(state,"launch-setup"),"A verified OMP setup agent reviews providers, accounts and approved launch settings. The SPAWN window starts it."),
 		action_row("setup-add-local","Add local record manually",action(state,"add-local"),"Adds a disabled-by-review record; approve its command in Config."),
 		action_row("setup-add-ssh","Add SSH record manually",action(state,"add-ssh"),"Review the SSH destination, command and account before launch."),
 		text_row("manual-json","Paste setup JSON",state.import_text,"Paste the complete schema-2 JSON, including setup_run_id and confirmed when recovering Guided setup. Use its original host and session; nothing starts."),
@@ -272,6 +309,9 @@ local function setup_sections(state)
 		action_row("manual-review","Review pasted JSON",action(state,"manual-review"),"Validate every record, argument and existing ID before confirmation."),
 		action_row("setup-reset",if state.armed=="reset-roster" then "Confirm delete saved roster" else "Delete saved roster",action(state,"reset-roster"),"Two deliberate clicks; installations, logins and launch history are unchanged."),
 	}
+	if setup_active(state) then
+		table.insert(rows,3,action_row("setup-result","Review setup result",action(state,"launch-result"),"Recover the confirmed result of the active Guided setup run. The SPAWN window that started it reviews it; nothing is imported until you confirm."))
+	end
 	local preview,records=Dispatch.import_decode(state.import_text,true)
 	if preview then
 		table.insert(rows,static_row("bridge-import-source","Migration source",preview.source_client,"Source revision "..tostring(preview.source_revision).." · SHA256 "..preview.source_sha256))
@@ -297,7 +337,7 @@ local function record_sections(state)
 		local backends={{value="local-terminal",label="Terminal"},{value="ssh-command",label="SSH terminal"}}
 		if string.lower(record.provider)=="omp" then table.insert(backends,1,{value="native-agent",label="Native OMP"}) end
 		local rows={
-			text_row(prefix("id"),"Stable id",record.id,"Duplicate and launch-history identity.","Stable ids are immutable"),
+			text_row(prefix("id"),"Stable id",record.id,"Launch-history identity.","Stable ids are immutable"),
 			text_row(prefix("provider"),"Provider",record.provider,"Changing away from OMP requires selecting Terminal or SSH terminal and reviewing its command first."),
 			text_row(prefix("account_label"),"Account label suffix",record.account_label,"A distinguishing suffix, not an account-isolation mechanism."),
 			choice_row(prefix("backend"),"Launch mode",record.backend,backends,"Settings only; this editor never launches a process."),
@@ -305,7 +345,6 @@ local function record_sections(state)
 			text_row(prefix("arguments"),"Arguments",Config.render_arguments(record.arguments),"Shell-like editor syntax preserves quoted argument boundaries."),
 			text_row(prefix("cwd"),"Working directory",text(record.cwd),"Used on the execution host."),
 			choice_row(prefix("placement"),"Placement",record.placement,{{value="tab",label="New tab"},{value="split",label="Split"},{value="replace_if_alone",label="Replace if alone"}},"Saved placement: tab, split, or replace_if_alone."),
-			choice_row(prefix("duplicate_policy"),"Duplicate policy",record.duplicate_policy,{{value="skip",label="Skip existing"},{value="allow",label="Allow duplicate"}},"Unresolved reservations block Skip existing until explicitly inspected and resolved."),
 			switch_row(prefix("enabled"),"Enabled",record.enabled,"Disabled records cannot launch."),
 			switch_row(prefix("include_all"),"Include in all",record.include_all,"Include this record in Spawn all."),
 			text_row(prefix("user"),"Unix user",text(record.user),"Non-secret account routing; labels do not create users."),
@@ -324,13 +363,72 @@ local function record_sections(state)
 	end
 	return sections
 end
+-- Spawn agents: the rows only publish a launch intent; the SPAWN window runs
+-- the exact Spawn all / Spawn specific path with this Config as its origin.
+local PAGES={{id="setup",label="Setup",icon="sparkle"},{id="agents",label="Configured agents",icon="sparkle"},{id="spawn",label="Spawn agents",icon="sparkle"},{id="runtime",label="Running agents",icon="sparkle"}}
+local PAGE_IDS={};for _,page in ipairs(PAGES) do PAGE_IDS[page.id]=true end
+local INTENT_KEY,INTENT_ROLE="spawn-launch-intent","spawn.launch.intent"
+local MAX_INTENTS=16
+local QUEUE_FULL="Too many launches queued; wait a moment"
+local intent_sequence=0
+-- Pending intents queue oldest first, so every click launches exactly once.
+-- Each gets a fresh id; the window runs each at most once and acknowledges it.
+local function publish_intent(state,cx,kind,revision,record_id)
+	state.intents=state.intents or {}
+	if #state.intents>=MAX_INTENTS then state.intent_refused=true;state.notice=QUEUE_FULL;return end
+	intent_sequence+=1
+	table.insert(state.intents,{intent_id=tostring(cx.pane)..":"..string.format("%.0f",tern.now())..":"..tostring(intent_sequence),kind=kind,record_id=record_id,config_revision=revision})
+	state.intent_refused=nil
+	state.notice=if kind=="setup" then "Guided setup requested; the SPAWN window starts it."
+		elseif kind=="result" then "Setup result review requested in the SPAWN window."
+		else "Spawn requested; the SPAWN window launches it."
+end
+local LAUNCH_LINE_MAX=160
+local function provider_key(record)
+	local key=string.lower(record.provider)
+	return if key:match("^[a-z0-9-]+$") then key else "other"
+end
+local function launch_line(record)
+	local command=text(record.command)
+	if command=="" and record.backend=="native-agent" then command="Native OMP" end
+	local arguments=Config.render_arguments(record.arguments)
+	local line=command..(if arguments~="" then " "..arguments else "").." · "..(if text(record.cwd)~="" then record.cwd else "default folder")
+	if #line>LAUNCH_LINE_MAX then
+		-- Cut before a UTF-8 continuation byte so the line stays valid text.
+		local cut=LAUNCH_LINE_MAX-3
+		while cut>0 and (string.byte(line,cut+1) or 0)>=0x80 and (string.byte(line,cut+1) or 0)<0xC0 do cut-=1 end
+		line=line:sub(1,cut).."…"
+	end
+	return line
+end
+local function launch_blocked(record)
+	if not record.enabled then return "Disabled in Config" end
+	if record.review_required then return "Needs settings review: "..(if text(record.review_reason)~="" then record.review_reason else "approve its launch settings in Configured agents") end
+	if record.backend=="native-agent" and not text(record.prompt):find("%S") then return "Needs an approved startup prompt in Configured agents" end
+	return nil
+end
+local function spawn_sections(state)
+	local included=0
+	for _,record in ipairs(state.config.agents) do if record.enabled and record.include_all then included+=1 end end
+	local all=action_row("spawn-launch-all","Spawn all",action(state,"launch-all"),tostring(included).." enabled "..(if included==1 then "record is" else "records are").." included in Spawn all.")
+	if included==0 then all.disabled="No enabled records are included in Spawn all" end
+	local rows={}
+	for _,record in ipairs(state.config.agents) do
+		local row=action_row("spawn-launch:"..provider_key(record)..":"..record.id,record.provider.." — "..record.account_label,action(state,"launch:"..record.id),launch_line(record))
+		row.control.label="Spawn"
+		row.disabled=launch_blocked(record)
+		table.insert(rows,row)
+	end
+	if #rows==0 then table.insert(rows,static_row("spawn-launch-empty","Saved agents","None","Add agents in Setup first.")) end
+	local head={all}
+	if state.intent_refused then table.insert(head,static_row("spawn-queue-full",QUEUE_FULL,"Refused","This click was not queued. Press again once the SPAWN window has started the queued launches.")) end
+	return {{id="spawn-all",page="spawn",title="Spawn all",rows=head},{id="spawn-agents",page="spawn",title="Spawn one agent",rows=rows}}
+end
 local function runtime_sections(state)
 	local live={};local history={};local other={};local transport={}
-	local restart=state.snapshot.host_restart
-	if restart then
-		local count=#restart.attempts
-		table.insert(live,static_row("host-restart","Host restarted — "..tostring(count).." SPAWN "..(if count==1 then "agent was" else "agents were").." lost","The execution host's daemon restarted; their panes cannot be verified. Nothing was relaunched.","Attempts: "..table.concat(restart.attempts,", ")))
-		table.insert(live,action_row("resolve-lost",if state.armed=="resolve-lost" then "Confirm mark all lost agents no longer running" else "Mark all lost agents no longer running",action(state,"resolve-lost"),"Releases only these reservations; never closes a pane or stops a program."))
+	local restart=state.snapshot.host_restart_notice
+	if restart and type(restart.count)=="number" and restart.count>0 then
+		table.insert(live,static_row("host-restart","Host restarted: "..tostring(restart.count).." SPAWN "..(if restart.count==1 then "agent" else "agents").." ended (cleared automatically)","Informational","Their launches moved to history. Nothing was relaunched."))
 	end
 	for _,a in ipairs(state.snapshot.attempts) do
 		local target=if a.phase=="Exited" or a.phase=="Failed" or not a.unresolved then history else live
@@ -340,11 +438,10 @@ local function runtime_sections(state)
 		if a.error_category then detail..=" · "..a.error_category end
 		if a.diagnostic then detail..=" · "..a.diagnostic end
 		table.insert(target,static_row("attempt-"..a.id,a.record_id.." · "..a.id,detail,"Observation scope "..a.scope..". Liveness is observer-reported, not authentication or readiness."))
-		if a.unresolved then table.insert(target,action_row("resolve-"..a.id,if state.armed=="resolve:"..a.id then "Confirm mark no longer running" else "Mark no longer running",action(state,"resolve:"..a.id),"Inspect the original pane first. This releases only its reservation; it never closes a pane.")) end
 	end
-	if #live==0 then table.insert(live,static_row("live-empty","SPAWN launches","None","No active or unresolved saved reservations in this native session.")) end
+	if #live==0 then table.insert(live,static_row("live-empty","SPAWN launches","None","No live SPAWN launches in this native session.")) end
 	if #history==0 then table.insert(history,static_row("history-empty","Failed/exited history","None","Failed terminal output stays in its original shell pane.")) end
-	table.insert(history,action_row("clear-history",if state.armed=="clear-history" then "Confirm clear reviewed terminal history" else "Clear reviewed terminal history",action(state,"clear-history"),"Only resolved/terminal metadata is removed; panes and unresolved attempts remain."))
+	table.insert(history,action_row("clear-history",if state.armed=="clear-history" then "Confirm clear reviewed terminal history" else "Clear reviewed terminal history",action(state,"clear-history"),"Only terminal metadata is removed; panes and live attempts remain."))
 	if state.scope_error or not state.inventory then
 		table.insert(other,static_row("other-unknown","Observation scope","Unknown",state.scope_error or "Refresh to inspect visible host sessions."))
 	else
@@ -391,6 +488,7 @@ local function view(state)
 	if state.snapshot then
 		if state.snapshot.migration then sections=review_sections(state)
 		elseif state.page=="setup" then sections=setup_sections(state)
+		elseif state.page=="spawn" then sections=spawn_sections(state)
 		elseif state.page=="runtime" then sections=runtime_sections(state)
 		else sections=record_sections(state) end
 	end
@@ -400,7 +498,13 @@ local function view(state)
 		payload="SPAWN_STATE_V2 "..tern.json.encode({version=2,host_key=snapshot.host_key,authority_id=snapshot.authority_id,session_key=snapshot.session_key,config_revision=snapshot.config_revision,records={},attempt_revision=snapshot.attempt_revision,attempts={},jobs={},replies={},request_sequences={},host_os=snapshot.host_os,host_shell=snapshot.host_shell,ready=false,error="Snapshot exceeds capacity; preserved state was not truncated or reset"})
 	end
 	local diagnostic=ui.text(payload);diagnostic.p=diagnostic.p or {};diagnostic.p.key="spawn-state"
-	return {main=ui.col({ui.node("prefs",{title="SPAWN",lead=lead,pages={{id="setup",label="Setup",icon="sparkle"},{id="agents",label="Configured agents",icon="sparkle"},{id="runtime",label="Running agents",icon="sparkle"}},page=state.page,sections=sections,focus=state.focus,editing=state.editing}),diagnostic})}
+	local children={ui.node("prefs",{title="SPAWN",lead=lead,pages=PAGES,page=state.page,sections=sections,focus=state.focus,editing=state.editing}),diagnostic}
+	-- Pending launch intents, oldest first: a machine node the SPAWN window reads and acknowledges.
+	if state.intents and #state.intents>0 then
+		local intent=ui.text(tern.json.encode({schema=1,intents=state.intents}));intent.p=intent.p or {};intent.p.key=INTENT_KEY;intent.p.role=INTENT_ROLE
+		table.insert(children,intent)
+	end
+	return {main=ui.col(children)}
 end
 local function update_record(state,cx,id,field,value,revision)
 	local record,index=record_by_id(state,id);if not record then return end
@@ -417,7 +521,7 @@ local function update_record(state,cx,id,field,value,revision)
 		local next_records=Authority.clone(state.config.agents);next_records[index]=canonical
 		mutate(state,cx,revision,"replace-records",{records=next_records});return
 	end
-	local allowed={provider=true,account_label=true,host=true,user=true,key_path=true,command=true,arguments=true,cwd=true,prompt=true,placement=true,backend=true,duplicate_policy=true,enabled=true,include_all=true}
+	local allowed={provider=true,account_label=true,host=true,user=true,key_path=true,command=true,arguments=true,cwd=true,prompt=true,placement=true,backend=true,enabled=true,include_all=true}
 	if not allowed[field] then return end
 	local candidate=Authority.clone(record)
 	if field=="arguments" then
@@ -480,7 +584,7 @@ local definition={
 		local discovery=nil;if #args>0 then discovery=decode(args[1]) end
 		local state={config={schema=2,agents={}},host_key=host_key(discovery),page="agents",provider_filter="",label_filter="",import_text="",notice=nil,editing=nil,focus=nil}
 		if type(saved)=="table" then
-			if saved.page=="setup" or saved.page=="agents" or saved.page=="runtime" then state.page=saved.page end
+			if PAGE_IDS[saved.page] then state.page=saved.page end
 			if type(saved.origin_session)=="number" then state.origin_session=saved.origin_session end
 			if type(saved.origin_scope)=="string" then state.origin_scope=saved.origin_scope end
 			if not state.host_key and type(saved.host_key)=="string" then state.host_key=saved.host_key end
@@ -488,7 +592,7 @@ local definition={
 		if type(discovery)=="table" then
 			state.native_window=discovery.native_window
 			state.client_config=discovery.client_config
-			if discovery.page=="runtime" then state.page="runtime" end
+			if PAGE_IDS[discovery.page] then state.page=discovery.page end
 		end
 		live_blocks[cx.pane]={state=state,cx=cx}
 		open(state,cx);return state
@@ -496,6 +600,12 @@ local definition={
 	view=function(state,_cx)return view(state) end,
 	event=function(state,event,cx)
 		local incoming=event
+		if event.ev=="action" and event.id=="main" and event.act=="spawn.launch-intent-ack" then
+			for index,pending in ipairs(state.intents or {}) do
+				if pending.intent_id==event.value then table.remove(state.intents,index);state.intent_refused=nil;break end
+			end
+			return
+		end
 		if event.ev=="action" and event.id=="main" and event.act=="spawn.request" then
 			local input,err=decode(event.value)
 			if not input then state.transport_error=err;return end
@@ -503,10 +613,11 @@ local definition={
 			verify(state,cx,function(session,why)
 				if not session then state.transport_error=why;refuse(state,input,why);return end
 				if not state.binding then state.transport_error="Authority not initialized";refuse(state,input,state.transport_error);return end
-				local ok,reason=Authority.request(state.binding,input,Executor.epoch())
+				local ok,reason=Authority.request(state.binding,input)
 				if ok and (input.op=="launch_record" or input.op=="start_setup") then Executor.attach(state.binding) end
 				state.transport_error=if ok then nil else reason;reload(state)
 				if not ok then refuse(state,input,reason) end
+				queue_sweep()
 			end)
 			return
 		end
@@ -536,7 +647,7 @@ local definition={
 			end
 			if draft then state.focus=item;state.editing={row=item,draft=draft,cursor=utf16_length(draft),revision=revision} end
 		elseif event.ev=="action" then
-			if event.act=="page" and (event.value=="setup" or event.value=="agents" or event.value=="runtime") then state.page=event.value;state.focus=nil;state.editing=nil;state.armed=nil;open(state,cx);return end
+			if event.act=="page" and PAGE_IDS[event.value] then state.page=event.value;state.focus=nil;state.editing=nil;state.armed=nil;open(state,cx);return end
 			if event.act=="refresh" then open(state,cx);return end
 			local recovery_id,recovery_revision,recovery_mode=event.act:match("^bridge%-recover:([A-Za-z0-9_-]+):(%d+):(%a+)$")
 			if recovery_id then
@@ -558,7 +669,6 @@ local definition={
 				if ok then state.bridge_import_gate=nil end
 				state.notice=if ok then "Import gate cancelled" else why;return
 			end
-			if event.act=="setup" then cx:action("plugin.spawn.spawn_setup");return end
 			if event.act=="close" then if event.value==nil then state.closed=true;state.inspect_queue={};live_blocks[cx.pane]=nil;cx:exit(0) else state.editing=nil;state.focus=nil end;return end
 			local op,rev=event.act:match("^(.*)@(%d+)$");local expected=tonumber(rev)
 			if not op or not state.snapshot then return end
@@ -586,7 +696,7 @@ local definition={
 					if not review.run then review.run=state.binding.authority_id.."/manual/"..observer.."/"..tostring(seq) end
 					for id,reply in pairs(state.snapshot.replies) do if reply.observer_id==observer then table.insert(acks,id) end end
 					local request={version=2,request_id=observer..":"..tostring(seq),authority_id=state.binding.authority_id,observer_id=observer,request_sequence=seq,acknowledged_requests=acks,expected_config_revision=review.revision,op="import_records",data={setup_run_id=review.run,records=review.records}}
-					local ok,why=Authority.request(state.binding,request,Executor.epoch());reload(state)
+					local ok,why=Authority.request(state.binding,request);reload(state)
 					local reply=state.snapshot and state.snapshot.replies[request.request_id]
 					if ok and reply and reply.ok then state.import_review=nil;state.import_text="";state.notice="Imported "..tostring(reply.result.imported).." records. No agents were launched." else state.notice=why or (reply and reply.error) or "Import was not acknowledged; refresh and review transport" end
 					if reply then
@@ -599,7 +709,7 @@ local definition={
 				local base=if op=="add-ssh" then "ssh-agent" else "local-agent";local id=base;local n=1
 				while record_by_id(state,id) do n+=1;id=base.."-"..tostring(n) end
 				local records=Authority.clone(state.config.agents)
-				table.insert(records,{id=id,provider=if op=="add-ssh" then "SSH agent" else "Local agent",account_label="Default",backend=if op=="add-ssh" then "ssh-command" else "local-terminal",enabled=true,include_all=true,duplicate_policy="skip",placement="tab",arguments={},review_required=true,review_reason="Review this account's launch command and routing"})
+				table.insert(records,{id=id,provider=if op=="add-ssh" then "SSH agent" else "Local agent",account_label="Default",backend=if op=="add-ssh" then "ssh-command" else "local-terminal",enabled=true,include_all=true,placement="tab",arguments={},review_required=true,review_reason="Review this account's launch command and routing"})
 				state.page="agents";mutate(state,cx,expected,"replace-records",{records=records});return
 			end
 			local approve_id=op:match("^approve:(.+)$")
@@ -610,23 +720,18 @@ local definition={
 				local validated,why=Config.validate_record(candidate);if not validated then state.notice=why;return end
 				local records=Authority.clone(state.config.agents);records[index]=validated;mutate(state,cx,expected,"replace-records",{records=records});return
 			end
-			if op=="resolve-lost" then
-				local restart=state.snapshot.host_restart
-				if state.armed~=op then
-					if not restart then state.notice="No host-restart lost agents are listed; nothing was changed.";return end
-					state.armed=op;state.armed_attempt_revision=state.snapshot.attempt_revision;state.armed_lost_attempts=Authority.clone(restart.attempts)
-					state.notice="Inspect the listed lost agents, then click the confirmation again.";return
-				end
-				local ids=state.armed_lost_attempts
-				state.armed=nil;state.armed_lost_attempts=nil
-				mutate(state,cx,expected,"resolve-lost-attempts",{attempt_ids=ids,attempt_revision=state.armed_attempt_revision,epoch=Executor.epoch()})
-				return
+			if op=="launch-all" then publish_intent(state,cx,"all",expected);return end
+			if op=="launch-setup" then publish_intent(state,cx,"setup",expected);return end
+			if op=="launch-result" then publish_intent(state,cx,"result",expected);return end
+			local launch_id=op:match("^launch:(.+)$")
+			if launch_id then
+				if not record_by_id(state,launch_id) then reload(state);state.notice="That saved agent no longer exists; review the refreshed list";return end
+				publish_intent(state,cx,"record",expected,launch_id);return
 			end
-			if op=="reset-roster" or op=="clear-history" or op=="reset-transport" or op:match("^resolve:") or op:match("^review%-reply:") then
+			if op=="reset-roster" or op=="clear-history" or op=="reset-transport" or op:match("^review%-reply:") then
 				if state.armed~=op then state.armed=op;state.armed_attempt_revision=state.snapshot.attempt_revision;state.notice="Inspect the displayed state, then click the confirmation again.";return end
 				state.armed=nil
 				if op=="reset-roster" then mutate(state,cx,expected,"replace-records",{records={}})
-				elseif op:match("^resolve:") then mutate(state,cx,expected,"resolve-attempt",{id=op:sub(9),attempt_revision=state.armed_attempt_revision})
 				elseif op:match("^review%-reply:") then mutate(state,cx,expected,"review-reply",{id=op:sub(14)})
 				else mutate(state,cx,expected,op,{attempt_revision=state.armed_attempt_revision}) end
 			end

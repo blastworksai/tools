@@ -36,7 +36,7 @@ local function record(id, fields)
 	local result = {
 		id = id, provider = "custom", account_label = id, backend = "local-terminal",
 		command = "ordinary-cli", arguments = {}, enabled = true, include_all = true,
-		duplicate_policy = "skip", placement = "tab",
+		placement = "tab",
 	}
 	for key, value in pairs(fields or {}) do result[key] = value end
 	return result
@@ -60,7 +60,7 @@ check(not assert(config.migrate(fresh.store, "host-A")).changed, "empty store is
 local original_record = record("preserved", {
 	command = "/opt/My Tools/custom-cli", arguments = { "", "two words", "--", "acp", "$(not executed)" },
 	cwd = "/work/a directory/'quoted'", prompt = "  Keep this prompt.\nSecond line: $HOME `literal`  ",
-	enabled = false, include_all = false, duplicate_policy = "allow", placement = "split",
+	enabled = false, include_all = false, placement = "split",
 	host = "remote.example", user = "account", key_path = "/keys/my key",
 })
 local sentinel = { schema = 1, agents = { record("foreign") }, extension = { exact = "untouched" } }
@@ -397,7 +397,7 @@ check(#slow_store.writes == 1 and slow_store.claims == 1 and slow_store.job.stag
 -- A pending window request is cleared automatically only by its own definitive refusal.
 do
 	local pending = { request_id = "window-1:22", op = "launch_record" }
-	local refusal = { request_id = "window-1:22", observer_id = "window-1", ok = false, error = "duplicate" }
+	local refusal = { request_id = "window-1:22", observer_id = "window-1", ok = false, error = "disabled" }
 	check(lifecycle.refused_pending(pending, refusal, "window-1"), "a matching ok=false reply clears its pending request")
 	local admitted_reply = copy(refusal); admitted_reply.ok, admitted_reply.error = true, nil
 	check(not lifecycle.refused_pending(pending, admitted_reply, "window-1"), "an admitted reply keeps manual transport review")
@@ -429,15 +429,19 @@ local function reject_observation(target, attempt, observer, sequence, observati
 end
 local first = reserve(state, account)
 check(first.phase == "Starting" and first.unresolved, "reservation is starting, not proof of execution")
-local snapshot = copy(state)
-local denied, why = lifecycle.reserve(state, account, first.scope, "window-2")
-check(denied == nil and why == "skip", "another window cannot bypass account reservation")
-same(state, snapshot, "duplicate skip allocates no ID or revision")
+-- Cold start: a second launch of the same record always gets its own attempt.
+local cold = lifecycle.new()
+local cold_a = reserve(cold, account, first.scope, "window-1")
+local cold_b = reserve(cold, account, first.scope, "window-2")
+check(cold_a.id ~= cold_b.id and cold_b.phase == "Starting" and cold.next_attempt == 3, "a second launch of the same record always gets its own attempt (cold start)")
 observe(state, first, 1, { phase = "Running", pane = 42 })
 observe(state, first, 2, { phase = "Waiting for input" })
 check(first.error_category == nil and first.unresolved, "waiting input is not fabricated authentication failure")
 observe(state, first, 3, { phase = "Unknown" })
-check(first.unresolved and lifecycle.reserve(state, account, first.scope, "window-2") == nil, "close or disconnect remains duplicate-blocking")
+check(first.unresolved, "close or disconnect keeps the attempt uncertain until host evidence settles it")
+local steady = copy(state)
+local steady_second = reserve(steady, account, first.scope, "window-2")
+check(steady_second.id ~= first.id and #steady.attempts == 2, "a second launch of the same record always gets its own attempt (steady state)")
 reject_observation(state, first, first.observer_id, 4, { phase = "Running", pane = 42, scope = "host-A/reused-session-alias" }, "scope-mismatch")
 reject_observation(state, first, first.observer_id, 4, { phase = "Running", pane = 43 }, "pane-mismatch")
 local recovered = assert(lifecycle.validate(copy(state)))
@@ -448,7 +452,7 @@ local other_scope = reserve(recovered, account, "host-B/session-1", "window-1")
 observe(recovered, other_scope, 1, { phase = "Running", pane = 42 })
 check(other_scope.id ~= first.id, "same numeric pane alias on another host/session is independent")
 observe(recovered, recovered_first, 5, { phase = "Exited", exit_status = 0 })
-local batch = { recovered_first.id, recovered_first.id, { outcome = "Skipped", reason = "duplicate" }, { outcome = "Blocked", reason = "review" } }
+local batch = { recovered_first.id, recovered_first.id, { outcome = "Skipped", reason = "disabled" }, { outcome = "Blocked", reason = "review" } }
 local counts = lifecycle.aggregate(recovered, batch)
 check(counts.Exited == 1 and counts.total == 3 and counts.Skipped == 1 and counts.Blocked == 1, "batch deduplicates attempts and distinguishes admission outcomes")
 observe(recovered, recovered_first, 6, { phase = "Failed", exit_status = 23, error_category = "command-exit", diagnostic = "late failure" })
@@ -497,21 +501,23 @@ check(metadata.error_category == "command-exit" and metadata.exit_status == 24 a
 observe(metadata_state, metadata, 5, { phase = "Unknown", error_category = "host-mismatch", diagnostic = "later connectivity" })
 check(metadata.error_category == "command-exit" and metadata.exit_status == 24 and metadata.diagnostic == "verified permission failure", "later unknown cannot overwrite retained terminal metadata")
 
-local allowed = record("parallel", { duplicate_policy = "allow" })
-local parallel_a = reserve(recovered, allowed)
-local parallel_b = reserve(recovered, allowed)
-check(parallel_a.id ~= parallel_b.id, "explicit duplicate allowance creates distinct attempts")
+local parallel = record("parallel")
+local parallel_a = reserve(recovered, parallel)
+local parallel_b = reserve(recovered, parallel)
+check(parallel_a.id ~= parallel_b.id, "a second launch of the same record always gets its own attempt")
 observe(recovered, parallel_a, 1, { phase = "Running", pane = 90 })
 reject_observation(recovered, parallel_b, parallel_b.observer_id, 1, { phase = "Running", pane = 90 }, "pane-already-bound")
 observe(recovered, parallel_b, 1, { phase = "Running", pane = 91 })
-check(lifecycle.resolve(recovered, replacement.id), "explicit resolution releases uncertain attempt")
-check(replacement.phase == "Unknown" and not replacement.unresolved and replacement.exit_status == nil, "resolution does not invent successful exit")
-reject_observation(recovered, replacement, replacement.observer_id, 2, { phase = "Running", pane = 42 }, "resolved-attempt")
-local revision = recovered.revision
-check(lifecycle.resolve(recovered, replacement.id) and recovered.revision == revision, "repeated resolution is idempotent")
+check(lifecycle.settle(recovered, replacement.id, "Exited", "Pane closed"), "settlement releases a live attempt whose pane is gone")
+check(replacement.phase == "Exited" and not replacement.unresolved and replacement.exit_status == nil and replacement.diagnostic == "Pane closed", "settlement does not invent an exit status")
+reject_observation(recovered, replacement, replacement.observer_id, 2, { phase = "Running", pane = 42 }, "illegal-transition")
+local settled_snapshot = copy(recovered)
+local resettled, resettle_error = lifecycle.settle(recovered, replacement.id, "Exited", "Pane closed")
+check(not resettled and resettle_error == "terminal-attempt", "settlement refuses an already terminal attempt")
+same(recovered, settled_snapshot, "refused settlement leaves all state unchanged")
 local next_id = recovered.next_attempt
 local removed = lifecycle.clear_history(recovered)
-check(removed == 4, "history clear removes only three terminal and one resolved attempts")
+check(removed == 4, "history clear removes only the four terminal attempts")
 check(#recovered.attempts == 3 and recovered.attempts[1].id == other_scope.id and recovered.attempts[2].id == parallel_a.id and recovered.attempts[3].id == parallel_b.id, "clear preserves live attempts and original order")
 check(recovered.next_attempt == next_id, "clear preserves ID continuity")
 check(lifecycle.aggregate(recovered, { replacement.id }).missing == 1, "cleared result is missing, never successful")
@@ -526,7 +532,7 @@ check(lifecycle.reserve(recovered, blocked, first.scope, "window-1") == nil, "re
 check(reserve(recovered, record("explicit-only", { include_all = false })).phase == "Starting", "batch exclusion does not prohibit explicit launch")
 local full_state = lifecycle.new()
 for index = 1, 128 do reserve(full_state, record("capacity-" .. tostring(index))) end
-snapshot = copy(full_state)
+local snapshot = copy(full_state)
 local overflow, capacity = lifecycle.reserve(full_state, record("overflow"), first.scope, "window-1")
 check(overflow == nil and capacity == "capacity", "full history refuses rather than evicting reservations")
 same(full_state, snapshot, "capacity refusal preserves all history")
@@ -534,5 +540,135 @@ for _, invalid in ipairs({ { version = 99, next_attempt = 1, revision = 0, attem
 	local preserved = copy(invalid)
 	check(lifecycle.validate(invalid) == nil, "future or corrupt lifecycle refuses reset")
 	same(invalid, preserved, "invalid persisted lifecycle stays untouched")
+end
+
+-- R3 grid: host evidence settles ordinary and setup attempts automatically.
+local PANE_CLOSED, HOST_RESTARTED = "Pane closed", "Host restarted"
+local READOPTED, NEVER_STARTED = "Re-adopted after host restart (Tern reran the agent command)", "Never started (ticket not claimed)"
+local EVIDENCE = {
+	present = { pane_present = true },
+	absent = { pane_present = false },
+	-- Host restart: Tern restores panes after the host loads, so nothing ends before grace.
+	restart = { epoch_changed = true, pane_present = true, grace_used = true },
+	restart_gone = { epoch_changed = true, pane_present = false, grace_used = true },
+	restart_grace = { epoch_changed = true, pane_present = true },
+	restart_gone_grace = { epoch_changed = true, pane_present = false },
+	readopt = { epoch_changed = true, pane_present = true, readopt = true },
+	ticket = { ticket_expired = true },
+	none = {},
+}
+local SETTLED = {
+	absent = { "Exited", PANE_CLOSED }, restart = { "Exited", HOST_RESTARTED },
+	restart_gone = { "Exited", HOST_RESTARTED }, readopt = { "Running", READOPTED },
+	ticket = { "Failed", NEVER_STARTED },
+}
+local function attempt_in(phase, purpose, bound)
+	local target = lifecycle.new()
+	local item = assert(config.validate_record(record("grid", if purpose == "setup" then { provider = "omp", backend = "native-agent", command = "omp" } else nil)))
+	local attempt, err = lifecycle.reserve(target, item, "host-A/session-1", "host-executor", purpose)
+	assert(attempt, tostring(err))
+	if phase == "Starting" then
+		if bound then observe(target, attempt, 1, { phase = "Starting", pane = 50 }) end
+	else
+		observe(target, attempt, 1, { phase = "Running", pane = 50 })
+		if phase == "Waiting for input" or phase == "Unknown" then observe(target, attempt, 2, { phase = phase }) end
+		if phase == "Exited" then observe(target, attempt, 2, { phase = "Exited", exit_status = 0 }) end
+		if phase == "Failed" then observe(target, attempt, 2, { phase = "Failed", exit_status = 1 }) end
+	end
+	return target, attempt
+end
+local function expect_cell(label, phase, purpose, bound, evidence_name, expected)
+	local target, attempt = attempt_in(phase, purpose, bound)
+	local before = copy(target)
+	local result, diagnostic = lifecycle.classify(attempt, EVIDENCE[evidence_name])
+	same(target, before, label .. ": classify is pure")
+	if expected == nil then
+		check(result == nil and diagnostic == nil, label .. ": unchanged")
+		return
+	end
+	check(result == expected[1] and diagnostic == expected[2], label .. ": classified " .. tostring(expected[1]) .. ", got " .. tostring(result) .. " / " .. tostring(diagnostic))
+	local ok, err = lifecycle.settle(target, attempt.id, result, diagnostic)
+	check(ok, label .. ": settles: " .. tostring(err))
+	check(attempt.phase == result and attempt.diagnostic == diagnostic and attempt.exit_status == nil, label .. ": records phase and diagnostic")
+	check(lifecycle.validate(target) == target, label .. ": settled lifecycle stays a valid persisted value")
+	if result == "Running" then
+		check(attempt.unresolved and attempt.pane == 50, label .. ": re-adopted attempt stays live on its pane")
+	else
+		check(not attempt.unresolved and lifecycle.clear_history(copy(target)) == 1, label .. ": settled attempt moves to history")
+	end
+end
+for _, purpose in ipairs({ "launch", "setup" }) do
+	for _, phase in ipairs({ "Starting", "Running", "Waiting for input" }) do
+		for _, name in ipairs({ "present", "absent", "restart", "restart_gone", "restart_grace", "restart_gone_grace", "readopt", "none" }) do
+			expect_cell(purpose .. " " .. phase .. " / " .. name, phase, purpose, true, name, SETTLED[name])
+		end
+	end
+	expect_cell(purpose .. " unclaimed Starting / ticket", "Starting", purpose, false, "ticket", SETTLED.ticket)
+	expect_cell(purpose .. " unclaimed Starting / no observer", "Starting", purpose, false, "none", nil)
+	-- Legacy unresolved Unknown from stores written before automatic settlement.
+	for _, name in ipairs({ "absent", "restart", "restart_gone", "restart_grace", "restart_gone_grace", "readopt", "ticket", "none" }) do
+		expect_cell(purpose .. " legacy Unknown / " .. name, "Unknown", purpose, true, name, SETTLED[name])
+	end
+	expect_cell(purpose .. " legacy Unknown / present", "Unknown", purpose, true, "present", { "Running", nil })
+	for _, phase in ipairs({ "Exited", "Failed" }) do
+		for name in pairs(EVIDENCE) do expect_cell(purpose .. " " .. phase .. " / " .. name, phase, purpose, true, name, nil) end
+	end
+end
+for _, phase in ipairs({ "Starting", "Running", "Waiting for input", "Unknown", "Exited" }) do
+	for name in pairs(EVIDENCE) do expect_cell("managed " .. phase .. " / " .. name, phase, "managed", true, name, nil) end
+end
+
+-- settle refuses managed and terminal attempts, and anything that is not a settlement.
+for _, case in ipairs({
+	{ "Running", "managed", "Exited", "managed-attempt" }, { "Unknown", "managed", "Exited", "managed-attempt" },
+	{ "Starting", "managed", "Failed", "managed-attempt" }, { "Exited", "launch", "Failed", "terminal-attempt" },
+	{ "Failed", "launch", "Exited", "terminal-attempt" }, { "Running", "launch", "Unknown", "invalid-phase" },
+}) do
+	local target, attempt = attempt_in(case[1], case[2], true)
+	local before = copy(target)
+	local ok, err = lifecycle.settle(target, attempt.id, case[3], "Pane closed")
+	check(not ok and err == case[4], "settle refuses " .. case[2] .. " " .. case[1] .. " -> " .. case[3] .. ": " .. tostring(err))
+	same(target, before, "refused settlement leaves " .. case[2] .. " " .. case[1] .. " unchanged")
+end
+do
+	local target, attempt = attempt_in("Starting", "launch", false)
+	local before = copy(target)
+	local ok, err = lifecycle.settle(target, attempt.id, "Running", nil)
+	check(not ok and err == "unbound-live-attempt", "settlement never makes an unclaimed attempt live")
+	same(target, before, "refused unbound settlement leaves state unchanged")
+	check(select(2, lifecycle.settle(target, "attempt-99", "Exited", PANE_CLOSED)) == "missing-attempt", "settlement of a missing attempt is refused")
+end
+-- A legacy Unknown a user already released is history: never revived, still endable.
+do
+	local legacy_store = assert(lifecycle.validate({ version = 1, next_attempt = 2, revision = 3, attempts = {
+		{ id = "attempt-1", record_id = "grid", scope = "host-A/session-1", observer_id = "host-executor", sequence = 2, mode = "Terminal", phase = "Unknown", unresolved = false, pane = 50 },
+	} }))
+	local released = legacy_store.attempts[1]
+	check(lifecycle.classify(released, EVIDENCE.present) == nil and lifecycle.classify(released, EVIDENCE.readopt) == nil, "released legacy Unknown is never revived")
+	local result, diagnostic = lifecycle.classify(released, EVIDENCE.absent)
+	check(result == "Exited" and diagnostic == PANE_CLOSED and lifecycle.settle(legacy_store, released.id, result, diagnostic), "released legacy Unknown settles to Exited when its pane is gone")
+	check(released.phase == "Exited" and not released.unresolved and lifecycle.validate(legacy_store) == legacy_store, "settled legacy store remains valid")
+end
+
+-- Retired duplicate_policy is stripped at every restore/import boundary, never rejected.
+do
+	local stored = record("legacy-skip"); stored.duplicate_policy = "skip"
+	local legacy_saved = { schema = 2, hosts = { ["host-A"] = { schema = 2, agents = { stored } } } }
+	local legacy_before = copy(legacy_saved)
+	local restored = assert(config.migrate(legacy_saved, "host-A"))
+	check(restored.records[1].duplicate_policy == nil and restored.store.hosts["host-A"].agents[1].duplicate_policy == nil, "restore strips a stored duplicate_policy")
+	check(restored.changed, "restore that strips duplicate_policy is persisted")
+	same(legacy_saved, legacy_before, "stripping does not mutate the original before durable commit")
+	check(not assert(config.migrate(restored.store, "host-A")).changed, "stripped store is idempotent")
+	local relaunch_state = lifecycle.new()
+	local stripped = restored.records[1]
+	check(reserve(relaunch_state, stripped).id ~= reserve(relaunch_state, stripped).id, "a restored former skip record launches as many times as asked")
+	for _, value in ipairs({ "allow", "skip", "bogus", false }) do
+		local imported = record("import"); imported.duplicate_policy = value
+		local canonical = config.validate_record(imported)
+		check(canonical ~= nil and canonical.duplicate_policy == nil, "import strips duplicate_policy=" .. tostring(value))
+	end
+	local prompt = assert(config.setup_prompt({}, "run-1", "host-A", "host-A/session-1"))
+	check(not prompt:find("duplicate", 1, true), "setup prompt no longer asks for or emits duplicate_policy")
 end
 return "PASS " .. tostring(checks) .. " SPAWN behavior checks"

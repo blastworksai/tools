@@ -4,12 +4,23 @@
 local Config = require("./config")
 local Launch = require("./launch_state")
 local Native = require("./native_cli")
+local DispatchWindow = require("./dispatch_window")
 local BLOCK = "spawn.spawner"
 local PREFIX = "SPAWN_STATE_V2 "
 local MAX_QUEUE = 64
 local POLL_MS = 250
 -- Spawn all starts each submitted launch this far apart so start-up memory spikes don't stack.
 local BATCH_INTERVAL_MS = 5000
+-- Config › Spawn agents / Setup clicks: the host block publishes a queue node of pending intents,
+-- oldest first. This window runs each once, in click order (journal shared by every window of this
+-- client), and acks it.
+local INTENT_NODE, INTENT_ROLE, INTENT_JOURNAL = "spawn-launch-intent", "spawn.launch.intent", "spawn.intents.v1"
+local INTENT_KINDS = { all = true, record = true, setup = true, result = true }
+-- Last saved-record count seen per host, so the menu knows setup is done while no Config is open.
+local RECORDS_SEEN = "spawn.records-seen.v1"
+-- Upgrade boundary: manual release requests from older versions are dropped, never replayed.
+local OBSOLETE_OPS = { resolve_attempt = true, resolve_lost_attempts = true }
+local OBSOLETE_NOTICE = "An old Mark-no-longer-running request was cleared; SPAWN now does this automatically"
 local MODES = { ["native-agent"] = "Native OMP", ["local-terminal"] = "Terminal", ["ssh-command"] = "SSH terminal" }
 local COLORS = { claude = "orange", codex = "green", kimi = "teal", muse = "blue", agy = "red", grok = "yellow", omp = "purple" }
 local ICONS = { claude = "provider-anthropic", codex = "provider-openai-codex", kimi = "provider-kimi-code", muse = "provider-meta", agy = "provider-google-antigravity", grok = "provider:xai", omp = "pi-mark" }
@@ -35,7 +46,12 @@ local observer_loading = false
 local observer_waiters = {}
 local queues: any = {}
 local authority_panes: any = {}
-local parked_origins: any = {}
+-- Config panes SPAWN itself opened to carry a launch; closed again once their batch settles.
+-- A Config the user opened (SPAWN: Config, or clicked a launch in it) is never in this set.
+local opened_for_batch: any = {}
+local records_seen: any = nil
+-- with_authority calls still resolving their Config; a queued Config launch waits for them.
+local starting = 0
 local tracked: any = {}
 local setup: any = nil
 local batches: any = {}
@@ -238,8 +254,9 @@ local function ensure_observer(cx: any, callback: any)
 					end
 				end
 			end
-			if problem == nil and (client == nil or not integer(client.conn) or not integer(client.since)) then problem = "Native client incarnation is unavailable; existing reservations remain unresolved" end
+			if problem == nil and (client == nil or not integer(client.conn) or not integer(client.since)) then problem = "Native client incarnation is unavailable; nothing was launched" end
 			if problem == nil then
+				local cleared = false
 				local loaded, data = pcall(function()
 					local namespace = tern.kv.get("window-observer-namespace")
 					if namespace == nil then
@@ -265,8 +282,15 @@ local function ensure_observer(cx: any, callback: any)
 						end
 						if count ~= #state.acknowledgments then error("Invalid sparse request acknowledgment journal") end
 						if state.pending ~= nil then
-							local ops = { refresh = true, import_records = true, launch_record = true, start_setup = true, resolve_attempt = true, resolve_lost_attempts = true }
-							if type(state.pending) ~= "table" or not identity(state.pending.request_id, 512) or not ops[state.pending.op] then error("Invalid pending request journal; inspect Config without replaying it") end
+							local ops = { refresh = true, import_records = true, launch_record = true, start_setup = true }
+							if type(state.pending) ~= "table" or not identity(state.pending.request_id, 512) or not (ops[state.pending.op] or OBSOLETE_OPS[state.pending.op]) then error("Invalid pending request journal; inspect Config without replaying it") end
+							if OBSOLETE_OPS[state.pending.op] then
+								-- Acknowledge it so the host may drop any retained reply; it is never sent again.
+								if #state.acknowledgments >= 64 then table.remove(state.acknowledgments, 1) end
+								if not seen[state.pending.request_id] then table.insert(state.acknowledgments, state.pending.request_id) end
+								state.pending = nil
+								cleared = true
+							end
 						end
 					end
 					for key, track in saved.tracked do
@@ -285,7 +309,10 @@ local function ensure_observer(cx: any, callback: any)
 					end
 					return saved
 				end)
-				if loaded then observer = data; tracked = data.tracked; setup = data.setup else problem = tostring(data) end
+				if loaded then
+					observer = data; tracked = data.tracked; setup = data.setup
+					if cleared and save_observer(fresh) then fresh:toast("info", "SPAWN", OBSOLETE_NOTICE) end
+				else problem = tostring(data) end
 			end
 			observer_loading = false
 			local waiting = observer_waiters; observer_waiters = {}
@@ -345,47 +372,26 @@ local function validate_snapshot(value: any): (any?, string?)
 		if count > 64 or not identity(id, 256) or not integer(sequence) then return nil, "Invalid authority request watermark" end
 	end
 	if value.error ~= nil and type(value.error) ~= "string" then return nil, "Invalid authority error" end
-	if value.host_restart ~= nil then
-		local restart = value.host_restart
-		local valid = type(restart) == "table" and identity(restart.restart_id, 64) and type(restart.attempts) == "table"
-		if valid then
-			for name in restart do if name ~= "restart_id" and name ~= "attempts" then valid = false end end
-		end
-		if valid then
-			local listed, seen = 0, {}
-			for index, id in restart.attempts do
-				listed += 1
-				local attempt = if type(id) == "string" then attempts[id] else nil
-				if listed > 128 or not integer(index) or index < 1 or index > #restart.attempts or attempt == nil or seen[id]
-					or attempt.phase ~= "Unknown" or attempt.unresolved ~= true or attempt.purpose == "managed" then valid = false; break end
-				seen[id] = true
-			end
-			if valid and (listed == 0 or listed ~= #restart.attempts) then valid = false end
-		end
-		if not valid then return nil, "Invalid host restart notice" end
+	-- A 0.4.0 host's lost-attempt list is ignored: nothing is resolved by hand any more.
+	value.host_restart = nil
+	-- Informational only: how many ordinary attempts the host ended after its daemon restarted.
+	-- Count, or an attempts list to count; extra keys are ignored and a malformed notice is dropped.
+	local notice = value.host_restart_notice
+	value.host_restart_notice = nil
+	if type(notice) == "table" and identity(notice.restart_id, 64) then
+		local count = notice.count
+		if count == nil and type(notice.attempts) == "table" then count = #notice.attempts end
+		if integer(count) and count >= 1 then value.host_restart_notice = { restart_id = notice.restart_id, count = count } end
 	end
 	value.records = records
 	return value, nil
 end
-local function snapshot(cx: any, origin: any, readonly: boolean?): (any?, string?)
-	local problem = context_error(cx, origin, false)
-	if problem ~= nil then return nil, problem end
-	if not pane_member(cx, origin, origin.pane) then
-		local pane = cx.session:pane(origin.pane)
-		local parked_here = false
-		for _, host in cx.hosts:list() do
-			if host.id == origin.host and contains(host.panes, origin.pane) then parked_here = true end
-		end
-		-- Parking removes tab membership, not the already-bound status source.
-		-- Writes still require visible membership; canonical scope is checked below.
-		if not readonly or origin.authority_id == nil or pane == nil or not pane.parked or not parked_here then
-			return nil, "The SPAWN authority is no longer visible in the captured session"
-		end
-	end
+-- Reads and validates the exact snapshot node of a SPAWN Config pane; no membership or scope check.
+local function read_snapshot(cx: any, pane_id: number): (any?, string?)
 	local ok, tree = pcall(function()
-		local pane = cx.session:pane(origin.pane)
+		local pane = cx.session:pane(pane_id)
 		if pane == nil or pane.block ~= BLOCK then error("The captured block is not SPAWN Config") end
-		return cx.session:surface(origin.pane, { as = "table", root = "main.spawn-state", nodes = 4, depth = 2, max_chars = 128000 })
+		return cx.session:surface(pane_id, { as = "table", root = "main.spawn-state", nodes = 4, depth = 2, max_chars = 128000 })
 	end)
 	if not ok then return nil, tostring(tree) end
 	if type(tree) ~= "table" or type(tree.surface) ~= "table" or tree.surface.role ~= "plugin.spawn.spawner" or (tree.more ~= nil and tree.more ~= 0) then return nil, "The authority surface is unavailable or clipped" end
@@ -404,11 +410,47 @@ local function snapshot(cx: any, origin: any, readonly: boolean?): (any?, string
 	if text:sub(1, #PREFIX) ~= PREFIX then return nil, "The authority snapshot prefix is missing" end
 	local decoded, raw = pcall(tern.json.decode, text:sub(#PREFIX + 1))
 	if not decoded then return nil, "The authority snapshot is incomplete or invalid JSON" end
-	local value, err = validate_snapshot(raw)
+	return validate_snapshot(raw)
+end
+local function records_cache(): any
+	if records_seen == nil then
+		local ok, saved = pcall(tern.kv.get, RECORDS_SEEN)
+		records_seen = if ok and type(saved) == "table" then saved else {}
+	end
+	return records_seen
+end
+local function remember_records(host: string, count: number)
+	local seen = records_cache()
+	if seen[host] == count then return end
+	if seen[host] == nil then
+		local entries = 0
+		for _ in seen do entries += 1 end
+		if entries >= 64 then seen[(next(seen))] = nil end
+	end
+	seen[host] = count
+	pcall(tern.kv.set, RECORDS_SEEN, seen)
+end
+local function snapshot(cx: any, origin: any, readonly: boolean?): (any?, string?)
+	local problem = context_error(cx, origin, false)
+	if problem ~= nil then return nil, problem end
+	if not pane_member(cx, origin, origin.pane) then
+		local pane = cx.session:pane(origin.pane)
+		local parked_here = false
+		for _, host in cx.hosts:list() do
+			if host.id == origin.host and contains(host.panes, origin.pane) then parked_here = true end
+		end
+		-- Parking removes tab membership, not the already-bound status source.
+		-- Writes still require visible membership; canonical scope is checked below.
+		if not readonly or origin.authority_id == nil or pane == nil or not pane.parked or not parked_here then
+			return nil, "The SPAWN authority is no longer visible in the captured session"
+		end
+	end
+	local value, err = read_snapshot(cx, origin.pane)
 	if value == nil then return nil, err end
 	-- The persisted roster key is not this client's display/route alias.
 	-- Verified pane membership and canonical authority/session IDs bind scope.
 	if origin.authority_id ~= nil and (value.authority_id ~= origin.authority_id or value.session_key ~= origin.session_key) then return nil, "The authority identity changed; choose the action again" end
+	remember_records(origin.host_key, #value.records)
 	if not readonly and not value.ready then return nil, value.error or "Config requires review before this host is ready" end
 	if not readonly and value.error ~= nil then return nil, value.error end
 	return value, nil
@@ -440,57 +482,118 @@ local function find_authority(cx: any, origin: any): number?
 		-- after reload. A new client's legacy copy still requires its own review.
 		if value ~= nil and observer ~= nil and observer.transports[value.authority_id] ~= nil then return pane.pane end
 	end
-	-- Unpark only a parked Config whose read-only snapshot proves an authority
-	-- already bound to this host/session (remembered at park time or tracked).
-	-- Native session IDs differ from SDK IDs, so unknown parked blocks are never
-	-- adopted. Several matches: the lowest pane ID is reused, others untouched.
-	local known = {}
-	if parked_origins[key] ~= nil then known[parked_origins[key].authority_id] = parked_origins[key] end
-	for _, track in tracked do
-		local bound = track.origin
-		if bound.host == origin.host and bound.session == origin.session then known[bound.authority_id] = bound end
-	end
-	local chosen: number? = nil
-	for _, pane in cx.session:panes() do
-		if not pane.parked or pane.block ~= BLOCK or (chosen ~= nil and pane.pane >= chosen) then continue end
-		for _, bound in known do
-			local candidate = table.clone(bound)
-			candidate.pane = pane.pane
-			if snapshot(cx, candidate, true) ~= nil then chosen = pane.pane; break end
-		end
-	end
-	if chosen == nil then return nil end
-	local restored, err = cx.layout:unpark(chosen, { focus = false })
-	if not restored then error("Could not reopen SPAWN Config: " .. tostring(err)) end
-	return chosen
+	return nil
 end
-local function with_authority(cx: any, callback: any, readonly: boolean?)
+-- A Config carrying in-flight work for this window: queued/unacknowledged requests or a running batch.
+local function in_use(pane: number, authority_id: string?): boolean
+	if authority_id ~= nil then
+		local queue = queues[authority_id]
+		if queue ~= nil and (queue.busy or #queue.items > 0) then return true end
+		local state = if observer ~= nil then observer.transports[authority_id] else nil
+		if state ~= nil and state.pending ~= nil then return true end
+	end
+	for _, batch in batches do
+		if (batch.origin.pane == pane or (authority_id ~= nil and batch.origin.authority_id == authority_id)) and not batch.completed and not batch.stopped then return true end
+	end
+	return false
+end
+local function forget_pane(origin: any, pane: number)
+	opened_for_batch[pane] = nil
+	local key = tostring(origin.host) .. "/" .. tostring(origin.session)
+	if authority_panes[key] == pane then authority_panes[key] = nil end
+end
+local function valid_intent(intent: any): boolean
+	if type(intent) ~= "table" or not identity(intent.intent_id, 256) or not INTENT_KINDS[intent.kind] or not integer(intent.config_revision) then return false end
+	if intent.kind == "record" then return identity(intent.record_id, 96) end
+	return intent.record_id == nil
+end
+local function intent_journal(): any
+	local ok, saved = pcall(tern.kv.get, INTENT_JOURNAL)
+	return if ok and type(saved) == "table" then saved else {}
+end
+-- The intents queued on a Config's launch node, oldest first; empty when unreadable.
+local function intent_queue(cx: any, pane: number): { any }
+	local read_ok, bytes = pcall(DispatchWindow.read_node, cx, pane, BLOCK, INTENT_NODE, INTENT_ROLE, 16384)
+	if not read_ok or bytes == nil then return {} end
+	local decoded, node = pcall(tern.json.decode, bytes)
+	if not decoded or type(node) ~= "table" or node.schema ~= 1 or type(node.intents) ~= "table" or #node.intents > 64 then return {} end
+	return node.intents
+end
+local function unrun_intent(cx: any, pane: number): boolean
+	local journal = intent_journal()
+	for _, intent in ipairs(intent_queue(cx, pane)) do
+		if valid_intent(intent) and not contains(journal, intent.intent_id) then return true end
+	end
+	return false
+end
+-- Closes a Config SPAWN opened to carry a launch once nothing uses it. A focused one stays, and so
+-- does one holding a click this window has not run yet.
+local function dismiss_opened(cx: any, origin: any): boolean
+	local pane = origin.pane
+	if not opened_for_batch[pane] or in_use(pane, origin.authority_id) or unrun_intent(cx, pane) then return false end
+	local info = cx.session:pane(pane)
+	if info == nil or info.focused then return false end
+	local closed, err = pcall(function() cx.layout:close(pane) end)
+	if not closed then fail(cx, "Spawning finished, but SPAWN Config could not be closed: " .. tostring(err)); return false end
+	forget_pane(origin, pane)
+	return true
+end
+-- Older versions parked Config after a batch and lost track of it on reload. Close every parked
+-- SPAWN Config of this host whose snapshot shows no pending request for this window. Only SPAWN
+-- parks these blocks; authority, attempts and history live in the host store, not the block.
+local function close_parked(cx: any, origin: any)
+	if observer == nil then return end
+	local here = {}
+	for _, host in cx.hosts:list() do
+		if host.id == origin.host then for _, pane in host.panes do here[pane] = true end end
+	end
+	for _, pane in cx.session:panes() do
+		if not pane.parked or pane.block ~= BLOCK or not here[pane.pane] then continue end
+		local value = read_snapshot(cx, pane.pane)
+		if value == nil or in_use(pane.pane, value.authority_id) then continue end
+		if pcall(function() cx.layout:close(pane.pane) end) then forget_pane(origin, pane.pane) end
+	end
+end
+-- target: run against this exact Config pane (a launch clicked in it) instead of finding one.
+local function with_authority(cx: any, callback: any, readonly: boolean?, target: number?)
 	local origin, capture_error = capture(cx)
 	if origin == nil then fail(cx, capture_error); return end
+	starting += 1
+	local live = true
+	local function settle()
+		if live then live = false; starting -= 1 end
+	end
 	ensure_observer(cx, function(fresh, identity_error)
-		if identity_error ~= nil then fail(fresh, identity_error); return end
+		if identity_error ~= nil then settle(); fail(fresh, identity_error); return end
 		local changed = context_error(fresh, origin, true)
-		if changed ~= nil then fail(fresh, changed); return end
+		if changed ~= nil then settle(); fail(fresh, changed); return end
 		local opened, pane = pcall(function()
-			return find_authority(fresh, origin) or fresh:new_block(BLOCK, block_args(fresh, origin), "beside", { focus = false })
+			if target ~= nil then return target end
+			local found = find_authority(fresh, origin)
+			if found ~= nil then return found end
+			close_parked(fresh, origin)
+			local created = fresh:new_block(BLOCK, block_args(fresh, origin), "beside", { focus = false })
+			if created ~= nil then opened_for_batch[created] = true end
+			return created
 		end)
-		if not opened or pane == nil then fail(fresh, "Could not open host Config: " .. tostring(pane)); return end
+		if not opened or pane == nil then settle(); fail(fresh, "Could not open host Config: " .. tostring(pane)); return end
 		origin.pane = pane
 		authority_panes[tostring(origin.host) .. "/" .. tostring(origin.session)] = pane
 		local polls = 0
 		local function read_ready(next_cx: any)
-			if next_cx == nil then return end
+			if next_cx == nil then settle(); return end
 			local changed_now = context_error(next_cx, origin, true)
-			if changed_now ~= nil then fail(next_cx, changed_now); return end
+			if changed_now ~= nil then settle(); fail(next_cx, changed_now); return end
 			local value, err = snapshot(next_cx, origin, readonly)
 			if value ~= nil then
 				origin.authority_id, origin.session_key = value.authority_id, value.session_key
 				origin.config_revision = value.config_revision
+				settle()
 				callback(next_cx, origin, value)
 				return
 			end
 			polls += 1
-			if polls >= 240 then fail(next_cx, tostring(err) .. ". Review the visible Config block; no command was launched."); return end
+			if polls >= 240 then settle(); fail(next_cx, tostring(err) .. ". Review the visible Config block; no command was launched."); return end
 			tern.timer(POLL_MS, read_ready)
 		end
 		read_ready(fresh)
@@ -502,10 +605,15 @@ local function open_config(cx: any)
 	local ok, pane = pcall(function()
 		local existing = find_authority(cx, origin)
 		if existing ~= nil then cx.layout:focus(existing); return existing end
+		close_parked(cx, origin)
 		return cx:new_block(BLOCK, block_args(cx, origin), "beside", { focus = true })
 	end)
 	if not ok or pane == nil then fail(cx, "Could not open Config: " .. tostring(pane))
-	else authority_panes[tostring(origin.host) .. "/" .. tostring(origin.session)] = pane end
+	else
+		-- The user asked for this Config; it is theirs now and stays open.
+		opened_for_batch[pane] = nil
+		authority_panes[tostring(origin.host) .. "/" .. tostring(origin.session)] = pane
+	end
 end
 
 local function transport(origin: any): any
@@ -619,26 +727,13 @@ local function batch_summary(cx: any, batch: any)
 	cx:toast(if counts.Failed > 0 then "error" else "info", "SPAWN batch observations", string.format("%d starting · %d running · %d waiting · %d exited · %d failed · %d unknown · %d skipped", counts.Starting, counts.Running, counts["Waiting for input"], counts.Exited, counts.Failed, counts.Unknown, batch.skipped))
 	if not batch.completed or batch.dismissed or counts.Starting > 0 or counts.Failed > 0 or counts.Unknown > 0 then return end
 	local origin = batch.origin
-	-- Never hide Config under other in-flight work for this authority.
-	local queue, state = queues[origin.authority_id], observer and observer.transports[origin.authority_id]
-	if (queue ~= nil and (queue.busy or #queue.items > 0)) or (state ~= nil and state.pending ~= nil) then return end
-	for _, other in batches do
-		if other ~= batch and other.origin.authority_id == origin.authority_id and not other.completed and not other.stopped then return end
-	end
-	if context_error(cx, origin, true) ~= nil then return end
+	if not opened_for_batch[origin.pane] or context_error(cx, origin, true) ~= nil then return end
 	local value = snapshot(cx, origin)
 	if value == nil then return end
 	for _, attempt in value.attempts do
 		if batch.record_ids[attempt.record_id] and (attempt.phase == "Starting" or (attempt.phase == "Unknown" and attempt.unresolved)) then return end
 	end
-	-- Hide only the ready view that started this batch, and never while focused.
-	local info = cx.session:pane(origin.pane)
-	if info == nil or info.focused then return end
-	local parked, err = cx.layout:park(origin.pane)
-	if not parked then fail(cx, "Spawning finished, but SPAWN Config could not be hidden: " .. tostring(err)); return end
-	batch.dismissed = true
-	local key = tostring(origin.host) .. "/" .. tostring(origin.session)
-	authority_panes[key], parked_origins[key] = origin.pane, table.clone(origin)
+	if dismiss_opened(cx, origin) then batch.dismissed = true end
 end
 local function sync_snapshot(cx: any, origin: any, value: any)
 	local attempts, present, changed_batches = {}, {}, {}
@@ -689,7 +784,7 @@ local function sync_snapshot(cx: any, origin: any, value: any)
 	end
 	refresh_artwork(cx)
 	if changed then save_observer(cx) end
-	local restart = value.host_restart
+	local restart = value.host_restart_notice
 	if restart ~= nil and observer ~= nil then
 		local notices = observer.restart_notices or {}
 		if notices[value.session_key] ~= restart.restart_id then
@@ -701,8 +796,7 @@ local function sync_snapshot(cx: any, origin: any, value: any)
 			notices[value.session_key] = restart.restart_id
 			observer.restart_notices = notices
 			save_observer(cx)
-			local lost = #restart.attempts
-			cx:toast("info", "Host restarted — " .. tostring(lost) .. " SPAWN " .. (if lost == 1 then "agent was" else "agents were") .. " lost", "Nothing was relaunched. Running agents → Mark all lost agents no longer running after review.")
+			cx:toast("info", "Host restarted: " .. tostring(restart.count) .. " SPAWN " .. (if restart.count == 1 then "agent" else "agents") .. " ended (cleared automatically)")
 		end
 	end
 	for id in changed_batches do if batches[id] ~= nil then batch_summary(cx, batches[id]) end end
@@ -841,7 +935,7 @@ local function run_batch(cx: any, origin: any, records: any)
 	local index = 0
 	local admit: any
 	-- paced is true only after a record reached the host submission boundary.
-	-- Skipped, duplicate and disabled records continue at once; the first
+	-- Skipped (disabled) records continue at once; the first
 	-- record is never delayed. No ticket or admission exists during the wait.
 	local function next_record(fresh: any, stop: string?, paced: boolean?)
 		if stop ~= nil then batch.stopped = true; fail(fresh, stop); batch_summary(fresh, batch); return end
@@ -863,7 +957,7 @@ local function run_batch(cx: any, origin: any, records: any)
 		local record = records[index]
 		request(fresh, origin, "launch_record", { record_id = record.id }, function(admitted_cx, reply, err)
 			if err ~= nil then
-				if err == "skip" or err == "duplicate" or err == "disabled" then batch.skipped += 1 else batch.failed += 1 end
+				if err == "skip" or err == "disabled" then batch.skipped += 1 else batch.failed += 1 end
 				fail(admitted_cx, label(record) .. ": " .. tostring(err) .. ". Inspect Running agents for unresolved work.")
 				next_record(admitted_cx); return
 			end
@@ -876,27 +970,36 @@ local function run_batch(cx: any, origin: any, records: any)
 	end
 	next_record(cx)
 end
-local function spawn_all(cx: any)
+-- target: the Config pane a launch was clicked in; nil finds or opens one.
+local function spawn_all(cx: any, target: number?)
 	with_authority(cx, function(fresh, origin, value)
 		local selected = {}
 		for _, record in value.records do if record.enabled and record.include_all then table.insert(selected, record) end end
-		if #selected == 0 then fresh:toast("info", "SPAWN", "No enabled saved records are included in Spawn all"); return end
+		if #selected == 0 then fresh:toast("info", "SPAWN", "No enabled saved records are included in Spawn all"); dismiss_opened(fresh, origin); return end
 		run_batch(fresh, origin, selected)
-	end)
+	end, nil, target)
 end
-local function spawn_specific(cx: any)
+-- record_id: launch exactly this saved agent (Config › Spawn agents row) instead of asking.
+local function spawn_specific(cx: any, target: number?, record_id: string?)
 	with_authority(cx, function(fresh, origin, value)
 		local items = {}
 		for _, record in value.records do
 			if record.enabled and not record.review_required and (record.backend ~= "native-agent" or nonempty(record.prompt) ~= nil) then table.insert(items, { label = label(record) .. " [" .. record.id .. "]", detail = MODES[record.backend], record = record }) end
 		end
-		if #items == 0 then fresh:toast("info", "SPAWN", "No enabled reviewed records are available; review Config"); return end
+		if record_id ~= nil then
+			for _, item in items do
+				if item.record.id == record_id then run_batch(fresh, origin, { item.record }); return end
+			end
+			fresh:toast("info", "SPAWN", "This saved agent is disabled, needs review or no longer exists; review Config")
+			return
+		end
+		if #items == 0 then fresh:toast("info", "SPAWN", "No enabled reviewed records are available; review Config"); dismiss_opened(fresh, origin); return end
 		fresh:pick({ items = items, placeholder = "Choose a saved agent", icon = "sparkle" }):next(function(item, err, next_cx)
 			if next_cx == nil then return end
 			if err ~= nil then fail(next_cx, err); return end
-			if item ~= nil then run_batch(next_cx, origin, { item.record }) end
+			if item ~= nil then run_batch(next_cx, origin, { item.record }) else dismiss_opened(next_cx, origin) end
 		end)
-	end)
+	end, nil, target)
 end
 
 local function startup_delivered(cx: any, pane: number, prompt: string): boolean
@@ -945,12 +1048,25 @@ reconcile = function(cx: any)
 	if observer == nil then return end
 	local origins = {}
 	for _, track in tracked do origins[track.origin.authority_id] = track.origin end
-	for _, origin in origins do
+	for _, bound in origins do
+		local origin = bound
+		local closed = cx.session:pane(origin.pane) == nil
+		if closed then
+			-- SPAWN closes the Config it opened once a batch settles; observe through another
+			-- open Config of the same authority, or wait quietly until one is open again.
+			for _, pane in cx.session:panes() do
+				if pane.block ~= BLOCK then continue end
+				local candidate = table.clone(origin)
+				candidate.pane = pane.pane
+				local found_ok, found = pcall(snapshot, cx, candidate, true)
+				if found_ok and found ~= nil then origin, closed = candidate, false; break end
+			end
+		end
 		local ok, value, read_error = pcall(snapshot, cx, origin, true)
 		if ok and value ~= nil then
 			sync_snapshot(cx, origin, value)
 		else
-			local problem = if ok then read_error else tostring(value)
+			local problem = if closed then "SPAWN Config is closed; host observations resume when it is open" elseif ok then read_error else tostring(value)
 			local notify = false
 			for _, track in tracked do
 				if track.origin.authority_id == origin.authority_id then
@@ -958,7 +1074,7 @@ reconcile = function(cx: any)
 					track.authority_error, track.native_detail = problem, nil
 				end
 			end
-			if notify then fail(cx, "Host observations unavailable: " .. tostring(problem) .. ". Retained outcomes were not replaced and nothing was launched.") end
+			if notify and not closed then fail(cx, "Host observations unavailable: " .. tostring(problem) .. ". Retained outcomes were not replaced and nothing was launched.") end
 		end
 	end
 	refresh_artwork(cx)
@@ -1011,15 +1127,10 @@ open_running = function(cx: any)
 			groups[group] = true
 			table.insert(items, { group = group, label = label(track.job) .. " · Host " .. attempt.phase, detail = detail, attempt = attempt, job = track.job, verified = verified })
 		end
-		-- The host alone decides which attempts are lost; a pane this window still
-		-- verifies is never offered for bulk release.
-		if value.host_restart ~= nil then
-			local verified_ids, lost = {}, {}
-			for _, item in items do if item.attempt ~= nil and item.verified then verified_ids[item.attempt.id] = true end end
-			for _, id in value.host_restart.attempts do if not verified_ids[id] then table.insert(lost, id) end end
-			if #lost > 0 then
-				table.insert(items, 1, { group = "Host restart", label = "Host restarted — " .. tostring(#lost) .. " SPAWN " .. (if #lost == 1 then "agent was" else "agents were") .. " lost", detail = "The execution host's daemon restarted; their panes cannot be verified. Nothing was relaunched.", lost = lost })
-			end
+		-- Informational: the host already ended the attempts its restart lost.
+		if value.host_restart_notice ~= nil then
+			local count = value.host_restart_notice.count
+			table.insert(items, 1, { group = "Host restart", label = "Host restarted: " .. tostring(count) .. " SPAWN " .. (if count == 1 then "agent" else "agents") .. " ended (cleared automatically)", other = true })
 		end
 		local pane_hosts, tab_sessions = {}, {}
 		for _, host in fresh.hosts:list() do for _, pane in host.panes do pane_hosts[pane] = host end end
@@ -1045,24 +1156,7 @@ open_running = function(cx: any)
 		fresh:pick({ items = items, placeholder = "Running agents — observations, not saved configuration", icon = "sparkle" }):next(function(item, err, next_cx)
 			if next_cx == nil then return end
 			if err ~= nil then fail(next_cx, err); return end
-			if item == nil or item.other then return end
-			if item.lost ~= nil then
-				local ids = item.lost
-				next_cx:pick({ items = {
-					{ label = "Keep reservations", action = "keep" },
-					{ label = "Mark all " .. tostring(#ids) .. " lost agents no longer running", detail = "Only after inspection. Releases duplicate blocking for exactly these attempts; does not stop or close a program.", action = "release" },
-				}, placeholder = "Host restart · lost SPAWN agents" }):next(function(choice, choice_error, decision_cx)
-					if decision_cx == nil then return end
-					if choice_error ~= nil then fail(decision_cx, choice_error); return end
-					if choice == nil or choice.action ~= "release" then return end
-					request(decision_cx, origin, "resolve_lost_attempts", { attempt_ids = ids, attempt_revision = value.attempt_revision }, function(done_cx, reply, release_error)
-						if release_error ~= nil then fail(done_cx, release_error); return end
-						local released = if type(reply) == "table" and type(reply.result) == "table" then reply.result.released else #ids
-						done_cx:toast("info", "SPAWN", "Released " .. tostring(released) .. " lost reservations; no pane was closed")
-					end)
-				end)
-				return
-			end
+			if item == nil or item.other then dismiss_opened(next_cx, origin); return end
 			if item.transport then
 				next_cx:pick({ items = {
 					{ label = "Keep waiting state", action = "keep" },
@@ -1084,10 +1178,9 @@ open_running = function(cx: any)
 				return
 			end
 			local attempt = item.attempt
-			local choices = { { label = "Keep reservation", action = "keep" } }
+			local choices = { { label = "Back", action = "keep" } }
 			if item.verified then table.insert(choices, { label = "Inspect retained pane", action = "inspect" }) end
 			if item.verified and item.job.purpose == "setup" then table.insert(choices, { label = "Review this setup result", action = "setup" }) end
-			if attempt.unresolved then table.insert(choices, { label = "Mark no longer running", detail = "Only after inspection. Releases duplicate blocking; does not stop or close a program.", action = "resolve" }) end
 			next_cx:pick({ items = choices, placeholder = attempt.record_id .. " · " .. attempt.phase }):next(function(choice, choice_error, decision_cx)
 				if decision_cx == nil then return end
 				if choice_error ~= nil then fail(decision_cx, choice_error); return end
@@ -1101,10 +1194,6 @@ open_running = function(cx: any)
 						setup = { id = item.job.setup_run_id, job_id = item.job.id, ticket = item.job.ticket, initial_prompt = item.job.initial_prompt, origin = origin, pane = pane }
 						if save_observer(decision_cx) then collect_setup(decision_cx) end
 					end
-				elseif choice.action == "resolve" then
-					request(decision_cx, origin, "resolve_attempt", { attempt_id = attempt.id, attempt_revision = value.attempt_revision }, function(done_cx, _, resolve_error)
-						if resolve_error ~= nil then fail(done_cx, resolve_error) else done_cx:toast("info", "SPAWN", "Reservation resolved; no pane was closed") end
-					end)
 				end
 			end)
 		end)
@@ -1171,7 +1260,7 @@ collect_setup = function(cx: any, manual: boolean?)
 		end
 	end
 end
-local function start_setup(cx: any)
+local function start_setup(cx: any, target: number?)
 	with_authority(cx, function(fresh, origin, value)
 		local choices = {}
 		for _, record in value.records do
@@ -1204,7 +1293,7 @@ local function start_setup(cx: any)
 				end)
 			end)
 		end)
-	end)
+	end, nil, target)
 end
 tern.on("agent_finished", function(event, cx)
 	if setup ~= nil and event.pane == setup.pane then collect_setup(cx) end
@@ -1212,30 +1301,105 @@ tern.on("agent_finished", function(event, cx)
 end)
 tern.on("agent_state", function(_event, cx) reconcile(cx) end)
 
+-- Setup is done once the host has a saved record: counted from an open Config of this host/session,
+-- else from the last snapshot this client read (SPAWN closes the Config it opened after a launch).
+local function saved_records(cx: any): number?
+	local origin = capture(cx)
+	if origin == nil then return nil end
+	for _, pane in cx.session:panes() do
+		if pane.block ~= BLOCK or pane.parked or not pane_member(cx, origin, pane.pane) then continue end
+		local candidate = table.clone(origin)
+		candidate.pane = pane.pane
+		local ok, value = pcall(snapshot, cx, candidate, true)
+		if ok and value ~= nil then return #value.records end
+	end
+	local seen = records_cache()[origin.host_key]
+	return if integer(seen) then seen else nil
+end
 local function menu(cx: any)
 	for _, message in icon_errors do fail(cx, "Provider icon registration failed: " .. message) end
-	cx:pick({ items = {
-		{ label = "Guided setup", detail = "Verified OMP setup on the captured execution host", action = "setup" },
-		{ label = "Config", detail = "Saved records and manual Paste JSON import", action = "config" },
-		{ label = "Spawn all", detail = "Enabled records explicitly included in this session", action = "all" },
-		{ label = "Spawn specific", detail = "One reviewed saved account", action = "specific" },
-		{ label = "Running agents", detail = "SPAWN launches, failed/exited history, other observations", action = "running" },
-		{ label = "Review setup result", detail = "Recover the confirmed result from this window's active setup run", action = "result" },
-	}, placeholder = "SPAWN", icon = "sparkle" }):next(function(item, err, fresh)
+	local items = {}
+	local saved = saved_records(cx)
+	if saved == nil or saved == 0 then table.insert(items, { label = "Guided setup", detail = "Verified OMP setup on the captured execution host", action = "setup" }) end
+	table.insert(items, { label = "Config", detail = "Saved records and manual Paste JSON import", action = "config" })
+	table.insert(items, { label = "Spawn all", detail = "Enabled records explicitly included in this session", action = "all" })
+	table.insert(items, { label = "Spawn specific", detail = "One reviewed saved account", action = "specific" })
+	cx:pick({ items = items, placeholder = "SPAWN", icon = "sparkle" }):next(function(item, err, fresh)
 		if fresh == nil then return end
 		if err ~= nil then fail(fresh, err); return end
 		if item == nil then return end
 		if item.action == "setup" then start_setup(fresh)
 		elseif item.action == "config" then open_config(fresh)
 		elseif item.action == "all" then spawn_all(fresh)
-		elseif item.action == "specific" then spawn_specific(fresh)
-		elseif item.action == "running" then open_running(fresh)
-		elseif item.action == "result" then ensure_observer(fresh, function(ready, problem) if problem then fail(ready, problem) else collect_setup(ready, true) end end) end
+		elseif item.action == "specific" then spawn_specific(fresh) end
 	end)
+end
+-- "This window has no setup run" for a Review setup result click in Config.
+local SETUP_ELSEWHERE = "This setup was started in another window; paste its result in Config › Setup › Paste setup JSON"
+-- A batch from this window, or a launch still resolving its Config, is in flight.
+local function launch_busy(): boolean
+	if starting > 0 then return true end
+	for _, batch in batches do
+		if not batch.completed and not batch.stopped then return true end
+	end
+	return false
+end
+local function run_intent(cx: any, intent: any, pane: number)
+	if intent.kind == "all" then spawn_all(cx, pane)
+	elseif intent.kind == "record" then spawn_specific(cx, pane, intent.record_id)
+	elseif intent.kind == "setup" then start_setup(cx, pane)
+	else
+		ensure_observer(cx, function(ready, problem)
+			if problem then fail(ready, problem)
+			elseif setup == nil then ready:toast("info", "SPAWN", SETUP_ELSEWHERE)
+			else collect_setup(ready, true) end
+		end)
+	end
+end
+-- Runs the launches clicked in a visible Config of this host/session in click order, each exactly
+-- once, and acks each so the host drops it from the queue. The journal is shared by every window
+-- of this client. While a launch from this window is in flight the rest wait for a later tick.
+local function poll_intents(cx: any)
+	local origin = capture(cx)
+	if origin == nil then return end
+	for _, pane in cx.session:panes() do
+		-- Nobody can click a parked or hidden Config; its node is never acted on.
+		if pane.block ~= BLOCK or pane.parked or not pane_member(cx, origin, pane.pane) then continue end
+		local journal = intent_journal()
+		local value: any = nil
+		for _, intent in ipairs(intent_queue(cx, pane.pane)) do
+			if not valid_intent(intent) then continue end
+			if not contains(journal, intent.intent_id) then
+				-- The user clicked in this Config; it is theirs and stays open, even while this
+				-- click waits for a running batch.
+				opened_for_batch[pane.pane] = nil
+				if value == nil then
+					local candidate = table.clone(origin)
+					candidate.pane = pane.pane
+					value = snapshot(cx, candidate, true)
+					if value == nil then break end
+				end
+				local stale = value.config_revision ~= intent.config_revision
+				-- Click order: a later launch never overtakes one that has to wait.
+				if not stale and launch_busy() then break end
+				table.insert(journal, intent.intent_id)
+				while #journal > 64 do table.remove(journal, 1) end
+				-- Journal before running: a lost ack or a second window never runs it again.
+				if not pcall(tern.kv.set, INTENT_JOURNAL, journal) then break end
+				if stale then
+					cx:toast("info", "SPAWN", "Config changed; press again")
+				else
+					local ran, run_error = pcall(run_intent, cx, intent, pane.pane)
+					if not ran then fail(cx, "The Config launch could not start: " .. tostring(run_error)) end
+				end
+			end
+			pcall(function() cx.session:event(pane.pane, { ev = "action", id = "main", act = "spawn.launch-intent-ack", value = intent.intent_id }) end)
+		end
+	end
 end
 for _, command in ipairs({
 	{ id = "spawn_config", title = "SPAWN: Config", run = open_config },
-	{ id = "spawn_setup", title = "SPAWN: Guided setup", run = start_setup },
+	{ id = "spawn_setup", title = "SPAWN: Guided setup", run = function(cx) start_setup(cx) end },
 	{ id = "spawn_menu", title = "SPAWN", run = menu },
 	{ id = "spawn_running", title = "SPAWN: Running agents", run = open_running },
 }) do tern.command({ id = command.id, title = command.title, run = command.run, icon = "sparkle", group = "SPAWN" }) end
@@ -1245,6 +1409,21 @@ tern.css("reset-danger", [[
 [data-surface="plugin.spawn.spawner"] [data-row="setup-reset"] button { color: var(--error); }
 [data-surface="plugin.spawn.spawner"] [data-row="setup-reset"] button { border-color: var(--error); }
 ]])
+-- Config › Spawn agents rows: provider artwork (or a tinted dot) and a one-line mono command hint.
+-- The launch intent node is machine-only.
+local launch_rules = {
+	'[data-surface="plugin.spawn.spawner"] [data-role="spawn.launch.intent"] { display: none; }',
+	'[data-surface="plugin.spawn.spawner"] .pf-row[data-row^="spawn-launch:"] .pf-lbl .h { font-family: var(--mono, ui-monospace, monospace); font-size: 0.85em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }',
+}
+for program, color in pairs(COLORS) do
+	local logo = '[data-surface="plugin.spawn.spawner"] .pf-row[data-row^="spawn-launch:' .. program .. ':"] .pf-lbl .t::before { content: ""; display: inline-block; margin-right: 0.4em; '
+	local image = ARTWORK[program]
+	if image ~= nil then logo ..= "width: 1em; height: 1em; vertical-align: -0.15em; background: " .. image .. " center / contain no-repeat; }"
+	else logo ..= "width: 0.6em; height: 0.6em; border-radius: 50%; background: " .. color .. "; }" end
+	table.insert(launch_rules, logo)
+end
+table.sort(launch_rules)
+tern.css("spawn-launch", table.concat(launch_rules, "\n"))
 tern.chrome.status(function(_pane) return { { icon = "sparkle", text = "SPAWN", tone = "muted", command = "plugin.spawn.spawn_menu" } } end)
 local function register_files()
 	tern.files.button({ id = "spawn", title = "SPAWN", icon = "sparkle", run = function(_files, cx) menu(cx) end })
@@ -1263,6 +1442,12 @@ tern.timer(250, function(cx)
 			end
 			if setup ~= nil then setup.reviewing = false end
 			reconcile(fresh)
+			-- One-time cleanup of Config blocks older versions parked and forgot.
+			local origin = capture(fresh)
+			if origin ~= nil then
+				local cleaned, clean_error = pcall(close_parked, fresh, origin)
+				if not cleaned then fail(fresh, "Could not close leftover SPAWN Config blocks: " .. tostring(clean_error)) end
+			end
 		end)
 	end
 end)
@@ -1271,11 +1456,13 @@ local function tick(cx: any)
 	if cx ~= nil then
 		local ok, err = pcall(reconcile, cx)
 		if not ok then fail(cx, "Read-only host observation failed; no execution was repeated: " .. tostring(err)) end
+		local polled, poll_error = pcall(poll_intents, cx)
+		if not polled then fail(cx, "Config launch check failed; nothing was launched: " .. tostring(poll_error)) end
 	end
 end
 tern.timer(1000, tick)
 
 -- Module initialization also runs after a VM reload; one executor timer per VM.
-require("./dispatch_window").start()
+DispatchWindow.start()
 
 require("./updater/window").register({ name = "SPAWN", dir = "SPAWN", title_prefix = "SPAWN: " })

@@ -7,6 +7,32 @@ Requires Tern 0.9.10 (now declared in `requires.json`).
 ### Added
 
 - Self-updater: **SPAWN: Check for updates** reports whether a newer SPAWN is on GitHub (a background check runs at most every 6 hours), and **SPAWN: Update** checks the release's `requires.json`, asks first, optionally updates connected remote hosts, then reinstalls with `tern plugin install --force`. Linked development checkouts are never updated. Copies installed before 0.5.0 need one manual `tern plugin install --force github.com/blastworksai/tools/plugins/tern/SPAWN`.
+- Config has a **Spawn agents** page: one **Spawn all** button and one button per saved record with its provider logo, `Provider — Suffix` and its command, arguments and working directory. Disabled records and records needing review are greyed with the reason.
+- Automatic settlement: the host checks its panes on load, every 15 seconds and after each observation, and moves ordinary launches to history by itself: `Exited` "Pane closed", `Failed` "Never started (ticket not claimed)" after 30 seconds, `Exited` "Host restarted" 20 seconds after a host restart. Agents Tern reruns in their pane within those 20 seconds are re-adopted as `Running`. On non-Linux hosts the restart epoch is unverifiable, so only the pane rule applies. Managed (ORCH+) launches are unchanged.
+
+### Changed
+
+- One record can run any number of copies: every Spawn starts a new launch. Only disabled records are skipped.
+- The SPAWN menu is **Guided setup** (only until the first record is saved), **Config**, **Spawn all** and **Spawn specific**. **Running agents** and **Review setup result** left the menu; the `SPAWN: Running agents` and `SPAWN: Guided setup` palette commands stay, and **Review setup result** moved to Config › Setup while a setup run is active.
+- The host-restart notice is one informational line, "Host restarted: N SPAWN agents ended (cleared automatically)", with no action.
+- When a batch finishes, SPAWN closes the Config view it opened for that batch instead of hiding it, so no idle SPAWN block is left behind. A Config you opened, or are looking at, stays.
+- Reset transport now waits only for live or managed attempts.
+
+### Removed
+
+- The `duplicate_policy` record field and the `skip`/`allow` duplicate choice.
+- **Mark no longer running** and **Mark all N lost agents no longer running**, with the `resolve_attempt` and `resolve_lost_attempts` operations and the `Unknown` blocking state for ordinary launches.
+
+### Fixed
+
+- The Config › Setup **Guided setup** row raised an error; it now starts Guided setup.
+
+### Upgrade notes
+
+- Saved records, Paste JSON imports, setup results and managed imports that still carry `duplicate_policy` have it stripped on restore or import, never rejected.
+- A retained or journalled old Mark request is cleared automatically ("An old Mark-no-longer-running request was cleared; SPAWN now does this automatically") and never replayed.
+- Leftover parked SPAWN Config blocks from older versions are closed when the window loads, unless one still has a pending request.
+- Launches left `Unknown` by an older version settle on the host's first check.
 
 ## 0.4.0
 

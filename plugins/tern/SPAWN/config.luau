@@ -9,7 +9,7 @@ local REVIEW_COMMAND = "Review this account's launch command"
 
 local FIELDS = {
 	id = true, provider = true, account_label = true, backend = true,
-	enabled = true, include_all = true, duplicate_policy = true, placement = true,
+	enabled = true, include_all = true, placement = true,
 	command = true, arguments = true, cwd = true, prompt = true,
 	host = true, user = true, key_path = true, review_required = true, review_reason = true,
 	fresh_executable = true, fresh_arguments = true, fresh_native_default = true, task_argument_index = true,
@@ -22,6 +22,9 @@ local LEGACY_FIELDS = {
 	acp_capable = true, acp_enabled = true, acp_available = true,
 	include_cli_twin = true, cli_twin = true, cli_command = true, cli_arguments = true,
 }
+-- Retired fields: accepted from stored records, imports and setup results, then
+-- dropped, so older rosters and setup prompts keep working and nothing re-emits them.
+local RETIRED_FIELDS = { duplicate_policy = true }
 
 local function nonblank(value: string): boolean
 	return string.find(value, "%S") ~= nil
@@ -281,7 +284,7 @@ end
 local function normalize(source: any, legacy: boolean): (any?, string?)
 	if type(source) ~= "table" then return nil, "Record must be an object" end
 	for field in pairs(source) do
-		if not FIELDS[field] and not (legacy and LEGACY_FIELDS[field]) then
+		if not FIELDS[field] and not RETIRED_FIELDS[field] and not (legacy and LEGACY_FIELDS[field]) then
 			return nil, "Record contains an unsupported field"
 		end
 	end
@@ -312,10 +315,6 @@ local function normalize(source: any, legacy: boolean): (any?, string?)
 	if record.review_required and (record.review_reason == nil or not nonblank(record.review_reason)) then
 		record.review_reason = REVIEW_COMMAND
 	end
-	if source.duplicate_policy ~= nil and source.duplicate_policy ~= "skip" and source.duplicate_policy ~= "allow" then
-		return nil, "Duplicate policy must be skip or allow"
-	end
-	record.duplicate_policy = source.duplicate_policy or "skip"
 	if record.placement ~= nil and record.placement ~= "tab" and record.placement ~= "split" and record.placement ~= "replace_if_alone" then
 		return nil, "Placement must be tab, split, or replace_if_alone"
 	end
@@ -508,15 +507,15 @@ session identified in the run context below. Never change host or start the save
 9. Choose Native OMP only for OMP, Terminal for other normal local commands, SSH
    terminal for a remote CLI. Native OMP needs an explicitly approved startup prompt;
    preserve any custom instruction. Never invent a global role or silently add a task.
-10. Ask include-all, enabled, duplicate skip/allow, and tab/split/replace_if_alone.
+10. Ask include-all, enabled, and tab/split/replace_if_alone.
     Preserve each explicit choice. Show the WHOLE configuration for confirmation.
 After explicit user confirmation, emit one JSON object between the existing markers:
 SPAWN_RESULT_BEGIN
-{"schema":2,"setup_run_id":"COPY THE EXACT RUN ID BELOW","confirmed":true,"agents":[{"id":"provider-account-id","provider":"Provider","account_label":"Work","backend":"local-terminal","enabled":true,"include_all":false,"command":"provider-command","arguments":["--profile","work"],"cwd":"~","duplicate_policy":"skip","placement":"tab"}]}
+{"schema":2,"setup_run_id":"COPY THE EXACT RUN ID BELOW","confirmed":true,"agents":[{"id":"provider-account-id","provider":"Provider","account_label":"Work","backend":"local-terminal","enabled":true,"include_all":false,"command":"provider-command","arguments":["--profile","work"],"cwd":"~","placement":"tab"}]}
 SPAWN_RESULT_END
 Use canonical fields only: id, provider, account_label, backend, enabled, include_all,
 command, arguments (array), cwd, prompt (OMP only), host, user, key_path,
-duplicate_policy, placement. Backend values: native-agent, local-terminal, ssh-command.
+placement. Backend values: native-agent, local-terminal, ssh-command.
 Reuse exact existing account IDs; never create suffix IDs to avoid a conflict.
 The plugin reads only your assistant result for this run, asks the user to review
 all records, then saves to the ORIGINAL host's Config. Nothing is launched by import.

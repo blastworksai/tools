@@ -10,13 +10,14 @@ local function copy(v)if type(v)~='table'then return v end local n={} for k,x in
 local function fixture(seed,actual_mailbox)
  local saved=copy(seed or {});local modules={};local effects={reserves=0,observations=0,imports=0}
  local transport={files={},modes={},writes=0}
- local record={id='worker',provider='omp',account_label='Configured display',backend='native-agent',command='omp',arguments={},cwd='/work',placement='tab',enabled=true,include_all=true,duplicate_policy='skip',fresh_native_default=true,mailbox={permitted_root='/mail',helper_path='/tools/helper',worker_identity='fixture',verified=true,evidence_ref='fixture-only',wake='native-ask-v1',producer={read=true,write=true,hash=true,journal=true,poll=false},capabilities={'report-files-v1','native-ask-v1'}}}
+ local record={id='worker',provider='omp',account_label='Configured display',backend='native-agent',command='omp',arguments={},cwd='/work',placement='tab',enabled=true,include_all=true,fresh_native_default=true,mailbox={permitted_root='/mail',helper_path='/tools/helper',worker_identity='fixture',verified=true,evidence_ref='fixture-only',wake='native-ask-v1',producer={read=true,write=true,hash=true,journal=true,poll=false},capabilities={'report-files-v1','native-ask-v1'}}}
  record.mailbox.producer_helper_path='/tools/worker-helper'
  local snapshot={ready=true,namespace='host',host_key='host:test',config_revision=0,records={record},host_os='linux',host_shell='/bin/sh'}
  local binding={authority_id='host:1',managed_authority_id='host:1',session_key='host/session/1',host_key='host:test',native_session=1}
  local mailbox_binding,mailbox_handover=nil,nil
  local authority={snapshot=function()return copy(snapshot)end,managed_reserve=function(_,_,id,observer)effects.reserves+=1;return {id='attempt-1',record_id=id,observer_id=observer}end,managed_observe=function()effects.observations+=1;return true end,managed_retire=function(...)effects.retire_args={...};effects.retirements=(effects.retirements or 0)+1;return not effects.fail_retire,'injected retirement storage failure' end,managed_import=function()effects.imports+=1;return {imported=1}end}
  authority.managed_snapshot=authority.snapshot
+ authority.execution_bindings=function()return {} end
  local mailbox={empty=function()return {version=1,generations={}}end,validate=function(r)if type(r)~='table' or r.version~=1 then return nil,{status='rejected',error={code='journal_corrupt'}} end return r end,recover=copy,get=function()return {binding=copy(mailbox_binding),record_id='worker',record_revision=0,phase='provisioned',capabilities=copy(record.mailbox.capabilities),handover=copy(mailbox_handover)}end,location=function()return {root='/mail/private',helper='/tools/helper',producer_helper='/tools/worker-helper',wake=effects.wake_route or 'native-ask-v1'}end}
  mailbox.prepare=function(registry,_,_,context)
   effects.prepares=(effects.prepares or 0)+1
@@ -52,7 +53,7 @@ local function fixture(seed,actual_mailbox)
  local function load(name)
   name=name:gsub('^%./','')
   if name=='authority'then return authority elseif name=='mailbox' and not actual_mailbox then return mailbox end
-  if name=='host_executor' then return {install=function()end,attach=function()end} end
+  if name=='host_executor' then return {install=function()end,attach=function()end,epoch=function()return nil end} end
   if modules[name]then return modules[name]end
   local chunk=assert(loadstring(runtime.fs.read(root..'/'..name..'.luau'),name))
   setfenv(chunk,setmetatable({tern=injected,require=load},{__index=environment}))

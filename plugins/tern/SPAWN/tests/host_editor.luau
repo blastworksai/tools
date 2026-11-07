@@ -7,6 +7,7 @@ local modules,definitions,saved={},{},{}
 local checks,writes=0,0
 local deferred,holdInspection=nil,false
 local hooks,timers={},{}
+local paneList={}
 local function check(value,message) assert(value,message);checks+=1 end
 local function clone(value)
  if type(value)~='table' then return value end
@@ -21,7 +22,7 @@ local fake=setmetatable({
   hooks[name]=hooks[name] or {};table.insert(hooks[name],callback)
  end,
  timer=function(ms,callback)table.insert(timers,{ms=ms,callback=callback});return {} end,
- pane={write=function()error('Editor attempted provider input') end,list=function()return {} end},
+ pane={write=function()error('Editor attempted provider input') end,list=function()return clone(paneList) end},
  block={define=function(name,definition)definitions[name]=definition end},
  ui={node=function(kind,props)return {k=kind,p=props} end,col=function(children)return {children=children} end,text=function(value)return {text=value} end},
  process={run=function()error('Editor attempted a real subprocess') end},
@@ -38,7 +39,10 @@ local function load(name)
  modules[name]=chunk() or true;return modules[name]
 end
 load('host')
-local A,P=load('authority'),load('bridge_protocol')
+-- The host sweep timer is the last one host load arms; it needs no Config block.
+local sweepTimer=timers[#timers]
+check(sweepTimer~=nil and sweepTimer.ms==1,'host load arms the first settlement sweep at once')
+local A,P,C=load('authority'),load('bridge_protocol'),load('config')
 local definition=assert(definitions.spawner)
 local cx={pane=7,save=function()end,render=function()end,action=function()error('Editor launched a window action') end}
 local state=definition.init(cx,{runtime.json.encode({host={name='fixture'},native_window='fixture-window'})},nil)
@@ -55,7 +59,7 @@ local function send(value,revision)
  definition.event(state,{ev='change',item=row(revision),value=runtime.json.encode(value)},cx)
 end
 local function record(id)
- return {id=id,provider='custom',account_label=id,backend='local-terminal',command='ordinary-cli',arguments={},enabled=true,include_all=true,duplicate_policy='skip',placement='tab'}
+ return {id=id,provider='custom',account_label=id,backend='local-terminal',command='ordinary-cli',arguments={},enabled=true,include_all=true,placement='tab'}
 end
 local original=record('editable')
 original.fresh_executable='/tools/worker';original.fresh_arguments={'--fresh','--task'};original.task_argument_index=3
@@ -150,29 +154,128 @@ check(reply.ok and #admitted.attempts==1 and #admitted.jobs==1,'approved launch 
 check(admitted.jobs[1].attempt_id==admitted.attempts[1].id and type(admitted.jobs[1].ticket)=='string','admission binds the released harmless ticket to its exact attempt')
 check(admitted.attempts[1].purpose~='managed','ordinary editor admission never converts managed metadata into a managed reservation')
 check(hooks.spawn~=nil and #hooks.spawn==1 and #timers>=1,'real host executor installs only deferred hooks while editor tests execute no native effects')
--- Host restart: an attempt recorded under an earlier daemon epoch is listed
--- and released only by the explicit two-click resolve-lost action.
-local lostId=admitted.attempts[1].id
-local native={pane=42,window_key='',program='/bin/bash',executable='/opt/tern',socket='/tmp/tern.sock'}
-check(A.claim_execution(state.binding,lostId,native)~=nil,'fixture claims the admitted job')
-check(A.update_execution(state.binding,lostId,'claimed',{epoch='previous-epoch'})~=nil,'fixture records the earlier daemon epoch')
-check(A.update_execution(state.binding,lostId,'claimed',{stage='submission_intent',command='ordinary-cli'})~=nil,'fixture records submission intent')
-check(A.update_execution(state.binding,lostId,'submission_intent',{stage='running'},{phase='Running',pane=42})~=nil,'fixture observes the provider running')
-check(A.update_execution(state.binding,lostId,'running',{stage='unknown'},{phase='Unknown',error_category='host-unavailable',diagnostic='Host restarted (daemon epoch changed): lost; execution will not be repeated'})~=nil,'fixture loses the attempt to a restart')
-refresh()
-check(state.snapshot.host_restart~=nil and P.equal(state.snapshot.host_restart.attempts,{lostId}),'reload passes the host epoch and lists the lost attempt')
-state.page='runtime'
-local lostRows={}
-for _,section in ipairs(definition.view(state,cx).main.children[1].p.sections) do
- for _,item in ipairs(section.rows) do lostRows[item.id]=item end
+local function prefs()return definition.view(state,cx).main.children[1].p end
+local function rows_of(page)
+ state.page=page
+ local found,ordered={},{}
+ for _,section in ipairs(prefs().sections) do
+  for _,item in ipairs(section.rows) do found[item.id]=item;table.insert(ordered,item) end
+ end
+ return found,ordered
 end
-local lostAction='resolve-lost@'..tostring(state.snapshot.config_revision)
-check(lostRows['host-restart']~=nil and lostRows['resolve-lost']~=nil and lostRows['resolve-lost'].control.act==lostAction,'Running agents shows the restart notice and one config-revision-bound bulk action')
+local function rendered_pages()
+ local text={}
+ for _,page in ipairs(prefs().pages) do state.page=page.id;table.insert(text,runtime.json.encode(definition.view(state,cx))) end
+ return table.concat(text,'\n')
+end
+-- Pages: Setup, Configured agents, Spawn agents, Running agents; saved and discovered restore accept spawn.
+local pageIds,pageLabels={},{}
+for _,page in ipairs(prefs().pages) do table.insert(pageIds,page.id);pageLabels[page.id]=page.label end
+check(P.equal(pageIds,{'setup','agents','spawn','runtime'}) and pageLabels.spawn=='Spawn agents','Config pages are setup, agents, spawn, runtime with a Spawn agents page')
+local restoreCx={pane=8,save=function()end,render=function()end}
+check(definition.init(restoreCx,{runtime.json.encode({host={name='fixture'},native_window='fixture-window'})},{page='spawn'}).page=='spawn','saved page restore accepts spawn')
+local discoverCx={pane=9,save=function()end,render=function()end}
+check(definition.init(discoverCx,{runtime.json.encode({host={name='fixture'},native_window='fixture-window',page='spawn'})},nil).page=='spawn','discovered page restore accepts spawn')
+-- Settlement: the host's own sweep timer diffs tern.pane.list(), with no Config event.
+local liveId=admitted.attempts[1].id
+local native={pane=42,window_key='',program='/bin/bash',executable='/opt/tern',socket='/tmp/tern.sock'}
+check(A.claim_execution(state.binding,liveId,native)~=nil,'fixture claims the admitted job')
+check(A.update_execution(state.binding,liveId,'claimed',{epoch='fixture-epoch'})~=nil,'fixture records the current daemon epoch')
+check(A.update_execution(state.binding,liveId,'claimed',{stage='submission_intent',command='ordinary-cli'})~=nil,'fixture records submission intent')
+check(A.update_execution(state.binding,liveId,'submission_intent',{stage='running'},{phase='Running',pane=42})~=nil,'fixture observes the provider running')
+paneList={{pane=42,title='ordinary-cli'}}
+local priorTimers=#timers
+sweepTimer.callback()
+check(#timers==priorTimers+1 and timers[#timers].ms==15000,'each sweep re-arms the 15 s settlement timer')
+check(snapshot().attempts[1].phase=='Running','a present pane keeps its ordinary attempt live')
+refresh()
+-- Invariant: no manual release control on any page, even with a live attempt and a restart notice.
+state.snapshot.host_restart_notice={restart_id='fixture',count=2}
+local everyPage=rendered_pages()
+check(not everyPage:find('Mark no longer running',1,true) and not everyPage:find('Mark all',1,true),'no page renders a Mark no longer running or Mark all control')
+check(not everyPage:find('Duplicate policy',1,true) and not everyPage:find('duplicate_policy',1,true),'no page renders a duplicate policy')
+local runtimeRows=rows_of('runtime')
+check(runtimeRows['host-restart']~=nil and runtimeRows['host-restart'].label=='Host restarted: 2 SPAWN agents ended (cleared automatically)' and runtimeRows['host-restart'].control.act=='noop','host restart is one informational line with no action')
+check(runtimeRows['resolve-lost']==nil and runtimeRows['resolve-'..liveId]==nil,'Running agents has no resolve rows')
+paneList={}
+sweepTimer.callback()
+local settled=snapshot().attempts[1]
+check(settled.phase=='Exited' and settled.diagnostic=='Pane closed' and not settled.unresolved,'the host sweep settles a closed pane to Exited without any human action')
+check(state.snapshot.attempts[1].phase=='Exited','the sweep refreshes the open Config view')
+-- Spawn agents rows: Spawn all, then one row per saved record in Config order.
+local roster=clone(snapshot().records)
+local argsy=record('argsy');argsy.provider='kimi';argsy.account_label='Work';argsy.arguments={'--model','x y'};argsy.cwd='/srv'
+local off=record('off');off.enabled=false
+local needs=record('needs');needs.review_required=true;needs.review_reason='Review the new command'
+table.insert(roster,argsy);table.insert(roster,off);table.insert(roster,needs)
+check(A.edit(state.binding,snapshot().config_revision,'replace-records',{records=roster}),'seed launchable, disabled and needs-review records')
+refresh()
+local rev=state.snapshot.config_revision
+local spawnRows,spawnOrder=rows_of('spawn')
+check(spawnOrder[1].id=='spawn-launch-all' and spawnOrder[1].control.act=='launch-all@'..rev and spawnOrder[1].disabled==nil,'Spawn agents starts with one Spawn all button')
+check(spawnOrder[1].hint:find('^4 enabled records are included in Spawn all'),'Spawn all detail counts enabled included records')
+local launchRows={}
+for _,item in ipairs(spawnOrder) do if item.id:find('^spawn%-launch:') then table.insert(launchRows,item) end end
+check(#launchRows==#roster,'one Spawn row per saved record')
+for index,item in ipairs(launchRows) do
+ local saved_record=roster[index]
+ check(item.label==saved_record.provider..' — '..saved_record.account_label and item.control.act=='launch:'..saved_record.id..'@'..rev,'record rows follow Config order with Provider — Suffix labels')
+end
+local argsRow=spawnRows['spawn-launch:kimi:argsy']
+check(argsRow~=nil and argsRow.hint=='ordinary-cli '..C.render_arguments({'--model','x y'})..' · /srv' and argsRow.disabled==nil,'record row shows command, arguments and launch folder')
+check(spawnRows['spawn-launch:custom:other'].hint=='ordinary-cli · default folder','record without a folder names the default folder')
+check(spawnRows['spawn-launch:custom:off'].disabled=='Disabled in Config','disabled record is shown greyed with its reason')
+check(spawnRows['spawn-launch:custom:needs'].disabled=='Needs settings review: Review the new command','needs-review record is shown greyed with its reason')
+-- Launch intents: every click queues a fresh intent (oldest first); an ack removes only its own.
+local function intents()
+ local node=definition.view(state,cx).main.children[3]
+ if node==nil then return nil end
+ check(node.p.key=='spawn-launch-intent' and node.p.role=='spawn.launch.intent','intents ride the keyed spawn.launch.intent node')
+ local value=runtime.json.decode(node.text)
+ check(value.schema==1 and type(value.intents)=='table' and #value.intents>0,'the node carries a non-empty schema-1 intents list')
+ return value.intents
+end
+local function ack(id)definition.event(state,{ev='action',id='main',act='spawn.launch-intent-ack',value=id},cx) end
+check(intents()==nil,'no intent node while nothing is pending')
 before=clone(saved)
-definition.event(state,{ev='action',act=lostAction},cx)
-check(state.armed=='resolve-lost' and P.equal(before,saved),'the first click only arms the bulk release')
-definition.event(state,{ev='action',act=lostAction},cx)
-local releasedView=snapshot()
-check(state.armed==nil and not releasedView.attempts[1].unresolved and releasedView.jobs[1].stage=='resolved','the confirming click releases the lost reservation through resolve-lost-attempts')
-check(assert(A.snapshot(state.binding,'fixture-epoch')).host_restart==nil and state.notice=='Saved. No agents were launched.','no lost attempt remains and the release reports success')
-return 'host_editor checks: '..checks
+definition.event(state,{ev='action',act='launch-all@'..rev},cx)
+definition.event(state,{ev='action',act='launch:argsy@'..rev},cx)
+definition.event(state,{ev='action',act='launch:argsy@'..rev},cx)
+local queued=intents()
+check(#queued==3,'three rapid clicks queue three intents')
+check(queued[1].kind=='all' and queued[1].record_id==nil and queued[1].config_revision==rev,'the oldest intent is the Spawn all click at the current revision')
+check(queued[2].kind=='record' and queued[2].record_id=='argsy' and queued[3].kind=='record' and queued[3].record_id=='argsy','repeat clicks of one record each queue their own intent')
+check(queued[1].intent_id~=queued[2].intent_id and queued[2].intent_id~=queued[3].intent_id and queued[1].intent_id~=queued[3].intent_id,'every click gets a fresh intent id')
+check(P.equal(before,saved),'launch clicks write no durable state and admit nothing on the host')
+ack('not-a-pending-intent')
+check(P.equal(intents(),queued),'a mismatched ack removes nothing')
+ack(queued[2].intent_id)
+local left=intents()
+check(#left==2 and left[1].intent_id==queued[1].intent_id and left[2].intent_id==queued[3].intent_id,'an ack removes only its own intent and keeps the order')
+ack(queued[2].intent_id)
+check(#intents()==2,'a repeated ack removes nothing more')
+ack(queued[1].intent_id);ack(queued[3].intent_id)
+check(intents()==nil,'acking every intent removes the node')
+for _=1,16 do definition.event(state,{ev='action',act='launch-all@'..rev},cx) end
+local full=intents()
+check(#full==16,'the queue holds 16 intents')
+definition.event(state,{ev='action',act='launch-all@'..rev},cx)
+check(#intents()==16 and state.notice=='Too many launches queued; wait a moment','a 17th click is refused')
+check(rows_of('spawn')['spawn-queue-full']~=nil,'the refusal is shown as a notice row on Spawn agents')
+for _,pending in ipairs(full) do ack(pending.intent_id) end
+check(intents()==nil and rows_of('spawn')['spawn-queue-full']==nil,'draining the queue clears the node and the notice row')
+definition.event(state,{ev='action',act='launch-all@'..(rev-1)},cx)
+check(intents()==nil and state.notice:find('stale%-config'),'a stale click queues no intent')
+-- Setup page: Guided setup goes through the intent; Review setup result only while a setup run is active.
+local setupRows=rows_of('setup')
+check(setupRows['setup-flow'].control.act=='launch-setup@'..rev and setupRows['setup-result']==nil,'Guided setup row uses the intent; no Review setup result without an active run')
+definition.event(state,{ev='action',act='launch-setup@'..rev},cx)
+check(intents()[1].kind=='setup','Guided setup click queues a setup intent instead of calling a window action')
+table.insert(state.snapshot.attempts,{id='attempt-setup',record_id='editable',purpose='setup',phase='Running',mode='Native OMP',observer_id='fixture',scope='fixture',unresolved=true})
+setupRows=rows_of('setup')
+check(setupRows['setup-result']~=nil and setupRows['setup-result'].control.act=='launch-result@'..rev,'Review setup result appears while a setup run is active')
+definition.event(state,{ev='action',act='launch-result@'..rev},cx)
+local setupQueue=intents()
+check(#setupQueue==2 and setupQueue[2].kind=='result','Review setup result click queues a result intent after the setup intent')
+refresh()
+return 'PASS host_editor '..tostring(checks)
