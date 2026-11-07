@@ -225,7 +225,7 @@ A fill is refused with `invalid_fill` (a field you may not write, or a malformed
 
 **Hand release.** On `request_cancelled` for a fill or respond, that ONE request is over: stop guiding that step, say so in one line, and keep polling `events`.
 
-**Stop list.** Stop the loop and report the code when `events`, `respond` or `fill` returns `agent_unavailable`, `owner_unavailable` or `unsupported_idea_version`. `unsupported_idea_version` now means this one idea could not be updated for this version and was left as it was: give the operator the returned sentence verbatim, and do not try to fix or re-capture it. `request_cancelled` is not a stop: it ends one request only.
+**Stop list.** Stop the loop and report the code when `events`, `respond` or `fill` returns `agent_unavailable`, `owner_unavailable` or `unsupported_idea_version`. `unsupported_idea_version` now means this one idea could not be updated for this version and was left as it was: give the operator the returned sentence verbatim, and do not try to fix or re-capture it. `request_cancelled` is not a stop: it ends one request only. Nor is `agent_transport_timeout`: the service's answer came late (the page was saving), it did not refuse the agent; run `events` again from the same cursor, resend a fill, and treat a `respond` as committed_uncertain.
 
 ## Install, launch and the planning prompt
 

@@ -104,8 +104,12 @@ No interpreter or dependency installation happens here.
 
 `events` requires a nonnegative integer cursor and a finite timeout from 0 to
 25 seconds. It returns the broker's bounded event batch; use its actual sequence
-for the next cursor. A wait has two additional seconds for bounded network
-transport. This command performs one wait per invocation and does not schedule
+for the next cursor. The client waits up to the timeout plus 22 seconds for the
+answer: the service takes the session's lock before and after the wait (10
+seconds each at most, then it answers `busy`), and the page saving a fill holds
+that lock meanwhile. An answer later than that returns `agent_transport_timeout`,
+never `agent_unavailable`: the answer was late, the agent was not refused. Run
+`events` again from the same cursor; it is not a stop. This command performs one wait per invocation and does not schedule
 a heartbeat loop or model call.
 
 Right after launch, start one background shell loop that runs `events` again by itself each time a wait returns (advancing the cursor) and writes each result to a file, so the lease never lapses between turns; it exits, waking the agent, only when a request is delivered or a stop code comes back. In Orca mode the same loop runs `browser-open --reconnect <binding_id>` after every wait returns; it is a no-op on a paired tab, re-pairs a rebuilt one in place without waking the agent, and the loop only records its result. The lease starts at open: start the loop within the first call after `session-open`, never minutes later (`agent_unavailable` right after `session-open` means the loop started too late). On delivery, restart the loop at once, in the same turn you start composing (in the background, as the first loop ran), so the lease never lapses; the server keeps a composing agent through a supersede until its next call. A `request_cancelled` on a fill means the operator moved on: read the next request from the loop's file, never resume the session. Never re-run waits by hand turn by turn to keep the lease alive (that wakes the model every 25 seconds); empty waits never reset the idle clock, so a forgotten session still pauses after 600 seconds.
@@ -136,6 +140,7 @@ Never send `null` as a fill field value (it is refused `invalid_fill`): leave ou
 Its UTF-8 JSON file has the same correlation keys as a `respond` file plus `fields` instead of `proposal`: only the agreed fields of that step (operation `discovery`: `problem`, `audience`, `workaround`, `evidence`, `kill_criteria`, `challenges`, `prior_art` (at most 8 rows of `{name, link, does, differs, licence}`, all text), `prior_art_none` (boolean), `prior_art_searched` (text, where it was looked); accept needs one or more rows with name, differs and licence filled and `prior_art_none` false, or `prior_art_none` true with no rows and `prior_art_searched` filled; "Not stated" is a valid licence; operation `exploration`: `outcome`, `alternatives`, `assumptions`, `scope`, `scope_reason`, `next_slice`, `learning`, `investment`, `experiment`, `sketch`; operation `method`: a memory fill only, `{"memory": {status, sources, rationale, preferred_method}}` with `preferred_method` one of the four method ids, required when status is `found` and null otherwise; operation `assessment`, behind the Assess step: `assessment`, `proposed_position`, a whole number from 1).
 It returns `{ok, code, request_id, operation, status: "pending", write_state: "not_applied", fill_sequence}`: the fill is held for the page, which saves it as the operator's draft; nothing is accepted.
 Refusals carry the service's own code: `invalid_fill`, `request_cancelled` (that one request is over; keep polling `events`), `request_closed`, `request_not_delivered`, `request_not_found`, `response_mismatch`, `fill_capacity` (64 fills per request), `agent_unavailable`.
+`agent_transport_timeout` is not the service's code: its answer did not arrive in time, and the fill may have reached the page; send the same fill again (the page writes the same fields once more).
 Each fill renews the 10-minute answer window and counts as activity for the idle pause.
 
 The owned service writes every accepted keep-alive to `<runtime-root>/activity.log` (mode 0600, bounded to 256 KB), one line `<UTC time> activity binding=<id> count=<n> agent_clock_moved=<v>` where `true` means the agent's idle clock was reset, `false` means no connected agent of that generation, and `n/a` means no agent is attached.
@@ -148,7 +153,8 @@ Run it again with `--confirm` only when the operator says yes. An unknown bindin
 
 `session-close` revokes only agent provenance; it preserves the paired browser
 and saved drafts. Errors contain fixed codes and no peer diagnostics. A
-`respond` failure with `write_state: committed_uncertain` may follow durable
+`respond` failure with `write_state: committed_uncertain` (including a late
+answer, `agent_transport_timeout`) may follow durable
 publication: reconcile the same request and payload after inspecting current
 state. The helper never retries a response automatically. Explicit resume
 rotates the generation; old credentials and outstanding replies cannot cross it.
