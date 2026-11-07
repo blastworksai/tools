@@ -1,0 +1,6 @@
+schema = 1
+id = "updater-fixture"
+name = "Updater Fixture"
+version = "0.1.0"
+host = "host.luau"
+window = "window.luau"

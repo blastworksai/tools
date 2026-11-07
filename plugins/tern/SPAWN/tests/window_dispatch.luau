@@ -1,7 +1,7 @@
--- Pure window fixture: exact native surfaces are injected, never real panes/effects.
+-- Pure window fixtures: exact native surfaces are injected, never real panes/effects.
 local root,section=...
 assert(type(root)=='string','pass package directory')
-assert(section==nil or section=='wake' or section=='retirement','unknown window dispatch section')
+assert(section==nil or section=='wake' or section=='retirement' or section=='window','unknown window dispatch section')
 local runtime,environment=tern,getfenv()
 local checks=0
 local function check(v,m)assert(v,m);checks+=1 end
@@ -213,7 +213,7 @@ if section==nil then
  local released=settled.w.retained()
  check(released.markers==0 and released.requests==0 and settled.starts==1 and #settled.events==3,'a settled ORCH+ action releases its markers and starts nothing')
 end
-if section~='retirement' then
+if section~='retirement' and section~='window' then
 local good=fixture()
 check(good.p.decode(runtime.json.encode(good.request))~=nil,'fixture uses valid immutable publication')
 check(good.w.origin_ok(good.cx,45,good.request,good.claim),'exact live action and claim match')
@@ -358,7 +358,7 @@ check(#retry.events==0,'capacity retry waits for a new live ORCH+ grant')
 retry.state.action.claim.grant_id='new-retry-grant';retry.tick()
 check(#retry.events==1 and retry.events[1].act=='spawn.authorize','new exact retry grant may answer the fresh challenge')
 end
-if section~='wake' then
+if section~='wake' and section~='window' then
  local function stop_fixture()
   local f=fixture()
   local r={schema=1,origin='orchplus',op='stop',request_id='stop',action_id='action-stop',controller_pane='44',controller_generation=1,origin_binding=copy(f.request.origin_binding),target_request_id='launch',target_action_id='launch-action',worker_id='worker',worker_generation=1,enrolment_token='aaaaaaaaaaaaaaaa',work_id='work',pane_binding={pane_id='55',window_epoch='epoch',window_key='',native_session_id='3',window_host_id='7'}}
@@ -449,5 +449,280 @@ if section~='wake' then
  check(scoped.asks==0,'an out-of-window adoption target never receives a native ask')
  local ambiguous=adopt_fixture();ambiguous.ask_error=true;begin_effect(ambiguous);ambiguous.tick();ambiguous.tick()
  check(ambiguous.asks==1 and ambiguous.c.strict_decode(ambiguous.events[3].value,65536).result.status=='uncertain' and #ambiguous.events==3,'an ambiguous native ask is reported uncertain and never repeated')
+end
+if section==nil or section=='window' then
+ -- SPAWN window half (window.luau) with the real config/launch modules against a modelled host
+ -- Config block and layout. A world outlives a window fixture, so a second fixture is a reload.
+ local function spawn_record(id)
+  return {id=id,provider='custom',account_label=id,backend='local-terminal',command='ordinary-cli',arguments={},enabled=true,include_all=true,placement='tab'}
+ end
+ local function new_world(records)
+  return {kv={},blocks={},next_pane=100,host={id=1,state='connected',name='fixture',sessions={1},panes={}},
+   authority={authority_id='authority-1',session_key='session-1',config_revision=1,records=records or {spawn_record('alpha')},replies={},request_sequences={}},
+   requests={},acks={},closes=0,opened=0}
+ end
+ local function add_block(world,opts)
+  world.next_pane+=1
+  local id=world.next_pane
+  world.blocks[id]={parked=opts~=nil and opts.parked==true,intents=opts and opts.intents or {}}
+  table.insert(world.host.panes,id)
+  return id
+ end
+ local function intent(id,kind,revision,record_id)return {intent_id=id,kind=kind,config_revision=revision or 1,record_id=record_id}end
+ -- Pure modules load once; only window.luau runs again (one compile) for each fixture.
+ local pure={}
+ local function load_pure(name)
+  name=name:gsub('^%./','');if pure[name]then return pure[name]end
+  local fn=assert(loadstring(runtime.fs.read(root..'/'..name..'.luau'),name))
+  setfenv(fn,setmetatable({require=load_pure},{__index=environment}));pure[name]=fn() or true;return pure[name]
+ end
+ local read_node=load_pure('dispatch_window').read_node
+ local window_chunk=assert(loadstring(runtime.fs.read(root..'/window.luau'),'window'))
+ local function window(world)
+  local f={timers={},commands={},toasts={},picks={}}
+  local cx=nil
+  local fake=setmetatable({
+   chrome={program_icon=function()end,status=function()end},
+   files={button=function()end},
+   timer=function(ms,fn)table.insert(f.timers,{ms=ms,fn=fn});return {} end,
+   on=function()end,
+   command=function(spec)f.commands[spec.id]=spec.run end,
+   css=function()end,
+   kv={get=function(key)return copy(world.kv[key])end,set=function(key,value)world.kv[key]=copy(value)end},
+   json=runtime.json,
+  },{__index=runtime})
+  local stubs={
+   native_cli={inspect=function(_,_,callback)callback({status=0,timed_out=false,stdout=runtime.json.encode({clients={{kind='window',window='win',conn=1,since=1}}})},nil,cx)end},
+   dispatch_window={start=function()end,read_node=read_node},
+   ['updater/window']={register=function()end},
+  }
+  local function load(name)name=name:gsub('^%./','');return stubs[name] or load_pure(name)end
+  local function info(id)
+   local b=world.blocks[id];if not b then return nil end
+   return {pane=id,block='spawn.spawner',kind='plugin',title='SPAWN',tab=if b.parked then nil else 1,parked=b.parked,focused=world.focus==id}
+  end
+  local function node(key,role,text)return {surface={role='plugin.spawn.spawner'},main={id='main.'..key,k='text',p={role=role,spans={{t=text}}}}}end
+  cx={
+   hosts={current=function()return world.host end,list=function()return {world.host}end},
+   sessions={current=function()return {id=1,host=1}end,list=function()return {{id=1,host=1}}end},
+   agents={list=function()return {}end},
+   window_key=function()return 'win' end,
+   toast=function(_,level,text,sub)table.insert(f.toasts,{level=level,text=text,sub=sub})end,
+   pick=function(_,spec)local p={spec=spec};table.insert(f.picks,p);return {next=function(_,fn)p.fn=fn end}end,
+   new_block=function(_,block,_,_,opts)
+    assert(block=='spawn.spawner','only SPAWN Config is opened');world.opened+=1
+    local id=add_block(world);if opts and opts.focus then world.focus=id end;return id
+   end,
+  }
+  cx.layout={
+   close=function(_,id)
+    assert(world.blocks[id],'close of an unknown pane');world.blocks[id]=nil;world.closes+=1
+    for i,p in ipairs(world.host.panes)do if p==id then table.remove(world.host.panes,i);break end end
+    if world.focus==id then world.focus=nil end
+   end,
+   focus=function(_,id)world.focus=id end,
+   park=function()error('SPAWN closes Config; it never parks it')end,
+   unpark=function()error('SPAWN never adopts a parked Config')end,
+  }
+  cx.session={
+   pane=function(_,id)return info(id)end,
+   panes=function()local out={};for id in pairs(world.blocks)do table.insert(out,info(id))end;table.sort(out,function(a,b)return a.pane<b.pane end);return out end,
+   tabs=function()return {{id=1,session=1}}end,
+   tab_of=function(_,id)local i=info(id);return i and i.tab end,
+   focused=function()return world.focus end,
+   surface=function(_,id,opts)
+    local b=world.blocks[id];if not b then return nil end
+    local a=world.authority
+    if opts.root=='main.spawn-state' then
+     local state={version=2,ready=true,host_key='host:fixture',authority_id=a.authority_id,session_key=a.session_key,config_revision=a.config_revision,attempt_revision=0,records=a.records,attempts={},jobs={},replies=a.replies,request_sequences=a.request_sequences}
+     for key,extra in pairs(a.extra or {})do state[key]=extra end
+     return node('spawn-state',nil,'SPAWN_STATE_V2 '..runtime.json.encode(state))
+    end
+    if opts.root=='main.spawn-launch-intent' and #b.intents>0 then return node('spawn-launch-intent','spawn.launch.intent',runtime.json.encode({schema=1,intents=b.intents}))end
+    return nil
+   end,
+   event=function(_,id,ev)
+    local b=assert(world.blocks[id],'event sent to a closed Config')
+    if ev.act=='spawn.launch-intent-ack' then
+     table.insert(world.acks,ev.value)
+     if not world.keep_intent then for i,queued in ipairs(b.intents)do if queued.intent_id==ev.value then table.remove(b.intents,i);break end end end
+    elseif ev.act=='spawn.request' then
+     -- The host refuses every launch as disabled: a skip-only batch settles without a ticket.
+     local r=runtime.json.decode(ev.value);table.insert(world.requests,r)
+     local a=world.authority
+     for _,acked in ipairs(r.acknowledged_requests)do a.replies[acked]=nil end
+     if not world.hold then
+      a.replies[r.request_id]={request_id=r.request_id,observer_id=r.observer_id,request_sequence=r.request_sequence,ok=false,error='disabled',config_revision=a.config_revision,attempt_revision=0}
+      a.request_sequences[r.observer_id]=r.request_sequence
+     end
+    end
+   end,
+  }
+  setfenv(window_chunk,setmetatable({tern=fake,require=load},{__index=environment}));window_chunk()
+  f.cx=cx
+  f.round=function(n)for _=1,n or 1 do local due=f.timers;f.timers={};for _,t in ipairs(due)do t.fn(cx)end end end
+  -- Only the window's existing 1 s tick (reconcile + intent poll), not other timers.
+  f.ticks=function(n)for _=1,n or 1 do local due=f.timers;f.timers={};for _,t in ipairs(due)do if t.ms==1000 then t.fn(cx) else table.insert(f.timers,t)end end end end
+  -- Every timer except that tick: request polls and continuations settle without an intent poll.
+  f.others=function(n)for _=1,n or 1 do local due=f.timers;f.timers={};for _,t in ipairs(due)do if t.ms~=1000 then t.fn(cx) else table.insert(f.timers,t)end end end end
+  f.choose=function(action)
+   local p=f.picks[#f.picks]
+   for _,item in ipairs(p.spec.items)do if item.action==action then p.fn(item,nil,cx);return end end
+   error('no menu item '..action)
+  end
+  f.labels=function()local out={};for _,item in ipairs(f.picks[#f.picks].spec.items)do out[item.label]=true end;return out end
+  f.toasted=function(text)for _,t in ipairs(f.toasts)do if t.text==text or t.sub==text then return true end end;return false end
+  f.spawners=function()local n=0;for _ in pairs(world.blocks)do n+=1 end;return n end
+  f.launches=function()local n=0;for _,r in ipairs(world.requests)do if r.op=='launch_record' then n+=1 end end;return n end
+  return f
+ end
+ local function only_menu(labels)return labels['Config'] and labels['Spawn all'] and labels['Spawn specific'] and not labels['Running agents'] and not labels['Review setup result'] end
+ -- R2: the SPAWN menu.
+ local empty=new_world({});add_block(empty)
+ local e=window(empty);e.commands.spawn_menu(e.cx)
+ check(e.labels()['Guided setup'] and only_menu(e.labels()),'no saved records: the menu offers Guided setup, Config, Spawn all and Spawn specific')
+ local done=new_world();local shown=add_block(done)
+ local d=window(done);d.commands.spawn_menu(d.cx)
+ check(not d.labels()['Guided setup'] and only_menu(d.labels()),'a saved record hides Guided setup; Running agents and Review setup result are never offered')
+ d.cx.layout:close(shown);d.commands.spawn_menu(d.cx)
+ check(not d.labels()['Guided setup'],'with no Config open the menu keeps the saved-record count this client last read')
+ check(d.commands.spawn_setup~=nil and d.commands.spawn_running~=nil,'palette commands SPAWN: Guided setup and SPAWN: Running agents stay')
+ -- R1: launch intents from a visible Config, queued oldest first by the host.
+ local once=new_world();once.keep_intent=true
+ local clicked=add_block(once,{intents={intent('intent-1','all')}})
+ local o=window(once);o.round(4)
+ check(o.launches()==1 and #once.acks>=2 and once.acks[1]=='intent-1' and once.acks[#once.acks]=='intent-1','an intent read on several ticks runs Spawn all exactly once and is acked each time')
+ check(once.blocks[clicked]~=nil and once.opened==0 and once.closes==0,'a clicked launch runs from that Config, which stays open, and opens no other block')
+ table.insert(once.blocks[clicked].intents,intent('intent-2','record',1,'alpha'));o.round(4)
+ check(o.launches()==2 and once.requests[2].data.record_id=='alpha','a newer queued intent for one saved agent runs the Spawn specific path for that record')
+ local again=window(once);again.round(3)
+ check(o.launches()==2,'the shared intent journal keeps a reloaded window from running still-queued intents again')
+ -- Order in which each intent was first acked (a kept queue is re-acked on later ticks).
+ local function acked(world,ids)
+  local seen,first={},{};for _,id in ipairs(world.acks)do if not first[id] then first[id]=true;table.insert(seen,id)end end
+  if #seen~=#ids then return false end
+  for i,id in ipairs(ids)do if seen[i]~=id then return false end end
+  return true
+ end
+ local rapid=new_world();rapid.keep_intent=true
+ add_block(rapid,{intents={intent('rapid-1','all'),intent('rapid-2','record',1,'alpha'),intent('rapid-3','all')}})
+ local r=window(rapid);r.round(12)
+ check(r.launches()==3 and rapid.requests[2].data.record_id=='alpha','three intents in one read launch three times, in click order')
+ check(acked(rapid,{'rapid-1','rapid-2','rapid-3'}),'each queued intent is acked after it runs, oldest first')
+ r.round(6)
+ check(r.launches()==3,'re-reading a queue of already-run intents launches nothing')
+ local deferred=new_world();deferred.hold=true
+ local queue=add_block(deferred,{intents={intent('wait-1','all'),intent('wait-2','all')}})
+ local dw=window(deferred);dw.round(5)
+ check(dw.launches()==1 and acked(deferred,{'wait-1'}) and #deferred.blocks[queue].intents==1,'while a batch from this window runs, the next intent waits unjournalled and unacked')
+ local function answer(world)
+  world.hold=false
+  local a=world.authority
+  for _,held in ipairs(world.requests)do
+   if not a.replies[held.request_id] and (a.request_sequences[held.observer_id] or 0)<held.request_sequence then
+    a.replies[held.request_id]={request_id=held.request_id,observer_id=held.observer_id,request_sequence=held.request_sequence,ok=false,error='disabled',config_revision=a.config_revision,attempt_revision=0}
+    a.request_sequences[held.observer_id]=held.request_sequence
+   end
+  end
+ end
+ answer(deferred)
+ dw.round(10)
+ check(dw.launches()==2 and acked(deferred,{'wait-1','wait-2'}) and #deferred.blocks[queue].intents==0,'the waiting intent runs once the batch settles')
+ local mixed=new_world()
+ add_block(mixed,{intents={intent('old-1','all',0),intent('new-1','all'),intent('old-2','record',0,'alpha'),intent('new-2','record',1,'alpha')}})
+ local mx=window(mixed);mx.round(12)
+ local refusals=0;for _,t in ipairs(mx.toasts)do if t.sub=='Config changed; press again' then refusals+=1 end end
+ check(mx.launches()==2 and refusals==2 and mixed.requests[2].data.record_id=='alpha' and acked(mixed,{'old-1','new-1','old-2','new-2'}),'stale intents are refused and acked in place, valid ones launch once each in order')
+ local stale=new_world();local refused=add_block(stale,{intents={intent('stale-1','record',0,'alpha')}})
+ local s=window(stale);s.round(3)
+ check(#stale.requests==0 and s.toasted('Config changed; press again') and stale.acks[1]=='stale-1' and #stale.blocks[refused].intents==0,'a stale config_revision is refused with a toast and acked, and nothing launches')
+ local hidden=new_world();local parked=add_block(hidden,{parked=true,intents={intent('parked-1','all')}})
+ local h=window(hidden);h.ticks(3)
+ check(#hidden.requests==0 and #hidden.acks==0 and hidden.blocks[parked]~=nil,'an intent on a parked Config is never run or acked')
+ -- A click queued in a SPAWN-opened Config during a multi-agent Spawn all runs after the batch.
+ local queued=new_world({spawn_record('alpha'),spawn_record('beta')});queued.hold=true
+ local qw=window(queued)
+ qw.commands.spawn_menu(qw.cx);qw.choose('all')
+ local carrier=next(queued.blocks)
+ table.insert(queued.blocks[carrier].intents,intent('during-1','all'))
+ qw.round(3)
+ check(qw.launches()==1 and #queued.acks==0,'a click made while this window runs a batch waits')
+ answer(queued);qw.others(6)
+ check(queued.blocks[carrier]~=nil and queued.closes==0,'the batch settling never closes a Config holding a click not yet run')
+ qw.round(14)
+ check(qw.launches()==4 and acked(queued,{'during-1'}) and queued.blocks[carrier]~=nil and queued.closes==0,'the queued click runs once after the batch and its Config stays open')
+ local raced=new_world({spawn_record('alpha'),spawn_record('beta')});raced.hold=true
+ local rw=window(raced)
+ rw.commands.spawn_menu(rw.cx);rw.choose('all')
+ local raced_carrier=next(raced.blocks)
+ table.insert(raced.blocks[raced_carrier].intents,intent('race-1','all'))
+ answer(raced);rw.others(8)
+ check(raced.blocks[raced_carrier]~=nil and raced.closes==0,'a batch settling before the intent poll still keeps a Config holding an unrun click')
+ rw.round(16)
+ check(rw.launches()==4 and acked(raced,{'race-1'}) and raced.blocks[raced_carrier]~=nil and raced.closes==0,'that click then runs once and its Config stays open')
+ -- Host restart notice: count or attempts, extra keys ignored; a 0.4.0 lost list never fails the snapshot.
+ local function restart_view(extra)
+  local world=new_world();add_block(world);world.authority.extra=extra
+  local v=window(world);v.commands.spawn_running(v.cx)
+  local line=nil
+  for _,item in ipairs(v.picks[#v.picks] and v.picks[#v.picks].spec.items or {})do if item.group=='Host restart' then line=item.label end end
+  return v,line
+ end
+ local counted,counted_line=restart_view({host_restart_notice={restart_id='restart-a',count=2,later_field=true}})
+ check(counted.toasted('Host restarted: 2 SPAWN agents ended (cleared automatically)') and counted_line=='Host restarted: 2 SPAWN agents ended (cleared automatically)','a {restart_id,count} notice shows one info toast and an action-free Running agents line')
+ local listed=restart_view({host_restart_notice={restart_id='restart-b',attempts={'attempt-1','attempt-2','attempt-3'}}})
+ check(listed.toasted('Host restarted: 3 SPAWN agents ended (cleared automatically)'),'a {restart_id,attempts} notice counts its attempts')
+ local legacy_host,legacy_line=restart_view({host_restart={restart_id='restart-c',attempts={'attempt-9'}}})
+ check(#legacy_host.picks==1 and legacy_line==nil and not legacy_host.toasted('Host restarted: 1 SPAWN agent ended (cleared automatically)'),'a 0.4.0 host_restart list is tolerated and never shown as automatic cleanup')
+ -- Review setup result clicked in Config with no setup run in this window.
+ local elsewhere=new_world();add_block(elsewhere,{intents={intent('result-1','result')}})
+ local ew=window(elsewhere);ew.round(2)
+ check(ew.toasted('This setup was started in another window; paste its result in Config › Setup › Paste setup JSON') and elsewhere.acks[1]=='result-1','a result click without this window\'s setup run explains where to paste it')
+ -- R5: no idle or parked Config left behind.
+ local opened=new_world();local op=window(opened)
+ op.commands.spawn_menu(op.cx);op.choose('all')
+ check(opened.opened==1 and op.spawners()==1,'Spawn all opens one Config to carry the batch')
+ op.round(3)
+ check(opened.closes==1 and op.spawners()==0,'the Config SPAWN opened is closed once its skip-only batch settles')
+ local user=new_world();local u=window(user)
+ u.commands.spawn_config(u.cx);local mine=next(user.blocks);user.focus=nil
+ u.commands.spawn_menu(u.cx);u.choose('all');u.round(3)
+ check(#user.requests==1 and user.opened==1 and user.closes==0 and user.blocks[mine]~=nil,'a Config the user opened carries the batch and stays open')
+ local watched=new_world();local w=window(watched)
+ w.commands.spawn_menu(w.cx);w.choose('all');watched.focus=next(watched.blocks);w.round(3)
+ check(watched.closes==0 and w.spawners()==1,'a SPAWN-opened Config the user is looking at stays open')
+ local pending=new_world();pending.hold=true;local pe=window(pending)
+ pe.commands.spawn_menu(pe.cx);pe.choose('all');pe.round(4)
+ local busy=next(pending.blocks)
+ check(pending.closes==0 and pending.blocks[busy]~=nil,'a Config with an unanswered request is never closed')
+ pending.blocks[busy].parked=true
+ pe.commands.spawn_menu(pe.cx);pe.choose('all');pe.round(2)
+ check(pending.closes==0 and pending.blocks[busy]~=nil and pending.opened==2,'leftover cleanup never closes a parked Config whose request is pending')
+ local cold=new_world();window(cold).round(2)
+ local c=window(cold)
+ c.commands.spawn_menu(c.cx);c.choose('all')
+ check(c.spawners()==1,'cold start after a reload: the next Spawn opens exactly one Config')
+ c.round(3)
+ check(c.spawners()==0 and cold.opened==1,'cold start after a reload: no spawn.spawner block is left once the batch settles')
+ local steady=new_world();window(steady).round(2)
+ local old=add_block(steady,{parked=true})
+ local st=window(steady)
+ st.commands.spawn_menu(st.cx);st.choose('all')
+ check(steady.blocks[old]==nil and st.spawners()==1,'steady state after a reload: the old parked Config is closed before a new one opens')
+ st.round(3)
+ check(st.spawners()==0,'steady state after a reload: no spawn.spawner block is left once the batch settles')
+ local leftover=new_world();local forgotten=add_block(leftover,{parked=true})
+ window(leftover).round(1)
+ check(leftover.blocks[forgotten]==nil and leftover.closes==1,'window load closes a parked Config with no pending request')
+ -- Upgrade boundary: an old journalled Mark-no-longer-running request.
+ local legacy=new_world();add_block(legacy)
+ local observer_id='window-ns-1-1-win'
+ legacy.kv['window-observer-namespace']='ns'
+ legacy.kv['window-observer:'..observer_id]={version=2,id=observer_id,transports={['authority-1']={sequence=3,acknowledgments={},pending={request_id=observer_id..':3',op='resolve_lost_attempts'}}},tracked={},next_run=1}
+ local lg=window(legacy);lg.round(1)
+ local journal=legacy.kv['window-observer:'..observer_id].transports['authority-1']
+ check(lg.toasted('An old Mark-no-longer-running request was cleared; SPAWN now does this automatically') and journal.pending==nil and journal.acknowledgments[1]==observer_id..':3' and #legacy.requests==0,'an old journalled resolve request is dropped with the info toast and never replayed')
+ lg.commands.spawn_menu(lg.cx);lg.choose('all');lg.round(3)
+ check(#legacy.requests==1 and legacy.requests[1].op=='launch_record' and legacy.requests[1].acknowledged_requests[1]==observer_id..':3','the next request launches normally and acknowledges the dropped one')
 end
 return 'PASS window_dispatch '..tostring(checks)

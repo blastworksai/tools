@@ -29,6 +29,8 @@ The results are public for each skill: follow its Walkdown link in the table.
 | [ORCH+](plugins/tern/ORCH+/README.md) | Tern | Orchestration+ Basic Improvements to Native Tern Orchestration. DEPENDENCY: NEEDS [SPAWN](plugins/tern/SPAWN/README.md) 0.4.0+; [USAGE](plugins/tern/USAGE/README.md) 2.1.0+ optional for quota routing. |
 | [GLITCH IDEA](skills/glitch-idea/glitch-idea/tern-plugin/README.md) | Tern | Opens the GLITCH IDEA page, already paired, in a pane above your focused pane. Part of the [GLITCH IDEA](skills/glitch-idea/README.md) skill. |
 
+Each plugin checks GitHub for its own newer version and updates itself from Tern's command palette (*Check for updates*). See [the shared updater](shared/tern-updater/README.md).
+
 ## Found a bug? Have an idea?
 
 Open an issue on this repository. Stars mean nothing, but they're free, and we like them. ⭐

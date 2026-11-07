@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.5.0
+
+Requires SPAWN 0.4.0 and Tern 0.9.10, now declared in `requires.json`.
+
+### Added
+
+- **ORCH+ Check for updates** in the command palette: compares this copy with the version published on GitHub. A background check runs at most every 6 hours and announces a new version once. Linked development checkouts are never checked or updated.
+- **ORCH+ Update** (shown when an update is known): re-checks, verifies the release's `requires.json` (stops with "Update spawn to … or later first" when SPAWN is too old), asks in a picker, optionally also on connected remote hosts, then runs `tern plugin install --force`. Nothing installs without that choice.
+- `requires.json`: Tern 0.9.10 and SPAWN 0.4.0 minimums.
+- The Update confirm text and the success notice warn that installing reloads every plugin on that machine and that running ORCH+ controllers pause until you run **ORCH+ Reload recovery guide**.
+
+### Changed
+
+- The native test fixtures resolve `require("./…")` against the requiring module's folder, as Tern does, so `window.luau` loads with the vendored `updater/` modules.
+
 ## 0.4.0
 
 Requires SPAWN 0.4.0 (new helper modes, capabilities and report kinds: reinstall its mailbox helpers with SPAWN). Quota routing and usage deltas work with USAGE 2.1.0 or later. Stored 0.3.0 settings, workers and landing items are migrated when the store is restored.

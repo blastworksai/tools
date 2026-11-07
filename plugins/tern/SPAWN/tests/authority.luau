@@ -30,8 +30,7 @@ end
 local function record(id, fields)
 	local value = {
 		id = id, provider = "custom", account_label = id, backend = "local-terminal",
-		command = "ordinary-cli", arguments = {}, enabled = true, include_all = true,
-		duplicate_policy = "skip", placement = "tab",
+		command = "ordinary-cli", arguments = {}, enabled = true, include_all = true, placement = "tab",
 	}
 	for key, item in pairs(fields or {}) do value[key] = item end
 	return value
@@ -129,10 +128,37 @@ local function update(authority, binding, id, stage, patch, observation)
 	check(job ~= nil, "host commits execution evidence: " .. tostring(err))
 	return job
 end
+-- Admits launches from one observer, acknowledging each previous reply.
+local function admitter(authority, binding, observer)
+	observer = observer or "window"
+	local sequence = 0
+	return function(record_id)
+		sequence += 1
+		local acks = if sequence > 1 then { observer .. "/" .. tostring(sequence - 1) } else {}
+		local revision = snapshot(authority, binding).config_revision
+		local reply = submit(authority, binding, request(binding, observer, sequence, revision, "launch_record", { record_id = record_id }, acks))
+		check(reply.ok, "admit " .. record_id .. ": " .. tostring(reply.error))
+		return reply.result.attempt.id
+	end
+end
+-- Claims a pane, records the daemon epoch, submits and observes the provider running.
+local function run_job(authority, binding, id, pane, epoch)
+	claim(authority, binding, id, pane)
+	if epoch then update(authority, binding, id, "claimed", { epoch = epoch }) end
+	update(authority, binding, id, "claimed", { stage = "submission_intent", command = "ordinary-cli" })
+	update(authority, binding, id, "submission_intent", { stage = "running" }, { phase = "Running" })
+end
+local function by_id(view)
+	local attempts, jobs = {}, {}
+	for _, a in view.attempts do attempts[a.id] = a end
+	for _, job in view.jobs do jobs[job.id] = job end
+	return attempts, jobs
+end
+local OBSOLETE_NOTICE = "An old Mark-no-longer-running request was cleared; SPAWN now does this automatically"
 local sections = {}
 
 sections.managed_coexistence=function()
-	local db,authority,binding,_,_,load=fresh({record("shared"),record("ordinary",{duplicate_policy="allow"})})
+	local db,authority,binding,_,_,load=fresh({record("shared"),record("ordinary")})
 	local managed=assert(authority.managed_reserve(binding,1,"shared","bridge-observer"))
 	check(managed.purpose=="managed","managed reservation has explicit purpose")
 	local ordinary=submit(authority,binding,reserve_request(binding,"window",1,1,"ordinary")).result.attempt
@@ -142,11 +168,11 @@ sections.managed_coexistence=function()
 	refused_unchanged(db,function()return authority.claim_execution(binding,managed.id,native())end,"ordinary executor cannot claim managed reservation")
 	refused_unchanged(db,function()return authority.managed_observe(binding,ordinary.id,"bridge-observer",{phase="Running",pane=55})end,"bridge cannot observe ordinary job")
 	refused_unchanged(db,function()return authority.managed_observe(binding,managed.id,"another-observer",{phase="Running",pane=55})end,"managed observer identity is immutable")
-	local duplicate=submit(authority,binding,reserve_request(binding,"window",2,1,"shared"))
-	check(not duplicate.ok and duplicate.error=="duplicate","managed reservation blocks ordinary skip admission")
+	local again=submit(authority,binding,reserve_request(binding,"window",2,1,"shared"))
+	check(again.ok and again.result.attempt.id~=managed.id,"a managed reservation never blocks an ordinary launch of the same record")
 	db.now+=31
 	view=snapshot(authority,binding)
-	check(view.attempts[1].phase=="Starting" and view.attempts[2].phase=="Unknown","admission expiry never expires managed reservations")
+	check(view.attempts[1].phase=="Starting" and view.attempts[2].phase=="Failed" and view.attempts[3].phase=="Failed","admission expiry fails unclaimed tickets but never expires managed reservations")
 	check(authority.managed_observe(binding,managed.id,"bridge-observer",{phase="Starting",pane=55}),"managed result remains independently bindable")
 	local changed=copy(binding);changed.native_session=999
 	refused_unchanged(db,function()return authority.managed_observe(changed,managed.id,"bridge-observer",{phase="Exited",pane=55})end,"native-session change rejects delayed result")
@@ -190,10 +216,10 @@ sections.managed_retention=function()
 	edit(authority,binding,"clear-history",{attempt_revision=view.attempt_revision})
 	view=snapshot(authority,binding)
 	check(#view.attempts==2 and view.attempts[1].id==held.id and view.attempts[1].unresolved,"history clear reclaims settled managed attempts but preserves unknown and active work")
-	edit(authority,binding,"resolve-attempt",{id=held.id,attempt_revision=view.attempt_revision})
+	refused_unchanged(db,function()return authority.edit(binding,view.config_revision,"resolve-attempt",{id=held.id,attempt_revision=view.attempt_revision})end,"manual release no longer exists","Unknown settings operation")
+	check(authority.sweep(binding,{},"daemon:1",db.now)==0,"a sweep with no panes leaves managed and unexpired ordinary work alone")
 	view=snapshot(authority,binding)
-	edit(authority,binding,"clear-history",{attempt_revision=view.attempt_revision})
-	check(snapshot(authority,binding).attempts[1].id==held.id,"operator resolution of Unknown is not successful managed retirement evidence")
+	check(view.attempts[1].id==held.id and view.attempts[1].phase=="Unknown" and view.attempts[1].unresolved,"managed Unknown keeps its reservation; only bridge evidence settles it")
 end
 
 sections.managed_import=function()
@@ -295,7 +321,7 @@ sections.managed_settlement_replay=function()
 	registry.requests["logical/retire"]=pending
 	db.kv.set("dispatch-v1",registry)
 	check(authority.managed_retire(binding,a.id,a.observer_id,"managed",55),"authority settles while bridge retirement-result commit remains interrupted")
-	edit(authority,binding,"replace-records",{records={record("managed"),record("ordinary",{duplicate_policy="allow"})}})
+	edit(authority,binding,"replace-records",{records={record("managed"),record("ordinary")}})
 	for i=1,35 do
 		local value=request(binding,"ordinary",i,2,"launch_record",{record_id="ordinary"},if i>1 then {"ordinary/"..tostring(i-1)} else {})
 		local id=submit(authority,binding,value).result.attempt.id
@@ -451,11 +477,12 @@ sections.managed_retirement = function()
 	check(authority.managed_retire(binding,first.id,"managed-first","coordinator",55),"exact reservation retirement is idempotent")
 	same(db.image(),before,"retirement replay does not advance unrelated counters")
 	local successor=assert(authority.managed_reserve(binding,revision,"coordinator","managed-successor"))
-	check(successor.id~=first.id,"Skip existing allows same record only after exact settlement")
-	check(authority.managed_observe(binding,successor.id,"managed-successor",{phase="Starting",pane=57}),"new generation has a distinct attempt")
+	check(successor.id~=first.id,"a new managed generation of the same record gets a distinct attempt")
+	check(authority.managed_observe(binding,successor.id,"managed-successor",{phase="Starting",pane=57}),"new generation binds its own pane")
 	check(authority.managed_retire(binding,first.id,"managed-first","coordinator",55),"old retirement remains a no-op after successor")
-	check(authority.managed_reserve(binding,revision,"coordinator","third")==nil,"old retirement cannot clear successor reservation")
-	check(authority.managed_reserve(binding,revision,"unrelated","third-other")==nil,"retirement cannot clear unrelated record")
+	local held=by_id(snapshot(authority,binding))
+	check(held[successor.id].phase=="Starting" and held[successor.id].unresolved,"old retirement cannot clear successor reservation")
+	check(held[other.id].phase=="Starting" and held[other.id].unresolved,"retirement cannot clear unrelated record")
 	check(authority.managed_observe(binding,successor.id,"managed-successor",{phase="Unknown",pane=57}),"lost successor observation stays uncertain")
 	refused_unchanged(db,function()return authority.managed_retire(binding,successor.id,"managed-successor","coordinator",57)end,"uncertain reservation cannot be silently settled")
 end
@@ -527,59 +554,6 @@ sections.stale_config = function()
 	same(snapshot(authority, binding).records, after.records, "setup replay and conflict preserve exact roster")
 end
 
--- Resolution is fenced by the inspected launch revision on both mutation paths.
-sections.stale_resolution = function()
-	for _, path in ipairs({ "native", "remote" }) do
-		local db, authority, binding = fresh({ record("resolve") })
-		local revision = snapshot(authority, binding).config_revision
-		local reserved = submit(authority, binding, reserve_request(binding, "owner", 1, revision, "resolve"))
-		check(reserved.ok, "reserve attempt before resolution review")
-		local inspected = snapshot(authority, binding)
-		local id = reserved.result.attempt.id
-		claim(authority, binding, id)
-		update(authority, binding, id, "claimed", { stage = "submission_intent", command = "ordinary-cli" })
-		update(authority, binding, id, "submission_intent", { stage = "running" }, { phase = "Running", pane = 42 })
-		local advanced = snapshot(authority, binding)
-		check(advanced.attempt_revision > inspected.attempt_revision and advanced.attempts[1].unresolved,
-			"observation invalidates old resolution view without releasing reservation")
-		local ledger = db.peek("authority").sessions[binding.session_key].launch
-		if path == "native" then
-			refused_unchanged(db, function()
-				return authority.edit(binding, revision, "resolve-attempt", { id = id })
-			end, "native resolution without inspected attempt revision")
-			refused_unchanged(db, function()
-				return authority.edit(binding, revision, "resolve-attempt", { id = id, attempt_revision = inspected.attempt_revision })
-			end, "native stale resolution")
-		else
-			local unfenced = request(binding, "owner", 3, revision, "resolve_attempt", { attempt_id = id })
-			refused_unchanged(db, function() return authority.request(binding, unfenced) end,
-				"remote resolution without inspected attempt revision")
-			local stale = request(binding, "owner", 3, revision, "resolve_attempt", {
-				attempt_id = id, attempt_revision = inspected.attempt_revision,
-			})
-			local reply = submit(authority, binding, stale)
-			check(not reply.ok and reply.error == "stale-attempt-revision", "remote stale resolution retains explicit rejection")
-		end
-		same(db.peek("authority").sessions[binding.session_key].launch, ledger,
-			path .. " stale resolution preserves full ledger including unresolved flag and revision")
-		local current = snapshot(authority, binding)
-		if path == "native" then
-			edit(authority, binding, "resolve-attempt", { id = id, attempt_revision = current.attempt_revision })
-		else
-			local resolve = request(binding, "owner", 4, revision, "resolve_attempt", {
-				attempt_id = id, attempt_revision = current.attempt_revision,
-			})
-			check(submit(authority, binding, resolve).ok, "current remote resolution is accepted")
-		end
-		local resolved = snapshot(authority, binding)
-		check(#resolved.attempts == 1 and resolved.attempts[1].id == id and not resolved.attempts[1].unresolved,
-			path .. " fresh deliberate resolution releases only the existing attempt")
-		check(resolved.attempt_revision > current.attempt_revision and resolved.attempts[1].exit_status == nil,
-			path .. " resolution advances history without inventing exit evidence")
-		check(resolved.jobs[1].stage == "resolved", path .. " resolution updates corresponding execution job")
-	end
-end
-
 -- One atomic write commits the mutation, reply and watermark together.
 sections.recovery = function()
 	local db, authority, binding = fresh({ record("fault") })
@@ -606,7 +580,7 @@ end
 
 -- Capacity rotates the transport generation, never drops replay fences in place.
 sections.reply_capacity = function()
-	local db, authority, binding = fresh({ record("kept", { duplicate_policy = "allow" }) })
+	local db, authority, binding = fresh({ record("kept") })
 	local captured = reserve_request(binding, "captured", 1, 1, "kept")
 	local admitted = submit(authority, binding, captured)
 	local id = admitted.result.attempt.id
@@ -763,11 +737,9 @@ sections.transport_reset = function()
 	local view = snapshot(authority, binding)
 	refused_unchanged(db, function() return authority.edit(binding, revision, "reset-transport", {}) end, "reset with retained reply")
 	edit(authority, binding, "review-reply", { id = value.request_id })
-	refused_unchanged(db, function() return authority.edit(binding, revision, "reset-transport", {}) end, "reset with active attempt")
+	refused_unchanged(db, function() return authority.edit(binding, revision, "reset-transport", {}) end, "reset with active attempt", "Wait until every live or managed attempt has ended before resetting transport")
 	update(authority, binding, view.jobs[1].id, "admitted", { stage = "unknown" }, { phase = "Unknown" })
-	refused_unchanged(db, function() return authority.edit(binding, revision, "reset-transport", {}) end, "reset with unresolved unknown attempt")
-	view = snapshot(authority, binding)
-	edit(authority, binding, "resolve-attempt", { id = view.attempts[1].id, attempt_revision = view.attempt_revision })
+	-- An ordinary Unknown settles itself, so it no longer holds transport.
 	view = snapshot(authority, binding)
 	local before = db.peek("authority")
 	local old_binding = copy(binding)
@@ -784,9 +756,13 @@ sections.transport_reset = function()
 	check(next(new_scope.replies) == nil and next(new_scope.requests) == nil, "reset leaves transport empty")
 	refused_unchanged(db, function() return authority.request(old_binding, value) end, "old authority request after reset", "stale-authority")
 	check(authority.snapshot(old_binding) == nil, "old authority binding cannot read as the new identity")
-	same(snapshot(authority, binding).attempts, view.attempts, "reset preserves explicitly resolved history")
+	same(snapshot(authority, binding).attempts, view.attempts, "reset preserves history")
 	local next_launch = reserve_request(binding, "new-observer", 1, revision, "reset")
-	check(submit(authority, binding, next_launch).ok, "explicit new launch allowed only after resolution")
+	check(submit(authority, binding, next_launch).ok, "a new launch is admitted after reset")
+	local managed_db, managed_authority, managed_binding = fresh({ record("managed") })
+	local held = assert(managed_authority.managed_reserve(managed_binding, 1, "managed", "bridge-observer"))
+	check(managed_authority.managed_observe(managed_binding, held.id, "bridge-observer", { phase = "Unknown" }), "managed effect becomes uncertain")
+	refused_unchanged(managed_db, function() return managed_authority.edit(managed_binding, 1, "reset-transport", {}) end, "reset with an unresolved managed attempt", "Wait until every live or managed attempt has ended before resetting transport")
 end
 
 -- An explicitly empty client roster is still a conflicting source, not an absent copy.
@@ -979,10 +955,10 @@ sections.admission_expiry = function()
 		if path == "claim" then check(authority.claim_execution(binding, id, native()) == nil, "expired claim supplies no execution permission")
 		else snapshot(authority, binding) end
 		local view = snapshot(authority, binding)
-		check(view.jobs[1].stage == "unknown" and view.attempts[1].unresolved, "30 second expiry is durable blocking Unknown")
-		check(not submit(authority, binding, reserve_request(binding, "window", 2, 1, "expired")).ok, "expired unknown cannot replay by another launch")
-		edit(authority, binding, "resolve-attempt", { id = id, attempt_revision = view.attempt_revision })
-		check(submit(authority, binding, reserve_request(binding, "window", 3, 1, "expired")).ok, "explicit resolution permits a new launch")
+		local a = view.attempts[1]
+		check(view.jobs[1].stage == "failed" and a.phase == "Failed" and not a.unresolved and a.diagnostic == "Never started (ticket not claimed)", path .. ": 30 second expiry settles to Failed history")
+		refused_unchanged(db, function() return authority.claim_execution(binding, id, native()) end, path .. ": an expired ticket is never claimable later")
+		check(submit(authority, binding, reserve_request(binding, "window", 2, 1, "expired")).ok, path .. ": a new launch gets its own ticket")
 	end
 end
 
@@ -1010,23 +986,22 @@ sections.clear_history = function()
 end
 
 sections.late_completion = function()
-	for _, resolve in ipairs({ false, true }) do
+	for _, settled in ipairs({ false, true }) do
 		local db, authority, binding = fresh({ record("late") })
 		local id = submit(authority, binding, reserve_request(binding, "window", 1, 1, "late")).result.attempt.id
 		claim(authority, binding, id)
 		update(authority, binding, id, "claimed", { stage = "submission_intent", command = "ordinary-cli" })
 		update(authority, binding, id, "submission_intent", { stage = "unknown" }, { phase = "Unknown", diagnostic = "lost host observation" })
 		refused_unchanged(db, function() return authority.update_execution(binding, id, "unknown", { stage = "submission_intent", command = "ordinary-cli" }) end, "unknown may never resend")
-		if resolve then
-			local view = snapshot(authority, binding)
-			edit(authority, binding, "resolve-attempt", { id = id, attempt_revision = view.attempt_revision })
-			refused_unchanged(db, function() return authority.update_execution(binding, id, "resolved", { stage = "running" }, { phase = "Running" }) end, "resolved attempt cannot regain liveness")
+		if settled then
+			check(authority.sweep(binding, {}, nil, db.now) == 1, "the sweep ends the attempt whose pane is gone")
+			refused_unchanged(db, function() return authority.update_execution(binding, id, "resolved", { stage = "running" }, { phase = "Running" }) end, "settled attempt cannot regain liveness")
 		else
 			update(authority, binding, id, "unknown", { stage = "running" }, { phase = "Running" })
 		end
-		update(authority, binding, id, if resolve then "resolved" else "running", { stage = "completed" }, { phase = "Exited", exit_status = 0 })
+		update(authority, binding, id, if settled then "resolved" else "running", { stage = "completed" }, { phase = "Exited", exit_status = 0 })
 		local view = snapshot(authority, binding)
-		check(view.jobs[1].stage == "completed" and view.attempts[1].phase == "Exited" and not view.attempts[1].unresolved, "late host completion supersedes uncertainty or explicit resolution")
+		check(view.jobs[1].stage == "completed" and view.attempts[1].phase == "Exited" and view.attempts[1].exit_status == 0 and not view.attempts[1].unresolved, "late host completion supersedes uncertainty or automatic settlement")
 	end
 end
 
@@ -1061,7 +1036,7 @@ end
 
 -- Ended session buckets are forgotten only against a verified live inventory.
 sections.forget_sessions = function()
-	local db, authority, binding = fresh({ record("kept", { duplicate_policy = "allow" }) })
+	local db, authority, binding = fresh({ record("kept") })
 	local ended = assert(authority.open("host-A", 5))
 	local live = assert(authority.open("host-A", 6))
 	for sequence = 1, 2 do
@@ -1097,7 +1072,7 @@ end
 
 -- Each write keeps only the 26 newest finished attempts; blocking ones stay.
 sections.trim_history = function()
-	local db, authority, binding = fresh({ record("many", { duplicate_policy = "allow" }) })
+	local db, authority, binding = fresh({ record("many") })
 	local sequence = 0
 	local function admit()
 		sequence += 1
@@ -1130,10 +1105,9 @@ sections.trim_history = function()
 	local ids = kept()
 	check(ids[running] and ids[unknown], "active and unresolved attempts are never trimmed")
 	for index, id in ipairs(finished) do check((ids[id] == true) == (index > 4), "exactly the 26 newest finished attempts are kept") end
-	local view = snapshot(authority, binding)
-	edit(authority, binding, "resolve-attempt", { id = unknown, attempt_revision = view.attempt_revision })
+	check(authority.sweep(binding, { [200] = { title = "ordinary-cli" } }, nil, db.now + authority.ADMISSION_SECONDS) == 1, "the sweep settles the never-claimed Unknown")
 	ids = kept()
-	check(not ids[unknown] and ids[running] and ids[finished[5]], "a newly finished older attempt is trimmed in the same write")
+	check(not ids[unknown] and ids[running] and ids[finished[5]], "a newly settled older attempt is trimmed in the same write")
 end
 
 -- Runs the real host Config block against the real authority; native
@@ -1230,113 +1204,234 @@ sections.transient_reply = function()
 	check(refused == 16, "refusal replies are bounded")
 end
 
--- C3: only Unknown native work recorded under a different, known daemon epoch
--- is lost. Bulk release is all-or-nothing on the request and edit paths.
-sections.lost_release = function()
-	local reason_unverifiable = "host-epoch-unverifiable: inspect and mark each attempt individually"
-	for _, path in ipairs({ "remote", "native" }) do
-		local db, authority, binding = fresh({ record("expired"), record("lost-a"), record("lost-b"), record("live") })
-		local revision = snapshot(authority, binding).config_revision
-		local sequence = 0
-		local function admit(record_id)
-			sequence += 1
-			local reply = submit(authority, binding, reserve_request(binding, "owner", sequence, revision, record_id))
-			check(reply.ok, "admit " .. record_id)
-			return reply.result.attempt.id
-		end
-		local function run(id, pane)
-			claim(authority, binding, id, pane)
-			update(authority, binding, id, "claimed", { epoch = "daemon:1" })
-			update(authority, binding, id, "claimed", { stage = "submission_intent", command = "ordinary-cli" })
-			update(authority, binding, id, "submission_intent", { stage = "running" }, { phase = "Running", pane = pane })
-		end
-		local function lose(id, pane)
-			run(id, pane)
-			update(authority, binding, id, "running", { stage = "unknown" }, { phase = "Unknown", error_category = "host-unavailable", diagnostic = "Host restarted (daemon epoch changed): lost; execution will not be repeated" })
-		end
-		local expired = admit("expired")
-		db.now += authority.ADMISSION_SECONDS + 1
-		check(snapshot(authority, binding).jobs[1].stage == "unknown", "an unclaimed admission expires to Unknown without an epoch")
-		local a, b = admit("lost-a"), admit("lost-b")
-		lose(a, 42); lose(b, 43)
-		local live = admit("live"); run(live, 44)
-		local function restart_of(epoch)
-			local value, err = authority.snapshot(binding, epoch)
-			assert(value, tostring(err))
-			return value.host_restart, value
-		end
-		local restart, view = restart_of("daemon:2")
-		check(restart ~= nil and equal(restart.attempts, { a, b }), path .. ": a changed host epoch lists exactly the lost attempts")
-		check(type(restart.restart_id) == "string" and #restart.restart_id == 32 and restart.restart_id:find("daemon", 1, true) == nil, "the restart id is a digest, never the raw epoch")
-		check(restart_of("daemon:1") == nil, "the recording epoch lists no lost attempt")
-		check(restart_of(nil) == nil, "an unknown host epoch lists no lost attempt")
-		local function ledger()
-			local scope = db.peek("authority").sessions[binding.session_key]
-			return { launch = scope.launch, jobs = scope.jobs }
-		end
-		local function remote(ids, attempt_revision, epoch)
-			sequence += 1
-			local value = request(binding, "owner", sequence, revision, "resolve_lost_attempts", { attempt_ids = ids, attempt_revision = attempt_revision })
-			local ok, err = authority.request(binding, value, epoch)
-			check(ok, "lost release request commits its reply: " .. tostring(err))
-			local _, latest = restart_of(epoch)
-			return latest.replies[value.request_id], value
-		end
-		local before = ledger()
-		for _, case in ipairs({
-			{ name = "stale attempt revision", ids = { a, b }, revision = view.attempt_revision - 1, epoch = "daemon:2", reason = "stale-attempt-revision" },
-			{ name = "mix with a running job", ids = { a, b, live }, revision = view.attempt_revision, epoch = "daemon:2", reason = "not-lost: " .. live },
-			{ name = "mix with an admission-expired job", ids = { a, expired }, revision = view.attempt_revision, epoch = "daemon:2", reason = "not-lost: " .. expired },
-			{ name = "unknown host epoch", ids = { a, b }, revision = view.attempt_revision, epoch = nil, reason = reason_unverifiable },
-		}) do
-			if path == "remote" then
-				local reply = remote(case.ids, case.revision, case.epoch)
-				check(reply ~= nil and not reply.ok and reply.error == case.reason, "remote " .. case.name .. " is refused: " .. tostring(reply and reply.error))
-				same(ledger(), before, "remote " .. case.name .. " leaves the ledger unchanged")
-			else
-				refused_unchanged(db, function()
-					return authority.edit(binding, revision, "resolve-lost-attempts", { attempt_ids = case.ids, attempt_revision = case.revision, epoch = case.epoch })
-				end, "native " .. case.name, case.reason)
-			end
-		end
-		if path == "native" then
-			refused_unchanged(db, function()
-				return authority.edit(binding, revision, "resolve-lost-attempts", { attempt_ids = { a, a }, attempt_revision = view.attempt_revision, epoch = "daemon:2" })
-			end, "native duplicate attempt IDs")
-		else
-			local duplicate = request(binding, "owner", sequence + 1, revision, "resolve_lost_attempts", { attempt_ids = { a, a }, attempt_revision = view.attempt_revision })
-			refused_unchanged(db, function() return authority.request(binding, duplicate, "daemon:2") end, "remote duplicate attempt IDs")
-		end
-		local current = select(2, restart_of("daemon:2"))
-		if path == "remote" then
-			local reply, value = remote({ a, b }, current.attempt_revision, "daemon:2")
-			check(reply ~= nil and reply.ok and reply.result.released == 2, "remote bulk release reports every released attempt")
-			check(authority.validate(db.peek("authority")) ~= nil, "the retained release reply survives read_root validation")
-			local settled = ledger()
-			check(authority.request(binding, value, "daemon:2"), "an identical replay returns the retained reply")
-			same(ledger(), settled, "an identical replay changes nothing")
-			same(select(2, restart_of("daemon:2")).replies[value.request_id], reply, "the replayed reply is unchanged")
-		else
-			edit(authority, binding, "resolve-lost-attempts", { attempt_ids = { a, b }, attempt_revision = current.attempt_revision, epoch = "daemon:2" })
-			local released = select(2, restart_of("daemon:2"))
-			refused_unchanged(db, function()
-				return authority.edit(binding, revision, "resolve-lost-attempts", { attempt_ids = { a, b }, attempt_revision = released.attempt_revision, epoch = "daemon:2" })
-			end, "native repeated release", "not-lost: " .. a)
-		end
-		local after_restart, after = restart_of("daemon:2")
-		check(after_restart == nil, path .. ": no lost attempt remains after release")
-		for _, attempt in after.attempts do
-			local job = nil
-			for _, candidate in after.jobs do if candidate.id == attempt.id then job = candidate end end
-			if attempt.id == a or attempt.id == b then
-				check(not attempt.unresolved and attempt.phase == "Unknown" and job.stage == "resolved", path .. ": released attempt and job are resolved")
-			elseif attempt.id == live then
-				check(attempt.unresolved and attempt.phase == "Running" and job.stage == "running", path .. ": running attempt is untouched")
-			else
-				check(attempt.unresolved and job.stage == "unknown", path .. ": admission-expired attempt stays per-attempt only")
-			end
-		end
+-- R3: after a host restart every ordinary attempt first waits out a time-based
+-- grace (Tern restores panes after the host loads). A pane in which Tern reran the
+-- agent command is re-adopted at any sweep during grace; the rest end together in
+-- one write once grace expires. Managed attempts are never touched.
+sections.sweep_restart = function()
+	local db, authority, binding = fresh({ record("agent"), record("rerun"), record("slow"), record("managed") })
+	local admit = admitter(authority, binding)
+	local a, b = admit("agent"), admit("agent")
+	run_job(authority, binding, a, 41, "daemon:1"); run_job(authority, binding, b, 42, "daemon:1")
+	local legacy = admit("agent"); run_job(authority, binding, legacy, 43, "daemon:1")
+	update(authority, binding, legacy, "running", { stage = "unknown" }, { phase = "Unknown", error_category = "host-unavailable", diagnostic = "Host restarted (daemon epoch changed): lost; execution will not be repeated" })
+	local rerun = admit("rerun"); run_job(authority, binding, rerun, 44, "daemon:1")
+	update(authority, binding, rerun, "running", { process_identity = "boot:100:old" })
+	update(authority, binding, rerun, "running", { stage = "unknown" }, { phase = "Unknown", diagnostic = "Host restarted (daemon epoch changed): lost; execution will not be repeated" })
+	local slow = admit("slow"); run_job(authority, binding, slow, 45, "daemon:1")
+	local managed = assert(authority.managed_reserve(binding, 1, "managed", "bridge-observer"))
+	check(authority.managed_observe(binding, managed.id, "bridge-observer", { phase = "Running", pane = 46 }), "managed attempt runs in its own pane")
+	local function view_at(epoch) return assert(authority.snapshot(binding, epoch)) end
+	local managed_before = by_id(view_at(nil))[managed.id]
+	check(view_at("daemon:2").host_restart_notice == nil, "no notice before any sweep")
+	local grace = authority.RESTART_GRACE_SECONDS
+	local start = db.now
+	local writes = db.authority_writes
+	check(authority.sweep(binding, {}, "daemon:2", start) == 5, "the load-time sweep starts grace for every ordinary attempt")
+	check(db.authority_writes == writes + 1, "starting grace commits in one persist")
+	local attempts, jobs = by_id(view_at("daemon:2"))
+	check(attempts[a].phase == "Running" and attempts[b].phase == "Running" and attempts[slow].phase == "Running" and attempts[legacy].phase == "Unknown" and attempts[rerun].phase == "Unknown", "no pane restored yet ends nothing during grace")
+	local stored = db.peek("authority").sessions[binding.session_key].jobs
+	for _, id in ipairs({ a, b, legacy, rerun, slow }) do
+		check(stored[id].restart_grace == "daemon:2" and stored[id].restart_grace_at == start and stored[id].epoch == "daemon:1", id .. ": grace records only the epoch and its start")
 	end
+	check(view_at("daemon:2").host_restart_notice == nil, "grace raises no notice")
+	local panes = { [44] = { title = "ordinary-cli" }, [45] = { title = "bash" } }
+	writes = db.authority_writes
+	check(authority.sweep(binding, panes, "daemon:2", start + 5) == 1 and db.authority_writes == writes + 1, "a later sweep during grace re-adopts the rerun agent")
+	attempts, jobs = by_id(view_at("daemon:2"))
+	check(attempts[rerun].phase == "Running" and attempts[rerun].unresolved and attempts[rerun].diagnostic == "Re-adopted after host restart (Tern reran the agent command)" and jobs[rerun].stage == "running", "a pane titled with the agent command is re-adopted")
+	stored = db.peek("authority").sessions[binding.session_key].jobs
+	check(stored[rerun].epoch == "daemon:2" and stored[rerun].process_identity == nil and stored[rerun].restart_grace == nil and stored[rerun].restart_grace_at == nil, "re-adoption records the new epoch and drops the dead process identity")
+	check(attempts[slow].phase == "Running" and attempts[a].phase == "Running", "other attempts keep waiting")
+	local waiting = db.image()
+	check(authority.sweep(binding, panes, "daemon:2", start + grace - 1) == 0, "nothing ends before grace expires")
+	same(db.image(), waiting, "no persist while waiting")
+	writes = db.authority_writes
+	check(authority.sweep(binding, panes, "daemon:2", start + grace) == 4 and db.authority_writes == writes + 1, "expired grace ends every unadopted attempt in one persist")
+	local view = view_at("daemon:2")
+	attempts, jobs = by_id(view)
+	for _, id in ipairs({ a, b, legacy, slow }) do
+		local ended = attempts[id]
+		check(ended.phase == "Exited" and not ended.unresolved and ended.diagnostic == "Host restarted" and jobs[id].stage == "resolved", id .. ": an unadopted attempt moves to history as Host restarted")
+	end
+	check(attempts[rerun].phase == "Running", "a re-adopted attempt stays live under its new epoch")
+	same(attempts[managed.id], managed_before, "the sweep never touches a managed attempt")
+	local restart = view.host_restart_notice
+	check(restart ~= nil and restart.count == 4 and type(restart.restart_id) == "string" and #restart.restart_id == 32 and restart.restart_id:find("daemon", 1, true) == nil, "the informational notice counts ended attempts under a digest of the epoch")
+	check(count(restart) == 2, "the notice carries only restart_id and count")
+	-- A pre-0.5.0 window validates host_restart only as blocking Unknown attempts.
+	check(view.host_restart == nil, "the legacy host_restart key is never published")
+	check(view_at("daemon:1").host_restart_notice == nil and view_at(nil).host_restart_notice == nil, "another or unknown epoch shows no notice")
+	local settled = db.image()
+	check(authority.sweep(binding, panes, "daemon:2", start + grace + 15) == 0, "a settled store has nothing to change")
+	same(db.image(), settled, "no persist when nothing changed")
+	same(by_id(view_at(nil))[managed.id], managed_before, "managed attempt is unchanged after every sweep")
+end
+
+-- R3 without a restart: a closed pane ends its attempt, an unclaimed ticket fails,
+-- and an unverifiable host epoch (nil) falls back to the pane rule alone.
+sections.sweep_pane = function()
+	local db, authority, binding = fresh({ record("agent") })
+	local admit = admitter(authority, binding)
+	local closed = admit("agent"); run_job(authority, binding, closed, 61, "daemon:1")
+	local kept = admit("agent"); run_job(authority, binding, kept, 62, "daemon:1")
+	local starting = admit("agent"); claim(authority, binding, starting, 63)
+	local ticket = admit("agent")
+	local panes = { [62] = { title = "ordinary-cli" }, [63] = { title = "bash" } }
+	local other = copy(binding); other.native_session = 5
+	for _, case in ipairs({
+		{ name = "missing pane inventory", run = function() return authority.sweep(binding, nil, "daemon:1", db.now) end },
+		{ name = "string pane id", run = function() return authority.sweep(binding, { ["61"] = {} }, "daemon:1", db.now) end },
+		{ name = "non-table pane entry", run = function() return authority.sweep(binding, { [61] = true }, "daemon:1", db.now) end },
+		{ name = "invalid epoch", run = function() return authority.sweep(binding, panes, 7, db.now) end },
+		{ name = "missing clock", run = function() return authority.sweep(binding, panes, "daemon:1", nil) end },
+		{ name = "other native session", run = function() return authority.sweep(other, panes, "daemon:1", db.now) end },
+	}) do refused_unchanged(db, case.run, "sweep with " .. case.name) end
+	check(authority.sweep(binding, panes, nil, db.now) == 1, "with an unverifiable epoch only the closed pane settles")
+	local attempts, jobs = by_id(snapshot(authority, binding))
+	check(attempts[closed].phase == "Exited" and not attempts[closed].unresolved and attempts[closed].diagnostic == "Pane closed" and jobs[closed].stage == "resolved", "an absent pane moves to history as Pane closed")
+	check(attempts[kept].phase == "Running" and attempts[kept].unresolved, "a present pane stays live")
+	check(db.peek("authority").sessions[binding.session_key].jobs[kept].restart_grace == nil, "a nil epoch is never read as a restart")
+	check(attempts[starting].phase == "Starting" and attempts[ticket].phase == "Starting" and jobs[ticket].stage == "admitted", "claims in flight and fresh tickets wait")
+	check(authority.sweep(binding, { [63] = { title = "bash" } }, "daemon:1", db.now) == 1, "the same epoch applies the pane rule")
+	attempts = by_id(snapshot(authority, binding))
+	check(attempts[kept].phase == "Exited" and attempts[kept].diagnostic == "Pane closed", "a pane closed under the recording epoch is Pane closed, not Host restarted")
+	check(assert(authority.snapshot(binding, "daemon:1")).host_restart_notice == nil, "pane closures never raise the restart notice")
+	check(authority.sweep(binding, { [63] = { title = "bash" } }, "daemon:1", db.now + authority.ADMISSION_SECONDS) == 1, "the deadline settles only the unclaimed ticket")
+	attempts, jobs = by_id(snapshot(authority, binding))
+	check(attempts[ticket].phase == "Failed" and not attempts[ticket].unresolved and attempts[ticket].diagnostic == "Never started (ticket not claimed)" and jobs[ticket].stage == "failed", "an unclaimed ticket moves to history as Failed")
+	check(authority.sweep(binding, {}, "daemon:1", db.now) == 1, "a claimed pane that closes before submission settles")
+	attempts, jobs = by_id(snapshot(authority, binding))
+	check(attempts[starting].phase == "Exited" and attempts[starting].diagnostic == "Pane closed" and jobs[starting].stage == "resolved", "a Starting attempt whose pane is gone is never shown live")
+	for _, a in pairs(attempts) do check(not a.unresolved, a.id .. " is history") end
+end
+
+-- Cold start: a store written before automatic settlement holds blocking
+-- Unknowns; the first host sweep settles every one of them in one write.
+sections.sweep_legacy = function()
+	local db, authority, binding = fresh({ record("agent") })
+	local admit = admitter(authority, binding)
+	local expired = admit("agent")
+	update(authority, binding, expired, "admitted", { stage = "unknown" }, { phase = "Unknown", diagnostic = "The launch ticket was not claimed within 30 seconds." })
+	local lost = admit("agent"); run_job(authority, binding, lost, 91, "daemon:1")
+	update(authority, binding, lost, "running", { stage = "unknown" }, { phase = "Unknown", error_category = "host-unavailable", diagnostic = "Host restarted (daemon epoch changed): lost; execution will not be repeated" })
+	local alive = admit("agent"); run_job(authority, binding, alive, 92, "daemon:1")
+	update(authority, binding, alive, "running", { stage = "unknown" }, { phase = "Unknown", diagnostic = "The native pane does not retain its exact host ticket and shell" })
+	local unsent = admit("agent"); claim(authority, binding, unsent, 93)
+	update(authority, binding, unsent, "claimed", { stage = "unknown" }, { phase = "Unknown", diagnostic = "No verified provider process identity survived reload; execution will not be repeated" })
+	local released = admit("agent"); run_job(authority, binding, released, 94, "daemon:1")
+	update(authority, binding, released, "running", { stage = "unknown" }, { phase = "Unknown" })
+	-- Older versions' manual release left a resolved Unknown in history.
+	local image = db.image()
+	local scope = image.authority.sessions[binding.session_key]
+	for _, a in ipairs(scope.launch.attempts) do if a.id == released then a.unresolved = false end end
+	scope.jobs[released].stage = "resolved"
+	local cold_db = boundary(image)
+	local cold = modules(cold_db)
+	local unresolved = 0
+	for _, a in snapshot(cold, binding).attempts do if a.phase == "Unknown" and a.unresolved then unresolved += 1 end end
+	check(unresolved == 4, "the cold store holds four blocking legacy Unknowns")
+	local panes = { [92] = { title = "bash" }, [93] = { title = "bash" } }
+	local writes = cold_db.authority_writes
+	check(cold.sweep(binding, panes, "daemon:1", db.now + cold.ADMISSION_SECONDS) == 5 and cold_db.authority_writes == writes + 1, "the first sweep settles every legacy Unknown in one write")
+	local attempts, jobs = by_id(snapshot(cold, binding))
+	check(attempts[expired].phase == "Failed" and attempts[expired].diagnostic == "Never started (ticket not claimed)" and jobs[expired].stage == "failed", "a legacy expired ticket fails")
+	check(attempts[lost].phase == "Exited" and attempts[lost].diagnostic == "Pane closed" and jobs[lost].stage == "resolved", "a legacy Unknown without its pane ends")
+	check(attempts[alive].phase == "Running" and attempts[alive].unresolved and attempts[alive].diagnostic == nil and jobs[alive].stage == "running", "a legacy Unknown whose submitted pane is present is live again")
+	check(attempts[unsent].phase == "Failed" and attempts[unsent].diagnostic == "Never started (provider command was not submitted)" and jobs[unsent].stage == "failed", "a legacy claim that never submitted cannot become a provider")
+	check(attempts[released].phase == "Exited" and attempts[released].diagnostic == "Pane closed" and jobs[released].stage == "resolved", "a manually released Unknown is settled into ordinary history")
+	for _, a in pairs(attempts) do check(a.phase ~= "Unknown", a.id .. " is no longer Unknown") end
+	local settled = cold_db.image()
+	check(cold.sweep(binding, panes, "daemon:1", db.now + cold.ADMISSION_SECONDS) == 0, "the second sweep has nothing to settle")
+	same(cold_db.image(), settled, "a settled cold store is not rewritten")
+end
+
+-- Upgrade boundary: manual release is gone. A retained or newly delivered old
+-- request is acknowledged as obsolete and never executed; the authority stays readable.
+sections.obsolete_release = function()
+	local db, authority, binding = fresh({ record("agent") })
+	local id = admitter(authority, binding, "launcher")("agent")
+	run_job(authority, binding, id, 71, "daemon:1")
+	update(authority, binding, id, "running", { stage = "unknown" }, { phase = "Unknown" })
+	local image = db.image()
+	local scope = image.authority.sessions[binding.session_key]
+	local revision = scope.launch.revision
+	local released = request(binding, "owner", 1, 1, "resolve_lost_attempts", { attempt_ids = { id }, attempt_revision = revision })
+	local refused = request(binding, "owner", 2, 1, "resolve_attempt", { attempt_id = id, attempt_revision = 0 })
+	scope.requests[released.request_id], scope.requests[refused.request_id] = released, refused
+	scope.replies[released.request_id] = { request_id = released.request_id, observer_id = "owner", request_sequence = 1, ok = true, config_revision = 1, attempt_revision = revision, result = { released = 1 } }
+	scope.replies[refused.request_id] = { request_id = refused.request_id, observer_id = "owner", request_sequence = 2, ok = false, error = "stale-attempt-revision", config_revision = 1, attempt_revision = revision }
+	scope.request_sequences.owner = 2
+	local old_db = boundary(image)
+	local upgraded = modules(old_db)
+	check(upgraded.validate(old_db.peek("authority")) ~= nil, "a store retaining old release requests validates")
+	local view = snapshot(upgraded, binding)
+	for _, old in ipairs({ released, refused }) do
+		local reply = view.replies[old.request_id]
+		check(reply.ok and reply.error == nil and equal(reply.result, { obsolete = true, notice = OBSOLETE_NOTICE }), old.op .. ": a retained old request is acknowledged as obsolete")
+	end
+	local ledger = old_db.peek("authority").sessions[binding.session_key].launch
+	check(by_id(view)[id].phase == "Unknown" and by_id(view)[id].unresolved, "acknowledgement replays nothing")
+	local before = old_db.image()
+	check(upgraded.request(binding, released), "an identical redelivery is answered from the retained reply")
+	same(old_db.image(), before, "redelivery changes nothing")
+	local incoming = request(binding, "owner", 3, 0, "resolve_lost_attempts", { attempt_ids = { id }, attempt_revision = view.attempt_revision }, { released.request_id, refused.request_id })
+	local reply = submit(upgraded, binding, incoming)
+	check(reply.ok and equal(reply.result, { obsolete = true, notice = OBSOLETE_NOTICE }), "a newly delivered old request is acknowledged before any fence")
+	local after = snapshot(upgraded, binding)
+	check(after.replies[released.request_id] == nil and after.replies[refused.request_id] == nil, "acknowledged obsolete replies are released")
+	same(old_db.peek("authority").sessions[binding.session_key].launch, ledger, "an obsolete request never touches the ledger")
+	local malformed = request(binding, "owner", 4, 1, "resolve_attempt", { attempt_id = id, reason = "unexpected" })
+	refused_unchanged(old_db, function() return upgraded.request(binding, malformed) end, "an obsolete op with unknown fields")
+	for _, operation in ipairs({ "resolve-attempt", "resolve-lost-attempts" }) do
+		refused_unchanged(old_db, function()
+			return upgraded.edit(binding, after.config_revision, operation, { id = id, attempt_ids = { id }, attempt_revision = after.attempt_revision, epoch = "daemon:1" })
+		end, operation .. " edit is removed", "Unknown settings operation")
+	end
+	check(upgraded.sweep(binding, {}, "daemon:1", old_db.now) == 1, "the sweep settles what manual release used to")
+	check(by_id(snapshot(upgraded, binding))[id].phase == "Exited", "the attempt is history without any manual step")
+end
+
+-- R4: every Spawn is its own attempt. A second launch of a record is admitted
+-- while the first is live, in steady state and after a cold start.
+sections.repeat_launch = function()
+	local db, authority, binding = fresh({ record("agent") })
+	local admit = admitter(authority, binding)
+	local first = admit("agent")
+	local second = admit("agent")
+	check(first ~= second, "a second launch while the first is Starting gets its own attempt")
+	run_job(authority, binding, first, 81, "daemon:1")
+	local third = admit("agent")
+	local cold = modules(boundary(db.image()))
+	local fourth = submit(cold, binding, request(binding, "cold", 1, 1, "launch_record", { record_id = "agent" }))
+	check(fourth.ok, "a cold-started host admits another launch of a live record")
+	local attempts = by_id(snapshot(cold, binding))
+	local live = 0
+	for _, a in pairs(attempts) do if a.unresolved and a.record_id == "agent" then live += 1 end end
+	check(live == 4 and attempts[first].phase == "Running" and attempts[third].phase == "Starting", "every copy of the record is live at once")
+	edit(authority, binding, "replace-records", { records = { record("agent", { enabled = false }) } })
+	local disabled = submit(authority, binding, request(binding, "window", 4, 2, "launch_record", { record_id = "agent" }, { "window/3" }))
+	check(not disabled.ok and disabled.error == "disabled", "only a disabled record is skipped")
+end
+
+-- Restore boundary: a store written while duplicate_policy existed stays readable;
+-- the retired field is stripped from the roster and from managed import receipts.
+sections.retired_fields = function()
+	local db, authority, binding = fresh({ record("agent") })
+	check(assert(authority.managed_import(binding, 1, "bridge-import", { record("imported") })).imported == 1, "seed a managed import receipt")
+	local image = db.image()
+	local stored = image.authority
+	stored.config.hosts["host-A"].agents[1].duplicate_policy = "skip"
+	stored.sessions[binding.session_key].managed_imports["bridge-import"][1].duplicate_policy = "allow"
+	local old_db = boundary(image)
+	local upgraded = modules(old_db)
+	local view = snapshot(upgraded, binding)
+	check(#view.records == 2 and view.records[1].id == "agent" and view.records[1].duplicate_policy == nil, "a stored record carrying duplicate_policy is read with it stripped")
+	check(assert(upgraded.managed_import(binding, -1, "bridge-import", { record("imported") })).replayed, "an old receipt carrying duplicate_policy still replays exactly")
+	check(submit(upgraded, binding, reserve_request(binding, "window", 1, view.config_revision, "agent")).ok, "the stripped record launches")
+	local saved = old_db.peek("authority")
+	check(saved.config.hosts["host-A"].agents[1].duplicate_policy == nil and saved.sessions[binding.session_key].managed_imports["bridge-import"][1].duplicate_policy == nil, "the next persist writes canonical values")
 end
 
 local run = assert(sections[section], "unknown authority test section: " .. section)

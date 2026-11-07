@@ -22,11 +22,13 @@ fake.kv = { get = function() return if ui_value then clone(ui_value) else nil en
 fake.block = { define = function(_, value) definition = value end }; fake.on = function() end
 fake.timer = function() return { cancel = function() end } end
 local modules = {}
-local function load(name)
-	name = name:gsub("^%./", "")
+-- `./x` resolves against the requiring module's directory, as Tern's require does (updater/ modules).
+local function load(name, base)
+	name = (base or "") .. name:gsub("^%./", "")
 	if modules[name] then return modules[name] end
 	local chunk = assert(loadstring(runtime.fs.read(root .. "/" .. name .. ".luau"), name))
-	setfenv(chunk, setmetatable({ tern = fake, require = load }, { __index = environment }))
+	local dir = name:match("^(.*/)")
+	setfenv(chunk, setmetatable({ tern = fake, require = function(n) return load(n, dir) end }, { __index = environment }))
 	local value = chunk(); modules[name] = value; return value
 end
 local host, state, dispatch, codec, quota = load("host"), load("state"), load("dispatch"), load("transport"), load("quota")
@@ -697,11 +699,12 @@ itern.pane = { list = function() return { { pane = 11 } } end }
 local host_timers = {}
 itern.timer = function(_, fn) table.insert(host_timers, fn); return { cancel = function() end } end
 local imodules = {}
-local function iload(name)
-	name = name:gsub("^%./", "")
+local function iload(name, base)
+	name = (base or "") .. name:gsub("^%./", "")
 	if imodules[name] then return imodules[name] end
 	local chunk = assert(loadstring(runtime.fs.read(root .. "/" .. name .. ".luau"), "intent-" .. name))
-	setfenv(chunk, setmetatable({ tern = itern, require = iload }, { __index = environment }))
+	local dir = name:match("^(.*/)")
+	setfenv(chunk, setmetatable({ tern = itern, require = function(n) return iload(n, dir) end }, { __index = environment }))
 	local value = chunk(); imodules[name] = value; return value
 end
 iload("host")

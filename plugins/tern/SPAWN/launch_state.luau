@@ -13,10 +13,12 @@
 -- Native pane IDs are display-only in Window snapshots and never Window API IDs.
 -- A bound native pane cannot be replaced on an existing attempt.
 --
--- Starting is a reservation, not proof of execution. Unknown retains the reservation
--- on close, disconnect, or unverified reload. Only terminal evidence or explicit
--- resolve releases it. A retained failed shell never becomes a running provider.
--- No attempt is automatically evicted, and IDs are never reused after cleanup.
+-- Starting is a reservation, not proof of execution. An ordinary or setup attempt is
+-- live only while its pane provably exists: classify() turns host evidence (pane gone,
+-- ticket never claimed, host restart) into terminal history and settle() applies it,
+-- with no human release. Managed attempts keep their reservation until the authority
+-- proves them stopped. A retained failed shell never becomes a running provider.
+-- Every launch gets its own attempt, and IDs are never reused after cleanup.
 local M = {}
 
 export type Attempt = {
@@ -200,8 +202,8 @@ end
 
 -- reserve returns an aliased attempt in the caller's candidate. Admission outcomes
 -- skip/capacity/review do not allocate IDs or change revisions. Roster disabled is
--- skip; an explicit setup helper is independent of roster enabled/duplicate policy.
--- Helpers retain the real record ID but never block ordinary roster admission.
+-- skip; an explicit setup helper is independent of roster enabled. Another live
+-- attempt of the same record never refuses admission: every launch is its own attempt.
 function M.reserve(state: State, record: any, scope: string, observer_id: string, purpose: string?): (Attempt?, string?)
 	if purpose ~= nil and purpose ~= "launch" and purpose ~= "setup" and purpose ~= "managed" then return nil, "invalid-purpose" end
 	local setup = purpose == "setup"
@@ -212,12 +214,6 @@ function M.reserve(state: State, record: any, scope: string, observer_id: string
 	end
 	local mode = MODES[record.backend]
 	if mode == nil or (record.backend == "native-agent" and string.lower(record.provider) ~= "omp") then return nil, "review" end
-	if record.duplicate_policy ~= "allow" and record.duplicate_policy ~= "skip" then return nil, "review" end
-	if not setup and record.duplicate_policy == "skip" then
-		for _, attempt in state.attempts do
-			if attempt.purpose ~= "setup" and attempt.record_id == record.id and attempt.scope == scope and blocking(attempt) then return nil, "skip" end
-		end
-	end
 	if #state.attempts >= MAX_ATTEMPTS or state.next_attempt >= MAX_INTEGER or state.revision >= MAX_INTEGER then
 		return nil, "capacity"
 	end
@@ -314,17 +310,38 @@ function M.observe(state: State, attempt_id: string, observation: Observation): 
 	return true, nil
 end
 
--- Explicit user inspection only. This never closes a pane and never invents exit 0.
--- Idempotent on already released history; terminal diagnostics remain untouched.
-function M.resolve(state: State, attempt_id: string): (boolean, string?)
+-- Pure classification of host evidence for one attempt. Managed and terminal
+-- attempts are never classified. A resolved legacy Unknown is already history, so
+-- it is never brought back to Running; terminal evidence still settles it.
+function M.classify(attempt: Attempt, evidence: any): (string?, string?)
+	if attempt.purpose == "managed" or terminal(attempt.phase) then return nil, nil end
+	local revivable = not (attempt.phase == "Unknown" and not attempt.unresolved)
+	if evidence.ticket_expired == true then return "Failed", "Never started (ticket not claimed)" end
+	if evidence.epoch_changed == true then
+		if evidence.readopt == true then
+			if revivable then return "Running", "Re-adopted after host restart (Tern reran the agent command)" end
+			return nil, nil
+		end
+		-- Tern restores panes after the host plugin loads: wait out the grace period
+		-- even while the pane is still missing, so a rerun agent can be re-adopted.
+		if evidence.grace_used ~= true then return nil, nil end
+		return "Exited", "Host restarted"
+	end
+	if evidence.pane_present == false then return "Exited", "Pane closed" end
+	if evidence.pane_present == true and attempt.phase == "Unknown" and revivable then return "Running", nil end
+	return nil, nil
+end
+
+-- Applies a classify() result exactly like the equivalent observation: Exited and
+-- Failed release the attempt into history; Running keeps a bound pane live. This
+-- never closes a pane. Managed and terminal attempts are refused unchanged.
+function M.settle(state: State, attempt_id: string, phase: string, diagnostic: string?): (boolean, string?)
 	local attempt = find(state, attempt_id)
 	if attempt == nil then return false, "missing-attempt" end
-	if not blocking(attempt) then return true, nil end
-	if state.revision >= MAX_INTEGER then return false, "capacity" end
-	attempt.phase = "Unknown"
-	attempt.unresolved = false
-	state.revision += 1
-	return true, nil
+	if attempt.purpose == "managed" then return false, "managed-attempt" end
+	if terminal(attempt.phase) then return false, "terminal-attempt" end
+	if phase ~= "Exited" and phase ~= "Failed" and phase ~= "Running" then return false, "invalid-phase" end
+	return M.observe(state, attempt_id, { phase = phase, diagnostic = diagnostic })
 end
 
 -- Only the authority can establish that a managed Exited attempt is no longer

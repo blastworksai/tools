@@ -8,6 +8,10 @@ local SNAPSHOT_PREFIX = "SPAWN_STATE_V2 "
 local ADMISSION_SECONDS = 30
 M.ADMISSION_SECONDS = ADMISSION_SECONDS
 local KEEP_FINISHED = 26
+-- After a daemon restart Tern restores panes and reruns agent commands only some
+-- time after the host loads, so an attempt waits this long for re-adoption.
+local RESTART_GRACE_SECONDS = 20
+M.RESTART_GRACE_SECONDS = RESTART_GRACE_SECONDS
 local MAX_INT = 9007199254740991
 
 local function clone(value)
@@ -203,7 +207,7 @@ local function job_valid(root,key,scope,job,a)
 	if not fields(job,{id=true,attempt_id=true,record_id=true,purpose=true,config_revision=true,observer_id=true,
 		session_key=true,native_session=true,token=true,ticket=true,stage=true,admitted_at=true,
 		provider=true,account_label=true,backend=true,placement=true,cwd=true,
-		pane_reused=true,setup_run_id=true,initial_prompt=true,native=true,native_tab=true,epoch=true,process_identity=true,command=true}) then
+		pane_reused=true,setup_run_id=true,initial_prompt=true,native=true,native_tab=true,epoch=true,process_identity=true,command=true,restart_grace=true,restart_grace_at=true}) then
 		return false
 	end
 	if job.id~=a.id or job.attempt_id~=a.id or job.record_id~=a.record_id
@@ -216,9 +220,11 @@ local function job_valid(root,key,scope,job,a)
 	if a.mode~=mode then return false end
 	if job.native~=nil then
 		if not native_valid(job.native) or a.pane~=job.native.pane then return false end
-	elseif a.pane~=nil or job.native_tab~=nil or job.epoch~=nil or job.process_identity~=nil or job.command~=nil then return false end
+	elseif a.pane~=nil or job.native_tab~=nil or job.epoch~=nil or job.process_identity~=nil or job.command~=nil or job.restart_grace~=nil then return false end
 	if job.epoch~=nil and not text(job.epoch,4096) then return false end
 	if job.process_identity~=nil and not text(job.process_identity,4096) then return false end
+	if job.restart_grace~=nil and not text(job.restart_grace,4096) then return false end
+	if job.restart_grace_at~=nil and (job.restart_grace==nil or not integer(job.restart_grace_at,0)) then return false end
 	if job.command~=nil and not bounded(job.command,64000) then return false end
 	local stage=job.stage
 	if stage=="admitted" then return a.phase=="Starting" and job.native==nil and not job.pane_reused end
@@ -228,55 +234,49 @@ local function job_valid(root,key,scope,job,a)
 	if stage=="completed" then return (a.phase=="Exited" or a.phase=="Failed") and job.native~=nil and job.command~=nil end
 	if stage=="failed" then return a.phase=="Failed" end
 	if stage=="unknown" then return a.phase=="Unknown" and a.unresolved end
-	if stage=="resolved" then return a.phase=="Unknown" and not a.unresolved end
+	-- Settled without provider completion evidence: SPAWN ended it (pane closed,
+	-- host restarted) or, in older stores, an operator released an Unknown.
+	if stage=="resolved" then return not a.unresolved and (a.phase=="Exited" and job.native~=nil or a.phase=="Unknown") end
 	return false
 end
-local OPS = {refresh = {}, import_records = {setup_run_id=true, records=true}, launch_record = {record_id=true}, start_setup = {record_id=true,setup_run_id=true}, resolve_attempt = {attempt_id=true,attempt_revision=true}, resolve_lost_attempts = {attempt_ids=true,attempt_revision=true}}
-local MAX_LOST = 128
-local function unique_ids(ids)
-	if not array(ids,MAX_LOST) or #ids<1 then return false end
-	local seen={}
-	for _,id in ipairs(ids) do if not text(id,96) or seen[id] then return false end seen[id]=true end
-	return true
-end
+local OPS = {refresh = {}, import_records = {setup_run_id=true, records=true}, launch_record = {record_id=true}, start_setup = {record_id=true,setup_run_id=true}}
+-- Upgrade boundary: manual release was removed because ordinary attempts settle
+-- themselves. A request with a removed op is acknowledged, never executed.
+local OBSOLETE = {resolve_attempt = {attempt_id=true,attempt_revision=true}, resolve_lost_attempts = {attempt_ids=true,attempt_revision=true}}
+local OBSOLETE_RESULT = {obsolete=true, notice="An old Mark-no-longer-running request was cleared; SPAWN now does this automatically"}
 local function request_valid(r)
 	if not fields(r, {version=true,request_id=true,authority_id=true,observer_id=true,request_sequence=true,acknowledged_requests=true,expected_config_revision=true,op=true,data=true}) or r.version ~= 2 then return false end
 	if not text(r.request_id, 256) or not text(r.authority_id, 256) or not text(r.observer_id, 256) or not integer(r.request_sequence, 1) or not integer(r.expected_config_revision, 0) then return false end
-	if not array(r.acknowledged_requests, 64) or type(r.op) ~= "string" or OPS[r.op] == nil or not fields(r.data, OPS[r.op]) then return false end
+	local allowed = if type(r.op) == "string" then OPS[r.op] or OBSOLETE[r.op] else nil
+	if not array(r.acknowledged_requests, 64) or allowed == nil or not fields(r.data, allowed) then return false end
 	local seen = {}
 	for _, id in ipairs(r.acknowledged_requests) do if not text(id,256) or seen[id] then return false end seen[id]=true end
 	local d = r.data
 	if r.op == "import_records" then return text(d.setup_run_id,256) and Config.validate_records(d.records) ~= nil end
 	if r.op == "launch_record" then return text(d.record_id,96) end
 	if r.op == "start_setup" then return text(d.record_id,96) and text(d.setup_run_id,256) end
-	if r.op == "resolve_attempt" then return text(d.attempt_id,96) and integer(d.attempt_revision,0) end
-	if r.op == "resolve_lost_attempts" then return unique_ids(d.attempt_ids) and integer(d.attempt_revision,0) end
 	return true
 end
 local function result_valid(reply,request,key,native_session)
+	if OBSOLETE[request.op] then return reply.ok==true and reply.error==nil and equal(reply.result,OBSOLETE_RESULT) end
 	if not reply.ok then return type(reply.error)=="string" and #reply.error>0 and #reply.error<=4096 and reply.result==nil end
 	if reply.error~=nil then return false end
 	local result=reply.result
 	if request.op=="refresh" then return fields(result,{}) end
 	if request.op=="import_records" then return fields(result,{imported=true,replayed=true}) and integer(result.imported,0) and result.imported<=32 and (result.replayed==nil or type(result.replayed)=="boolean") end
-	if request.op=="resolve_lost_attempts" then return fields(result,{released=true}) and integer(result.released,1) and result.released==#request.data.attempt_ids end
-	local is_launch=request.op=="launch_record" or request.op=="start_setup"
-	local allowed=if is_launch then {attempt=true,job=true,replayed=true} else {attempt=true}
-	if not fields(result,allowed) or type(result.attempt)~="table" then return false end
+	-- launch_record / start_setup
+	if not fields(result,{attempt=true,job=true,replayed=true}) or type(result.attempt)~="table" then return false end
 	local a=result.attempt
 	local digits=if type(a.id)=="string" then a.id:match("^attempt%-(%d+)$") else nil
 	local id=if digits then tonumber(digits) else nil
 	if not integer(id,1) or a.scope~=key or Launch.validate({version=1,next_attempt=id+1,revision=reply.attempt_revision,attempts={a}})==nil then return false end
-	if is_launch then
-		local job=Launch.validate_execution_projection(result.job)
-		if not job or job.id~=a.id or job.record_id~=request.data.record_id or a.record_id~=job.record_id
-			or job.observer_id~=request.observer_id or job.session_key~=key or job.native_session~=native_session
-			or job.config_revision>reply.config_revision or job.token~=key..":"..job.id
-			or (result.replayed~=nil and result.replayed~=true) then return false end
-		if request.op=="start_setup" then return job.purpose=="setup" and job.setup_run_id==request.data.setup_run_id end
-		return job.purpose=="launch"
-	end
-	return a.id==request.data.attempt_id
+	local job=Launch.validate_execution_projection(result.job)
+	if not job or job.id~=a.id or job.record_id~=request.data.record_id or a.record_id~=job.record_id
+		or job.observer_id~=request.observer_id or job.session_key~=key or job.native_session~=native_session
+		or job.config_revision>reply.config_revision or job.token~=key..":"..job.id
+		or (result.replayed~=nil and result.replayed~=true) then return false end
+	if request.op=="start_setup" then return job.purpose=="setup" and job.setup_run_id==request.data.setup_run_id end
+	return job.purpose=="launch"
 end
 
 local function source_records(raw,host_key,label)
@@ -301,6 +301,12 @@ end
 local function validate(root)
 	if not fields(root,{version=true,namespace=true,next_authority=true,host_key=true,config=true,config_revision=true,sessions=true,review=true,reviewed_sources=true}) or root.version ~= STORAGE_VERSION then return nil,"Unsupported or corrupt authority storage format; expected version 3. Preserve it and use a compatible version" end
 	if not text(root.namespace,128) or not text(root.host_key,1024) or not integer(root.next_authority,1) or not integer(root.config_revision,0) or type(root.sessions)~="table" or type(root.reviewed_sources)~="table" then return nil,"Corrupt authority identity" end
+	-- Stores written before duplicate_policy was retired still carry it on saved
+	-- records; strip it so the roster stays canonical instead of unreadable.
+	local bucket=if type(root.config)=="table" and type(root.config.hosts)=="table" then root.config.hosts[root.host_key] else nil
+	if type(bucket)=="table" and type(bucket.agents)=="table" then
+		for _,record in pairs(bucket.agents) do if type(record)=="table" then record.duplicate_policy=nil end end
+	end
 	local migrated, err = Config.migrate(root.config,root.host_key)
 	if not migrated or migrated.changed then return nil,err or "Noncanonical authority configuration" end
 	if count(root.sessions)>64 or count(root.reviewed_sources)>64 then return nil,"Authority capacity exhausted" end
@@ -325,7 +331,10 @@ local function validate(root)
 		scope.managed_imports=scope.managed_imports or {}
 		if type(scope.managed_imports)~="table" or count(scope.managed_imports)>64 then return nil,"Managed import receipt capacity exhausted" end
 		for id,receipt in pairs(scope.managed_imports) do
-			if not text(id,256) or Config.validate_records(receipt)==nil then return nil,"Corrupt managed import receipt" end
+			-- Receipts are kept canonical so a replay compares equal after retired fields are stripped.
+			local canonical=Config.validate_records(receipt)
+			if not text(id,256) or canonical==nil then return nil,"Corrupt managed import receipt" end
+			scope.managed_imports[id]=canonical
 		end
 		authority_ids[scope.authority_id]=true
 		local valid, launch_err = Launch.validate(scope.launch)
@@ -356,13 +365,20 @@ local function validate(root)
 		for observer, seq in pairs(scope.request_sequences) do if not text(observer,256) or not integer(seq,1) then return nil,"Corrupt request watermark" end end
 		for id, reply in pairs(scope.replies) do
 			local req=scope.requests[id]
+			-- A retained manual-release request from an older SPAWN is acknowledged
+			-- as obsolete in place; its old outcome is never replayed.
+			if type(req)=="table" and OBSOLETE[req.op]~=nil and type(reply)=="table" then reply.ok=true;reply.error=nil;reply.result=clone(OBSOLETE_RESULT) end
 			if not request_valid(req) or req.authority_id~=scope.authority_id or req.request_id~=id or not fields(reply,{request_id=true,observer_id=true,request_sequence=true,ok=true,error=true,config_revision=true,attempt_revision=true,result=true}) or reply.request_id~=id or reply.observer_id~=req.observer_id or reply.request_sequence~=req.request_sequence or type(reply.ok)~="boolean" or not integer(reply.config_revision,0) or not integer(reply.attempt_revision,0) or (scope.request_sequences[reply.observer_id] or 0)<reply.request_sequence then return nil,"Corrupt retained result" end
 			if reply.config_revision>root.config_revision or reply.attempt_revision>scope.launch.revision or not result_valid(reply,req,key,scope.native_session) then return nil,"Corrupt result payload" end
 		end
 	end
 	if root.review ~= nil then
 		if not fields(root.review,{sources=true,choices=true,reason=true}) or not array(root.review.sources,64) or type(root.review.choices)~="table" or type(root.review.reason)~="string" then return nil,"Corrupt migration review" end
-		for _, source in ipairs(root.review.sources) do if not fields(source,{label=true,records=true}) or not text(source.label,256) or Config.validate_records(source.records)==nil then return nil,"Corrupt migration source" end end
+		for _, source in ipairs(root.review.sources) do
+			local canonical=if fields(source,{label=true,records=true}) and text(source.label,256) then Config.validate_records(source.records) else nil
+			if canonical==nil then return nil,"Corrupt migration source" end
+			source.records=canonical
+		end
 		local ids={}
 		for _,source in ipairs(root.review.sources) do for _,record in ipairs(source.records) do ids[record.id]=true end end
 		for id,choice in pairs(root.review.choices) do
@@ -444,35 +460,19 @@ local function read_root()
 	if value==nil then return nil,"Authority has not been initialized" end
 	return upgrade(value)
 end
--- C3: the single definition of an attempt lost to a host daemon restart. Both
--- epochs must be known and differ; an unknown epoch is never lost (per-attempt only).
-local function epoch_lost(scope,a,epoch)
-	if a==nil or a.purpose=="managed" or a.phase~="Unknown" or not a.unresolved or not text(epoch,4096) then return false end
-	local job=scope.jobs[a.id]
-	return job~=nil and job.stage=="unknown" and job.native~=nil and text(job.epoch,4096) and job.epoch~=epoch
-end
-local function lost_ids(scope,epoch)
-	local ids={}
+-- The host-restart notice is informational: how many ordinary attempts the sweep
+-- ended as "Host restarted" under the current daemon epoch. Nothing to act on.
+local function restart_notice(scope,host_epoch)
+	if not text(host_epoch,4096) then return nil end
+	local ended=0
 	for _,a in ipairs(scope.launch.attempts) do
-		if #ids<MAX_LOST and epoch_lost(scope,a,epoch) then table.insert(ids,a.id) end
+		local job=scope.jobs[a.id]
+		if a.phase=="Exited" and job~=nil and job.restart_grace==host_epoch then ended+=1 end
 	end
-	return ids
+	if ended==0 then return nil end
+	-- Only a digest of the host epoch is published, never the raw boot identity.
+	return {restart_id=require("./codec").sha256(host_epoch):sub(1,32),count=ended}
 end
--- All-or-nothing explicit release; the only gate on both request and edit paths.
-local function resolve_lost(scope,ids,revision,epoch)
-	if not unique_ids(ids) or not integer(revision,0) then return nil,"invalid-lost-attempts: 1-128 unique attempt IDs and an attempt revision are required" end
-	if revision~=scope.launch.revision then return nil,"stale-attempt-revision" end
-	if not text(epoch,4096) then return nil,"host-epoch-unverifiable: inspect and mark each attempt individually" end
-	for _,id in ipairs(ids) do if not epoch_lost(scope,attempt(scope,id),epoch) then return nil,"not-lost: "..id end end
-	for _,id in ipairs(ids) do
-		local accepted,why=Launch.resolve(scope.launch,id);if not accepted then return nil,why end
-		scope.jobs[id].stage="resolved"
-	end
-	return {released=#ids}
-end
--- Persist-time capacity uses a probe epoch no real daemon reports, so the byte
--- ceiling always counts the largest possible host restart notice.
-local CAPACITY_EPOCH="spawn-capacity-probe"
 local function snapshot_value(root,key,host_epoch)
 	local scope=root.sessions[key]
 	local value={version=2,namespace=root.namespace,host_key=root.host_key,authority_id=scope.authority_id,session_key=key,
@@ -481,18 +481,21 @@ local function snapshot_value(root,key,host_epoch)
 		replies=clone(scope.replies),request_sequences=clone(scope.request_sequences),
 		host_os=tern.runtime.os,host_shell=tern.getenv("SHELL") or tern.getenv("ComSpec") or "unknown",
 		ready=root.review==nil,migration=clone(root.review),
-		error=if root.review then "Migration or legacy source review required in Config" else nil}
-	local lost=lost_ids(scope,host_epoch)
-	-- Only a digest of the host epoch is published, never the raw boot identity.
-	if #lost>0 then value.host_restart={restart_id=require("./codec").sha256(host_epoch):sub(1,32),attempts=lost} end
+		error=if root.review then "Migration or legacy source review required in Config" else nil,
+		-- Not "host_restart": windows before 0.5.0 accept that key only as a list of
+		-- blocking Unknown attempts and would refuse the whole snapshot. They ignore
+		-- unknown top-level keys, so the informational notice travels under its own.
+		host_restart_notice=restart_notice(scope,host_epoch)}
 	return value
 end
 local function capacity(root)
 	local valid,err=validate(root)
 	if not valid then return false,err end
 	-- Snapshot overhead is checked as well as the larger durable value.
-	for key, scope in pairs(root.sessions) do
-		local value=snapshot_value(root,key,CAPACITY_EPOCH)
+	for key in pairs(root.sessions) do
+		local value=snapshot_value(root,key,nil)
+		-- Count the largest restart notice: a full digest over all 128 attempts Launch retains.
+		value.host_restart_notice={restart_id=string.rep("0",32),count=128}
 		local json=encoded(value)
 		if not json or #SNAPSHOT_PREFIX+#json>MAX_BYTES then return false,"Snapshot capacity exhausted; nothing saved" end
 	end
@@ -519,6 +522,16 @@ local function persist(root)
 	if not ok then return false,"Could not save authority; previous state retained: "..tostring(why) end
 	return true
 end
+-- Applies one Launch.classify result and keeps the job stage coupled to it:
+-- Failed -> failed; Exited -> resolved (ended without provider completion
+-- evidence, so a late real completion may still replace it); Running -> running.
+local function settle_attempt(scope,id,phase,diagnostic)
+	local accepted,why=Launch.settle(scope.launch,id,phase,diagnostic)
+	if not accepted then return false,why end
+	scope.jobs[id].stage=if phase=="Failed" then "failed" elseif phase=="Exited" then "resolved" else "running"
+	return true
+end
+-- An unclaimed ticket past its deadline can never run: it settles to Failed.
 local function expire_admissions(root,now)
 	local candidate=nil
 	for key,scope in pairs(root.sessions) do
@@ -526,12 +539,11 @@ local function expire_admissions(root,now)
 			if job.stage=="admitted" and now-job.admitted_at>=ADMISSION_SECONDS then
 				candidate=candidate or clone(root)
 				local next_scope=candidate.sessions[key]
-				local accepted,why=Launch.observe(next_scope.launch,id,{
-					phase="Unknown",error_category="unknown",
-					diagnostic="The launch ticket was not claimed within 30 seconds. No provider submission is proven; inspect and explicitly resolve it. The ticket will not be allocated or sent again.",
-				})
-				if not accepted then return nil,why end
-				next_scope.jobs[id].stage="unknown"
+				local phase,diagnostic=Launch.classify(attempt(next_scope,id),{ticket_expired=true})
+				if phase~=nil then
+					local settled,why=settle_attempt(next_scope,id,phase,diagnostic)
+					if not settled then return nil,why end
+				end
 			end
 		end
 	end
@@ -619,8 +631,10 @@ function M.open(host_key,native_session,client_config,origin_scope)
 	return binding_for(root,key),nil
 end
 
-local function dispatch(root,key,r,now,host_epoch)
+local function dispatch(root,key,r,now)
 	local scope=root.sessions[key];local d=r.data
+	-- Acknowledged before any fence: there is nothing left to execute.
+	if OBSOLETE[r.op] then return clone(OBSOLETE_RESULT) end
 	if r.expected_config_revision~=root.config_revision then return nil,"stale-config" end
 	if root.review then return nil,"migration-review-required" end
 	if r.op=="refresh" then return {} end
@@ -652,7 +666,7 @@ local function dispatch(root,key,r,now,host_epoch)
 		end
 		local purpose=if setup then "setup" else "launch"
 		local a,err=Launch.reserve(scope.launch,record,key,execution_observer(root),purpose)
-		if not a then return nil,if err=="skip" then (if record.enabled==false then "disabled" else "duplicate") else err end
+		if not a then return nil,if err=="skip" then "disabled" else err end
 		local token=key..":"..a.id
 		local job={id=a.id,attempt_id=a.id,record_id=record.id,purpose=purpose,
 			config_revision=root.config_revision,observer_id=r.observer_id,session_key=key,native_session=scope.native_session,
@@ -661,19 +675,10 @@ local function dispatch(root,key,r,now,host_epoch)
 		for name,value in pairs(display(record,purpose)) do job[name]=value end
 		scope.jobs[job.id]=job
 		return {attempt=clone(a),job=public_job(job)}
-	elseif r.op=="resolve_lost_attempts" then
-		return resolve_lost(scope,d.attempt_ids,d.attempt_revision,host_epoch)
-	elseif r.op=="resolve_attempt" then
-		if d.attempt_revision~=scope.launch.revision then return nil,"stale-attempt-revision" end
-		local accepted,err=Launch.resolve(scope.launch,d.attempt_id)
-		if not accepted then return nil,err end
-		local a=attempt(scope,d.attempt_id)
-		if a.phase=="Unknown" and scope.jobs[d.attempt_id] then scope.jobs[d.attempt_id].stage="resolved" end
-		return {attempt=attempt(scope,d.attempt_id)}
 	end
 	return nil,"unsupported-operation"
 end
-function M.request(binding,input,host_epoch)
+function M.request(binding,input)
 	if not request_valid(input) then return false,"Invalid authority request; nothing executed" end
 	local now=os.time()
 	local ok,result,reason=pcall(function()
@@ -701,7 +706,7 @@ function M.request(binding,input,host_epoch)
 		end
 		-- Change, reply and watermark commit together in one atomic write.
 		local candidate=clone(base)
-		local value,dispatch_err=dispatch(candidate,key,input,now,host_epoch)
+		local value,dispatch_err=dispatch(candidate,key,input,now)
 		-- A rejected operation must not retain any candidate mutation.
 		if value==nil then candidate=clone(base) end
 		scope=candidate.sessions[key]
@@ -757,13 +762,6 @@ function M.edit(binding,expected,operation,data)
 	elseif operation=="replace-records" then
 		local canonical,why=Config.validate_records(data.records);if not canonical then return false,why end
 		root.config.hosts[root.host_key].agents=canonical;root.config_revision+=1
-	elseif operation=="resolve-attempt" then
-		if data.attempt_revision~=scope.launch.revision then return false,"stale-attempt-revision: inspect the refreshed attempt before marking it no longer running" end
-		local accepted,why=Launch.resolve(scope.launch,data.id);if not accepted then return false,why end
-		if attempt(scope,data.id).phase=="Unknown" and scope.jobs[data.id] then scope.jobs[data.id].stage="resolved" end
-	elseif operation=="resolve-lost-attempts" then
-		if type(data)~="table" then return false,"invalid-lost-attempts" end
-		local released,why=resolve_lost(scope,data.attempt_ids,data.attempt_revision,data.epoch);if not released then return false,why end
 	elseif operation=="clear-history" then
 		if data.attempt_revision~=scope.launch.revision then return false,"Launch history changed; inspect the refreshed history before clearing it" end
 		local registry,registry_error=managed_registry();if registry==nil then return false,registry_error end
@@ -777,9 +775,11 @@ function M.edit(binding,expected,operation,data)
 		if registry==nil then return false,registry_error end
 		if managed_references(registry,binding.session_key,scope,true) then return false,"Recover managed controllers, consumed authorizations and import gates before resetting transport" end
 		if next(scope.replies)~=nil then return false,"Review every retained result before resetting transport" end
+		-- Ordinary attempts settle themselves; only live work and managed
+		-- reservations still owe a result to the current transport.
 		for _,a in ipairs(scope.launch.attempts) do
-			if a.unresolved or (a.phase~="Exited" and a.phase~="Failed" and a.phase~="Unknown") then
-				return false,"Resolve every active or unresolved attempt before resetting transport"
+			if a.phase=="Starting" or a.phase=="Running" or a.phase=="Waiting for input" or a.purpose=="managed" and a.unresolved then
+				return false,"Wait until every live or managed attempt has ended before resetting transport"
 			end
 		end
 		if root.next_authority>=MAX_INT then return false,"Authority identity capacity exhausted" end
@@ -879,13 +879,14 @@ function M.claim_execution(binding,id,native)
 	local saved,problem=persist(candidate);if not saved then return nil,problem end
 	return clone(job),nil
 end
+-- "resolved" is entered only by the sweep (settle_attempt), never by the executor.
 local PROGRESS={
-	admitted={failed=true,unknown=true,resolved=true},
-	claimed={submission_intent=true,failed=true,unknown=true,resolved=true},
-	submission_intent={submitted=true,running=true,completed=true,unknown=true,resolved=true},
-	submitted={running=true,completed=true,unknown=true,resolved=true},
-	running={completed=true,unknown=true,resolved=true},
-	unknown={running=true,completed=true,resolved=true},
+	admitted={failed=true,unknown=true},
+	claimed={submission_intent=true,failed=true,unknown=true},
+	submission_intent={submitted=true,running=true,completed=true,unknown=true},
+	submitted={running=true,completed=true,unknown=true},
+	running={completed=true,unknown=true},
+	unknown={running=true,completed=true},
 	resolved={completed=true},completed={},failed={},
 }
 function M.update_execution(binding,id,expected_stage,patch,observation)
@@ -917,9 +918,6 @@ function M.update_execution(binding,id,expected_stage,patch,observation)
 		local accepted,why=Launch.observe(scope.launch,id,observation)
 		if not accepted then return nil,why end
 	end
-	if stage=="resolved" and job.stage~="resolved" then
-		local accepted,why=Launch.resolve(scope.launch,id);if not accepted then return nil,why end
-	end
 	for name,value in pairs(patch) do job[name]=clone(value) end
 	-- Completed evidence cannot be replaced by wrapper liveness. Validation also
 	-- couples every other stage to its matching Launch phase and native binding.
@@ -930,6 +928,56 @@ function M.update_execution(binding,id,expected_stage,patch,observation)
 	end
 	local saved,why=persist(candidate);if not saved then return nil,why end
 	return clone(job),nil
+end
+-- Ordinary attempts settle themselves from host-native evidence: this host's pane
+-- inventory, its daemon epoch and the admission deadline. Managed attempts keep
+-- their bridge rules. Settlement only rewrites SPAWN's records; it never closes a
+-- pane or stops a program. panes maps pane id -> { title = PaneInfo.title }.
+function M.sweep(binding,panes,epoch,now)
+	if type(panes)~="table" then return nil,"Live pane inventory is unavailable; nothing was settled" end
+	for pane,info in pairs(panes) do
+		if not integer(pane,0) or type(info)~="table" or (info.title~=nil and type(info.title)~="string") then return nil,"Live pane inventory is invalid; nothing was settled" end
+	end
+	if epoch~=nil and not text(epoch,4096) then return nil,"Host epoch is invalid; nothing was settled" end
+	if not integer(now,0) then return nil,"Sweep time is invalid; nothing was settled" end
+	local root,scope,err=execution_scope(binding);if not root then return nil,err end
+	local candidate=clone(root);scope=candidate.sessions[binding.session_key]
+	local changed=0
+	for _,a in ipairs(scope.launch.attempts) do
+		local job=scope.jobs[a.id]
+		if a.purpose~="managed" and a.phase~="Exited" and a.phase~="Failed" then
+			local info=if a.pane~=nil then panes[a.pane] else nil
+			local present=if a.pane~=nil then info~=nil else nil
+			-- An unverifiable host epoch (nil) never counts as a restart.
+			local restarted=epoch~=nil and job.epoch~=nil and job.epoch~=epoch
+			local readopt=restarted and info~=nil and job.command~=nil and info.title==job.command
+			local graced=restarted and job.restart_grace==epoch
+			local phase,diagnostic=Launch.classify(a,{pane_present=present,epoch_changed=restarted,readopt=readopt,
+				ticket_expired=job.native==nil and now-job.admitted_at>=ADMISSION_SECONDS,
+				grace_used=graced and (job.restart_grace_at==nil or now-job.restart_grace_at>=RESTART_GRACE_SECONDS)})
+			-- Recovery never resubmits, so a claim whose provider command was never
+			-- submitted cannot become a running provider.
+			if phase=="Running" and job.command==nil then phase,diagnostic="Failed","Never started (provider command was not submitted)" end
+			if phase~=nil then
+				local settled,why=settle_attempt(scope,a.id,phase,diagnostic);if not settled then return nil,why end
+				-- A re-adopted pane runs a new provider process under the new daemon.
+				if phase=="Running" and readopt then job.epoch=epoch;job.process_identity=nil end
+				-- Kept on an attempt the restart ended, for the informational notice.
+				if restarted and phase=="Exited" then
+					if not graced then job.restart_grace_at=now end
+					job.restart_grace=epoch
+				else job.restart_grace=nil;job.restart_grace_at=nil end
+				changed+=1
+			elseif restarted and not graced then
+				-- Restored panes and reruns appear after the host loads: the first
+				-- sweep that sees the new epoch only starts the grace period.
+				job.restart_grace=epoch;job.restart_grace_at=now;changed+=1
+			end
+		end
+	end
+	if changed==0 then return 0,nil end
+	local saved,why=persist(candidate);if not saved then return nil,why end
+	return changed,nil
 end
 -- Bridge effect identity is the immutable host/namespace/native-session tuple.
 -- Reply transport rotation cannot invalidate an already granted native result.

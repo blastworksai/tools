@@ -56,6 +56,16 @@ Both entry points reveal an existing ORCH+ view in the current session rather th
 
 When you upgrade from 0.3.0, stored settings, workers and landing items are migrated when the store is restored. A landing grant that 0.3.0 had already sent to a builder is never re-sent: it shows a `legacy_grant_outstanding` hold that you settle with **Result lost — hold slot…** or **Reconcile observed outcome…**.
 
+### Update
+
+Run **ORCH+ Check for updates** from the command palette. When a newer version is on GitHub, **ORCH+ Update** installs it in place: it checks the release's requirements and asks first, and can also update connected remote hosts. Tern then reloads all its plugins, and your settings carry over. If ORCH+ is running a controller, run **ORCH+ Reload recovery guide** afterwards.
+
+A copy installed before the updater existed needs one manual update:
+
+    tern plugin install --force github.com/blastworksai/tools/plugins/tern/ORCH+
+
+A linked development checkout (`tern plugin link`) is never updated by the plugin; `git pull` it yourself.
+
 ## Use
 
 All ORCH+ controls are native buttons, except the two reload recovery commands described in [Recover after a reload](#recover-after-a-reload), which you run from the command palette. Buttons that change something ask for confirmation, or open a picker or prompt, before they act. Once the controller has run its first command, a dispatch or assistance button runs only in the window that owns the controller; every other window showing the same controller ignores it. (Assistance on a controller restored after a host reload stays open to any window, so you can still inspect or stop its recorded owner.) A button from an outdated view is refused as stale and never replayed. If the host gets no confirmation from an ORCH+ window within 30 s, the press expires with a notice that it will not run later. A window may still have run it, so check the current state before pressing again.
@@ -355,6 +365,8 @@ Run each group in its own callback; long sections can also run one at a time (th
 - `worker-brief.md`, `coordinator-brief.md`: contracts for managed agents
 - `REFERENCE.md`: full protocol reference
 - `CHANGELOG.md`: release notes
+- `requires.json`: minimum Tern and SPAWN versions checked by **ORCH+ Update**
+- `updater/`: vendored self-updater (from `shared/tern-updater`; do not edit here)
 - `mockups/`: conceptual SVG mockups
 - `assets/screenshots/`: the screenshots in this README
 - `tests/`: native regression suites
