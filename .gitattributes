@@ -1,0 +1,4 @@
+# Check out the exact repository bytes (LF) on every machine, including Git for
+# Windows with core.autocrlf=true: `tern plugin install` clones this repository,
+# and the installed plugin files must match the published release byte for byte.
+* text=auto eol=lf
