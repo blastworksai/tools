@@ -1,6 +1,7 @@
 --!strict
 -- Pure authority/workflow reducer, embedded in state.authority; never a second KV writer.
-local codec = require("./transport")
+local codec = require("./wire/codec")
+local rules = require("./workflow_rules")
 local quota = require("./quota")
 local M = {}
 local MAX = 9007199254740991
@@ -1624,6 +1625,45 @@ local function valid_rollover_quota(d: any, r: any): boolean
 	end
 	return true
 end
+-- Only the restore boundary accepts the former encoded-chunk prefix. Revalidate it there,
+-- then retain the shared JSON-safe incremental state; no live push replays earlier chunks.
+function config.restore_assembly(w: any): any?
+	local old = w.assembly
+	if not closed(old, "manifest sha256 chunks") or not dense(old.chunks, codec.LIMITS.chunks)
+		or not digest(old.sha256) or not str(old.manifest, codec.LIMITS.control) then return nil end
+	local binding = report_binding(w)
+	local a = codec.assembly_start(old.manifest, old.sha256, binding)
+	if not a then return nil end
+	for _, part in old.chunks do
+		if not closed(part, "bytes sha256") or not str(part.bytes, codec.LIMITS.chunk) or not digest(part.sha256) then return nil end
+		local pushed = codec.assembly_push(a, part.bytes, part.sha256, binding)
+		if not pushed or pushed.complete or pushed.code ~= "incomplete" then return nil end
+	end
+	if a.next_index ~= #old.chunks + 1 then return nil end
+	return a
+end
+function config.valid_assembly(w: any, legacy: boolean?): any?
+	local a = w.assembly
+	if legacy and type(a) == "table" and a.version == nil then a = config.restore_assembly(w) end
+	if not closed(a, "version manifest manifest_bytes manifest_sha256 binding next_index slices object_digests bytes")
+		or a.version ~= 1 or not digest(a.manifest_sha256) or not str(a.manifest_bytes, codec.LIMITS.control)
+		or not equal(a.binding, report_binding(w)) then return nil end
+	local started = codec.assembly_start(a.manifest_bytes, a.manifest_sha256, a.binding)
+	if not started or not equal(started.manifest, a.manifest) or a.manifest.direction ~= "report"
+		or a.manifest.slot ~= w.accepted_seq + 1 or not pos(a.next_index) or a.next_index > a.manifest.count
+		or not dense(a.slices, codec.LIMITS.chunks) or not dense(a.object_digests, codec.LIMITS.chunks)
+		or #a.slices ~= a.next_index - 1 or #a.object_digests ~= #a.slices then return nil end
+	local bytes = 0
+	for index, slice in a.slices do
+		if not str(slice, math.ceil(codec.LIMITS.slice / 3) * 4) or not digest(a.object_digests[index]) then return nil end
+		local ok, raw = pcall(tern.base64.decode, slice)
+		if not ok or type(raw) ~= "string" or #raw ~= codec.LIMITS.slice or tern.base64.encode(raw) ~= slice then return nil end
+		bytes += #raw
+	end
+	if a.bytes ~= bytes or bytes >= a.manifest.message_bytes or bytes > codec.LIMITS.logical then return nil end
+	if w.read_selector ~= nil and not equal(w.read_selector, { stream = "report", slot = a.manifest.slot, part = "chunk", index = a.next_index }) then return nil end
+	return a
+end
 -- Shape and correlation checks protect restored dispatch state; codecs revalidate exact receipts.
 function M.valid(d: any, registry: any, legacy_catalog_cache: boolean?): boolean
 	if d == nil then return true end
@@ -1686,6 +1726,7 @@ function M.valid(d: any, registry: any, legacy_catalog_cache: boolean?): boolean
 				or (resolution.status_sha256 ~= nil and not digest(resolution.status_sha256)) then return false end
 		elseif a.phase == "resolved" then return false end
 	end
+	local assembly_count, assembly_bytes = 0, 0
 	for key, w in d.workers do
 		if not closed(w, "worker_id work_id worker_generation logical_session_id origin_binding controller_pane record_id record_revision prompt cwd placement assignment_sha256 launch_request_id launch_action_id enrolment_token phase accepted_seq compacted_floor receipts replies reply_seq reply_floor coordinator_owner_id coordinator_generation coordinator_protocol activation retirement release stop_action_id stopped mailbox_retired mailbox_retire_action_id mailbox_handle capabilities binding_digest receipt_chain compacted_chain pane_binding effective_identity accepted_event accept_pending registered frozen reason assembly read_selector compaction_pending workflow rejected_report finish control_origin control_pane control_pane_binding attachment_action_id continuation_required wakes handover_id handover_token restored routing adopt_pane_binding withdrawn " .. config.WORKER_FIELDS)
 			or not id(key) or w.worker_id ~= key or not M.origin(w.origin_binding) or w.logical_session_id ~= w.origin_binding.logical_session_id
@@ -1792,6 +1833,12 @@ function M.valid(d: any, registry: any, legacy_catalog_cache: boolean?): boolean
 		if w.mailbox_retired ~= nil and (w.mailbox_retired ~= true or not w.mailbox_retire_action_id
 			or d.actions[w.mailbox_retire_action_id].phase ~= "complete" or not d.actions[w.mailbox_retire_action_id].response
 			or d.actions[w.mailbox_retire_action_id].response.status ~= "retired") then return false end
+		if w.assembly ~= nil then
+			local assembly = config.valid_assembly(w, legacy_catalog_cache)
+			if not assembly then return false end
+			assembly_count += 1; assembly_bytes += assembly.bytes
+			if assembly_count > codec.LIMITS.assemblies or assembly_bytes > codec.LIMITS.reassembly_bytes then return false end
+		elseif w.read_selector ~= nil then return false end
 		if w.rejected_report ~= nil then
 			local rejected = w.rejected_report
 			if not closed(rejected, "code message bytes sha256 action_id") or not str(rejected.code, 96) or not str(rejected.message, 1024)
@@ -1876,6 +1923,7 @@ function M.restore(d: any)
 		end
 	end
 	for _, w in d.workers do
+		if w.assembly and w.assembly.version == nil then w.assembly = config.restore_assembly(w) end
 		-- Contract A restore defaults: 0.3.0 workers become builders unless they carry coordinator
 		-- markers; family resolves lazily, the other new fields stay absent. Claims are never
 		-- stamped here (no clock): the first live tick rebases their claimed_at.
@@ -2290,7 +2338,7 @@ local function thread_room(w: any): boolean
 	for _, entry in entries do if entry.state == "settled" then return true end end
 	return false
 end
--- Checkout facts. Paths compare lexically (codec.normalize_path); symlinks and aliases are caught
+-- Checkout facts. Paths compare lexically (rules.normalize_path); symlinks and aliases are caught
 -- only through the helper's CHECKOUT worktree_path/common_dir (visibility: config.VISIBILITY).
 config.VISIBILITY = " Only same-session ORCH+ workers are visible; agents outside this ORCH+ session are not checked."
 function config.live_peers(d: any, w: any): any
@@ -2304,14 +2352,14 @@ function config.live_peers(d: any, w: any): any
 	return peers
 end
 function config.rooted(d: any, w: any, path: string): string?
-	for _, root in policy(d, w.logical_session_id).checkout_roots do if codec.path_within(root, path) then return codec.normalize_path(root) end end
+	for _, root in policy(d, w.logical_session_id).checkout_roots do if rules.path_within(root, path) then return rules.normalize_path(root) end end
 	return nil
 end
 -- Exact/ancestor index over literal paths; globs compare pairwise by literal prefix.
 function config.path_index(list: any): any
 	local index = { exact = {}, ancestors = {}, globs = {} }
 	for _, entry in list or {} do
-		local p = codec.normalize_path(entry)
+		local p = rules.normalize_path(entry)
 		if p:find("[%*%?%[{]") then table.insert(index.globs, p)
 		else
 			index.exact[p] = entry
@@ -2322,7 +2370,7 @@ function config.path_index(list: any): any
 	return index
 end
 function config.index_overlap(index: any, entry: string): string?
-	local p = codec.normalize_path(entry)
+	local p = rules.normalize_path(entry)
 	if not p:find("[%*%?%[{]") then
 		if index.exact[p] or index.ancestors[p] then return index.exact[p] or index.ancestors[p] end
 		local slash = p:find("/", 2, true)
@@ -2330,27 +2378,27 @@ function config.index_overlap(index: any, entry: string): string?
 			if index.exact[p:sub(1, slash - 1)] then return index.exact[p:sub(1, slash - 1)] end
 			slash = p:find("/", slash + 1, true)
 		end
-		for _, g in index.globs do if codec.globs_overlap(g, p) then return g end end
+		for _, g in index.globs do if rules.globs_overlap(g, p) then return g end end
 		return nil
 	end
-	for literal, original in index.exact do if codec.globs_overlap(p, literal) then return original end end
-	for _, g in index.globs do if codec.globs_overlap(p, g) then return g end end
+	for literal, original in index.exact do if rules.globs_overlap(p, literal) then return original end end
+	for _, g in index.globs do if rules.globs_overlap(p, g) then return g end end
 	return nil
 end
 -- Queue-time gates for a never-provisioned worker: one shared_checkout and/or one file_overlap
 -- gate (each naming every overlapping peer). Returns the gate ids, or nil when nothing overlaps.
 function config.queue_gates(d: any, w: any, clock: any): (any?, any?)
 	if w.role == "coordinator" then return nil, nil end
-	local peers, cwd, ids = config.live_peers(d, w), codec.normalize_path(w.cwd), {}
+	local peers, cwd, ids = config.live_peers(d, w), rules.normalize_path(w.cwd), {}
 	local options = { { id = "launch_anyway", label = "Launch anyway" }, { id = "cancel", label = "Cancel this work" } }
 	local root = config.rooted(d, w, cwd)
 	if root and #peers > 0 then
 		local hits, evidence = {}, { bounded("cwd:" .. cwd, 1024), bounded("root:" .. root, 1024) }
 		for _, o in peers do
 			for _, other in { o.cwd, if o.checkout then o.checkout.worktree_path else nil } do
-				if other and config.rooted(d, w, other) and (codec.path_within(other, cwd) or codec.path_within(cwd, other)) then
-					table.insert(hits, o.worker_id .. " (" .. codec.normalize_path(other) .. ")")
-					table.insert(evidence, bounded("peer:" .. o.worker_id .. ":" .. codec.normalize_path(other), 1024)); break
+				if other and config.rooted(d, w, other) and (rules.path_within(other, cwd) or rules.path_within(cwd, other)) then
+					table.insert(hits, o.worker_id .. " (" .. rules.normalize_path(other) .. ")")
+					table.insert(evidence, bounded("peer:" .. o.worker_id .. ":" .. rules.normalize_path(other), 1024)); break
 				end
 			end
 		end
@@ -2365,11 +2413,11 @@ function config.queue_gates(d: any, w: any, clock: any): (any?, any?)
 	if w.files and #w.files > 0 and #peers > 0 then
 		local repos = {}
 		for _, o in peers do
-			if o.checkout and (codec.normalize_path(o.cwd) == cwd or codec.path_within(o.checkout.worktree_path, cwd)) then repos[codec.normalize_path(o.checkout.common_dir)] = true end
+			if o.checkout and (rules.normalize_path(o.cwd) == cwd or rules.path_within(o.checkout.worktree_path, cwd)) then repos[rules.normalize_path(o.checkout.common_dir)] = true end
 		end
 		local hits, evidence = {}, { bounded("cwd:" .. cwd, 1024) }
 		for _, o in peers do
-			if codec.normalize_path(o.cwd) == cwd or (o.checkout and repos[codec.normalize_path(o.checkout.common_dir)]) then
+			if rules.normalize_path(o.cwd) == cwd or (o.checkout and repos[rules.normalize_path(o.checkout.common_dir)]) then
 				local theirs = {}
 				for _, f in o.files or {} do table.insert(theirs, f) end
 				for _, f in (if o.checkout then o.checkout.changed_files else {}) do table.insert(theirs, f) end
@@ -2510,7 +2558,7 @@ function config.scope_problem(w: any): (string?, any?)
 	local out = {}
 	for _, f in c.changed_files do
 		local inside = false
-		for _, entry in paths do if codec.path_in_scope(entry, f) then inside = true; break end end
+		for _, entry in paths do if rules.path_in_scope(entry, f) then inside = true; break end end
 		if not inside then table.insert(out, f) end
 	end
 	if #out == 0 and not c.changed_overflow then return nil, nil end
@@ -2523,7 +2571,7 @@ function config.scope_blocked(w: any): boolean
 	return digest_now ~= nil and not (w.scope_accepted ~= nil and w.scope_accepted.changed_digest == digest_now)
 end
 function config.checkout_mismatch(w: any, cp: any): boolean
-	return w.checkout ~= nil and codec.normalize_path(cp.payload.worktree_ref) ~= codec.normalize_path(w.checkout.worktree_path)
+	return w.checkout ~= nil and rules.normalize_path(cp.payload.worktree_ref) ~= rules.normalize_path(w.checkout.worktree_path)
 end
 -- Helper-only facts (CHECK_RESULT, CHECKOUT). The codec already required check-runner-v1.
 function config.helper_fact(d: any, w: any, report: any, clock: any): (string?, any?)
@@ -2538,11 +2586,11 @@ function config.helper_fact(d: any, w: any, report: any, clock: any): (string?, 
 	end
 	local c = clone(p); c.event_id = report.event_id; c.seq = report.seq
 	w.checkout = c
-	local path = codec.normalize_path(c.worktree_path)
+	local path = rules.normalize_path(c.worktree_path)
 	local root = config.rooted(d, w, path)
 	if root and w.role ~= "coordinator" then
 		for _, o in config.live_peers(d, w) do
-			if o.checkout and codec.normalize_path(o.checkout.worktree_path) == path then
+			if o.checkout and rules.normalize_path(o.checkout.worktree_path) == path then
 				local key = bounded("peer:" .. o.worker_id .. ":" .. path, 1024)
 				local seen = table.find(w.shared_acked or {}, key) ~= nil
 				for _, g in d.gates or {} do
@@ -2809,7 +2857,7 @@ local function rollover_step(n: any, r: any, event: any, clock: any, reserve: an
 			if cp and cp.payload.request_id == r.request_id then found = cp; bytes = kept end
 		end
 		local verified, problem = nil, nil
-		if found then verified, problem = codec.verify_checkpoint(found, r.request_id) end
+		if found then verified, problem = rules.verify_checkpoint(found, r.request_id) end
 		if not verified and coordinator_kind and pred.release then return self_released() end
 		if not found then
 			local outstanding = f.report_request
@@ -3084,7 +3132,7 @@ local function landing_problem(n: any, item: any, q: any, clock: any): any?
 	if config.scope_blocked(w) then
 		return landing_hold("scope_open", "The latest CHECKOUT changes files outside the declared scope (or the helper's changed-file list overflowed); answer its scope gate to accept the changes, or bring the checkout back in scope.")
 	end
-	local proof, problem = codec.verify_landing_proof({ enforce_cross_family = policy(d, w.logical_session_id).enforce_cross_family, source_revision = r.source_revision,
+	local proof, problem = rules.verify_landing_proof({ enforce_cross_family = policy(d, w.logical_session_id).enforce_cross_family, source_revision = r.source_revision,
 		checks = w.checks, check_results = w.check_results, builder_worker_id = w.worker_id, builder_record_id = w.record_id,
 		builder_family = w.family or config.family_of(d, w), review = config.review_for(d, w) })
 	if not proof then return landing_hold(problem.code, problem.message) end
@@ -3434,7 +3482,7 @@ function config.signer_problem(d: any, item: any, w: any): any?
 		end
 	end
 	local review = if item.proof then (d.reviews or {})[item.proof.review_id] else nil
-	local problem = codec.verify_signer({ release_manager_record_id = record, builder_record_id = w.record_id, reviewer_record_id = if review then review.reviewer_record_id else nil })
+	local problem = rules.verify_signer({ release_manager_record_id = record, builder_record_id = w.record_id, reviewer_record_id = if review then review.reviewer_record_id else nil })
 	if problem then return landing_hold(problem.code, problem.message .. config.RM_CONFIG) end
 	return nil
 end
@@ -6019,30 +6067,39 @@ local function complete(n: any, a: any, body: any, clock: any): (any?, any?)
 			elseif page.object.type == "manifest" then
 				local active = 0
 				for _, worker in d.workers do if worker.assembly then active += 1 end end
-				if active >= 4 and not w.assembly then
+				if active >= codec.LIMITS.assemblies and not w.assembly then
 					a.phase = "complete"; w.read_selector = nil
 					local message = "Host reassembly slots are full; immutable source remains unacknowledged and watermark settlement is available."
 					note_reason(w, { code = "full", message = message })
 					return { ok = true, code = "intake_backpressure", report_applied = false, message = message }, nil
 				end
-				local pool = codec.new_reassembler(); local _, problem = codec.begin_assembly(pool, page.bytes, report_binding(w), page.sha256); if problem then return nil, problem end
-				w.assembly = { manifest = page.bytes, sha256 = page.sha256, chunks = {} }
-				w.read_selector = { stream = "report", slot = page.object.slot, part = "chunk", index = 1 }
+				local binding = report_binding(w)
+				if w.assembly then
+					if w.assembly.manifest_bytes ~= page.bytes or w.assembly.manifest_sha256 ~= page.sha256
+						or not equal(w.assembly.binding, binding) then return fail("content_conflict", "A different manifest cannot replace the retained report prefix.") end
+				else
+					local assembly, problem = codec.assembly_start(page.bytes, page.sha256, binding)
+					if problem then return nil, problem end
+					w.assembly = assembly
+				end
+				w.read_selector = { stream = "report", slot = page.object.slot, part = "chunk", index = w.assembly.next_index }
 			else
 				if not w.assembly then return fail("incomplete", "No retained manifest for this chunk.") end
-				local pool = codec.new_reassembler()
-				local _, begin_error = codec.begin_assembly(pool, w.assembly.manifest, report_binding(w), w.assembly.sha256)
-				if begin_error then return nil, begin_error end
-				for _, part in w.assembly.chunks do
-					local _, problem = codec.push_chunk(pool, part.bytes, report_binding(w), part.sha256)
-					if problem then return nil, problem end
+				local total = 0
+				for _, worker in d.workers do if worker.assembly then total += worker.assembly.bytes end end
+				local added = if page.object.index == w.assembly.next_index then math.min(codec.LIMITS.slice,
+					w.assembly.manifest.message_bytes - w.assembly.bytes) else 0
+				if total + added > codec.LIMITS.reassembly_bytes then
+					a.phase = "complete"; w.assembly = nil; w.read_selector = nil
+					local message = "Host reassembly bytes are full; immutable source remains unacknowledged and watermark settlement is available."
+					note_reason(w, { code = "full", message = message })
+					return { ok = true, code = "intake_backpressure", report_applied = false, message = message }, nil
 				end
-				local assembled, problem = codec.push_chunk(pool, page.bytes, report_binding(w), page.sha256)
+				local assembled, problem = codec.assembly_push(w.assembly, page.bytes, page.sha256, report_binding(w))
 				if problem then
 					if problem.completed_bytes then return reject_read(a, w, problem.completed_bytes, problem) end
 					return nil, problem
 				end
-				table.insert(w.assembly.chunks, { bytes = page.bytes, sha256 = page.sha256 })
 				if assembled.complete then
 					local applied, semantic = intake(n, w, assembled.bytes, clock)
 					if semantic and semantic.code == "full" then
@@ -6058,7 +6115,7 @@ local function complete(n: any, a: any, body: any, clock: any): (any?, any?)
 					end
 					if not applied then return fail("semantic_handler_required", "Report was not applied.") end
 					w.assembly = nil; w.read_selector = nil
-				else w.read_selector = { stream = "report", slot = page.object.slot, part = "chunk", index = page.object.index + 1 } end
+				else w.read_selector = { stream = "report", slot = page.object.slot, part = "chunk", index = w.assembly.next_index } end
 			end
 		end
 	end

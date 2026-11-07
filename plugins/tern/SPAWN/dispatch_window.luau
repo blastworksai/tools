@@ -1,6 +1,6 @@
 -- Window-only executor. Recreated VMs get new IDs and cannot reuse old claims.
 local P=require('./bridge_protocol')
-local Codec=require('./codec')
+local Codec=require('./wire/codec')
 local M={}
 local executor=string.format('spawn-%d-%08x-%08x',os.time(),math.random(1,2147483647),math.random(1,2147483647))
 local sent={}

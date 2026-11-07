@@ -16,7 +16,7 @@
 -- Target paths: plan_check's `_paths_in` (backtick spans, else the whole target; brace expansions
 -- skipped) and `_looks_like_path`, except that a leading `/` or drive letter is kept (plan_check's
 -- token class drops it) and any `.ext` suffix counts, not only plan_check's extension list.
-local codec = require("./transport")
+local codec = require("./wire/codec")
 local M = {}
 M.MAX_BYTES = 1024 * 1024
 M.MAX_CHECKPOINTS = 30

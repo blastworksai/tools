@@ -188,10 +188,10 @@ Mailbox helper regressions run outside Tern: `python3 tests/mailbox_posix.py` on
 - `launch_state.luau`: launch phases, automatic settlement and history trimming
 - `launch_resolution.luau`: shared record validation, ordinary/fresh argv selection, OS-user and SSH identity resolution
 - `config.luau`: record validation, migration and the guided-setup prompt
-- `native_cli.luau`: bounded calls to Tern's own CLI for session inspection
+- `native_cli.luau`: bounded calls to Tern's own CLI; pure executable discovery comes from `updater/discovery.luau`
 - `backend.luau`: managed fresh-launch construction and serializers
 - `bridge_protocol.luau`: `spawn.dispatch` framing and parsing
-- `codec.luau`: report-files-v1 codecs
+- `wire/codec.luau`: strict report-files-v1 byte contract, vendored from `shared/report-files-v1`
 - `dispatch.luau`: host-side managed dispatcher
 - `dispatch_window.luau`: window-side managed executor
 - `dispatch.css`: bridge view styling (hides machine nodes)

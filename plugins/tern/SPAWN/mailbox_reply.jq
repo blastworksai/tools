@@ -1,4 +1,4 @@
-# Closed worker report/reply schemas, kept in step with codec.luau. The caller
+# Closed worker report/reply schemas, kept in step with wire/codec.luau. The caller
 # checks strict JSON, provisioned binding and exact message hashes separately.
 def id: type=="string" and test("^[A-Za-z0-9_-]{1,96}\\z");
 def token: type=="string" and test("^[A-Za-z0-9_-]{16,128}\\z");
@@ -52,7 +52,7 @@ def report_payload:
  elif $kind=="CHECKOUT" then
   shape(["worktree_path","common_dir","branch","head","changed_files","changed_overflow","changed_total","dirty"];["base"]) and
   (.worktree_path|absolute) and (.common_dir|absolute) and (.branch|text(256)) and (.head|revision) and optional("base";revision) and
-  (.changed_files|entries(0;512;text(1024)) and length==(unique|length)) and (.changed_overflow|type=="boolean") and (.changed_total|nonnegative) and (.dirty|type=="boolean") and
+  (.changed_files|entries(0;512;text(4096) and (contains("\u0000")|not)) and length==(unique|length)) and (.changed_overflow|type=="boolean") and (.changed_total|nonnegative) and (.dirty|type=="boolean") and
   .changed_total>=(.changed_files|length) and .changed_overflow==(.changed_total>(.changed_files|length))
  elif $kind=="LABEL" then shape(["work_ref","class"];["reason"]) and (.work_ref|text(1024)) and (.class|class) and optional("reason";text(1024))
  elif $kind=="DEPLOY_RESULT" then

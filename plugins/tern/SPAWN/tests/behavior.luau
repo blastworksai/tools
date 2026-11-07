@@ -283,6 +283,7 @@ local function execution_fixture(saved_job, options)
 		if name == "./config" then return config end
 		if name == "./native_cli" then return adapter end
 		if name == "./launch_resolution" then return load("launch_resolution") end
+		if name == "./backend" then return load("backend") end
 		error("Unexpected executor dependency: " .. name)
 	end }, { __index = environment }))
 	local subject = chunk()

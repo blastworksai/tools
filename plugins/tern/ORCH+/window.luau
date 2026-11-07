@@ -1,6 +1,6 @@
 --!strict
 local BLOCK = "orchplus.orchestrator"
-local codec = require("./transport")
+local codec = require("./wire/codec")
 local dispatch = require("./dispatch")
 local quota = require("./quota")
 local incarnation = string.format("window-%d-%08x-%08x", os.time(), math.random(1, 2147483647), math.random(1, 2147483647))

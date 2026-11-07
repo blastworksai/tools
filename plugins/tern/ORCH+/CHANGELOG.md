@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Share the strict report-files-v1 codec with SPAWN; keep landing, signer and scope policy in `workflow_rules.luau`.
+- Assemble reports incrementally in ORCH+ without replaying the accepted prefix on each chunk. Persist JSON-safe slices, validate restored prefixes and legacy in-flight assemblies, and retain the four-assembly/64-KiB logical limits.
+- Keep final whole-message validation, rejected-message preservation and durable cursor-before-ACK ordering.
+
 ## 0.5.0
 
 Requires SPAWN 0.4.0 and Tern 0.9.10, now declared in `requires.json`.

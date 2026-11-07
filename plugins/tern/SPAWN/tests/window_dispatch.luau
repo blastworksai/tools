@@ -14,7 +14,7 @@ local function fixture()
   local fn=assert(loadstring(runtime.fs.read(root..'/'..name..'.luau'),name))
   setfenv(fn,setmetatable({tern=injected,require=load},{__index=environment}));modules[name]=fn();return modules[name]
  end
- local p,c,w=load('bridge_protocol'),load('codec'),load('dispatch_window')
+ local p,c,w=load('bridge_protocol'),load('wire/codec'),load('dispatch_window')
  local origin={logical_session_id='session',owner_id='owner',owner_generation=1,host_pane_id='12',alias_nonce='alias',window_key='',window_epoch='epoch',native_session_id='3',window_host_id='7'}
  local r={schema=1,origin='orchplus',op='mailbox_publish_reply',request_id='publication',action_id='action-publication',controller_pane='44',controller_generation=1,origin_binding=copy(origin),logical_session_id='session',worker_id='worker',worker_generation=1,launch_request_id='launch',work_id='work',enrolment_token='aaaaaaaaaaaaaaaa',handle='mailbox',expected_generation=1,message_id='message',reply_seq=1,action_revision=1,reply_sha256=c.sha256('reply'),part='manifest',object_b64='e30=',object_sha256=c.sha256('{}')}
  local claim={executor='epoch',epoch=1,grant_id='grant-one'}

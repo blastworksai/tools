@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Share the strict report-files-v1 codec with ORCH+. Read only the requested mailbox object; retain complete validation before publishing a reply manifest.
+- Use native Base64 encoding and shared executable discovery while preserving distinct managed/ordinary PowerShell wrappers, UTF-16LE conversion and ordinary SSH argument handling.
+- Reject malformed Base64 and raw-NUL reply bytes before consumption. Drain Darwin `iconv` output while checking its status, so valid large UTF-8 replies are accepted and invalid bytes remain rejected.
+- Preserve ordinary/unmanaged automatic launch settlement and bounded Failed/Exited history.
+
 ## 0.5.0
 
 Requires Tern 0.9.10 (now declared in `requires.json`).

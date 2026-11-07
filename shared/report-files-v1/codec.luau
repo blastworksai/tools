@@ -312,7 +312,8 @@ end
 local REPORT_KINDS = enum("REGISTER", "READY", "ACCEPTED", "HEARTBEAT", "WAITING", "BLOCKED", "ASK", "CHECKPOINT", "REVIEW_READY", "REVIEW_RESULT", "DONE", "ROLLOVER_REQUEST", "LANDING_REQUEST", "LANDING_RESULT", "reply_ack", "COORDINATOR_RELEASE", "COORDINATOR_PROPOSAL",
 	"CHECK_RESULT", "CHECKOUT", "LABEL", "DEPLOY_RESULT")
 local CAPABILITIES = enum("report-files-v1", "native-ask-v1", "worker-poll-v1", "argv-v1", "coordinator-control-v1", "check-runner-v1", "release-manager-v1")
--- Kinds a provisioned capability must authorize, in both directions (kept in step with SPAWN codec).
+-- Missing provisioned capability is unsupported_capability in both packaged consumers.
+-- Identity mismatches remain binding_mismatch; neither classification grants authority.
 local REQUIRES = { COORDINATOR_RELEASE = "coordinator-control-v1", COORDINATOR_PROPOSAL = "coordinator-control-v1",
 	CHECK_RESULT = "check-runner-v1", CHECKOUT = "check-runner-v1", DEPLOY_RESULT = "release-manager-v1",
 	coordinator_activation = "coordinator-control-v1", coordinator_retirement = "coordinator-control-v1",
@@ -456,128 +457,7 @@ function M.decode_report(bytes: any, expected: any): (any?, any?)
 	return raw, nil
 end
 
--- Required checks must exist for the exact artifact revision and all must have passed: not_run is
--- absent evidence and failed evidence blocks too. Checks are worker-attested: completeness,
--- freshness and outcome are checked, nothing is executed and no default project verifier is invented.
-local function checks_problem(p: any, subject: string, action: string): any?
-	if type(p.checks) ~= "table" or #p.checks == 0 then
-		return failure("verification_missing", "At least one required verification outcome is needed for the " .. subject .. " artifact revision.")
-	end
-	for _, check in p.checks do
-		if check.artifact_revision ~= p.artifact_revision then
-			return failure("verification_stale", "Check " .. check.check_id .. " is not fresh for the " .. subject .. " artifact revision.")
-		end
-		if check.outcome == "not_run" then
-			return failure("verification_missing", "Check " .. check.check_id .. " was not run; absent required evidence blocks " .. action .. ".")
-		end
-		if check.outcome == "failed" then
-			return failure("verification_failed", "Check " .. check.check_id .. " failed for this artifact revision; failed evidence blocks " .. action .. ".")
-		end
-	end
-	return nil
-end
-
--- Rollover handover verification over an already decoded CHECKPOINT (worker-attested).
-function M.verify_checkpoint(report: any, request_id: any): (any?, any?)
-	if type(report) ~= "table" or report.kind ~= "CHECKPOINT" or type(report.payload) ~= "table" then
-		return nil, failure("checkpoint_missing", "A structured CHECKPOINT is required; a summary alone cannot hand over work.")
-	end
-	local p = report.payload
-	if not id(request_id) or p.request_id ~= request_id then
-		return nil, failure("checkpoint_stale", "The checkpoint must echo this rollover's exact request_id.")
-	end
-	if type(p.completed) ~= "table" or type(p.remaining) ~= "table" or #p.completed + #p.remaining == 0 then
-		return nil, failure("checkpoint_incomplete", "The checkpoint must state completed and/or remaining work.")
-	end
-	local problem = checks_problem(p, "handed-over", "rollover")
-	if problem then return nil, problem end
-	return { attestation = "worker-attested", checkpoint_id = p.checkpoint_id, artifact_revision = p.artifact_revision }, nil
-end
-
--- Proof rule H for landing (D1 × D3), pure over facts the reducer already holds. Checks are the
--- SPAWN helper's CHECK_RESULT facts (never worker-attested CHECKPOINT checks); a review is the
--- approved REVIEW_RESULT of an ORCH+ reviewer worker, recorded on its durable review, in BOTH
--- branches. input = { enforce_cross_family, source_revision, checks (declared {check_id, argv}[]),
--- check_results (check_id → CHECK_RESULT payload), builder_worker_id, builder_record_id?,
--- builder_family?, review? = { review_id, reviewer_worker_id, reviewer_record_id?, reviewer_family?,
--- reviewer_role, artifact_revision, outcome } }. Returns the stored/granted `proof` or a failure.
-function M.verify_landing_proof(input: any): (any?, any?)
-	local revision, results = input.source_revision, input.check_results or {}
-	local refs = tern.json.array()
-	local function review_problem(review: any): any?
-		if review.reviewer_worker_id == input.builder_worker_id then
-			return failure("reviewer_is_builder", "The review came from the builder itself; a different worker must review this revision.")
-		end
-		if review.reviewer_record_id ~= nil and review.reviewer_record_id == input.builder_record_id then
-			return failure("reviewer_record_is_builder", "The review came from the builder's own record; a reviewer on another record must review this revision.")
-		end
-		if review.artifact_revision ~= revision then
-			return failure("review_stale", "The approved review is for another artifact revision; the requested source revision needs its own review.")
-		end
-		if review.outcome ~= "approved" then
-			return failure("review_not_approved", "The latest review requires changes; landing waits for an approved review of this revision.")
-		end
-		return nil
-	end
-	if input.enforce_cross_family then
-		local review = input.review
-		if review == nil or review.reviewer_role ~= "reviewer" then
-			return nil, failure("review_required", "Cross-family review is enforced: an approved REVIEW_RESULT for this exact revision from an ORCH+ reviewer worker of a different provider family is the landing proof, and none exists yet.")
-		end
-		local problem = review_problem(review); if problem then return nil, problem end
-		if input.builder_family == nil or review.reviewer_family == nil then
-			return nil, failure("family_unknown", "The builder's or reviewer's provider family is not declared; map the record's family in Config before cross-family proof can hold.")
-		end
-		if input.builder_family == review.reviewer_family then
-			return nil, failure("family_same", "The reviewer's declared family equals the builder's; cross-family review needs a different provider family.")
-		end
-		-- Helper checks are evidence only in this mode.
-		for _, check in input.checks or {} do
-			local r = results[check.check_id]
-			if r and r.exit_code == 0 and r.head == revision then table.insert(refs, check.check_id .. ":" .. r.output_sha256) end
-		end
-		return { mode = "cross_family_review", artifact_revision = revision, review_id = review.review_id, check_refs = refs }, nil
-	end
-	if type(input.checks) ~= "table" or #input.checks == 0 then
-		return nil, failure("checks_undeclared", "Helper-run checks are the proof while cross-family review is off, but this work declares no checks; queue it with checks.")
-	end
-	for _, check in input.checks do
-		local r = results[check.check_id]
-		if r == nil then
-			return nil, failure("check_missing", "Declared check " .. check.check_id .. " has no helper-run CHECK_RESULT; the worker must run it with the SPAWN helper.")
-		end
-		if r.head ~= revision then
-			return nil, failure("check_stale", "Check " .. check.check_id .. " ran at " .. tostring(r.head) .. ", not at the requested source revision; run it again on this revision.")
-		end
-		if r.exit_code ~= 0 then
-			return nil, failure("check_failed", "Check " .. check.check_id .. " exited " .. tostring(r.exit_code) .. " at this revision; failed helper checks block landing.")
-		end
-		table.insert(refs, check.check_id .. ":" .. r.output_sha256)
-	end
-	local review = input.review
-	if review == nil or review.reviewer_role ~= "reviewer" then
-		return nil, failure("review_required", "Every declared check passed at this revision; landing also needs an approved REVIEW_RESULT from an ORCH+ reviewer worker other than the builder (same family allowed).")
-	end
-	local problem = review_problem(review); if problem then return nil, problem end
-	return { mode = "helper_checks", artifact_revision = revision, review_id = review.review_id, check_refs = refs }, nil
-end
-
--- D5 signer rule, the release-manager half of Proof rule H (Contract H): the landing grant's
--- recipient record must differ from the builder's record and from the approving reviewer's record.
--- input = { release_manager_record_id, builder_record_id?, reviewer_record_id? }. Pure; the reducer
--- decides which release-manager generation is live and never runs git.
-function M.verify_signer(input: any): any?
-	local record = input.release_manager_record_id
-	if input.builder_record_id ~= nil and record == input.builder_record_id then
-		return failure("release_manager_is_builder", "The release manager's record " .. tostring(record) .. " is the builder's record; the signer must be another record, so no grant is issued.")
-	end
-	if input.reviewer_record_id ~= nil and record == input.reviewer_record_id then
-		return failure("release_manager_is_reviewer", "The release manager's record " .. tostring(record) .. " is the approving reviewer's record; signer and reviewer must differ, so no grant is issued.")
-	end
-	return nil
-end
-
--- Authenticated assignment manifest (Contract G), kept in step with SPAWN codec.decode_manifest.
+-- Authenticated assignment manifest (Contract G).
 function M.decode_manifest(bytes: any): (any?, any?)
 	if type(bytes) == "string" and #bytes > LIMITS.manifest then return nil, failure("manifest_too_large", "Assignment manifest exceeds 4096 bytes.") end
 	local raw, diagnostic, shapes = M.strict_decode(bytes, LIMITS.manifest)
@@ -612,85 +492,6 @@ function M.encode_manifest(m: any): (string?, any?)
 	local _, problem = M.decode_manifest(bytes)
 	if problem then return nil, problem end
 	return bytes, nil
-end
-
--- Lexical path facts (Task 2D GOTCHA): collapse `//`, resolve `.`/`..`, strip the trailing `/`,
--- `\` → `/` and a lower-case drive letter for Windows absolute paths. Symlinks and aliases are
--- never resolved here; only the helper's CHECKOUT worktree_path/common_dir name the real checkout.
-function M.normalize_path(p: string): string
-	local s, prefix = p, ""
-	if s:match("^%a:[/\\]") or s:match("^%a:$") or s:sub(1, 2) == "\\\\" then
-		s = s:gsub("\\", "/")
-		if s:match("^%a:") then prefix = s:sub(1, 2):lower(); s = s:sub(3) else prefix = "//"; s = s:sub(3) end
-	end
-	local absolute_path = prefix ~= "" or s:sub(1, 1) == "/"
-	local parts = {}
-	for segment in s:gmatch("[^/]+") do
-		if segment == "." then continue end
-		if segment == ".." then
-			if #parts > 0 and parts[#parts] ~= ".." then table.remove(parts)
-			elseif not absolute_path then table.insert(parts, "..") end
-		else table.insert(parts, segment) end
-	end
-	local body = table.concat(parts, "/")
-	if prefix == "//" then return "//" .. body end
-	if absolute_path then return prefix .. "/" .. body end
-	return body
-end
--- `p` equals or lies under `root` (both normalized here), segment-aware.
-function M.path_within(root: string, p: string): boolean
-	root, p = M.normalize_path(root), M.normalize_path(p)
-	if root == p then return true end
-	if root == "" then return p:sub(1, 1) ~= "/" and p:sub(1, 2) ~= ".." and p:match("^%a:") == nil end
-	if root:sub(-1) == "/" then return p:sub(1, #root) == root end
-	return p:sub(1, #root + 1) == root .. "/"
-end
-local WILDCARD = "[%*%?%[{]"
--- Glob intersection: compare literal prefixes up to the first wildcard; exact or ancestor match overlaps.
-function M.globs_overlap(a: string, b: string): boolean
-	a, b = M.normalize_path(a), M.normalize_path(b)
-	local ia, ib = a:find(WILDCARD), b:find(WILDCARD)
-	if not ia and not ib then return M.path_within(a, b) or M.path_within(b, a) end
-	local pa = if ia then a:sub(1, ia - 1) else a
-	local pb = if ib then b:sub(1, ib - 1) else b
-	if ia and ib then return pa:sub(1, #pb) == pb or pb:sub(1, #pa) == pa end
-	local literal, prefix = if ia then pb else pa, if ia then pa else pb
-	return literal:sub(1, #prefix) == prefix or prefix:sub(1, #literal + 1) == literal .. "/"
-end
--- `*` and `?` stay within one segment, `**` crosses segments (`**/` also matches none).
-local function glob_match(g: string, s: string, gi: number, si: number): boolean
-	while gi <= #g do
-		local c = g:sub(gi, gi)
-		if c == "*" then
-			local double = g:sub(gi + 1, gi + 1) == "*"
-			local after = gi + (if double then 2 else 1)
-			if double and g:sub(after, after) == "/" and glob_match(g, s, after + 1, si) then return true end
-			for k = si, #s + 1 do
-				if glob_match(g, s, after, k) then return true end
-				if not double and s:sub(k, k) == "/" then break end
-			end
-			return false
-		elseif c == "?" then
-			if si > #s or s:sub(si, si) == "/" then return false end
-		elseif s:sub(si, si) ~= c then return false end
-		gi += 1; si += 1
-	end
-	return si > #s
-end
--- A changed file is in scope when a scope entry names it or an ancestor directory (literal), or a
--- glob matches it or an ancestor. `[`/`{` classes and globs with more than 8 wildcards fall back to
--- the literal-prefix comparison.
-function M.path_in_scope(entry: string, p: string): boolean
-	entry, p = M.normalize_path(entry), M.normalize_path(p)
-	local first = entry:find(WILDCARD)
-	if not first then return M.path_within(entry, p) end
-	local _, wildcards = entry:gsub("[%*%?]", "")
-	if entry:find("[%[{]") or wildcards > 8 then return p:sub(1, first - 1) == entry:sub(1, first - 1) end
-	if glob_match(entry, p, 1, 1) then return true end
-	for index = #p, 1, -1 do
-		if p:sub(index, index) == "/" and glob_match(entry, p:sub(1, index - 1), 1, 1) then return true end
-	end
-	return false
 end
 
 function M.decode_reply(bytes: any, expected: any): (any?, any?)
@@ -845,13 +646,121 @@ local function verified_object(bytes: any, object_sha256: any): (any?, any?)
 	return M.decode_object(bytes)
 end
 
+-- Shared completion gate for persisted sequential reads and in-memory publication validation.
+-- Only digest-proven bytes are returned on a semantic rejection; they are not an intake or ACK.
+local function complete_message(manifest: any, logical_bytes: string, expected: any): (any?, any?)
+	if #logical_bytes ~= manifest.message_bytes or M.sha256(logical_bytes) ~= manifest.message_sha256 then
+		return nil, failure("content_conflict", "Whole-message original-byte digest differs from the manifest.")
+	end
+	local logical, err
+	if manifest.direction == "report" then logical, err = M.decode_report(logical_bytes, expected)
+	else logical, err = M.decode_reply(logical_bytes, expected) end
+	if err == nil then
+		local slot = if manifest.direction == "report" then logical.seq else logical.reply_seq
+		local message_id = if manifest.direction == "report" then logical.event_id else logical.message_id
+		if slot ~= manifest.slot or message_id ~= manifest.message_id then
+			err = failure("binding_mismatch", "Logical envelope differs from its framing identity.")
+		end
+	end
+	if err ~= nil then
+		err.completed_bytes = logical_bytes; err.completed_sha256 = manifest.message_sha256
+		return nil, err
+	end
+	return { ok = true, complete = true, envelope = logical, bytes = logical_bytes,
+		sha256 = manifest.message_sha256, direction = manifest.direction }, nil
+end
+
+local function manifest_binding(manifest: any, expected: any): any?
+	if manifest.type ~= "manifest" then return failure("invalid_schema", "Begin reassembly with a complete manifest.") end
+	if type(expected) ~= "table" or manifest.mailbox_handle ~= expected.mailbox_handle then
+		return failure("binding_mismatch", "Manifest is for another mailbox.")
+	end
+	for key, validate in B do
+		if not validate(expected[key]) then return failure("binding_mismatch", "Missing provisioned message binding.") end
+	end
+	if manifest.direction == "report" and not token(expected.enrolment_token) then
+		return failure("binding_mismatch", "Missing provisioned report token.")
+	end
+	return nil
+end
+
+local function chunk_slice(chunk: any, manifest: any): (string?, any?)
+	for _, key in { "mailbox_handle", "direction", "slot", "message_id", "message_sha256", "count" } do
+		if chunk[key] ~= manifest[key] then return nil, failure("content_conflict", "Chunk identity differs from its immutable manifest.") end
+	end
+	local decoded = base64(chunk.data_b64, 2732)
+	local length = if chunk.index < manifest.count then LIMITS.slice else manifest.message_bytes - (manifest.count - 1) * LIMITS.slice
+	if decoded == nil or #decoded ~= length then return nil, failure("incomplete", "Chunk length does not match the manifest.") end
+	return decoded, nil
+end
+
+-- The owner persists this state with its active read, and caps simultaneous states at
+-- LIMITS.assemblies and total logical bytes at LIMITS.reassembly_bytes. Base64 slices,
+-- never raw partial UTF-8, cross the JSON persistence boundary. No cursor/ACK is owned here.
+function M.assembly_start(bytes: any, object_sha256: any, expected: any): (any?, any?)
+	local manifest, diagnostic = verified_object(bytes, object_sha256)
+	if diagnostic ~= nil then return nil, diagnostic end
+	local mismatch = manifest_binding(manifest, expected)
+	if mismatch then return nil, mismatch end
+	local encoded, binding_bytes = pcall(tern.json.encode, expected)
+	if not encoded then return nil, failure("invalid_schema", "Assembly binding must be JSON serializable.") end
+	local binding, problem = M.strict_decode(binding_bytes, LIMITS.control)
+	if problem then return nil, problem end
+	return { version = 1, manifest = manifest, manifest_bytes = bytes, manifest_sha256 = object_sha256,
+		binding = binding, next_index = 1, slices = tern.json.array(), object_digests = tern.json.array(), bytes = 0 }, nil
+end
+
+-- Validate/hash only the arriving object. Previously accepted slices are decoded once,
+-- at completion, and the whole original message is hashed once before semantic intake.
+-- Pending success mutates state; failures and completion leave the persisted prefix alone.
+function M.assembly_push(state: any, bytes: any, object_sha256: any, expected: any): (any?, any?)
+	if type(state) ~= "table" or state.version ~= 1 or type(state.manifest) ~= "table"
+		or not integer(state.next_index, 1, LIMITS.chunks) or not integer(state.bytes, 0, LIMITS.logical)
+		or type(state.slices) ~= "table" or type(state.object_digests) ~= "table"
+		or #state.slices ~= state.next_index - 1 or #state.object_digests ~= state.next_index - 1 then
+		return nil, failure("invalid_schema", "Invalid persisted assembly prefix.")
+	end
+	if not equal(state.binding, expected) then return nil, failure("binding_mismatch", "Provisioned generation changed during reassembly.") end
+	local manifest = state.manifest
+	if not integer(manifest.count, 1, LIMITS.chunks) or not integer(manifest.message_bytes, 1, LIMITS.logical)
+		or manifest.count ~= math.ceil(manifest.message_bytes / LIMITS.slice) or state.next_index > manifest.count
+		or state.bytes ~= (state.next_index - 1) * LIMITS.slice then
+		return nil, failure("invalid_schema", "Persisted assembly exceeds its manifest bounds.")
+	end
+	local chunk, diagnostic = verified_object(bytes, object_sha256)
+	if diagnostic ~= nil then return nil, diagnostic end
+	if chunk.type ~= "chunk" then return nil, failure("invalid_schema", "Expected a complete chunk object.") end
+	local decoded, problem = chunk_slice(chunk, manifest)
+	if decoded == nil then return nil, problem end
+	if chunk.index < state.next_index then
+		if state.slices[chunk.index] ~= chunk.data_b64 or state.object_digests[chunk.index] ~= object_sha256 then
+			return nil, failure("content_conflict", "A repeated chunk changed its exact wire bytes.")
+		end
+		return { ok = true, complete = false, code = "already_received" }, nil
+	end
+	if chunk.index ~= state.next_index then return nil, failure("incomplete", "Chunk skips the next persisted slice.") end
+	if chunk.index == manifest.count then
+		local pieces = table.create(manifest.count)
+		for index = 1, state.next_index - 1 do
+			local piece = base64(state.slices[index], 2732)
+			if piece == nil or #piece ~= LIMITS.slice then return nil, failure("invalid_schema", "Invalid persisted Base64 slice.") end
+			pieces[index] = piece
+		end
+		pieces[chunk.index] = decoded
+		return complete_message(manifest, table.concat(pieces), expected)
+	end
+	state.slices[chunk.index] = chunk.data_b64
+	state.object_digests[chunk.index] = object_sha256
+	state.bytes += #decoded
+	state.next_index += 1
+	return { ok = true, complete = false, code = "incomplete" }, nil
+end
+
 function M.begin_assembly(pool: any, bytes: any, expected: any, object_sha256: any): (any?, any?)
 	local manifest, diagnostic = verified_object(bytes, object_sha256)
 	if diagnostic ~= nil then return nil, diagnostic end
-	if manifest.type ~= "manifest" then return nil, failure("invalid_schema", "Begin reassembly with a complete manifest.") end
-	if type(expected) ~= "table" or manifest.mailbox_handle ~= expected.mailbox_handle then return nil, failure("binding_mismatch", "Manifest is for another mailbox.") end
-	for key, validate in B do if not validate(expected[key]) then return nil, failure("binding_mismatch", "Missing provisioned message binding.") end end
-	if manifest.direction == "report" and not token(expected.enrolment_token) then return nil, failure("binding_mismatch", "Missing provisioned report token.") end
+	local mismatch = manifest_binding(manifest, expected)
+	if mismatch then return nil, mismatch end
 	local prior = pool.assemblies[manifest.mailbox_handle]
 	if prior ~= nil then
 		if prior.manifest_bytes == bytes and equal(prior.binding, expected) then return { ok = true, code = "already_started" }, nil end
@@ -880,12 +789,8 @@ function M.push_chunk(pool: any, bytes: any, expected: any, object_sha256: any):
 	if assembly == nil then return nil, failure("incomplete", "No validated manifest is pending for this mailbox.") end
 	if not equal(assembly.binding, expected) then return nil, failure("binding_mismatch", "Provisioned generation changed during reassembly.") end
 	local manifest = assembly.manifest
-	for _, key in { "mailbox_handle", "direction", "slot", "message_id", "message_sha256", "count" } do
-		if chunk[key] ~= manifest[key] then return nil, failure("content_conflict", "Chunk identity differs from its immutable manifest.") end
-	end
-	local decoded = base64(chunk.data_b64, 2732)
-	local expected_length = if chunk.index < chunk.count then LIMITS.slice else manifest.message_bytes - (manifest.count - 1) * LIMITS.slice
-	if #decoded ~= expected_length then return nil, failure("incomplete", "Chunk length does not match the manifest.") end
+	local decoded, problem = chunk_slice(chunk, manifest)
+	if decoded == nil then return nil, problem end
 	local prior = assembly.chunks[chunk.index]
 	if prior ~= nil then
 		if prior ~= decoded or assembly.object_digests[chunk.index] ~= object_sha256 then return nil, failure("content_conflict", "A repeated chunk changed its exact wire bytes.") end
@@ -898,24 +803,10 @@ function M.push_chunk(pool: any, bytes: any, expected: any, object_sha256: any):
 		local pieces = table.clone(assembly.chunks)
 		pieces[chunk.index] = decoded
 		local logical_bytes = table.concat(pieces, "", 1, manifest.count)
-		if #logical_bytes ~= manifest.message_bytes or M.sha256(logical_bytes) ~= manifest.message_sha256 then return nil, failure("content_conflict", "Whole-message original-byte digest differs from the manifest.") end
-		local logical, err
-		if manifest.direction == "report" then logical, err = M.decode_report(logical_bytes, expected) else logical, err = M.decode_reply(logical_bytes, expected) end
-		if err ~= nil then
-			-- Transport completion is independently proven. Callers may settle the
-			-- completed read while retaining rejected bytes without any semantic ACK.
-			err.completed_bytes = logical_bytes; err.completed_sha256 = manifest.message_sha256
-			return nil, err
-		end
-		local slot = if manifest.direction == "report" then logical.seq else logical.reply_seq
-		local message_id = if manifest.direction == "report" then logical.event_id else logical.message_id
-		if slot ~= manifest.slot or message_id ~= manifest.message_id then
-			local mismatch = failure("binding_mismatch", "Logical envelope differs from its framing identity.")
-			mismatch.completed_bytes = logical_bytes; mismatch.completed_sha256 = manifest.message_sha256
-			return nil, mismatch
-		end
+		local completed, problem = complete_message(manifest, logical_bytes, expected)
+		if problem ~= nil then return nil, problem end
 		M.discard_assembly(pool, chunk.mailbox_handle)
-		return { ok = true, complete = true, envelope = logical, bytes = logical_bytes, sha256 = manifest.message_sha256, direction = manifest.direction }, nil
+		return completed, nil
 	end
 	assembly.chunks[chunk.index] = decoded
 	assembly.object_digests[chunk.index] = object_sha256

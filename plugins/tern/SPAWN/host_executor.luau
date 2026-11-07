@@ -1,6 +1,7 @@
 -- Host-only ticket execution. Authority owns persistence; this module owns effects.
 local Resolution = require("./launch_resolution")
 local Native = require("./native_cli")
+local Backend = require("./backend")
 local Executor = {}
 -- The daemon's identity cannot change under a running host VM, so a known
 -- epoch is read once per VM; reloads and snapshots reuse it without /proc.
@@ -12,24 +13,10 @@ end
 local function nonempty(value: any): string?
 	return if type(value) == "string" and value:match("%S") ~= nil then value else nil
 end
-local function posix_quote(value: string): string
-	return "'" .. value:gsub("'", "'\\''") .. "'"
-end
-local function powershell_quote(value: string): string
-	return "'" .. value:gsub("'", "''") .. "'"
-end
--- CreateProcess receives one command-line string. Quote each argv element using
--- the Windows CRT rules instead of PowerShell 5's lossy native argument binder.
-local function windows_argument(value: string): string
-	local escaped = value:gsub('(\\*)"', function(slashes) return slashes .. slashes .. '\\"' end)
-	escaped = escaped:gsub("(\\+)$", "%1%1")
-	return '"' .. escaped .. '"'
-end
-local CMD_META = {}
-for char in string.gmatch('()[]%!^"`<>&|;, *?', ".") do CMD_META[char] = true end
-local function cmd_escape(value: string): string
-	return (value:gsub(".", function(char) return if CMD_META[char] then "^" .. char else char end))
-end
+local posix_quote = Backend.posix_quote
+local powershell_quote = Backend.powershell_quote
+local windows_argument = Backend.windows_argument
+local cmd_escape = Backend.cmd_escape
 local function powershell_invocation(words: any): string
 	local native, batch = {}, {}
 	for index = 2, #words do

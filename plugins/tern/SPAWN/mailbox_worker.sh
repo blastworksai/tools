@@ -30,7 +30,17 @@ for lane in producer consumer staging reports replies acks watermarks; do safe_d
 hash() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d ' ' -f 1; elif command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | cut -d ' ' -f 1; else fail unsupported_capability; fi; }
 b64() { base64 < "$1" | tr -d '\r\n'; }
 un64() { if printf Zg== | base64 -d >/dev/null 2>&1; then base64 -d; else base64 -D; fi; }
-strict() { safe_file "$1" "$2"; iconv -f UTF-8 -t UTF-8 "$1" >/dev/null || fail invalid_schema; awk -v journal="${3:-0}" -f "$validator" "$1" || fail invalid_schema; }
+strict() {
+ safe_file "$1" "$2"
+ # Darwin awk drops raw NULs, so reject them before the lexical parser.
+ [ "$(wc -c < "$1")" -eq "$(tr -d '\000' < "$1" | wc -c)" ] || fail invalid_schema
+ # Darwin iconv can fail on valid large UTF-8 when writing to /dev/null.
+ # Drain through a pipe and append its exit status as the final record; POSIX
+ # pipelines otherwise expose only the drain's status, not iconv's failure.
+ { if iconv -f UTF-8 -t UTF-8 "$1" 2>/dev/null; then printf '\n0\n'; else printf '\n1\n'; fi; } |
+  awk 'END { exit ($0 != "0") }' || fail invalid_schema
+ awk -v journal="${3:-0}" -f "$validator" "$1" || fail invalid_schema
+}
 strict "$box/provision.json" 2048
 [ "$(jq -r '.handle' "$box/provision.json")" = "$handle" ] || fail binding_mismatch
 binding=$(jq -c '.binding' "$box/provision.json")
@@ -304,9 +314,12 @@ consume() {
  count=$(jq -r '.count' "$manifest"); index=1; : > "$work/reply"
  while [ "$index" -le "$count" ]; do
   chunk=$box/replies/$reply_seq/chunk-$index.json; strict "$chunk" 4096
-  jq -e --argjson manifest "$(cat "$manifest")" --argjson index "$index" '(keys|sort)==(["transport","version","type","mailbox_handle","direction","slot","message_id","message_sha256","index","count","data_b64"]|sort) and .type=="chunk" and .index==$index and (. as $chunk|all(["transport","version","mailbox_handle","direction","slot","message_id","message_sha256","count"][]; . as $key|$chunk[$key]==$manifest[$key])) and (.data_b64|test("^[A-Za-z0-9+/]*={0,2}$"))' "$chunk" >/dev/null || fail content_conflict
-  encoded=$(jq -r '.data_b64' "$chunk"); printf '%s' "$encoded" | un64 > "$work/slice"
+  jq -e --argjson manifest "$(cat "$manifest")" --argjson index "$index" '(keys|sort)==(["transport","version","type","mailbox_handle","direction","slot","message_id","message_sha256","index","count","data_b64"]|sort) and .type=="chunk" and .index==$index and (. as $chunk|all(["transport","version","mailbox_handle","direction","slot","message_id","message_sha256","count"][]; . as $key|$chunk[$key]==$manifest[$key]))' "$chunk" >/dev/null || fail content_conflict
+  jq -e '.data_b64|type=="string" and length>=4 and length<=2732 and length%4==0 and test("^[A-Za-z0-9+/]*={0,2}$")' "$chunk" >/dev/null || fail invalid_schema
+  encoded=$(jq -r '.data_b64' "$chunk"); printf '%s' "$encoded" | un64 > "$work/slice" 2>/dev/null || fail invalid_schema
   [ "$(b64 "$work/slice")" = "$encoded" ] || fail invalid_schema
+  slice_bytes=$(wc -c < "$work/slice")
+  [ "$slice_bytes" -ge 1 ] && [ "$slice_bytes" -le 2048 ] || fail invalid_schema
   expected=2048; [ "$index" -lt "$count" ] || expected=$(jq '.message_bytes-(.count-1)*2048' "$manifest")
   [ "$(wc -c < "$work/slice")" -eq "$expected" ] || fail incomplete
   cat "$work/slice" >> "$work/reply"; index=$((index+1))
@@ -340,7 +353,7 @@ if [ "$mode" = report ]; then report_input=$(dd bs=1 count=65537 2>/dev/null | b
 # Helper-only reports are computed from the code path, never from stdin, and
 # before either gate: a long check must not hold shared admission.
 hash_stdin() { if command -v sha256sum >/dev/null 2>&1; then sha256sum | cut -d ' ' -f 1; elif command -v shasum >/dev/null 2>&1; then shasum -a 256 | cut -d ' ' -f 1; else fail unsupported_capability; fi; }
-has_capability() { jq -e --arg name "$1" '(.capabilities // [])|type=="array" and index($name)!=null' "$box/provision.json" >/dev/null || fail capability_missing; }
+has_capability() { jq -e --arg name "$1" '(.capabilities // [])|type=="array" and index($name)!=null' "$box/provision.json" >/dev/null || fail unsupported_capability; }
 manifest_verify() {
  has_capability check-runner-v1
  bound=$(jq -r 'if has("manifest_sha256") then .manifest_sha256 else "" end' "$box/provision.json")

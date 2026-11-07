@@ -44,7 +44,7 @@ local function load(name)
  setfenv(chunk,setmetatable({require=load,tern=fake},{__index=environment}))
  modules[name]=chunk(); return modules[name]
 end
-local M,C=load('mailbox'),load('codec')
+local M,C=load('mailbox'),load('wire/codec')
 local Capabilities=load('mailbox_capabilities')
 local checks=0
 local function check(value,message) assert(value,message); checks+=1 end
@@ -466,9 +466,8 @@ check(C.decode_page(runtime.json.encode(page.payload),discovery.selector)~=nil,'
 watermark.through_seq=2; files['watermarks/1.json']=runtime.json.encode(watermark)
 M.execute(discoveryOp,function(value) page=value end)
 check(page.error.code=='binding_mismatch','discovered filename and watermark contents must agree')
--- Coordinator rollover successor: dispatch binds every report read to the
--- issued launch contract (assignment, handover pair, capabilities). The exact ACCEPTED reads
--- back; one mistyped handover-token digit is refused with its precise codec diagnostic.
+-- Reads validate only the requested wire object. Assignment/handover proof is
+-- checked by the report owner after it has assembled the complete message.
 do
  local issued=clone(readOp.binding)
  issued.assignment_sha256=string.rep('9',64); issued.handover_id='handover-540'
@@ -478,17 +477,22 @@ do
   for _,k in ipairs({'logical_session_id','worker_id','worker_generation','launch_request_id','work_id','enrolment_token'}) do report[k]=binding[k] end
   local written=clone(issued); written.handover_token=token
   local framed=assert(C.frame(runtime.json.encode(report),'report',written))
-  files['reports/1/manifest.json']=framed.manifest; files['reports/1/chunk-1.json']=framed.chunks[1]
+  files['reports/1/manifest.json']=framed.manifest; files['reports/1/chunk-1.json']=nil
   local successor=clone(readOp); successor.binding=clone(issued)
+  local before=#calls
   local outcome; M.execute(successor,function(value) outcome=value end)
+  check(#calls==before+1,'manifest read never traverses chunks')
   files['reports/1/manifest.json']=nil; files['reports/1/chunk-1.json']=nil
-  return outcome
+  return outcome,framed
  end
  local exact=acceptance(issued.handover_token)
- check(exact.status=='read' and exact.payload.selector.part=='manifest','coordinator successor ACCEPTED with the issued handover pair reads back')
- local typo=acceptance(string.rep('29f79cde',7)..'b585166a')
- check(typo.status=='rejected' and typo.error.code=='binding_mismatch' and typo.error.message=='Acceptance differs from the issued assignment or handover.',
-  'a mistyped successor handover token is refused with its exact diagnostic, not a bare code: '..runtime.json.encode(typo))
+ check(exact.status=='read' and exact.payload.selector.part=='manifest','a validated manifest is returned even before any chunks exist')
+ local typo,framed=acceptance(string.rep('29f79cde',7)..'b585166a')
+ check(typo.status=='read','manifest delivery does not claim logical handover validation')
+ local pool=C.new_reassembler()
+ assert(C.begin_assembly(pool,framed.manifest,issued,C.sha256(framed.manifest)))
+ local value,diagnostic=C.push_chunk(pool,framed.chunks[1],issued,C.sha256(framed.chunks[1]))
+ check(value==nil and diagnostic.code=='binding_mismatch','assembly owner rejects the mistyped handover token')
 end
 -- Deadlines measure awake progress between watchdog ticks, not wall time across a suspension.
 local function watchdog(ms) clock+=ms; timers[#timers].fn() end
@@ -613,7 +617,7 @@ do
  ordinary.payload.capabilities[4]='coordinator-control-v1'
  check(C.decode_report(runtime.json.encode(ordinary),allCapabilities)==nil,'REGISTER rejects duplicate control capability')
  ordinary.payload.capabilities={'report-files-v1','check-runner-v1'}
- check(select(2,C.decode_report(runtime.json.encode(ordinary),expected)).code=='binding_mismatch','REGISTER cannot claim an unprovisioned check-runner-v1')
+ check(select(2,C.decode_report(runtime.json.encode(ordinary),expected)).code=='binding_mismatch','REGISTER cannot grant a capability outside its provisioned binding')
  local legacy=clone(expected);legacy.capabilities=nil
  ordinary.payload.capabilities={'report-files-v1'}
  check(C.decode_report(runtime.json.encode(ordinary),legacy)~=nil,'ordinary legacy registration remains usable without control capability')
@@ -667,8 +671,8 @@ check(C.decode_report(runtime.json.encode(ordinary),legacy)~=nil,'READY without 
   builder_work_id='builder-work',review_id='review',reviewer_family='openai',proof={mode='cross_family_review',artifact_revision='rev',review_id='review',check_refs=runtime.json.array()}}
  local releaseManager=clone(legacy);releaseManager.capabilities={'report-files-v1','release-manager-v1'}
  check(C.decode_reply(runtime.json.encode(landingReply),releaseManager)~=nil,'landing_grant names the exact landing, target head, source, builder, review and proof')
- check(select(2,C.decode_reply(runtime.json.encode(landingReply),legacy)).code=='binding_mismatch','landing_grant requires provisioned release-manager-v1')
- check(select(2,C.decode_reply(runtime.json.encode(landingReply),expected)).code=='binding_mismatch','coordinator control does not imply release-manager-v1')
+ check(select(2,C.decode_reply(runtime.json.encode(landingReply),legacy)).code=='unsupported_capability','landing_grant requires provisioned release-manager-v1')
+ check(select(2,C.decode_reply(runtime.json.encode(landingReply),expected)).code=='unsupported_capability','coordinator control does not imply release-manager-v1')
  landingReply.payload.proof.mode='worker-attested'
  check(C.decode_reply(runtime.json.encode(landingReply),releaseManager)==nil,'landing_grant proof mode is a closed enum')
  landingReply.payload.proof.mode='helper_checks';landingReply.payload.proof.check_refs={'check-1'}
@@ -691,10 +695,10 @@ check(C.decode_report(runtime.json.encode(ordinary),legacy)~=nil,'READY without 
   for _,capabilities in ipairs({false,{}, {'report-files-v1'}}) do
    local unprovisioned=clone(expected);unprovisioned.capabilities=capabilities
    local result,diagnostic=decode(fixture.bytes,unprovisioned)
-   check(result==nil and diagnostic.code=='binding_mismatch','coordinator control requires explicitly provisioned capability')
+   check(result==nil and diagnostic.code=='unsupported_capability','coordinator control requires explicitly provisioned capability')
   end
   local result,diagnostic=decode(fixture.bytes,legacy)
-  check(result==nil and diagnostic.code=='binding_mismatch','legacy binding cannot silently acquire coordinator control')
+  check(result==nil and diagnostic.code=='unsupported_capability','legacy binding cannot silently acquire coordinator control')
   local envelope=assert(decode(fixture.bytes,expected))
   check(envelope.payload.activation_token==ownerToken and envelope.payload.owner_id=='owner' and envelope.payload.owner_generation==1,'typed coordinator identity retained')
   local frame=assert(C.frame(fixture.bytes,fixture.direction,expected))
@@ -840,7 +844,7 @@ do
  local checkResult={check_id='t1-c1',argv_sha256=string.rep('b',64),exit_code=0,output_sha256=string.rep('c',64),head=head,ran_at_ms=1730000000000}
  local function checkReport(p) return report('CHECK_RESULT',p) end
  roundtrip(checkReport(checkResult),full,'CHECK_RESULT')
- refused(checkReport(checkResult),plain,'CHECK_RESULT requires provisioned check-runner-v1','binding_mismatch')
+ refused(checkReport(checkResult),plain,'CHECK_RESULT requires provisioned check-runner-v1','unsupported_capability')
  refused(report('CHECK_RESULT',checkResult,true),full,'CHECK_RESULT carries no action correlation')
  closed(checkReport,checkResult,full,'CHECK_RESULT')
  for _,code in ipairs({1,255,-1,-2147483648,4294967295}) do
@@ -866,7 +870,7 @@ do
   changed_files={'src/a.luau','src/b.luau'},changed_overflow=false,changed_total=2,dirty=true}
  local function checkoutReport(p) return report('CHECKOUT',p) end
  roundtrip(checkoutReport(checkout),full,'CHECKOUT')
- refused(checkoutReport(checkout),plain,'CHECKOUT requires provisioned check-runner-v1','binding_mismatch')
+ refused(checkoutReport(checkout),plain,'CHECKOUT requires provisioned check-runner-v1','unsupported_capability')
  refused(report('CHECKOUT',checkout,true),full,'CHECKOUT carries no action correlation')
  closed(checkoutReport,checkout,full,'CHECKOUT',{base=true})
  local noBase=clone(checkout);noBase.base=nil
@@ -908,7 +912,7 @@ do
  local deploy={deploy_id='deploy',attempt_id='attempt-1',landing_id='landing',outcome='deployed',revision=head,evidence={'ci/run/1'}}
  local function deployReport(p) return report('DEPLOY_RESULT',p,true) end
  roundtrip(deployReport(deploy),full,'DEPLOY_RESULT')
- refused(deployReport(deploy),plain,'DEPLOY_RESULT requires provisioned release-manager-v1','binding_mismatch')
+ refused(deployReport(deploy),plain,'DEPLOY_RESULT requires provisioned release-manager-v1','unsupported_capability')
  refused(report('DEPLOY_RESULT',deploy),full,'DEPLOY_RESULT requires its deploy_grant correlation')
  closed(deployReport,deploy,full,'DEPLOY_RESULT',{reason=true})
  for _,outcome in ipairs({'held','not_applicable','failed'}) do
@@ -979,7 +983,7 @@ do
  local grant={deploy_id='deploy',attempt_id='attempt-1',landing_id='landing',revision=head,target_ref='production'}
  local function deployGrant(p) return reply('deploy_grant',p) end
  roundtrip(deployGrant(grant),full,'deploy_grant')
- refused(deployGrant(grant),plain,'deploy_grant requires provisioned release-manager-v1','binding_mismatch')
+ refused(deployGrant(grant),plain,'deploy_grant requires provisioned release-manager-v1','unsupported_capability')
  closed(deployGrant,grant,full,'deploy_grant')
  -- label_request: the labeller's closed class choice.
  local labelRequest={work_ref='work',classes={'bugfix','docs'},text='Fix the parser.'}

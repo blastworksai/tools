@@ -843,7 +843,7 @@ end
 
 -- The non-palette bridge is deliberately separate from normal Config rendering.
 local Protocol=Dispatch.protocol
-local Codec=require("./codec")
+local Codec=require("./wire/codec")
 local function dispatch_verify(state,cx,r,callback)
 	bridge_membership(state,cx,function(session,why)
 		if not session then callback(nil,why);return end

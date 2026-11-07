@@ -1,7 +1,8 @@
+-- Vendored from shared/report-files-v1 by sync.py; edit there, then run sync.py.
 --!strict
 
 -- Pure report-files-v1 codecs. Parsing/reassembly is not durable acceptance or an ACK.
--- SPAWN owns files; the later workflow reducer owns sequence cursors and committed receipts.
+-- SPAWN owns files; the workflow reducer owns sequence cursors and committed receipts.
 local M = {}
 local MAX_INTEGER = 9007199254740991
 -- `array_parse` bounds any JSON array the parser admits (CHECKOUT changed_files reaches 512);
@@ -197,32 +198,83 @@ local function word_bytes(word: number): string
 	return string.char(band(rshift(word, 24), 255), band(rshift(word, 16), 255), band(rshift(word, 8), 255), band(word, 255))
 end
 
-function M.sha256(bytes: string): string
-	local bits = #bytes * 8
-	local padded = bytes .. "\128" .. string.rep("\0", (55 - #bytes) % 64)
-		.. word_bytes(math.floor(bits / MOD)) .. word_bytes(bits % MOD)
-	local h = { 0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19 }
-	local w = table.create(64, 0)
-	for first = 1, #padded, 64 do
-		for index = 1, 16 do
-			local a, b, c, d = padded:byte(first + (index - 1) * 4, first + (index - 1) * 4 + 3)
-			w[index] = a * 16777216 + b * 65536 + c * 256 + d
-		end
-		for index = 17, 64 do
-			local x, y = w[index - 15], w[index - 2]
-			w[index] = (w[index - 16] + bxor(rotate(x, 7), rotate(x, 18), rshift(x, 3)) + w[index - 7]
-				+ bxor(rotate(y, 17), rotate(y, 19), rshift(y, 10))) % MOD
-		end
-		local a, b, c, d, e, f, g, hh = h[1], h[2], h[3], h[4], h[5], h[6], h[7], h[8]
-		for index = 1, 64 do
-			local t1 = (hh + bxor(rotate(e, 6), rotate(e, 11), rotate(e, 25)) + bxor(band(e, f), band(bnot(e), g)) + K[index] + w[index]) % MOD
-			local t2 = (bxor(rotate(a, 2), rotate(a, 13), rotate(a, 22)) + bxor(band(a, b), band(a, c), band(b, c))) % MOD
-			hh, g, f, e, d, c, b, a = g, f, e, (d + t1) % MOD, c, b, a, (t1 + t2) % MOD
-		end
-		h[1], h[2], h[3], h[4] = (h[1] + a) % MOD, (h[2] + b) % MOD, (h[3] + c) % MOD, (h[4] + d) % MOD
-		h[5], h[6], h[7], h[8] = (h[5] + e) % MOD, (h[6] + f) % MOD, (h[7] + g) % MOD, (h[8] + hh) % MOD
+-- One 64-byte block of `s` at `first` into the state words `h`, using the schedule scratch `w`.
+local function compress(h: { number }, w: { number }, s: string, first: number)
+	for index = 1, 16 do
+		local a, b, c, d = s:byte(first + (index - 1) * 4, first + (index - 1) * 4 + 3)
+		w[index] = a * 16777216 + b * 65536 + c * 256 + d
 	end
+	for index = 17, 64 do
+		local x, y = w[index - 15], w[index - 2]
+		w[index] = (w[index - 16] + bxor(rotate(x, 7), rotate(x, 18), rshift(x, 3)) + w[index - 7]
+			+ bxor(rotate(y, 17), rotate(y, 19), rshift(y, 10))) % MOD
+	end
+	local a, b, c, d, e, f, g, hh = h[1], h[2], h[3], h[4], h[5], h[6], h[7], h[8]
+	for index = 1, 64 do
+		local t1 = (hh + bxor(rotate(e, 6), rotate(e, 11), rotate(e, 25)) + bxor(band(e, f), band(bnot(e), g)) + K[index] + w[index]) % MOD
+		local t2 = (bxor(rotate(a, 2), rotate(a, 13), rotate(a, 22)) + bxor(band(a, b), band(a, c), band(b, c))) % MOD
+		hh, g, f, e, d, c, b, a = g, f, e, (d + t1) % MOD, c, b, a, (t1 + t2) % MOD
+	end
+	h[1], h[2], h[3], h[4] = (h[1] + a) % MOD, (h[2] + b) % MOD, (h[3] + c) % MOD, (h[4] + d) % MOD
+	h[5], h[6], h[7], h[8] = (h[5] + e) % MOD, (h[6] + f) % MOD, (h[7] + g) % MOD, (h[8] + hh) % MOD
+end
+local function initial(): { number }
+	return { 0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19 }
+end
+-- Pad the final partial block (fewer than 64 bytes) of a `length`-byte message and hex the digest.
+local function final(h: { number }, w: { number }, tail: string, length: number): string
+	local bits = length * 8
+	local padded = tail .. "\128" .. string.rep("\0", (55 - #tail) % 64) .. word_bytes(math.floor(bits / MOD)) .. word_bytes(bits % MOD)
+	for first = 1, #padded, 64 do compress(h, w, padded, first) end
 	return string.format("%08x%08x%08x%08x%08x%08x%08x%08x", h[1], h[2], h[3], h[4], h[5], h[6], h[7], h[8])
+end
+
+function M.sha256(bytes: string): string
+	local h, w = initial(), table.create(64, 0)
+	local whole = #bytes - #bytes % 64
+	for first = 1, whole, 64 do compress(h, w, bytes, first) end
+	return final(h, w, bytes:sub(whole + 1), #bytes)
+end
+
+-- Resumable SHA-256 for inputs too large to hash inside one window callback. `sha256_feed`
+-- only queues bytes; `sha256_step` compresses at most `max_blocks` 64-byte blocks and returns
+-- true once every queued full block is hashed; `sha256_digest` then pads the tail. A step that
+-- is interrupted (budget trip) leaves `busy` set, and every later call refuses that state.
+function M.sha256_begin(): any
+	return { h = initial(), w = table.create(64, 0), queue = {}, head = 1, tail = 0, current = "", pos = 1, length = 0, busy = false, finished = false }
+end
+function M.sha256_feed(state: any, bytes: string)
+	assert(not state.busy and not state.finished, "sha256 state was interrupted or already finished")
+	if #bytes == 0 then return end
+	-- Explicit tail index: consumed slots are nil, so `#queue`/table.insert would reuse slot 1.
+	state.tail += 1; state.queue[state.tail] = bytes; state.length += #bytes
+end
+function M.sha256_step(state: any, max_blocks: number): boolean
+	assert(not state.busy and not state.finished, "sha256 state was interrupted or already finished")
+	state.busy = true
+	local h, w, queue = state.h, state.w, state.queue
+	local current, pos, head, blocks = state.current, state.pos, state.head, 0
+	while true do
+		if #current - pos + 1 >= 64 then
+			if blocks >= max_blocks then break end
+			compress(h, w, current, pos); pos += 64; blocks += 1
+		else
+			local nextpart = queue[head]
+			if nextpart == nil then break end
+			queue[head] = nil; head += 1
+			current = current:sub(pos) .. nextpart; pos = 1
+		end
+	end
+	state.current, state.pos, state.head = current, pos, head
+	local drained = queue[head] == nil and #current - pos + 1 < 64
+	state.busy = false
+	return drained
+end
+function M.sha256_digest(state: any): string
+	assert(not state.busy and not state.finished, "sha256 state was interrupted or already finished")
+	assert(state.queue[state.head] == nil and #state.current - state.pos + 1 < 64, "sha256 input not fully stepped")
+	state.finished = true -- One-shot: the state words are consumed by the padding.
+	return final(state.h, state.w, state.current:sub(state.pos), state.length)
 end
 
 local function object(raw: any, required: any, optional: any, shapes: any): boolean
@@ -258,10 +310,11 @@ local function binding_matches(raw: any, expected: any, enrolment: boolean): boo
 	for key, validate in B do if not validate(expected[key]) or raw[key] ~= expected[key] then return false end end
 	return not enrolment or (token(expected.enrolment_token) and raw.enrolment_token == expected.enrolment_token)
 end
-local REPORT_KINDS = enum("REGISTER", "READY", "ACCEPTED", "HEARTBEAT", "WAITING", "BLOCKED", "ASK", "CHECKPOINT", "REVIEW_READY", "REVIEW_RESULT", "DONE", "ROLLOVER_REQUEST", "LANDING_REQUEST", "LANDING_RESULT", "COORDINATOR_RELEASE", "reply_ack", "COORDINATOR_PROPOSAL",
+local REPORT_KINDS = enum("REGISTER", "READY", "ACCEPTED", "HEARTBEAT", "WAITING", "BLOCKED", "ASK", "CHECKPOINT", "REVIEW_READY", "REVIEW_RESULT", "DONE", "ROLLOVER_REQUEST", "LANDING_REQUEST", "LANDING_RESULT", "reply_ack", "COORDINATOR_RELEASE", "COORDINATOR_PROPOSAL",
 	"CHECK_RESULT", "CHECKOUT", "LABEL", "DEPLOY_RESULT")
 local CAPABILITIES = enum("report-files-v1", "native-ask-v1", "worker-poll-v1", "argv-v1", "coordinator-control-v1", "check-runner-v1", "release-manager-v1")
--- Kinds a provisioned capability must authorize, in both directions.
+-- Missing provisioned capability is unsupported_capability in both packaged consumers.
+-- Identity mismatches remain binding_mismatch; neither classification grants authority.
 local REQUIRES = { COORDINATOR_RELEASE = "coordinator-control-v1", COORDINATOR_PROPOSAL = "coordinator-control-v1",
 	CHECK_RESULT = "check-runner-v1", CHECKOUT = "check-runner-v1", DEPLOY_RESULT = "release-manager-v1",
 	coordinator_activation = "coordinator-control-v1", coordinator_retirement = "coordinator-control-v1",
@@ -300,7 +353,7 @@ end
 local function report_payload(report: any, shapes: any): boolean
 	local p, kind = report.payload, report.kind
 	local references = function(v: any): boolean return array(v, short, shapes) end
-	-- Optional worker self-report of omp's displayed context usage, matching ORCH+ transport.
+	-- Optional worker self-report of omp's displayed context usage; never native evidence.
 	local context = function(v: any): boolean return integer(v, 0, 100) end
 	local texts = function(v: any): boolean return array(v, long, shapes) end
 	if kind == "REGISTER" then
@@ -347,10 +400,13 @@ local function report_payload(report: any, shapes: any): boolean
 			revision = short, evidence = function(v: any): boolean return array(v, short, shapes, 0, 16) end }, { reason = short }, shapes)
 	elseif kind == "ROLLOVER_REQUEST" then return object(p, { checkpoint_id = id, reason = short }, {}, shapes)
 	elseif kind == "LANDING_REQUEST" then
+		-- Exact artifact (source ref + revision, pinned by a retained checkpoint) onto an exact target
+		-- (repository, ref and expected head revision). A request is data, never a grant.
 		return object(p, { checkpoint_id = id, project_id = id, repo_ref = short, target_ref = short, target_revision = short,
 			source_ref = short, source_revision = short }, { summary = short }, shapes)
 	elseif kind == "LANDING_RESULT" then
-		-- Kept exactly in step with ORCH+ transport: outcome-specific fields are required or forbidden.
+		-- Echoes the exact landing_grant; landed names the resulting head, stale_target the observed
+		-- moved head, rejected/uncertain a reason. Nothing here is native proof of a merge.
 		if not object(p, { landing_id = id, grant_id = id, project_id = id, repo_ref = short, target_ref = short, target_revision = short,
 			source_revision = short, outcome = enum("landed", "rejected", "stale_target", "uncertain"), evidence = references },
 			{ result_revision = short, observed_target_revision = short, reason = short, pr_ref = short, summary = short }, shapes) then return false end
@@ -387,7 +443,7 @@ function M.decode_report(bytes: any, expected: any): (any?, any?)
 	if raw.kind == "reply_ack" and #bytes > LIMITS.control then return nil, failure("oversize", "Reserved reply acknowledgement exceeds its control limit.") end
 	if not binding_matches(raw, expected, true) or not id(expected.mailbox_handle) then return nil, failure("binding_mismatch", "Report differs from the provisioned enrolment.") end
 	if not authorized(raw.kind, expected) then
-		return nil, failure("binding_mismatch", raw.kind .. " requires its provisioned capability " .. REQUIRES[raw.kind] .. ".")
+		return nil, failure("unsupported_capability", raw.kind .. " requires its explicitly provisioned capability " .. REQUIRES[raw.kind] .. ".")
 	end
 	if raw.event_id ~= M.sha256(expected.mailbox_handle .. ":report:" .. string.format("%.0f", raw.seq)) then return nil, failure("binding_mismatch", "Report event ID does not match its mailbox sequence.") end
 	if raw.kind == "ACCEPTED" and (raw.handover_id ~= expected.handover_id or raw.handover_token ~= expected.handover_token
@@ -402,6 +458,43 @@ function M.decode_report(bytes: any, expected: any): (any?, any?)
 	return raw, nil
 end
 
+-- Authenticated assignment manifest (Contract G).
+function M.decode_manifest(bytes: any): (any?, any?)
+	if type(bytes) == "string" and #bytes > LIMITS.manifest then return nil, failure("manifest_too_large", "Assignment manifest exceeds 4096 bytes.") end
+	local raw, diagnostic, shapes = M.strict_decode(bytes, LIMITS.manifest)
+	if diagnostic ~= nil then return nil, diagnostic end
+	local bounded = function(n: number): (any) -> boolean return function(v: any): boolean return text(v, n) and v:find("%z") == nil end end
+	local check = function(v: any): boolean return object(v, { check_id = id, argv = function(a: any): boolean return array(a, bounded(512), shapes, 1, 16) end }, {}, shapes) end
+	local scope = function(v: any): boolean return object(v, { paths = function(a: any): boolean return array(a, bounded(256), shapes, 0, 64) end,
+		systems = function(a: any): boolean return array(a, bounded(80), shapes, 0, 16) end }, {}, shapes) end
+	if not object(raw, { checks = function(v: any): boolean return array(v, check, shapes, 0, 16) and unique(v, "check_id") end,
+		files = function(v: any): boolean return array(v, bounded(256), shapes, 0, 64) end, scope = scope }, { base_ref = bounded(256) }, shapes) then
+		return nil, failure("invalid_schema", "Invalid closed assignment manifest.")
+	end
+	return raw, nil
+end
+
+-- Canonical manifest bytes (sorted keys, arrays always arrays) for {checks, files, scope, base_ref?}.
+-- SPAWN writes these exact bytes as manifest.json and binds their sha256; ORCH+ never runs argv.
+function M.encode_manifest(m: any): (string?, any?)
+	local function strings(list: any): string
+		local parts = {}
+		for index, value in list or {} do parts[index] = tern.json.encode(value) end
+		return "[" .. table.concat(parts, ",") .. "]"
+	end
+	local checks = {}
+	for index, check in m.checks or {} do
+		checks[index] = '{"argv":' .. strings(check.argv) .. ',"check_id":' .. tern.json.encode(check.check_id) .. "}"
+	end
+	local scope = m.scope or {}
+	local bytes = "{" .. (if m.base_ref ~= nil then '"base_ref":' .. tern.json.encode(m.base_ref) .. "," else "")
+		.. '"checks":[' .. table.concat(checks, ",") .. '],"files":' .. strings(m.files)
+		.. ',"scope":{"paths":' .. strings(scope.paths) .. ',"systems":' .. strings(scope.systems) .. "}}"
+	local _, problem = M.decode_manifest(bytes)
+	if problem then return nil, problem end
+	return bytes, nil
+end
+
 function M.decode_reply(bytes: any, expected: any): (any?, any?)
 	local raw, diagnostic, shapes = M.strict_decode(bytes)
 	if diagnostic ~= nil then return nil, diagnostic end
@@ -413,6 +506,8 @@ function M.decode_reply(bytes: any, expected: any): (any?, any?)
 	if raw.kind == "assignment" then valid = object(p, { assignment_ref = short, assignment_sha256 = digest, instructions = long }, {}, shapes)
 	elseif raw.kind == "report_request" then valid = object(p, { request_id = id, requested_kind = enum("HEARTBEAT", "CHECKPOINT"), reason = short }, {}, shapes)
 	elseif raw.kind == "owner_decision" then valid = object(p, { choice_id = id, answer = long }, {}, shapes)
+	elseif raw.kind == "coordinator_activation" then valid = object(p, { owner_id = id, owner_generation = positive, activation_token = digest, instructions = long }, {}, shapes)
+	elseif raw.kind == "coordinator_retirement" then valid = object(p, { owner_id = id, owner_generation = positive, activation_token = digest, reason = short }, {}, shapes)
 	elseif raw.kind == "landing_grant" then valid = object(p, { landing_id = id, grant_id = id, project_id = id, checkpoint_id = id, repo_ref = short,
 		target_ref = short, target_revision = short, source_ref = short, source_revision = short, builder_work_id = id, review_id = id, reviewer_family = family,
 		proof = function(v: any): boolean return object(v, { mode = enum("cross_family_review", "helper_checks"), artifact_revision = short, review_id = id,
@@ -430,32 +525,13 @@ function M.decode_reply(bytes: any, expected: any): (any?, any?)
 			findings = function(v: any): boolean return findings(v, shapes) end }, { review_id = id }, shapes)
 	elseif raw.kind == "deploy_grant" then valid = object(p, { deploy_id = id, attempt_id = id, landing_id = id, revision = short, target_ref = short }, {}, shapes)
 	elseif raw.kind == "label_request" then
-		valid = object(p, { work_ref = short, classes = function(v: any): boolean return array(v, class_name, shapes, 1, 32) and unique(v) end, text = long }, {}, shapes)
-	elseif raw.kind == "coordinator_activation" then valid = object(p, { owner_id = id, owner_generation = positive, activation_token = digest, instructions = long }, {}, shapes)
-	elseif raw.kind == "coordinator_retirement" then valid = object(p, { owner_id = id, owner_generation = positive, activation_token = digest, reason = short }, {}, shapes) end
+		valid = object(p, { work_ref = short, classes = function(v: any): boolean return array(v, class_name, shapes, 1, 32) and unique(v) end, text = long }, {}, shapes) end
 	if not valid or (raw.kind == "owner_decision" and (raw.gate_id == nil or raw.gate_revision == nil))
 		or (raw.kind ~= "owner_decision" and (raw.gate_id ~= nil or raw.gate_revision ~= nil)) then return nil, failure("invalid_schema", "Invalid closed reply payload or gate fields.") end
 	if raw.kind == "report_request" and #bytes > LIMITS.control then return nil, failure("oversize", "Report-request reply exceeds its control limit.") end
 	if not binding_matches(raw, expected, false) then return nil, failure("binding_mismatch", "Reply differs from its recipient binding.") end
 	if not authorized(raw.kind, expected) then
-		return nil, failure("binding_mismatch", raw.kind .. " requires its provisioned capability " .. REQUIRES[raw.kind] .. ".")
-	end
-	return raw, nil
-end
-
--- Authenticated assignment manifest (ORCH+ Contract G) carried by mailbox_provision. The exact
--- bytes are hashed and written verbatim by the target helper; worker helpers run only these argv.
-function M.decode_manifest(bytes: any): (any?, any?)
-	if type(bytes) == "string" and #bytes > LIMITS.manifest then return nil, failure("manifest_too_large", "Assignment manifest exceeds 4096 bytes.") end
-	local raw, diagnostic, shapes = M.strict_decode(bytes, LIMITS.manifest)
-	if diagnostic ~= nil then return nil, diagnostic end
-	local bounded = function(n: number): (any) -> boolean return function(v: any): boolean return text(v, n) and v:find("%z") == nil end end
-	local check = function(v: any): boolean return object(v, { check_id = id, argv = function(a: any): boolean return array(a, bounded(512), shapes, 1, 16) end }, {}, shapes) end
-	local scope = function(v: any): boolean return object(v, { paths = function(a: any): boolean return array(a, bounded(256), shapes, 0, 64) end,
-		systems = function(a: any): boolean return array(a, bounded(80), shapes, 0, 16) end }, {}, shapes) end
-	if not object(raw, { checks = function(v: any): boolean return array(v, check, shapes, 0, 16) and unique(v, "check_id") end,
-		files = function(v: any): boolean return array(v, bounded(256), shapes, 0, 64) end, scope = scope }, { base_ref = bounded(256) }, shapes) then
-		return nil, failure("invalid_schema", "Invalid closed assignment manifest.")
+		return nil, failure("unsupported_capability", raw.kind .. " requires its explicitly provisioned capability " .. REQUIRES[raw.kind] .. ".")
 	end
 	return raw, nil
 end
@@ -571,13 +647,121 @@ local function verified_object(bytes: any, object_sha256: any): (any?, any?)
 	return M.decode_object(bytes)
 end
 
+-- Shared completion gate for persisted sequential reads and in-memory publication validation.
+-- Only digest-proven bytes are returned on a semantic rejection; they are not an intake or ACK.
+local function complete_message(manifest: any, logical_bytes: string, expected: any): (any?, any?)
+	if #logical_bytes ~= manifest.message_bytes or M.sha256(logical_bytes) ~= manifest.message_sha256 then
+		return nil, failure("content_conflict", "Whole-message original-byte digest differs from the manifest.")
+	end
+	local logical, err
+	if manifest.direction == "report" then logical, err = M.decode_report(logical_bytes, expected)
+	else logical, err = M.decode_reply(logical_bytes, expected) end
+	if err == nil then
+		local slot = if manifest.direction == "report" then logical.seq else logical.reply_seq
+		local message_id = if manifest.direction == "report" then logical.event_id else logical.message_id
+		if slot ~= manifest.slot or message_id ~= manifest.message_id then
+			err = failure("binding_mismatch", "Logical envelope differs from its framing identity.")
+		end
+	end
+	if err ~= nil then
+		err.completed_bytes = logical_bytes; err.completed_sha256 = manifest.message_sha256
+		return nil, err
+	end
+	return { ok = true, complete = true, envelope = logical, bytes = logical_bytes,
+		sha256 = manifest.message_sha256, direction = manifest.direction }, nil
+end
+
+local function manifest_binding(manifest: any, expected: any): any?
+	if manifest.type ~= "manifest" then return failure("invalid_schema", "Begin reassembly with a complete manifest.") end
+	if type(expected) ~= "table" or manifest.mailbox_handle ~= expected.mailbox_handle then
+		return failure("binding_mismatch", "Manifest is for another mailbox.")
+	end
+	for key, validate in B do
+		if not validate(expected[key]) then return failure("binding_mismatch", "Missing provisioned message binding.") end
+	end
+	if manifest.direction == "report" and not token(expected.enrolment_token) then
+		return failure("binding_mismatch", "Missing provisioned report token.")
+	end
+	return nil
+end
+
+local function chunk_slice(chunk: any, manifest: any): (string?, any?)
+	for _, key in { "mailbox_handle", "direction", "slot", "message_id", "message_sha256", "count" } do
+		if chunk[key] ~= manifest[key] then return nil, failure("content_conflict", "Chunk identity differs from its immutable manifest.") end
+	end
+	local decoded = base64(chunk.data_b64, 2732)
+	local length = if chunk.index < manifest.count then LIMITS.slice else manifest.message_bytes - (manifest.count - 1) * LIMITS.slice
+	if decoded == nil or #decoded ~= length then return nil, failure("incomplete", "Chunk length does not match the manifest.") end
+	return decoded, nil
+end
+
+-- The owner persists this state with its active read, and caps simultaneous states at
+-- LIMITS.assemblies and total logical bytes at LIMITS.reassembly_bytes. Base64 slices,
+-- never raw partial UTF-8, cross the JSON persistence boundary. No cursor/ACK is owned here.
+function M.assembly_start(bytes: any, object_sha256: any, expected: any): (any?, any?)
+	local manifest, diagnostic = verified_object(bytes, object_sha256)
+	if diagnostic ~= nil then return nil, diagnostic end
+	local mismatch = manifest_binding(manifest, expected)
+	if mismatch then return nil, mismatch end
+	local encoded, binding_bytes = pcall(tern.json.encode, expected)
+	if not encoded then return nil, failure("invalid_schema", "Assembly binding must be JSON serializable.") end
+	local binding, problem = M.strict_decode(binding_bytes, LIMITS.control)
+	if problem then return nil, problem end
+	return { version = 1, manifest = manifest, manifest_bytes = bytes, manifest_sha256 = object_sha256,
+		binding = binding, next_index = 1, slices = tern.json.array(), object_digests = tern.json.array(), bytes = 0 }, nil
+end
+
+-- Validate/hash only the arriving object. Previously accepted slices are decoded once,
+-- at completion, and the whole original message is hashed once before semantic intake.
+-- Pending success mutates state; failures and completion leave the persisted prefix alone.
+function M.assembly_push(state: any, bytes: any, object_sha256: any, expected: any): (any?, any?)
+	if type(state) ~= "table" or state.version ~= 1 or type(state.manifest) ~= "table"
+		or not integer(state.next_index, 1, LIMITS.chunks) or not integer(state.bytes, 0, LIMITS.logical)
+		or type(state.slices) ~= "table" or type(state.object_digests) ~= "table"
+		or #state.slices ~= state.next_index - 1 or #state.object_digests ~= state.next_index - 1 then
+		return nil, failure("invalid_schema", "Invalid persisted assembly prefix.")
+	end
+	if not equal(state.binding, expected) then return nil, failure("binding_mismatch", "Provisioned generation changed during reassembly.") end
+	local manifest = state.manifest
+	if not integer(manifest.count, 1, LIMITS.chunks) or not integer(manifest.message_bytes, 1, LIMITS.logical)
+		or manifest.count ~= math.ceil(manifest.message_bytes / LIMITS.slice) or state.next_index > manifest.count
+		or state.bytes ~= (state.next_index - 1) * LIMITS.slice then
+		return nil, failure("invalid_schema", "Persisted assembly exceeds its manifest bounds.")
+	end
+	local chunk, diagnostic = verified_object(bytes, object_sha256)
+	if diagnostic ~= nil then return nil, diagnostic end
+	if chunk.type ~= "chunk" then return nil, failure("invalid_schema", "Expected a complete chunk object.") end
+	local decoded, problem = chunk_slice(chunk, manifest)
+	if decoded == nil then return nil, problem end
+	if chunk.index < state.next_index then
+		if state.slices[chunk.index] ~= chunk.data_b64 or state.object_digests[chunk.index] ~= object_sha256 then
+			return nil, failure("content_conflict", "A repeated chunk changed its exact wire bytes.")
+		end
+		return { ok = true, complete = false, code = "already_received" }, nil
+	end
+	if chunk.index ~= state.next_index then return nil, failure("incomplete", "Chunk skips the next persisted slice.") end
+	if chunk.index == manifest.count then
+		local pieces = table.create(manifest.count)
+		for index = 1, state.next_index - 1 do
+			local piece = base64(state.slices[index], 2732)
+			if piece == nil or #piece ~= LIMITS.slice then return nil, failure("invalid_schema", "Invalid persisted Base64 slice.") end
+			pieces[index] = piece
+		end
+		pieces[chunk.index] = decoded
+		return complete_message(manifest, table.concat(pieces), expected)
+	end
+	state.slices[chunk.index] = chunk.data_b64
+	state.object_digests[chunk.index] = object_sha256
+	state.bytes += #decoded
+	state.next_index += 1
+	return { ok = true, complete = false, code = "incomplete" }, nil
+end
+
 function M.begin_assembly(pool: any, bytes: any, expected: any, object_sha256: any): (any?, any?)
 	local manifest, diagnostic = verified_object(bytes, object_sha256)
 	if diagnostic ~= nil then return nil, diagnostic end
-	if manifest.type ~= "manifest" then return nil, failure("invalid_schema", "Begin reassembly with a complete manifest.") end
-	if type(expected) ~= "table" or manifest.mailbox_handle ~= expected.mailbox_handle then return nil, failure("binding_mismatch", "Manifest is for another mailbox.") end
-	for key, validate in B do if not validate(expected[key]) then return nil, failure("binding_mismatch", "Missing provisioned message binding.") end end
-	if manifest.direction == "report" and not token(expected.enrolment_token) then return nil, failure("binding_mismatch", "Missing provisioned report token.") end
+	local mismatch = manifest_binding(manifest, expected)
+	if mismatch then return nil, mismatch end
 	local prior = pool.assemblies[manifest.mailbox_handle]
 	if prior ~= nil then
 		if prior.manifest_bytes == bytes and equal(prior.binding, expected) then return { ok = true, code = "already_started" }, nil end
@@ -606,12 +790,8 @@ function M.push_chunk(pool: any, bytes: any, expected: any, object_sha256: any):
 	if assembly == nil then return nil, failure("incomplete", "No validated manifest is pending for this mailbox.") end
 	if not equal(assembly.binding, expected) then return nil, failure("binding_mismatch", "Provisioned generation changed during reassembly.") end
 	local manifest = assembly.manifest
-	for _, key in { "mailbox_handle", "direction", "slot", "message_id", "message_sha256", "count" } do
-		if chunk[key] ~= manifest[key] then return nil, failure("content_conflict", "Chunk identity differs from its immutable manifest.") end
-	end
-	local decoded = base64(chunk.data_b64, 2732)
-	local expected_length = if chunk.index < chunk.count then LIMITS.slice else manifest.message_bytes - (manifest.count - 1) * LIMITS.slice
-	if #decoded ~= expected_length then return nil, failure("incomplete", "Chunk length does not match the manifest.") end
+	local decoded, problem = chunk_slice(chunk, manifest)
+	if decoded == nil then return nil, problem end
 	local prior = assembly.chunks[chunk.index]
 	if prior ~= nil then
 		if prior ~= decoded or assembly.object_digests[chunk.index] ~= object_sha256 then return nil, failure("content_conflict", "A repeated chunk changed its exact wire bytes.") end
@@ -624,15 +804,10 @@ function M.push_chunk(pool: any, bytes: any, expected: any, object_sha256: any):
 		local pieces = table.clone(assembly.chunks)
 		pieces[chunk.index] = decoded
 		local logical_bytes = table.concat(pieces, "", 1, manifest.count)
-		if #logical_bytes ~= manifest.message_bytes or M.sha256(logical_bytes) ~= manifest.message_sha256 then return nil, failure("content_conflict", "Whole-message original-byte digest differs from the manifest.") end
-		local logical, err
-		if manifest.direction == "report" then logical, err = M.decode_report(logical_bytes, expected) else logical, err = M.decode_reply(logical_bytes, expected) end
-		if err ~= nil then return nil, err end
-		local slot = if manifest.direction == "report" then logical.seq else logical.reply_seq
-		local message_id = if manifest.direction == "report" then logical.event_id else logical.message_id
-		if slot ~= manifest.slot or message_id ~= manifest.message_id then return nil, failure("binding_mismatch", "Logical envelope differs from its framing identity.") end
+		local completed, problem = complete_message(manifest, logical_bytes, expected)
+		if problem ~= nil then return nil, problem end
 		M.discard_assembly(pool, chunk.mailbox_handle)
-		return { ok = true, complete = true, envelope = logical, bytes = logical_bytes, sha256 = manifest.message_sha256, direction = manifest.direction }, nil
+		return completed, nil
 	end
 	assembly.chunks[chunk.index] = decoded
 	assembly.object_digests[chunk.index] = object_sha256

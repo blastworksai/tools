@@ -60,7 +60,7 @@ A review's `void` is `{artifact_revision, at_ms}` when a newer checkpoint voided
 
 ## Proof rule
 
-`codec.verify_landing_proof` decides every landing grant from durable facts; it is recomputed on every commit (`item.proof`).
+`workflow_rules.verify_landing_proof` decides every landing grant from durable facts; it is recomputed on every commit (`item.proof`). Wire validation remains in the shared `wire/codec.luau`, not in workflow policy.
 
 | `enforce_cross_family` | Proof | Helper checks |
 | --- | --- | --- |

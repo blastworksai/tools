@@ -1,5 +1,5 @@
 -- Pure public door for spawn.dispatch. Parsing is not authority admission.
-local Codec=require('./codec')
+local Codec=require('./wire/codec')
 local M={PREFIX='SPAWN_DISPATCH v1 ',NODE='spawn-dispatch-response',ROLE='spawn.dispatch.response',LIMIT=8192}
 local MAX=9007199254740991
 function M.integer(v,min) return type(v)=='number' and v>=min and v<=MAX and v%1==0 end

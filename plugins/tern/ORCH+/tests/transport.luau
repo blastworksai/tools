@@ -12,7 +12,8 @@ local function load(name)
 	modules[name] = module
 	return module
 end
-local transport = load("transport")
+local transport = load("wire/codec")
+local rules = load("workflow_rules")
 local checks = 0
 local function check(condition, message)
 	assert(condition, message)
@@ -99,7 +100,6 @@ for _, fixture in fixtures do
 	check(decoded ~= nil and err == nil and decoded.kind == fixture[1], "closed report schema " .. fixture[1])
 end
 -- Checkpoint 2 (Contracts C/F): helper-only and role report kinds, with their capability gates.
--- Pinned names; ORCH+ transport.luau gains them in Task 2D, so these fail until 2D lands.
 local all_capabilities = { "report-files-v1", "native-ask-v1", "worker-poll-v1", "argv-v1", "coordinator-control-v1", "check-runner-v1", "release-manager-v1" }
 local granted = clone(binding); granted.capabilities = all_capabilities
 local check_runner = clone(binding); check_runner.capabilities = { "report-files-v1", "check-runner-v1" }
@@ -295,11 +295,11 @@ local function review(change)
 	for key, child in change do value[key] = child end
 	return value
 end
-local proof = transport.verify_landing_proof(proof_input())
+local proof = rules.verify_landing_proof(proof_input())
 check(proof and proof.mode == "cross_family_review" and proof.artifact_revision == source and proof.review_id == "review_1", "approved cross-family review proves landing")
-proof = transport.verify_landing_proof(proof_input({ check_results = { ["t1-c1"] = { check_id = "t1-c1", exit_code = 1, head = source, output_sha256 = zero_hash } } }))
+proof = rules.verify_landing_proof(proof_input({ check_results = { ["t1-c1"] = { check_id = "t1-c1", exit_code = 1, head = source, output_sha256 = zero_hash } } }))
 check(proof and proof.mode == "cross_family_review", "failed attested check is evidence only under cross-family review")
-proof = transport.verify_landing_proof(proof_input({ enforce_cross_family = false, review = review({ reviewer_family = "anthropic" }) }))
+proof = rules.verify_landing_proof(proof_input({ enforce_cross_family = false, review = review({ reviewer_family = "anthropic" }) }))
 check(proof and proof.mode == "helper_checks" and proof.check_refs[1] == "t1-c1:" .. zero_hash, "passing helper checks plus same-family review prove landing")
 for _, case in {
 	{ { review = false }, "review_required", "no review" },
@@ -317,7 +317,7 @@ for _, case in {
 	local input = proof_input()
 	for key, child in case[1] do input[key] = if child == false then nil else child end
 	if input.review and input.review.reviewer_family == false then input.review.reviewer_family = nil end
-	local value, problem = transport.verify_landing_proof(input)
+	local value, problem = rules.verify_landing_proof(input)
 	check(value == nil and problem ~= nil and problem.code == case[2], "landing proof blocks: " .. case[3] .. " (" .. tostring(problem and problem.code) .. ")")
 end
 
@@ -565,20 +565,66 @@ do
 		return { kind = "CHECKPOINT", payload = { checkpoint_id = "cp", task_ref = "task", project_id = "project", worktree_ref = "tree", artifact_revision = "rev-2",
 			completed = { "done" }, remaining = { "next" }, holds = {}, checks = checks, request_id = "rollover-request" } }
 	end
-	local verified = transport.verify_checkpoint(checkpoint({ { check_id = "unit", artifact_revision = "rev-2", outcome = "passed", evidence_ref = "unit" } }), "rollover-request")
+	local verified = rules.verify_checkpoint(checkpoint({ { check_id = "unit", artifact_revision = "rev-2", outcome = "passed", evidence_ref = "unit" } }), "rollover-request")
 	check(verified ~= nil and verified.attestation == "worker-attested" and verified.artifact_revision == "rev-2", "fresh passed outcome verifies as worker-attested")
-	local value, diagnostic = transport.verify_checkpoint(checkpoint({ { check_id = "unit", artifact_revision = "rev-2", outcome = "passed", evidence_ref = "unit" },
+	local value, diagnostic = rules.verify_checkpoint(checkpoint({ { check_id = "unit", artifact_revision = "rev-2", outcome = "passed", evidence_ref = "unit" },
 		{ check_id = "project-artifact", artifact_revision = "rev-2", outcome = "failed", evidence_ref = "artifact" } }), "rollover-request")
 	rejected(value, diagnostic, "verification_failed", "a failed required check blocks rollover even beside passed checks")
-	value, diagnostic = transport.verify_checkpoint(checkpoint({ { check_id = "unit", artifact_revision = "rev-1", outcome = "passed", evidence_ref = "unit" } }), "rollover-request")
+	value, diagnostic = rules.verify_checkpoint(checkpoint({ { check_id = "unit", artifact_revision = "rev-1", outcome = "passed", evidence_ref = "unit" } }), "rollover-request")
 	rejected(value, diagnostic, "verification_stale", "check for another artifact revision blocks rollover")
-	value, diagnostic = transport.verify_checkpoint(checkpoint({ { check_id = "unit", artifact_revision = "rev-2", outcome = "not_run", evidence_ref = "unit" } }), "rollover-request")
+	value, diagnostic = rules.verify_checkpoint(checkpoint({ { check_id = "unit", artifact_revision = "rev-2", outcome = "not_run", evidence_ref = "unit" } }), "rollover-request")
 	rejected(value, diagnostic, "verification_missing", "not_run is absent evidence")
-	value, diagnostic = transport.verify_checkpoint(checkpoint({}), "rollover-request")
+	value, diagnostic = rules.verify_checkpoint(checkpoint({}), "rollover-request")
 	rejected(value, diagnostic, "verification_missing", "summary without verification outcomes blocks")
-	value, diagnostic = transport.verify_checkpoint(checkpoint({ { check_id = "unit", artifact_revision = "rev-2", outcome = "passed", evidence_ref = "unit" } }), "other-request")
+	value, diagnostic = rules.verify_checkpoint(checkpoint({ { check_id = "unit", artifact_revision = "rev-2", outcome = "passed", evidence_ref = "unit" } }), "other-request")
 	rejected(value, diagnostic, "checkpoint_stale", "checkpoint answering another request cannot hand over")
-	value, diagnostic = transport.verify_checkpoint({ kind = "HEARTBEAT", payload = { state = "idle" } }, "rollover-request")
+	value, diagnostic = rules.verify_checkpoint({ kind = "HEARTBEAT", payload = { state = "idle" } }, "rollover-request")
 	rejected(value, diagnostic, "checkpoint_missing", "non-checkpoint report cannot hand over")
+end
+-- Incremental state is a JSON-safe prefix, not a replay journal of encoded chunks.
+do
+	local a = assert(transport.assembly_start(split_frame.manifest, hash(split_frame.manifest), binding))
+	local pristine = encode(a)
+	local future, problem = transport.assembly_push(a, split_frame.chunks[2], hash(split_frame.chunks[2]), binding)
+	rejected(future, problem, "incomplete", "future incremental chunk cannot skip the contiguous prefix")
+	check(encode(a) == pristine, "out-of-order refusal leaves incremental state unchanged")
+	local pending = assert(transport.assembly_push(a, split_frame.chunks[1], hash(split_frame.chunks[1]), binding))
+	check(not pending.complete and a.next_index == 2 and a.bytes == 2048 and a.slices[1] == first_chunk.data_b64,
+		"pending push persists one base64 slice and advances the next index")
+	a = clone(a)
+	local saved = encode(a)
+	local duplicate = assert(transport.assembly_push(a, split_frame.chunks[1], hash(split_frame.chunks[1]), binding))
+	check(duplicate.code == "already_received" and encode(a) == saved, "duplicate after JSON restart neither copies nor advances the prefix")
+	value, diagnostic = transport.assembly_push(a, reencoded, hash(reencoded), binding)
+	rejected(value, diagnostic, "content_conflict", "incremental duplicate preserves exact encoded-chunk identity")
+	check(encode(a) == saved, "changed duplicate leaves prefix unchanged")
+	value, diagnostic = transport.assembly_push(a, split_frame.chunks[2], zero_hash, binding)
+	rejected(value, diagnostic, "content_conflict", "incremental push verifies the supplied chunk digest")
+	check(encode(a) == saved, "digest failure leaves prefix unchanged")
+	value, diagnostic = transport.assembly_push(a, split_frame.chunks[2], hash(split_frame.chunks[2]), switched_binding)
+	rejected(value, diagnostic, "binding_mismatch", "incremental continuation cannot change generation")
+	check(encode(a) == saved, "binding failure leaves prefix unchanged")
+	for index = 2, #split_frame.chunks do
+		local before = encode(a)
+		complete = assert(transport.assembly_push(a, split_frame.chunks[index], hash(split_frame.chunks[index]), binding))
+		if index == #split_frame.chunks then check(encode(a) == before, "successful final push does not mutate the retained prefix") end
+		a = clone(a)
+	end
+	check(complete.complete and complete.bytes == split_bytes and complete.sha256 == hash(split_bytes),
+		"JSON restart at every boundary preserves a UTF-8 character split across raw slices")
+	local max_state = assert(transport.assembly_start(maximum.manifest, hash(maximum.manifest), binding))
+	for _, chunk in maximum.chunks do complete = assert(transport.assembly_push(max_state, chunk, hash(chunk), binding)) end
+	check(complete.complete and complete.bytes == maximum_bytes and max_state.next_index == 32 and max_state.bytes == 31 * 2048,
+		"incremental maximum message completes without retaining the final slice")
+	local invalid_bytes = encode(report("HEARTBEAT", { state = "not-a-valid-worker-state" }))
+	local manifest, chunk = runtime.json.decode(framed.manifest), runtime.json.decode(framed.chunks[1])
+	manifest.message_bytes = #invalid_bytes; manifest.message_sha256 = hash(invalid_bytes); manifest.count = 1
+	chunk.message_sha256 = manifest.message_sha256; chunk.data_b64 = runtime.base64.encode(invalid_bytes); chunk.count = 1
+	local mb, cb = encode(manifest), encode(chunk)
+	local invalid_state = assert(transport.assembly_start(mb, hash(mb), binding))
+	local before = encode(invalid_state)
+	value, diagnostic = transport.assembly_push(invalid_state, cb, hash(cb), binding)
+	check(value == nil and diagnostic.completed_bytes == invalid_bytes and diagnostic.completed_sha256 == hash(invalid_bytes)
+		and encode(invalid_state) == before, "invalid completed schema retains exact digest-verified evidence and leaves prefix unchanged")
 end
 return "PASS " .. tostring(checks) .. " report transport checks"

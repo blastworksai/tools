@@ -401,7 +401,7 @@ local function upgrade(raw)
 	local candidate=clone(raw)
 	if not fields(candidate,{version=true,namespace=true,next_authority=true,host_key=true,config=true,config_revision=true,sessions=true,review=true,reviewed_sources=true})
 		or not text(candidate.namespace,128) or type(candidate.sessions)~="table" or type(candidate.reviewed_sources)~="table" then return nil,"Corrupt detached authority" end
-	local Codec=require("./codec")
+	local Codec=require("./wire/codec")
 	for key,scope in pairs(candidate.sessions) do
 		if not fields(scope,{authority_id=true,launch=true,inbox=true,replies=true,requests=true,request_sequences=true,imports=true})
 			or not text(scope.authority_id,256) or not array(scope.inbox,64) or #scope.inbox>0
@@ -471,7 +471,7 @@ local function restart_notice(scope,host_epoch)
 	end
 	if ended==0 then return nil end
 	-- Only a digest of the host epoch is published, never the raw boot identity.
-	return {restart_id=require("./codec").sha256(host_epoch):sub(1,32),count=ended}
+	return {restart_id=require("./wire/codec").sha256(host_epoch):sub(1,32),count=ended}
 end
 local function snapshot_value(root,key,host_epoch)
 	local scope=root.sessions[key]

@@ -359,7 +359,8 @@ Run each group in its own callback; long sections can also run one at a time (th
 - `views.luau`: controller and Config rendering
 - `state.luau`: ownership registry and persistence rules
 - `dispatch.luau`: dispatch, report, gate, review, rollover, landing, deploy, work-source and sweep reducer
-- `transport.luau`: report-files-v1 codecs and the landing proof rule
+- `wire/codec.luau`: strict report-files-v1 byte contract, vendored from `shared/report-files-v1`
+- `workflow_rules.luau`: ORCH-only checkpoint, landing-proof, signer and scope policy
 - `quota.luau`: USAGE capacity normalization, routing rule and usage deltas
 - `plan_import.luau`: `/glitch-plan` file parser
 - `worker-brief.md`, `coordinator-brief.md`: contracts for managed agents

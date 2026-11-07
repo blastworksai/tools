@@ -530,9 +530,11 @@ function Receive {
    $chunk=Decode (ReadFile (Join-Path $box ('replies/'+$seq+'/chunk-'+$i+'.json')) 4096) 4096
    Fields $chunk @('transport','version','type','mailbox_handle','direction','slot','message_id','message_sha256','index','count','data_b64')
    foreach ($key in @('transport','version','mailbox_handle','direction','slot','message_id','message_sha256','count')) { if ($chunk[$key] -cne $manifest[$key]) { Fail 'content_conflict' } }
-   if ($chunk.type -cne 'chunk' -or $chunk.index -ne $i -or $chunk.data_b64 -notmatch '^[A-Za-z0-9+/]*={0,2}$') { Fail 'invalid_schema' }
-   $part=[Convert]::FromBase64String($chunk.data_b64); $length=[Math]::Min(2048,$manifest.message_bytes-($i-1)*2048)
-   if ($part.Length -ne $length -or [Convert]::ToBase64String($part) -cne $chunk.data_b64) { Fail 'content_conflict' }; $memory.Write($part,0,$part.Length)
+   if ($chunk.type -cne 'chunk' -or $chunk.index -ne $i -or $chunk.data_b64 -isnot [string] -or $chunk.data_b64.Length -eq 0 -or $chunk.data_b64.Length -gt 2732 -or $chunk.data_b64.Length%4 -ne 0 -or $chunk.data_b64 -notmatch '^[A-Za-z0-9+/]*={0,2}$') { Fail 'invalid_schema' }
+   try { $part=[Convert]::FromBase64String($chunk.data_b64) } catch { Fail 'invalid_schema' }
+   if ($part.Length -lt 1 -or $part.Length -gt 2048 -or [Convert]::ToBase64String($part) -cne $chunk.data_b64) { Fail 'invalid_schema' }
+   $length=[Math]::Min(2048,$manifest.message_bytes-($i-1)*2048)
+   if ($part.Length -ne $length) { Fail 'incomplete' }; $memory.Write($part,0,$part.Length)
   }
   $bytes=$memory.ToArray()
  } finally { $memory.Dispose() }
@@ -548,6 +550,7 @@ function Receive {
   'assignment' {
    Fields $p @('assignment_ref','assignment_sha256','instructions')
    if ($p.assignment_sha256 -notmatch '^[0-9a-f]{64}$' -or $p.assignment_ref -isnot [string] -or $utf8.GetByteCount($p.assignment_ref) -lt 1 -or $utf8.GetByteCount($p.assignment_ref) -gt 1024 -or $p.instructions -isnot [string] -or $utf8.GetByteCount($p.instructions) -lt 1) { Fail 'invalid_schema' }
+   ValueType $p.instructions 'long'
   }
   'report_request' {
    Fields $p @('request_id','requested_kind','reason')
@@ -556,6 +559,7 @@ function Receive {
   'owner_decision' {
    Fields $p @('choice_id','answer')
    if ($reply.gate_id -notmatch '^[A-Za-z0-9_-]{1,96}$' -or $reply.gate_revision -lt 1 -or $reply.gate_revision -gt 9007199254740991 -or $reply.gate_revision%1 -ne 0 -or $p.choice_id -notmatch '^[A-Za-z0-9_-]{1,96}$' -or $p.answer -isnot [string] -or $utf8.GetByteCount($p.answer) -lt 1) { Fail 'invalid_schema' }
+   ValueType $p.answer 'long'
   }
   'landing_grant' {
    Fields $p @('landing_id','grant_id','project_id','checkpoint_id','repo_ref','target_ref','target_revision','source_ref','source_revision','builder_work_id','review_id','reviewer_family','proof')
@@ -610,7 +614,7 @@ function Receive {
  }
  # Grants authorize merging/deploying; only a release-manager-v1 generation consumes them,
  # refused before any receipt or journal change.
- if ($reply.kind -cin @('landing_grant','deploy_grant') -and -not (Capable 'release-manager-v1')) { Fail 'capability_missing' }
+ if ($reply.kind -cin @('landing_grant','deploy_grant') -and -not (Capable 'release-manager-v1')) { Fail 'unsupported_capability' }
  if ($reply.kind -eq 'report_request' -and $bytes.Length -gt 2048) { Fail 'oversize' }
  CompactJournal
  $retained=0L; foreach ($fact in $script:journal.consumed) { $retained+=[Convert]::FromBase64String($fact.bytes).Length }
@@ -794,10 +798,10 @@ function GitLine([string[]]$Arguments) {
  if ($result.code -ne 0) { return '' }
  return $utf8.GetString($result.out).TrimEnd([char[]]@([char]13,[char]10))
 }
-# Refusal order: capability_missing, manifest_missing, manifest_mismatch, check_undeclared,
+# Refusal order: unsupported_capability, manifest_missing, manifest_mismatch, check_undeclared,
 # git_unavailable. Not a worktree / unborn HEAD is git_unavailable with a suffix.
 function HelperReport {
- if (-not (Capable 'check-runner-v1')) { Fail 'capability_missing' }
+ if (-not (Capable 'check-runner-v1')) { Fail 'unsupported_capability' }
  $manifest=ProvisionedManifest
  if ($Mode -eq 'run-checks') {
   $declared=@($manifest.checks | Where-Object { $_.check_id -ceq $CheckId })
@@ -921,7 +925,7 @@ try {
    $reportInput=Decode $reportBytes
    # CHECK_RESULT/CHECKOUT exist only through run-checks/checkout, never caller-typed.
    if ($reportInput -is [hashtable] -and $reportInput.kind -cin @('CHECK_RESULT','CHECKOUT')) { Fail 'helper_only_kind' }
-   if ($reportInput -is [hashtable] -and $reportInput.kind -ceq 'DEPLOY_RESULT' -and -not (Capable 'release-manager-v1')) { Fail 'capability_missing' }
+   if ($reportInput -is [hashtable] -and $reportInput.kind -ceq 'DEPLOY_RESULT' -and -not (Capable 'release-manager-v1')) { Fail 'unsupported_capability' }
    $null=Allocate $reportInput
   } elseif ($Mode -eq 'run-checks' -or $Mode -eq 'checkout') {
    $null=Allocate $helperReport

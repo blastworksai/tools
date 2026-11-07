@@ -241,7 +241,7 @@ end
 
 local function managed_fixture()
 	local db,authority,binding,_,_,load=fresh({record("managed")})
-	local P,Codec=load("bridge_protocol"),load("codec")
+	local P,Codec=load("bridge_protocol"),load("wire/codec")
 	local origin={logical_session_id="logical",owner_id="owner",owner_generation=1,host_pane_id="12",alias_nonce="alias",window_key="",window_epoch="epoch",native_session_id="4",window_host_id="7"}
 	local r={schema=1,origin="orchplus",op="launch",request_id="launch",action_id="action-launch",controller_pane="44",controller_generation=1,origin_binding=origin,
 		record_id="managed",record_revision=1,work_id="work",prompt="assignment",cwd="/work",placement="tab",fresh=true,mailbox_handle="mailbox",
@@ -309,7 +309,7 @@ end
 
 sections.managed_settlement_replay=function()
 	local db,authority,binding,a,registry=managed_fixture()
-	local _,_,_,load=modules(db);local P,Codec=load("bridge_protocol"),load("codec")
+	local _,_,_,load=modules(db);local P,Codec=load("bridge_protocol"),load("wire/codec")
 	local launched=registry.requests["logical/launch"]
 	local r=launched.request
 	local retirement={schema=1,origin="orchplus",op="mailbox_retire",request_id="retire",action_id="action-retire",origin_binding=copy(r.origin_binding),
@@ -426,7 +426,7 @@ sections.managed_migration=function()
 	refused_unchanged(unreadable_db,function()return unreadable.open("host-A",4,nil,clean_binding.session_key)end,"empty migration distinguishes registry read failure from never-created")
 
 	local imported_db,importer,import_binding,import_config,_,load=fresh()
-	local Dispatch,Codec=load("dispatch"),load("codec")
+	local Dispatch,Codec=load("dispatch"),load("wire/codec")
 	local imported_records=assert(import_config.validate_records({record("imported")}))
 	local bytes=runtime.json.encode(imported_records)
 	local preview={schema=1,origin="spawn-migration",op="import_config",request_id="receipt",source_client="legacy-source",target_host=import_binding.host_key,
@@ -1132,7 +1132,7 @@ local function host_block(db, authority, config)
 		if name == "./native_cli" then return native_cli end
 		if name == "./host_executor" then return { install = function() end, attach = function() end, epoch = function() return nil end } end
 		if name == "./dispatch" then return {recovery_view=function()return {}end,import_decode=function()return nil end} end
-		if name == "./codec" then return load("codec") end
+		if name == "./wire/codec" then return load("wire/codec") end
 		error("Unexpected host dependency: " .. name)
 	end }, { __index = environment }))
 	chunk()

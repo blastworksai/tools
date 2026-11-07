@@ -2,7 +2,7 @@
 local state = require("./state")
 local views = require("./views")
 local dispatch = require("./dispatch")
-local codec = require("./transport")
+local codec = require("./wire/codec")
 local STORE_KEY = "authority_state"
 local MAX_AUTHORITY_BYTES = 8 * 1024 * 1024
 local CONTROL_RESERVE_BYTES = 512 * 1024

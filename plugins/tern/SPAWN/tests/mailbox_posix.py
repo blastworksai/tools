@@ -68,7 +68,7 @@ def until(predicate, timeout=10):
 
 class Mailbox:
     def __init__(self, root, handle="box", enrolment_token="enrolment_aaaaaaaa", handover=None,
-                 manifest=None, capabilities=None):
+                 manifest=None, capabilities=None, binding=None):
         self.root, self.handle = root, handle
         self.box = root / handle
         self.operation = 0
@@ -76,6 +76,8 @@ class Mailbox:
                             worker_generation=1, launch_request_id="launch",
                             work_id="work", enrolment_token=enrolment_token,
                             mailbox_handle=handle)
+        if binding is not None:
+            self.binding = {key: binding[key] for key in self.binding}
         provision = dict(version=1, handle=handle, binding_digest=digest(encode(self.binding)),
                          binding=self.binding)
         if capabilities is not None:
@@ -142,9 +144,14 @@ class Mailbox:
         # Preserve noncanonical whitespace and the final newline through receipt,
         # host compaction, restart, and unclaimed re-delivery.
         raw = (json.dumps(reply, ensure_ascii=False, indent=1) + "\n\n").encode()
+        self.install_reply(raw, seq, reply["message_id"])
+        return raw
+
+    def install_reply(self, raw, seq, message_id):
+        """Publish supplied logical bytes unchanged, including invalid JSON."""
         count = (len(raw) + 2047) // 2048
         common = dict(transport="report-files-v1", version=1, mailbox_handle=self.handle,
-                      direction="reply", slot=seq, message_id=reply["message_id"],
+                      direction="reply", slot=seq, message_id=message_id,
                       message_sha256=digest(raw), count=count)
         for index in range(1, count + 1):
             chunk = dict(common, type="chunk", index=index,
@@ -156,7 +163,6 @@ class Mailbox:
         result = self.target("publish", f"replies/{seq}/manifest.json", encode(manifest))
         if result.stdout != b"published\n":
             raise AssertionError(result.stdout)
-        return raw
 
     def acknowledge_pending(self):
         journal = self.journal()
@@ -214,6 +220,94 @@ class PosixMailboxTests(unittest.TestCase):
         self.assertGreater(int(lines[3]), 0)
         self.assertLessEqual(int(lines[2]), 9007199254740991)
         self.assertLessEqual(int(lines[3]), 9007199254740991)
+
+    def test_raw_nul_reply_rejected_without_consumption(self):
+        mailbox = self.mailbox
+        binding = {key: value for key, value in mailbox.binding.items()
+                   if key not in ("mailbox_handle", "enrolment_token")}
+        reply = dict(binding, version=1, message_id="nul_reply", reply_seq=1,
+                     action_id="action", action_revision=1, kind="assignment",
+                     payload=dict(assignment_ref="task", assignment_sha256="a" * 64,
+                                  instructions="work"))
+        mailbox.install_reply(encode(reply) + b"\0", 1, reply["message_id"])
+        before = mailbox.journal_path.read_bytes()
+        objects = {path: path.read_bytes() for path in (mailbox.box / "replies/1").iterdir()}
+        result = mailbox.worker("consume")
+        self.assertEqual((result.returncode, result.stdout, result.stderr),
+                         (1, b"", b"invalid_schema\n"))
+        self.assertEqual(mailbox.journal_path.read_bytes(), before)
+        self.assertEqual({path: path.read_bytes() for path in objects}, objects)
+        self.assertEqual(list((mailbox.box / "reports").iterdir()), [])
+
+    def test_shared_wire_corpus(self):
+        corpus = json.loads((SOURCE.parents[2] / "shared/report-files-v1/corpus.json").read_bytes())
+        exercised = set()
+        for case in corpus["cases"]:
+            if "posix" not in case.get("helpers", []):
+                continue
+            with self.subTest(case=case["id"]):
+                raw = base64.b64decode(case["bytes_b64"], validate=True)
+                if case["op"] == "strict_decode":
+                    valid_utf8 = subprocess.run(["iconv", "-f", "UTF-8", "-t", "UTF-8"],
+                                                input=raw, capture_output=True, timeout=20)
+                    parsed = subprocess.run(["awk", "-f", str(SOURCE / "mailbox_json.awk")],
+                                            input=raw, capture_output=True, timeout=20,
+                                            env=dict(os.environ, LC_ALL="C"))
+                    accepted = b"\0" not in raw and len(raw) <= case.get("maximum", 65536) and valid_utf8.returncode == 0 and parsed.returncode == 0
+                    self.assertEqual(accepted, case["expect"]["ok"])
+                elif case.get("helper_report_input_b64") and case["expect"].get("code") != "unsupported_capability":
+                    report_input = base64.b64decode(case["helper_report_input_b64"], validate=True)
+                    strict = subprocess.run(["awk", "-f", str(SOURCE / "mailbox_json.awk")],
+                                            input=report_input, capture_output=True, timeout=20,
+                                            env=dict(os.environ, LC_ALL="C"))
+                    schema = subprocess.run(["jq", "-e", "--arg", "schema", "report_input",
+                                             "-f", str(SOURCE / "mailbox_reply.jq")],
+                                            input=report_input, capture_output=True, timeout=20)
+                    self.assertEqual(strict.returncode == 0 and schema.returncode == 0, case["expect"]["ok"])
+                elif case["op"] == "decode_reply" or case.get("helper_frame") or case.get("helper_report_input_b64"):
+                    binding = case.get("binding", corpus["binding"])
+                    root = self.root / case["id"]
+                    root.mkdir()
+                    mailbox = Mailbox(root, binding["mailbox_handle"],
+                                      binding=binding, capabilities=binding.get("capabilities"))
+                    if case.get("helper_frame"):
+                        framing = case["helper_frame"]
+                        manifest = base64.b64decode(framing["manifest_b64"], validate=True)
+                        slot = json.loads(manifest)["slot"]
+                        for index, encoded in enumerate(framing["chunks_b64"], 1):
+                            self.assertEqual(mailbox.target("publish", f"replies/{slot}/chunk-{index}.json",
+                                                           base64.b64decode(encoded, validate=True)).stdout, b"published\n")
+                        self.assertEqual(mailbox.target("publish", f"replies/{slot}/manifest.json", manifest).stdout, b"published\n")
+                    elif case["op"] == "decode_reply":
+                        envelope = json.loads(raw)
+                        mailbox.install_reply(raw, envelope["reply_seq"], envelope["message_id"])
+                    before = mailbox.journal_path.read_bytes()
+                    if case.get("helper_report_input_b64"):
+                        result = mailbox.worker("report", base64.b64decode(case["helper_report_input_b64"], validate=True))
+                    else:
+                        result = mailbox.worker("consume")
+                    self.assertEqual(result.returncode == 0, case["expect"]["ok"], result.stderr)
+                    if case["expect"]["ok"]:
+                        if case["op"] == "decode_reply":
+                            self.assertEqual(result.stdout, raw)
+                        elif case.get("helper_frame"):
+                            self.assertEqual(digest(result.stdout), json.loads(manifest)["message_sha256"])
+                        else:
+                            published = json.loads(base64.b64decode(mailbox.journal()["pending"][0]["bytes"]))
+                            self.assertEqual(published["payload"], json.loads(raw)["payload"])
+                    else:
+                        self.assertEqual(mailbox.journal_path.read_bytes(), before)
+                        code = case["expect"]["code"]
+                        allowed = case["expect"].get("helper_codes", {}).get(
+                            "posix", corpus.get("diagnostics", {}).get(code, {}).get("posix", [code]))
+                        self.assertIn(result.stderr.decode().strip().split(":")[0], allowed)
+                else:
+                    self.fail("Unsupported marked helper corpus operation: " + case["op"])
+                exercised.add((case["op"], case["expect"]["ok"]))
+        self.assertTrue({("strict_decode", False), ("strict_decode", True),
+                         ("decode_reply", False), ("decode_reply", True),
+                         ("decode_report", False), ("decode_report", True),
+                         ("decode_object", False), ("decode_object", True)} <= exercised)
 
     def stop_process(self, process, release):
         release.touch()
@@ -1273,8 +1367,8 @@ class PosixHelperModeTests(unittest.TestCase):
         for mode, message in (("run-checks", "t1-c1"), ("checkout", "")):
             with self.subTest(mode=mode):
                 # Capability is checked first, before any manifest fact.
-                self.refused(self.mailbox(manifest, capabilities=["report-files-v1"]), mode, "capability_missing", message=message)
-                self.refused(self.mailbox(None, capabilities=None), mode, "capability_missing", message=message)
+                self.refused(self.mailbox(manifest, capabilities=["report-files-v1"]), mode, "unsupported_capability", message=message)
+                self.refused(self.mailbox(None, capabilities=None), mode, "unsupported_capability", message=message)
                 self.refused(self.mailbox(None), mode, "manifest_missing", message=message)
                 missing = self.mailbox(manifest)
                 (missing.box / "manifest.json").unlink()

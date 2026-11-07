@@ -1,6 +1,6 @@
 -- Host-only SPAWN dispatcher. One writer; files/native effects are separate stores.
 local P=require('./bridge_protocol')
-local Codec=require('./codec')
+local Codec=require('./wire/codec')
 local Authority=require('./authority')
 local Config=require('./config')
 local Backend=require('./backend')

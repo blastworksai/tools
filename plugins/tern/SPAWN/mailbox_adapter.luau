@@ -1,7 +1,7 @@
 -- Fixed helper protocol. Helpers are reviewed package assets installed explicitly
 -- on the target; public requests cannot choose helper, root, shell or SSH options.
 local Backend = require('./backend')
-local Codec = require('./codec')
+local Codec = require('./wire/codec')
 local Capabilities = require('./mailbox_capabilities')
 local M = {}
 local active = {}
@@ -227,8 +227,7 @@ function M.execute(op,callback)
    elseif selected.stream=='report' or selected.stream=='reply' then
     if object.mailbox_handle~=op.handle then done(rejected('binding_mismatch')); return end
    end
-   local function returned() done({status='read',payload=tern.json.decode(page)}) end
-   if object.type=='manifest' then verify_manifest(result.bytes,object,returned) else returned() end
+   done({status='read',payload=tern.json.decode(page)})
   end)
  elseif op.mode=='publish' then
   local function publish()

@@ -36,8 +36,8 @@ Optional, next to the plugin's `plugin.toml`:
    require("./updater/window").register({ name = "SPAWN", dir = "SPAWN", title_prefix = "SPAWN " })
    ```
 
-   `dir` must be the folder name under `plugins/tern/`. `title_prefix` is optional (default `name .. " "`). The line must contain `require("./updater/window").register(` verbatim: `sync.py` and `tests/test_vendored.py` find integrated plugins by it.
-2. Run `python3 shared/tern-updater/sync.py <DIR>` to vendor the eight modules into `plugins/tern/<DIR>/updater/`. Never edit vendored copies; edit here and re-run `sync.py` (no DIR = every integrated plugin).
+   `dir` must be the folder name under `plugins/tern/`. `title_prefix` is optional (default `name .. " "`). The line must contain `require("./updater/window").register(` verbatim: `sync.py` finds integrated plugins by it.
+2. Run `python3 shared/tern-updater/sync.py <DIR>` to vendor the nine modules into `plugins/tern/<DIR>/updater/`. Never edit vendored copies; edit here and re-run `sync.py` (no DIR = every integrated plugin). The pure `discovery.luau` module is also used by SPAWN and TODO; their runners retain their own deadlines and environment routing.
 3. Add the snippet below to the plugin's README with `<PREFIX>`/`<DIR>` filled in.
 4. Bump `version` in the plugin's `plugin.toml`.
 5. Optionally add `requires.json`.
@@ -63,7 +63,7 @@ A linked development checkout (`tern plugin link`) is never updated by the plugi
 ## Tests
 
 ```sh
-# vendored copies, register lines, manifests, requires.json
+# behavioral manifest/requirements checks; sync owns vendored-byte verification
 python3 -m unittest discover -s shared/tern-updater/tests -p 'test_*.py' -v
 python3 shared/tern-updater/sync.py --check
 

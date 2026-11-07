@@ -1,6 +1,6 @@
 -- Durable, pure report-files-v1 transport planning. Callers persist prepare/settle
 -- results before exposing them. No WindowCx, KV write or filesystem effect here.
-local Codec = require('./codec')
+local Codec = require('./wire/codec')
 local Adapter = require('./mailbox_adapter')
 local Capabilities = require('./mailbox_capabilities')
 local M = {}

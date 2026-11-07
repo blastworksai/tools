@@ -334,7 +334,7 @@ function W.rule_h(f)
 end
 
 if section == nil or section == "plan_import" then
-	local importer, codec = load("plan_import"), load("transport")
+	local importer, codec = load("plan_import"), load("wire/codec")
 	local function task_of(plan, id)
 		for _, cp in plan.checkpoints do for _, t in cp.tasks do if t.id == id then return t end end end
 		return nil

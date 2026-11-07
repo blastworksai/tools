@@ -59,7 +59,7 @@ local function fixture(seed,actual_mailbox)
   setfenv(chunk,setmetatable({tern=injected,require=load},{__index=environment}))
   modules[name]=chunk();return modules[name]
  end
- local p,c,d=load('bridge_protocol'),load('codec'),load('dispatch')
+ local p,c,d=load('bridge_protocol'),load('wire/codec'),load('dispatch')
  local raw=d
  local driver=setmetatable({},{__index=raw})
  driver.request=function(r,b,s,changed)

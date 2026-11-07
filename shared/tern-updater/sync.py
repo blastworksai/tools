@@ -3,7 +3,7 @@
 
     sync.py [--check] [DIR ...]
 
-Copies the eight updater modules into <DIR>/updater/, each prefixed with HEADER.
+Copies the updater modules into <DIR>/updater/, each prefixed with HEADER.
 DIR is a folder name under plugins/tern or a path. With no DIR, every
 plugins/tern/*/ whose window.luau calls the updater's register is synced.
 --check writes nothing; it exits 1 listing differing, missing or extra copies.
@@ -15,7 +15,7 @@ import sys
 CANON = Path(__file__).resolve().parent
 ROOT = Path(__file__).resolve().parents[2]
 PLUGINS = ROOT/'plugins/tern'
-MODULES = ('version', 'manifest', 'source', 'requires', 'confirm', 'state', 'cli', 'window')
+MODULES = ('version', 'manifest', 'source', 'requires', 'confirm', 'state', 'discovery', 'cli', 'window')
 HEADER = b'-- Vendored from shared/tern-updater by sync.py; edit there, then run sync.py.\n'
 REGISTER = 'require("./updater/window").register('
 

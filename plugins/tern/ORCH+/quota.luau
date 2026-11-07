@@ -2,7 +2,7 @@
 -- Pure USAGE capacity consumer and quota routing rule (plan §7). No native effects, provider
 -- calls, credential reads or USAGE private state: the window reads USAGE's public native
 -- `usage.capacity` block; this module only verifies, normalizes and ranks that evidence.
-local codec = require("./transport")
+local codec = require("./wire/codec")
 local M = {}
 local MAX = 9007199254740991
 M.BLOCK = "usage.capacity"

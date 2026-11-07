@@ -13,6 +13,9 @@ end
 function Backend.posix_quote(value: string): string
 	return "'" .. value:gsub("'", "'\\''") .. "'"
 end
+function Backend.powershell_quote(value: string): string
+	return "'" .. value:gsub("'", "''") .. "'"
+end
 function Backend.windows_argument(value: string): string
 	local escaped = value:gsub('(\\*)"', function(slashes) return slashes .. slashes .. '\\"' end)
 	escaped = escaped:gsub("(\\+)$", "%1%1")
@@ -32,17 +35,6 @@ function Backend.utf16le(value: string): (string?, string?)
 	end
 	return table.concat(bytes), nil
 end
-local ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
-function Backend.base64(value: string): string
-	local result = {}
-	for index = 1, #value, 3 do
-		local a, b, c = string.byte(value, index, index + 2)
-		local n = a * 65536 + (b or 0) * 256 + (c or 0)
-		local function digit(shift) local v = math.floor(n / shift) % 64 + 1; return ALPHABET:sub(v, v) end
-		table.insert(result, digit(262144) .. digit(4096) .. (if b then digit(64) else "=") .. (if c then digit(1) else "="))
-	end
-	return table.concat(result)
-end
 function Backend.shell_kind(os: string, shell: string): (string?, string?)
 	if os ~= "linux" and os ~= "macos" and os ~= "windows" then return nil, "Unsupported execution OS" end
 	if not text(shell, 4096) then return nil, "Execution shell is required" end
@@ -57,7 +49,7 @@ local function bounded(command: string, os: string): (string?, string?)
 end
 local CMD_META = {}
 for char in string.gmatch('()[]%!^"`<>&|;, *?', ".") do CMD_META[char] = true end
-local function cmd_escape(value: string): string
+function Backend.cmd_escape(value: string): string
 	return (value:gsub(".", function(char) return if CMD_META[char] then "^" .. char else char end))
 end
 -- This reviewed wrapper is fixed code. The only interpolated bytes are standard
@@ -94,11 +86,11 @@ function Backend.serialize(executable: string, args: {string}, cwd: string?, os:
 	for _, argument in ipairs(args) do
 		local quoted = Backend.windows_argument(argument)
 		table.insert(native, quoted)
-		if not crt_only then table.insert(batch, cmd_escape(cmd_escape(quoted))) end
+		if not crt_only then table.insert(batch, Backend.cmd_escape(Backend.cmd_escape(quoted))) end
 	end
 	local data = tern.json.encode({ executable = executable, arguments = table.concat(native, " "), batch = if crt_only then nil else table.concat(batch, " "), cwd = cwd })
-	local wrapper = POWERSHELL_PREFIX .. Backend.base64(data) .. (if crt_only then CRT_SUFFIX else POWERSHELL_SUFFIX)
-	local encoded = Backend.base64(assert(Backend.utf16le(wrapper)))
+	local wrapper = POWERSHELL_PREFIX .. tern.base64.encode(data) .. (if crt_only then CRT_SUFFIX else POWERSHELL_SUFFIX)
+	local encoded = tern.base64.encode(assert(Backend.utf16le(wrapper)))
 	return bounded("powershell.exe -NoLogo -NoProfile -EncodedCommand " .. encoded, os)
 end
 

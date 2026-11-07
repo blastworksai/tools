@@ -1,31 +1,15 @@
 -- Vendored from shared/tern-updater by sync.py; edit there, then run sync.py.
 -- Runs the running Tern executable for the updater (window half only).
--- Executable discovery mirrors SPAWN native_cli.luau; change both together.
+-- Executable discovery is shared; this window runner retains its own callback/cache semantics.
 -- No `--window` flag and no PATH in `env`: every call acts on this machine's
 -- plugins folder, and the folder watch reloads this machine's daemon and windows.
 local Cli = {}
+local Discovery = require("./discovery")
+local absolute = Discovery.absolute
 
 local executable = nil
 local waiting = nil
 
-local function opaque(value, max, empty)
-	return type(value) == "string" and #value <= max and (empty or #value > 0) and not value:find("%c")
-end
-local function absolute(value)
-	return opaque(value, 4096, false) and (value:sub(1, 1) == "/" or value:match("^%a:[/\\]") ~= nil or value:sub(1, 2) == "\\\\")
-end
-
-local function discovery_argv()
-	if tern.runtime.os == "linux" then return { "/bin/sh", "-c", '/usr/bin/readlink /proc/$PPID/exe' }, nil end
-	if tern.runtime.os == "macos" then return { "/bin/sh", "-c", '/bin/ps -p "$PPID" -o comm=' }, nil end
-	if tern.runtime.os == "windows" then
-		local system = tern.getenv("SystemRoot") or tern.getenv("WINDIR")
-		if not absolute(system) then return nil, "The host's absolute Windows system directory is unavailable" end
-		return { system .. "\\System32\\WindowsPowerShell\\v1.0\\powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
-			"$ErrorActionPreference='Stop'; $self=Get-CimInstance Win32_Process -Filter ('ProcessId='+$PID); $parent=Get-CimInstance Win32_Process -Filter ('ProcessId='+$self.ParentProcessId); [Console]::WriteLine($parent.ExecutablePath)" }, nil
-	end
-	return nil, "Native executable discovery is not verified on this host"
-end
 
 -- The window's own STENCIL_LOG is inherited; it would put the CLI's log lines in front
 -- of the real error on stderr, so Tern CLI calls run with logging off.
@@ -47,7 +31,8 @@ end
 function Cli.executable(cb)
 	if executable ~= nil then cb(executable, nil); return end
 	if waiting ~= nil then table.insert(waiting, cb); return end
-	local argv, problem = discovery_argv()
+	local system = if tern.runtime.os == "windows" then tern.getenv("SystemRoot") or tern.getenv("WINDIR") else nil
+	local argv, problem = Discovery.argv(tern.runtime.os, system)
 	if argv == nil then cb(nil, problem); return end
 	waiting = { cb }
 	run(argv, 10000, function(result, err, cx)
@@ -58,8 +43,7 @@ function Cli.executable(cb)
 			elseif result.status ~= 0 then
 				err = "Couldn't locate the running Tern executable: status " .. tostring(result.status) .. " · " .. first_line(result.stderr)
 			else
-				local found = result.stdout:gsub("\r?\n$", "")
-				if absolute(found) then path = found else err = "Tern executable discovery did not return one absolute path" end
+				path, err = Discovery.path(result.stdout)
 			end
 		end
 		if path ~= nil then executable = path end

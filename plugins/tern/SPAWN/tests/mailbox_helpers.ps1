@@ -37,12 +37,16 @@ function Reject([scriptblock]$Operation,[string]$Code) {
  try { $null=& $Operation } catch { $caught=$true; Assert ($_.Exception.Message.StartsWith($Code)) ('Expected '+$Code+', got '+$_.Exception.Message) }
  Assert $caught ('Expected rejection '+$Code)
 }
-function Fixture([string]$Prefix='box_',[string[]]$Capabilities=$null,[byte[]]$Manifest=$null) {
+function Fixture([string]$Prefix='box_',[string[]]$Capabilities=$null,[byte[]]$Manifest=$null,$ExactBinding=$null) {
  $script:Handle=$Prefix+[Guid]::NewGuid().ToString('N')
+ if ($null -ne $ExactBinding) { $script:Handle=$ExactBinding.mailbox_handle }
  $script:box=Join-Path $testRoot $Handle
  $null=[IO.Directory]::CreateDirectory($box)
  foreach ($lane in @('reports','replies','acks','watermarks','producer','consumer','staging')) { $null=[IO.Directory]::CreateDirectory((Join-Path $box $lane)) }
  $script:binding=@{logical_session_id='session';worker_id='worker';worker_generation=1;launch_request_id='launch';work_id='work';enrolment_token='enrolment_token_1234';mailbox_handle=$Handle}
+ if ($null -ne $ExactBinding) {
+  foreach ($key in @('logical_session_id','worker_id','worker_generation','launch_request_id','work_id','enrolment_token')) { $binding[$key]=$ExactBinding.$key }
+ }
  $script:descriptor=@{handle=$Handle;binding=$binding}
  # Capabilities are independent of the manifest; manifest_sha256 only with a manifest.
  if ($null -ne $Capabilities) { $descriptor['capabilities']=@($Capabilities) }
@@ -71,16 +75,16 @@ function ReplyBytes([long]$Sequence=1) {
  # Noncanonical whitespace makes decode/re-encode observable.
  return ,$utf8.GetBytes(" `n"+$utf8.GetString((Encode $reply))+" `t")
 }
-function InstallReply([byte[]]$Bytes,[long]$Sequence=1) {
+function InstallReply([byte[]]$Bytes,[long]$Sequence=1,[string]$MessageId=('reply_'+$Sequence)) {
  $directory=Join-Path $box ('replies/'+$Sequence); $null=[IO.Directory]::CreateDirectory($directory)
  $digest=Hash $Bytes; $count=[int][Math]::Ceiling($Bytes.Length/2048.0)
  for ($index=1;$index -le $count;$index++) {
   $length=[Math]::Min(2048,$Bytes.Length-($index-1)*2048); $part=New-Object byte[] $length
   [Array]::Copy($Bytes,($index-1)*2048,$part,0,$length)
-  $chunk=@{transport='report-files-v1';version=1;type='chunk';mailbox_handle=$Handle;direction='reply';slot=$Sequence;message_id=('reply_'+$Sequence);message_sha256=$digest;index=$index;count=$count;data_b64=[Convert]::ToBase64String($part)}
+  $chunk=@{transport='report-files-v1';version=1;type='chunk';mailbox_handle=$Handle;direction='reply';slot=$Sequence;message_id=$MessageId;message_sha256=$digest;index=$index;count=$count;data_b64=[Convert]::ToBase64String($part)}
   [IO.File]::WriteAllBytes((Join-Path $directory ('chunk-'+$index+'.json')),(Encode $chunk))
  }
- $manifest=@{transport='report-files-v1';version=1;type='manifest';mailbox_handle=$Handle;direction='reply';slot=$Sequence;message_id=('reply_'+$Sequence);message_sha256=$digest;message_bytes=$Bytes.Length;count=$count}
+ $manifest=@{transport='report-files-v1';version=1;type='manifest';mailbox_handle=$Handle;direction='reply';slot=$Sequence;message_id=$MessageId;message_sha256=$digest;message_bytes=$Bytes.Length;count=$count}
  [IO.File]::WriteAllBytes((Join-Path $directory 'manifest.json'),(Encode $manifest))
 }
 function AckBytes {
@@ -172,6 +176,67 @@ try {
  # property is promised. Both production guards must walk real nested ancestry,
  # reject file leaves, and still reject a junction at the leaf or any ancestor.
  $guard=Join-Path $testRoot 'guard'; $nested=Join-Path $guard 'child'
+ # Shared byte corpus: exercise the real strict parser and actual consume entrypoint.
+ $repository=Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $spawn))
+ $corpus=ConvertFrom-Json ([IO.File]::ReadAllText((Join-Path $repository 'shared/report-files-v1/corpus.json')))
+ $exercised=@{}
+ foreach ($case in $corpus.cases) {
+  if ('powershell' -cnotin $case.helpers) { continue }
+  $raw=[Convert]::FromBase64String($case.bytes_b64)
+  if ($case.op -ceq 'strict_decode') {
+   $maximum=65536; if ($null -ne $case.maximum) { $maximum=$case.maximum }
+   $accepted=$true
+   try { $null=Decode $raw $maximum } catch { $accepted=$false }
+   Assert ($accepted -eq $case.expect.ok) ('Shared strict case: '+$case.id)
+  } elseif ($null -ne $case.helper_report_input_b64 -and $case.expect.code -cne 'unsupported_capability') {
+   $expected=$corpus.binding; if ($null -ne $case.binding) { $expected=$case.binding }
+   Fixture 'corpus_' @($expected.capabilities) $null $expected
+   $accepted=$true; $diagnostic=''
+   try { $null=ReportInput (Decode ([Convert]::FromBase64String($case.helper_report_input_b64)) 65536) } catch { $accepted=$false; $diagnostic=$_.Exception.Message }
+   Assert ($accepted -eq $case.expect.ok) ('Shared report schema: '+$case.id+': '+$diagnostic)
+   [IO.Directory]::Delete($box,$true)
+  } elseif ($case.op -ceq 'decode_reply' -or $null -ne $case.helper_frame -or $null -ne $case.helper_report_input_b64) {
+   $expected=$corpus.binding; if ($null -ne $case.binding) { $expected=$case.binding }
+   Fixture 'corpus_' @($expected.capabilities) $null $expected
+   if ($null -ne $case.helper_frame) {
+    $manifestBytes=[Convert]::FromBase64String($case.helper_frame.manifest_b64)
+    $manifest=ConvertFrom-Json ($utf8.GetString($manifestBytes))
+    $directory=Join-Path $box ('replies/'+$manifest.slot); $null=[IO.Directory]::CreateDirectory($directory)
+    $index=0
+    foreach ($chunk in $case.helper_frame.chunks_b64) {
+     $index++
+     [IO.File]::WriteAllBytes((Join-Path $directory ('chunk-'+$index+'.json')),([Convert]::FromBase64String($chunk)))
+    }
+    [IO.File]::WriteAllBytes((Join-Path $directory 'manifest.json'),$manifestBytes)
+   } elseif ($case.op -ceq 'decode_reply') {
+    $envelope=ConvertFrom-Json ($utf8.GetString($raw))
+    InstallReply $raw $envelope.reply_seq $envelope.message_id
+   }
+   $before=ReadFile $journalPath 1572864
+   if ($null -ne $case.helper_report_input_b64) {
+    $result=Worker 'report' ($utf8.GetString([Convert]::FromBase64String($case.helper_report_input_b64))) -RawOutput
+   } else { $result=Worker 'consume' -RawOutput }
+   Assert (($result.code -eq 0) -eq $case.expect.ok) ('Shared helper case '+$case.id+': '+$result.err)
+   if ($case.expect.ok) {
+    if ($case.op -ceq 'decode_reply') { EqualBytes $raw $result.out }
+    elseif ($null -ne $case.helper_frame) { Assert ((Hash $result.out) -ceq $manifest.message_sha256) ('Shared frame bytes: '+$case.id) }
+   }
+   else {
+    EqualBytes $before (ReadFile $journalPath 1572864)
+    $allowed=@($case.expect.code)
+    $mapping=$corpus.diagnostics.($case.expect.code)
+    if ($null -ne $mapping.powershell) { $allowed=@($mapping.powershell) }
+    if ($case.expect.code -ceq 'invalid_schema') { $allowed=@($corpus.diagnostics.strict_structure.powershell) }
+    if ($null -ne $case.expect.helper_codes.powershell) { $allowed=@($case.expect.helper_codes.powershell) }
+    $diagnostic=($result.err.Trim() -split '\r?\n',2)[0].Split(':')[0]
+    Assert ($diagnostic -cin $allowed) ('Shared diagnostic '+$case.id+': '+$result.err)
+   }
+   [IO.Directory]::Delete($box,$true)
+  } else { throw ('Unsupported marked helper corpus operation: '+$case.op) }
+  $exercised[$case.op+':'+$case.expect.ok]=$true
+ }
+ foreach ($op in @('strict_decode','decode_reply','decode_report','decode_object')) { foreach ($ok in @($true,$false)) { Assert $exercised[$op+':'+$ok] ('Missing shared coverage '+$op+':'+$ok) } }
+
  $null=[IO.Directory]::CreateDirectory($nested)
  DirectorySafe $nested; TargetDirectory $nested
  $file=Join-Path $guard 'file'; [IO.File]::WriteAllBytes($file,[byte[]]@())
@@ -837,7 +902,7 @@ try {
  # DEPLOY_RESULT needs release-manager-v1; report mode refuses helper-only kinds.
  $deploy='{"kind":"DEPLOY_RESULT","action_id":"deploy","action_revision":1,"payload":{"deploy_id":"deploy","attempt_id":"attempt","landing_id":"landing","outcome":"deployed","revision":"rev","evidence":[]}}'
  Fixture 'box_' $release; $result=Worker 'report' $deploy; Assert ($result.code -eq 0) ('DEPLOY_RESULT rejected: '+$result.err)
- Fixture; $result=Worker 'report' $deploy; Assert ($result.code -ne 0 -and $result.err.StartsWith('capability_missing')) ('DEPLOY_RESULT without capability: '+$result.err)
+ Fixture; $result=Worker 'report' $deploy; Assert ($result.code -ne 0 -and $result.err.StartsWith('unsupported_capability')) ('DEPLOY_RESULT without capability: '+$result.err)
  $checks=@('report-files-v1','check-runner-v1')
  foreach ($wire in @(
   ('{"kind":"CHECK_RESULT","payload":{"check_id":"c","argv_sha256":"'+('a'*64)+'","exit_code":0,"output_sha256":"'+('a'*64)+'","head":"'+('a'*40)+'","ran_at_ms":1}}'),
@@ -893,7 +958,7 @@ try {
  Fixture 'box_' $checks $manifest; HelperRefused 'run-checks' 'check_undeclared' 't1-c9' $repo
  foreach ($mode in @('run-checks','checkout')) {
   $id=''; if ($mode -eq 'run-checks') { $id='t1-c1' }
-  Fixture 'box_' @('report-files-v1') $manifest; HelperRefused $mode 'capability_missing' $id $repo
+  Fixture 'box_' @('report-files-v1') $manifest; HelperRefused $mode 'unsupported_capability' $id $repo
   Fixture 'box_' $checks; HelperRefused $mode 'manifest_missing' $id $repo
   Fixture 'box_' $checks $manifest; [IO.File]::Delete((Join-Path $box 'manifest.json')); HelperRefused $mode 'manifest_mismatch' $id $repo
   Fixture 'box_' $checks $manifest; [IO.File]::WriteAllBytes((Join-Path $box 'manifest.json'),$utf8.GetBytes($utf8.GetString($manifest).Replace('no_such','also_no'))); HelperRefused $mode 'manifest_mismatch' $id $repo

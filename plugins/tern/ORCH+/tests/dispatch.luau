@@ -12,6 +12,7 @@ local sections = { fixture = true, core = true, receipts = true, callbacks = tru
 	rollover_coordinator_self_release = true, publication_readback = true, accept_after_owner_recovery = true,
 	quota_normalize = true, quota_assembly = true, quota_routing = true, quota_gate = true, quota_claim = true,
 	quota_rollover = true, quota_ledger = true, quota_selector = true, quota_continuation = true, window_bookkeeping = true, intent_buttons = true,
+	assembly_restore = true, assembly_capacity = true,
 	withdraw_fenced = true, policy_keys = true, loop_caps = true, worker_fields = true }
 assert(section == nil or sections[section], "unknown dispatch test section: " .. tostring(section))
 local runtime, environment = tern, getfenv()
@@ -31,7 +32,7 @@ local function load(name, base)
 	setfenv(chunk, setmetatable({ tern = fake, require = function(n) return load(n, dir) end }, { __index = environment }))
 	local value = chunk(); modules[name] = value; return value
 end
-local host, state, dispatch, codec, quota = load("host"), load("state"), load("dispatch"), load("transport"), load("quota")
+local host, state, dispatch, codec, quota = load("host"), load("state"), load("dispatch"), load("wire/codec"), load("quota")
 local checks, serial = 0, 0
 local function check(ok, why) assert(ok, why); checks += 1 end
 local function next_id() serial += 1; return "fixture-" .. tostring(serial) end
@@ -172,6 +173,112 @@ local function fixture(clock)
 	return f
 end
 if section == "fixture" then return { fixture = fixture, clone = clone, codec = codec, state = state, dispatch = dispatch, host = host, quota = quota, frame = frame, load = load } end
+if section == nil or section == "assembly_restore" then
+	local f = fixture(); local id = f:accepted(false)
+	local function worker() return f.authority.registry.dispatch.workers[id] end
+	local bytes = f:report(id, 2, "HEARTBEAT", { state = "idle" }) .. string.rep(" ", 5000)
+	local framed = assert(codec.frame(bytes, "report", worker()))
+	local function deliver(object)
+		local queued = f:apply("poll", { worker_id = id }); assert(queued.ok, queued.message)
+		local page = assert(codec.project_page(object, f:action(queued.action_id).request.selector))
+		return f:finish(queued.action_id, "complete", runtime.json.decode(page))
+	end
+	assert(deliver(framed.manifest).ok)
+	check(state.rehydrate(clone(f.authority.registry)) ~= nil, "manifest-only incremental state restores")
+	assert(deliver(framed.chunks[1]).ok)
+	local a = worker().assembly
+	check(a.version == 1 and a.next_index == 2 and a.bytes == 2048 and #a.slices == 1 and a.chunks == nil
+		and worker().accepted_seq == 1 and worker().receipts["2"] == nil, "a persisted prefix is not a receipt or encoded-chunk replay journal")
+	local saved = clone(f.authority.registry)
+	check(state.rehydrate(clone(saved)) ~= nil, "partial multi-chunk report passes strict restore validation")
+	for _, mutate in {
+		function(w) w.assembly.extra = true end,
+		function(w) w.assembly.version = 2 end,
+		function(w) w.assembly.next_index = 3 end,
+		function(w) w.assembly.bytes += 1 end,
+		function(w) w.assembly.slices[1] ..= "\n" end,
+		function(w) w.assembly.slices[1] = runtime.base64.encode("short") end,
+		function(w) w.assembly.object_digests[1] = "bad" end,
+		function(w) w.assembly.binding.worker_generation += 1 end,
+		function(w) w.assembly.manifest.message_sha256 = string.rep("0", 64) end,
+		function(w) w.assembly.manifest_sha256 = string.rep("0", 64) end,
+		function(w) w.read_selector.index = 3 end,
+	} do
+		local malformed = clone(saved); mutate(malformed.dispatch.workers[id])
+		check(state.rehydrate(malformed) == nil, "corrupt incremental state or selector is refused at restore")
+	end
+	local legacy = clone(saved)
+	legacy.dispatch.workers[id].assembly = { manifest = framed.manifest, sha256 = codec.sha256(framed.manifest),
+		chunks = { { bytes = framed.chunks[1], sha256 = codec.sha256(framed.chunks[1]) } } }
+	check(not dispatch.valid(legacy.dispatch, legacy), "legacy assembly is accepted only at the restore boundary")
+	local migrated = assert(state.rehydrate(clone(legacy)))
+	local ma = migrated.dispatch.workers[id].assembly
+	check(ma.version == 1 and ma.next_index == 2 and ma.slices[1] == a.slices[1] and ma.object_digests[1] == a.object_digests[1]
+		and migrated.dispatch.workers[id].accepted_seq == 1, "old encoded-chunk prefix migrates without accepting a report")
+	for _, mutate in {
+		function(old) old.chunks[1].sha256 = string.rep("0", 64) end,
+		function(old) old.chunks[1] = { bytes = framed.chunks[2], sha256 = codec.sha256(framed.chunks[2]) } end,
+		function(old) old.chunks[2] = clone(old.chunks[1]) end,
+	} do
+		local malformed = clone(legacy); mutate(malformed.dispatch.workers[id].assembly)
+		check(state.rehydrate(malformed) == nil, "invalid, skipped or duplicate legacy prefix is never silently migrated")
+	end
+	-- A real authority reload must preserve the prefix while requiring the same explicit recovery.
+	local original = clone(worker())
+	f.authority = host.new_authority(f.memory); assert(f.authority:load().ok)
+	f.origin.window_epoch = "assembly-replacement-window"; f.controller_pane = "9010"
+	check(not f:apply("poll", { worker_id = id }).ok, "reloaded partial report grants no automatic read authority")
+	assert(f:apply("continue_controller", { expected_revision = f.authority.registry.revision, operator_verified = true }).ok)
+	local pane = { pane_id = "9013", window_key = "", window_epoch = f.origin.window_epoch, native_session_id = "7", window_host_id = "local" }
+	local attached = f:apply("continue_worker", { worker_id = id, pane_binding = pane,
+		continuation_proof = dispatch.continuation_proof(f.authority.registry, worker()), operator_verified = true })
+	assert(attached.ok, attached.message)
+	assert(f:finish(attached.action_id, "attached", { pane_binding = pane, previous_origin_binding = original.origin_binding,
+		previous_pane_binding = original.pane_binding }).ok)
+	check(worker().assembly.next_index == 2 and worker().read_selector.index == 2, "explicit attachment resumes the next slice, not a replay of chunk one")
+	for index = 2, #framed.chunks do assert(deliver(framed.chunks[index]).ok) end
+	check(worker().accepted_seq == 2 and worker().receipts["2"].publish and worker().receipts["2"].sha256 == codec.sha256(bytes)
+		and worker().assembly == nil and worker().read_selector == nil, "final exact bytes commit cursor and owed ACK together after reload")
+	local ack = f:apply("poll", { worker_id = id }); assert(ack.ok, ack.message)
+	check(f:action(ack.action_id).request.op == "mailbox_publish_ack" and worker().accepted_seq == 2,
+		"ACK publication remains strictly after the durable acceptance cursor")
+end
+if section == nil or section == "assembly_capacity" then
+	local f = fixture()
+	local ids, frames = {}, {}
+	for index = 1, 5 do
+		f.target_pane = tostring(9200 + index)
+		local id = f:accepted(false); ids[index] = id
+		local w = f.authority.registry.dispatch.workers[id]
+		frames[index] = assert(codec.frame(f:report(id, 2, "HEARTBEAT", { state = "idle" }) .. string.rep(" ", 3000), "report", w))
+	end
+	for index, id in ids do
+		local queued = f:apply("poll", { worker_id = id }); assert(queued.ok, queued.message)
+		local page = assert(codec.project_page(frames[index].manifest, f:action(queued.action_id).request.selector))
+		local result = f:finish(queued.action_id, "complete", runtime.json.decode(page))
+		check(result.ok and (index < 5 or result.code == "intake_backpressure"), "only four active report assemblies are admitted")
+		if index < 5 then
+			local chunk = f:apply("poll", { worker_id = id }); assert(chunk.ok, chunk.message)
+			local part = assert(codec.project_page(frames[index].chunks[1], f:action(chunk.action_id).request.selector))
+			assert(f:finish(chunk.action_id, "complete", runtime.json.decode(part)).ok)
+		end
+	end
+	local total, active = 0, 0
+	for _, w in f.authority.registry.dispatch.workers do
+		if w.assembly then active += 1; total += w.assembly.bytes end
+	end
+	check(active == 4 and total == 4 * 2048 and total <= 262144 and f.authority.registry.dispatch.workers[ids[5]].assembly == nil
+		and f.authority.registry.dispatch.workers[ids[5]].receipts["2"] == nil, "fifth report stays unacknowledged without displacing a retained prefix")
+	check(state.rehydrate(clone(f.authority.registry)) ~= nil, "four active assemblies restore within the host budget")
+	local corrupt = clone(f.authority.registry)
+	local fifth = corrupt.dispatch.workers[ids[5]]
+	local binding = clone(corrupt.dispatch.workers[ids[1]].assembly.binding)
+	for _, key in { "logical_session_id", "worker_id", "worker_generation", "launch_request_id", "work_id", "enrolment_token",
+		"mailbox_handle", "assignment_sha256", "capabilities" } do binding[key] = clone(fifth[key]) end
+	fifth.assembly = assert(codec.assembly_start(frames[5].manifest, codec.sha256(frames[5].manifest), binding))
+	fifth.read_selector = { stream = "report", slot = 2, part = "chunk", index = 1 }
+	check(state.rehydrate(corrupt) == nil, "restore cannot bypass the four-active-state limit")
+end
 if section == nil or section == "core" then
 local opaque = fixture()
 local configured_id, configured_cwd = "Configured worker / one", "/" .. string.rep("a", 1200)

@@ -5,7 +5,7 @@ assert(type(selection) == "string" and selection ~= "", "pass bounded group/sect
 local allowed = { state = true, transport = true, authority = true, dispatch = true, reports = true, gates = true, health = true, workflow = true }
 local groups, seen = {}, {}
 for selector in string.gmatch(selection, "[^,]+") do
-	local name, section = string.match(selector, "^([a-z_]+)/([a-z_]+)$")
+	local name, section = string.match(selector, "^([a-z0-9_]+)/([a-z0-9_]+)$")
 	name = name or selector
 	assert(allowed[name] == true, "unknown test group: " .. selector)
 	assert(not seen[selector], "duplicate test selection: " .. selector)

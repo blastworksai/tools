@@ -40,10 +40,6 @@ same(Backend.windows_argument("a\\"), '"a\\\\"', "CRT trailing backslash doubles
 same(Backend.windows_argument('a\\"b'), '"a\\\\\\"b"', "CRT backslashes before quotes double plus one")
 same(Backend.utf16le("A雪😀"), string.char(65, 0, 234, 150, 61, 216, 0, 222), "UTF16LE includes surrogate pairs, not UTF8 bytes")
 check(Backend.utf16le(string.char(255)) == nil, "UTF16 rejects malformed UTF8")
-same(Backend.base64(""), "", "Base64 empty")
-same(Backend.base64("f"), "Zg==", "Base64 one byte")
-same(Backend.base64("fo"), "Zm8=", "Base64 two bytes")
-same(Backend.base64("foo"), "Zm9v", "Base64 three bytes")
 local args = { "", task, "ending\\", "--resume", "literal" }
 local command = assert(Backend.serialize("/a worker", args, "/work's", "linux", "sh"))
 local expected = "cd -- " .. Backend.posix_quote("/work's") .. " && " .. Backend.posix_quote("/a worker")

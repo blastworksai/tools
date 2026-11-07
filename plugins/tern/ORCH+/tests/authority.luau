@@ -364,7 +364,7 @@ check(ui_store.value.sessions[view1.orch_session_id].controller.pending_executor
 	"explicit controller continuation retains every original pending executor")
 local continued_phase = ui_store.value.dispatch.actions[callback_action].phase
 check(continued_phase == "uncertain", "continuation marks the stopped old executor's claim uncertain, never resolved")
-local transport = load("transport")
+local transport = load("wire/codec")
 local body = { schema = 1, op = "catalog", request_id = retained_action.request.request_id, action_id = callback_action,
 	origin_binding = retained_action.request.origin_binding, controller_generation = retained_action.request.controller_generation,
 	status = "catalog", payload = { namespace = "fixture-spawn", host_key = "fixture-host", config_revision = 0, revision = 0, records = runtime.json.array() } }
