@@ -624,35 +624,48 @@ class Opening(unittest.TestCase):
 
     @staticmethod
     def daemon_search(script):
-        """The window check runs per daemon: the default first, then each tern-* pipe owned by the user's own SID, and
-        the plugin check runs once, after a window was found, on that same daemon."""
-        loop = re.search(r"\$sockets = @\(''\)\n(.*?)\nif \(-not \$window\) \{ exit 9 \}", script, re.S)
+        """The daemon search: an inherited TERN_DAEMON_SOCKET, then the default daemon with the variable cleared, then
+        each tern-* pipe owned by the user's own SID; it stops only on a daemon with a window AND the ready plugin, and
+        both checks run against that same daemon."""
+        loop = re.search(r"\$sockets = @\(\)\n(.*?)\nif \(-not \$window\) \{ exit 9 \}\nif \(-not \$ready\) \{ exit 10 \}",
+                         script, re.S)
         if not loop:
             return False
         body = loop.group(1)
-        return all(piece in body for piece in (
-            "[IO.Directory]::GetFiles('\\\\.\\pipe\\')", "-like '\\\\.\\pipe\\tern-*'", 'Select-Object -First 16',
-            "GetOwner([Security.Principal.SecurityIdentifier]).Value -eq $me.Value) { $sockets += $p }",
-            'foreach ($s in $sockets)', 'if ($s) { $env:TERN_DAEMON_SOCKET = $s }', '& $tern inspect --json',
-            "$_.kind -eq 'window'", 'if ($window) { break }')) \
-            and body.index('$sockets += $p') < body.index('foreach ($s in $sockets)') < body.index('& $tern inspect') \
-            and 'plugin list' not in body \
-            and script.index('$me = $identity.User') < loop.start() < script.index('& $tern plugin list') \
-            and 'TERN_DAEMON_SOCKET' not in script[loop.end():]
+        pieces = ("if ($env:TERN_DAEMON_SOCKET) { $sockets += $env:TERN_DAEMON_SOCKET }", "$sockets += ''",
+                  "[IO.Directory]::GetFiles('\\\\.\\pipe\\')", "-like '\\\\.\\pipe\\tern-*'", 'Select-Object -First 16',
+                  "GetOwner([Security.Principal.SecurityIdentifier]).Value -eq $me.Value) { $sockets += $p }",
+                  'foreach ($s in $sockets)',
+                  'if ($s) { $env:TERN_DAEMON_SOCKET = $s } else { Remove-Item -LiteralPath Env:TERN_DAEMON_SOCKET -ErrorAction SilentlyContinue }',
+                  '& $tern inspect --json', "$_.kind -eq 'window'", 'if (-not $here) { continue }', '& $tern plugin list --json',
+                  "$_.id -eq 'glitch-idea'", 'if ($ready) { break }')
+        if not all(piece in body for piece in pieces):
+            return False
+        order = [body.index(p) for p in ('$sockets += $env:TERN_DAEMON_SOCKET', "$sockets += ''", '$sockets += $p',
+                                          'foreach ($s in $sockets)', '& $tern inspect', 'if (-not $here) { continue }',
+                                          '& $tern plugin list', 'if ($ready) { break }')]
+        return (order == sorted(order) and 'break' not in body[:body.index('if ($ready) { break }')]
+                and script.index('$me = $identity.User') < loop.start()
+                and 'TERN_DAEMON_SOCKET' not in script[loop.end():] and 'plugin list' not in script[loop.end():])
 
     def test_an_elevated_login_finds_the_window_on_the_users_own_daemon(self):
         script = self.windows_script()
         self.assertTrue(self.daemon_search(script))
-        self.assertIn('if (-not $ready) { exit 10 }', script)
         self.assertNotIn('BUILTIN', script)
-        # mutations: one default daemon only (the bug), any owner's pipe, the plugin check moved before the window search
+        # mutations: the default daemon only (the bug), any owner's pipe, the variable not set per daemon, an inherited
+        # override kept for the "default" candidate (review finding), stopping on a window without the plugin, and the
+        # plugin check moved out of the loop
         for old, new in (("foreach ($s in $sockets)", "foreach ($s in @(''))"),
                          ("-eq $me.Value) { $sockets += $p }", ") { $sockets += $p }"),
-                         ("if ($s) { $env:TERN_DAEMON_SOCKET = $s }", ""),
-                         ("if ($window) { break }", "")):
+                         ("if ($s) { $env:TERN_DAEMON_SOCKET = $s }", "if ($s) { }"),
+                         (" else { Remove-Item -LiteralPath Env:TERN_DAEMON_SOCKET -ErrorAction SilentlyContinue }", ""),
+                         ("if (-not $here) { continue }\n  $window = $true", "if (-not $here) { continue }\n  $window = $true\n  break"),
+                         ("if ($ready) { break }", ""),
+                         ("if ($env:TERN_DAEMON_SOCKET) { $sockets += $env:TERN_DAEMON_SOCKET }\n", "")):
             with self.subTest(mutation=old):
-                self.assertNotEqual(script.replace(old, new), script)
-                self.assertFalse(self.daemon_search(script.replace(old, new)))
+                mutated = script.replace(old, new)
+                self.assertNotEqual(mutated, script)
+                self.assertFalse(self.daemon_search(mutated))
 
     def test_macos(self):
         how, fake, client, url = self.open('macos')

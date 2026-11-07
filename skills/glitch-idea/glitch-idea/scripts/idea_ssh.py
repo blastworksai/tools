@@ -407,28 +407,34 @@ if (-not $env:LOCALAPPDATA -or -not (Test-Path -LiteralPath $tern)) { exit 4 }
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $me = $identity.User
 # An administrator's ssh login is elevated, and an elevated tern.com talks to Tern's elevated daemon, not the one the
-# operator's window uses. So: the default daemon first, then every Tern daemon pipe this user's own SID owns.
-$sockets = @('')
+# operator's window uses. So: an inherited TERN_DAEMON_SOCKET, then the default daemon (the variable cleared), then
+# every Tern daemon pipe this user's own SID owns; the first daemon with a window AND the ready plugin is the one.
+$sockets = @()
+if ($env:TERN_DAEMON_SOCKET) { $sockets += $env:TERN_DAEMON_SOCKET }
+$sockets += ''
 try {
   foreach ($p in @([IO.Directory]::GetFiles('\\.\pipe\') | Where-Object { $_ -like '\\.\pipe\tern-*' } | Select-Object -First 16)) {
     try { if ([IO.Directory]::GetAccessControl($p).GetOwner([Security.Principal.SecurityIdentifier]).Value -eq $me.Value) { $sockets += $p } } catch { }
   }
 } catch { }
 $window = $false
+$ready = $false
 foreach ($s in $sockets) {
-  if ($s) { $env:TERN_DAEMON_SOCKET = $s }
+  if ($s) { $env:TERN_DAEMON_SOCKET = $s } else { Remove-Item -LiteralPath Env:TERN_DAEMON_SOCKET -ErrorAction SilentlyContinue }
+  $here = $false
   try {
     $i = (& $tern inspect --json | Out-String) | ConvertFrom-Json
-    $window = @($i.clients | Where-Object { $_.kind -eq 'window' }).Count -gt 0
+    $here = @($i.clients | Where-Object { $_.kind -eq 'window' }).Count -gt 0
   } catch { }
-  if ($window) { break }
+  if (-not $here) { continue }
+  $window = $true
+  try {
+    $pl = (& $tern plugin list --json | Out-String) | ConvertFrom-Json
+    $ready = @($pl.plugins | Where-Object { $_.id -eq 'glitch-idea' -and $_.window -eq $true -and $_.status -eq 'ready' }).Count -gt 0
+  } catch { }
+  if ($ready) { break }
 }
 if (-not $window) { exit 9 }
-$ready = $false
-try {
-  $pl = (& $tern plugin list --json | Out-String) | ConvertFrom-Json
-  $ready = @($pl.plugins | Where-Object { $_.id -eq 'glitch-idea' -and $_.window -eq $true -and $_.status -eq 'ready' }).Count -gt 0
-} catch { }
 if (-not $ready) { exit 10 }
 $system = New-Object Security.Principal.SecurityIdentifier('S-1-5-18')
 $admins = New-Object Security.Principal.SecurityIdentifier('S-1-5-32-544')
