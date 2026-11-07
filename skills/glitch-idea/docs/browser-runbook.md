@@ -185,7 +185,7 @@ The result still carries `browser.link` with `browser.opened` set to `false`; cl
 | `timeout` / `ssh_failed` / `open_failed` | The ssh call timed out, failed, or the opener failed some other way. |
 
 On Windows an administrator's ssh login is elevated, and an elevated Tern talks to its own elevated session daemon, not the one your window uses.
-The opener tries the default daemon first, then every Tern daemon pipe that your own account owns, and uses the one with a window.
+The opener tries a `TERN_DAEMON_SOCKET` already set in the ssh environment, then the default daemon, then up to 16 Tern daemon pipes that your own account owns, and uses the first one with a window and the ready plugin.
 A throwaway `ssh -L` line is no longer the way.
 
 ### 5.2a Tern on a remote host
