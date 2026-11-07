@@ -188,7 +188,7 @@ Explore through the chosen method's lens, in this order, filling each beat under
 The page offers three choices, labelled exactly: "Visualize in Claude Design and import it back", "Prototype Here" and "Skip visualization".
 The step ends in one of two dispositions: `accepted_set` (with `source` `claude_design` or `prototype`) or `skipped` (the reason is optional and it takes one click).
 Only the operator accepts or skips, in the page.
-In the page the accepted set is called "the design", and a file only becomes part of it when the operator ticks it: uploading keeps a file with the idea and nothing more. The Claude Design card's buttons read "Choose which files are the design" (or "Start another design from other files" once a design exists) and "Use this design" for an earlier one. Speak those words to the operator, never the store's names (design set, membership, disposition, upload intent).
+In the page the accepted set is called "the design", and a file only becomes part of it when the operator ticks it: uploading keeps a file with the idea and nothing more. The Claude Design card's buttons read "Choose which files are the design" (or "Start another design from other files" once a design exists) and "Use this design" for an earlier one. Ticking a file needs no button first: the first tick starts a design by itself. The button only starts afresh (or switches from an earlier design) and clears the ticks. On Prototype Here nothing needs ticking: the prototype's two files show ticked and locked, and the operator presses Accept. Speak those words to the operator, never the store's names (design set, membership, disposition, upload intent).
 A skip (or a Claude Design import) sends the terminal no request; you learn the step is done only when the next request (assessment) arrives, so read your events before telling the operator anything about Visualize.
 
 For "Prototype Here" the page sends a `visual_brief` request.
@@ -207,7 +207,7 @@ When the browser is on another computer and `fixed_port` is `true`, the same sta
 Take a PNG screenshot (`orca screenshot --page <id> --format png`, or the browser's own screenshot as a fallback) and zip the prototype folder.
 Upload each file with one `idea.py asset --session <session_id> --idea <idea_id> --revision <N> --request <request_id> --file <path>` call (a `.png` and a `.zip`; the type follows the extension, or pass `--type`; the usual asset limits apply; see commands.md).
 Each call prints the new `asset_id`.
-Then, while the `visual_brief` request is still open, `fill` the `visualize` step with the design set `{"source": "prototype", "assets": [<zip id>, <png id>]}`.
+Then, while the `visual_brief` request is still open, `fill` with operation `visual_brief` and the top-level fields `{"source": "prototype", "assets": [<zip id>, <png id>]}` (not `fields: {visualize: ...}`, which is refused `invalid_fill`).
 Only after that fill and the operator's confirmation of "Prototype ready", reply `prototype_skill: "available"`.
 Tell the operator to check the prototype and press Accept in the page; you never accept.
 
