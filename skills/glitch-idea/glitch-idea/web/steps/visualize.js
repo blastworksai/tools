@@ -413,7 +413,7 @@ export function render(ctx) {
     use.id='visualize-set-'+set.set_id;use.disabled=Boolean(writeBlocked(ctx)||!eligible);use.setAttribute('aria-pressed',String(current().design_set_id===set.set_id));setRow.append(actions(element,use));choices.append(setRow);
   }
   if(current().design_set_id){const chosen=inventory?.sets.find(set=>set.set_id===current().design_set_id);choices.append(element('p','Chosen design: '+(chosen?chosen.members.map(member=>member.name).join(', '):'an earlier design'),'help'));}
-  if(local.members.length)choices.append(element('p',local.members.length===1?'1 file ticked as the design.':local.members.length+' files ticked as the design.','help'));
+  if(!ready&&local.members.length)choices.append(element('p',local.members.length===1?'1 file ticked as the design.':local.members.length+' files ticked as the design.','help'));
   claude.append(choices);
 
   // Card 2: Prototype Here. The terminal builds it; the page only asks and shows the result.

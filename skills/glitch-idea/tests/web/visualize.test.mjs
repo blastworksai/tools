@@ -622,6 +622,7 @@ test('Review: a file ticked before the prototype arrived is not shown ticked bes
   await h.get('visualize-prototype').click();fillPrototype(h,files);await new Promise(resolve=>setTimeout(resolve,20));h.draw();
   const other=h.get('visualize-member-'+extra.asset_id);assert.equal(other.checked,false);assert.equal(other.disabled,true);
   for(const f of [files.zip,files.png])assert.equal(h.get('visualize-member-'+f.asset_id).checked,true);
+  assert.doesNotMatch(text(h),/ticked as the design/);
   await h.get('visualize-accept').click();
   const request=writes(h).find(call=>call.route==='/api/v1/visual-set/accept').payload;
   assert.equal(request.fields.source,'prototype');assert.deepEqual(request.asset_ids,[files.zip.asset_id,files.png.asset_id]);
