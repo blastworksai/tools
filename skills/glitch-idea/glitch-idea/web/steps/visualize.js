@@ -393,14 +393,16 @@ export function render(ctx) {
   for (const asset of inventory?.assets??[]) {
     const label=element('label',asset.name),check=element('input');check.type='checkbox';check.id='visualize-member-'+asset.asset_id;label.htmlFor=check.id;
     const inPrototype=Boolean(ready&&(asset.asset_id===ready.zip.asset_id||asset.asset_id===ready.png.asset_id));
-    check.checked=inPrototype||local.members.includes(asset.asset_id);check.disabled=Boolean(writeBlocked(ctx)||ready||!brief);
+    // With a ready prototype the ticks show exactly its pair, which is what Accept saves.
+    check.checked=ready?inPrototype:local.members.includes(asset.asset_id);check.disabled=Boolean(writeBlocked(ctx)||ready||!brief);
     check.addEventListener('change',event=>{
       if(check.disabled)return;
-      if(event.target.checked&&!local.members.includes(asset.asset_id)){
-        // Ticking a file starts a design set by itself, exactly as the button does.
-        if(current().disposition!=='accepted_set'||current().design_set_id!==null||current().source!=='claude_design'){local.members=[];edited(make('accepted_set',null,'claude_design'));}
-        local.members.push(asset.asset_id);
-      } else if(!event.target.checked)local.members=local.members.filter(id=>id!==asset.asset_id);
+      // The ticked boxes are the design being made. Any tick or untick that is not already editing a new
+      // Claude Design set starts one from the boxes as they now stand, so a saved or earlier design is never
+      // kept behind changed ticks.
+      const members=event.target.checked?[...new Set([...local.members,asset.asset_id])]:local.members.filter(id=>id!==asset.asset_id);
+      if(current().disposition!=='accepted_set'||current().design_set_id!==null||current().source!=='claude_design')edited(make('accepted_set',null,'claude_design'));
+      local.members=members;
       change({...current()});
     });const pick=element('div','','g-check');pick.append(check,label);choices.append(pick);
   }
