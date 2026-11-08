@@ -1,7 +1,7 @@
 # gcc-skill-review: full report
 
-skills/gcc-skill-review | retrieved 2026-11-08 | sha256 176ca1683a9f1943d5dde7746324cd8c2c93d55b7889adf5b0f168e8858415cd
-Run 2026-11-08_176ca16 | Walkdown 0.3.1+blastworks.1
+skills/gcc-skill-review | retrieved 2026-11-08 | sha256 054ca715583208ec8a6f9b1fcdbf792e4d4ba68b9eaeb58a1163fc9f593050b4
+Run 2026-11-08_054ca71 | Walkdown 0.3.1+blastworks.1
 Static examination only. Nothing executed. Every finding below is a location to look at; none is a verdict. Stage order; nothing is ranked.
 
 ## 1 What ships
@@ -10,7 +10,7 @@ Static examination only. Nothing executed. Every finding below is a location to 
 
 Validation: PASS (gate 26/26, negative 7/7; measured 2026-11-02, same code and fixtures)
 
-Pin: sha256 176ca1683a9f1943d5dde7746324cd8c2c93d55b7889adf5b0f168e8858415cd, 8 files, 25,909 bytes.
+Pin: sha256 054ca715583208ec8a6f9b1fcdbf792e4d4ba68b9eaeb58a1163fc9f593050b4, 8 files, 27,848 bytes.
 
 Formats: md 5, (none) 2, json 1.
 
@@ -51,7 +51,7 @@ None.
 
 Programs are the ones Walkdown recognizes (`stages/04-phrases/tools.yaml`); declared means named in a dependency file, a skill's compatibility field, or an install line.
 
-- `claude`: not declared; used at gcc-skill-review/SKILL.md:58 (instructions), gcc-skill-review/SKILL.md:67 (instructions), gcc-skill-review/references/plugin-eval.md:19 (instructions), gcc-skill-review/references/plugin-eval.md:117 (instructions)
+- `claude`: not declared; used at gcc-skill-review/SKILL.md:60 (instructions), gcc-skill-review/SKILL.md:70 (instructions), gcc-skill-review/references/plugin-eval.md:19 (instructions), gcc-skill-review/references/plugin-eval.md:121 (instructions)
 - No package imported.
 
 ### What ties it to one machine
@@ -60,7 +60,7 @@ Nothing found that ties it to one machine.
 
 ## 2 What the model actually reads
 
-8/8 files (100.0%). 0 divergences. 4 lines changed by folding. 0 non-Latin runs. 0 passages in a language other than English. Validation INCOMPLETE: see 7.
+8/8 files (100.0%). 0 divergences. 5 lines changed by folding. 0 non-Latin runs. 0 passages in a language other than English. Validation INCOMPLETE: see 7.
 
 Validation: INCOMPLETE (gate 20/31, negative 22/24, recall 1/1; skipped: 13 rows; measured 2026-11-02, same code and fixtures)
 
@@ -68,12 +68,13 @@ Validation: INCOMPLETE (gate 20/31, negative 22/24, recall 1/1; skipped: 13 rows
 
 None.
 
-### Lines changed by folding (4)
+### Lines changed by folding (5)
 
 - gcc-skill-review/SKILL.md:35: removed or replaced U+2026, U+2026, U+2026
-- gcc-skill-review/SKILL.md:63: removed or replaced U+00D7
-- gcc-skill-review/SKILL.md:100: removed or replaced U+2013
+- gcc-skill-review/SKILL.md:66: removed or replaced U+00D7
+- gcc-skill-review/SKILL.md:104: removed or replaced U+2013
 - gcc-skill-review/references/example.md:56: removed or replaced U+2026, U+2026
+- gcc-skill-review/references/plugin-eval.md:114: removed or replaced U+2026, U+2026
 
 ### Non-Latin script runs (0)
 
@@ -93,7 +94,7 @@ None.
 
 ## 3 What loads what
 
-2 entry points. 1 orphan. 28 dangling references (28 code; 12 of them into a folder the repository does not have). 1 dynamic load: 0 files loaded only through one (named by nothing), 1 file reached only through a mention of a folder or wildcards. Graph incomplete by construction.
+2 entry points. 1 orphan. 30 dangling references (30 code; 13 of them into a folder the repository does not have). 1 dynamic load: 0 files loaded only through one (named by nothing), 1 file reached only through a mention of a folder or wildcards. Graph incomplete by construction.
 
 Validation: PASS (gate 11/11, negative 7/7; measured 2026-11-02, same code and fixtures)
 
@@ -124,12 +125,12 @@ None.
 
 None.
 
-### Dangling references (16)
+### Dangling references (17)
 
 - gcc-skill-review/SKILL.md:28: `skill>-review/` (code)
 - gcc-skill-review/SKILL.md:36: `map.md` (code)
-- gcc-skill-review/SKILL.md:77: `counts-before.md` (code)
-- gcc-skill-review/SKILL.md:92: `counts-after.md` (code)
+- gcc-skill-review/SKILL.md:81: `counts-before.md` (code)
+- gcc-skill-review/SKILL.md:96: `counts-after.md` (code)
 - gcc-skill-review/references/plugin-eval.md:12: `evals/` (code)
 - gcc-skill-review/references/plugin-eval.md:13: `case>/` (code)
 - gcc-skill-review/references/plugin-eval.md:14: `prompt.md` (code)
@@ -137,26 +138,28 @@ None.
 - gcc-skill-review/references/plugin-eval.md:16: `check-name>.md` (code)
 - gcc-skill-review/references/plugin-eval.md:31: `posts.csv` (code)
 - gcc-skill-review/references/plugin-eval.md:39: `case.yaml` (code)
-- gcc-skill-review/references/plugin-eval.md:117: `after>.json` (code)
-- gcc-skill-review/references/plugin-eval.md:126: `home/` (code)
-- gcc-skill-review/references/plugin-eval.md:126: `sealed/` (code)
-- gcc-skill-review/references/plugin-eval.md:126: `tmp/` (code)
-- gcc-skill-review/references/plugin-eval.md:127: `out/` (code)
+- gcc-skill-review/references/plugin-eval.md:114: `case.yaml` (code)
+- gcc-skill-review/references/plugin-eval.md:121: `after>.json` (code)
+- gcc-skill-review/references/plugin-eval.md:132: `home/` (code)
+- gcc-skill-review/references/plugin-eval.md:132: `sealed/` (code)
+- gcc-skill-review/references/plugin-eval.md:132: `tmp/` (code)
+- gcc-skill-review/references/plugin-eval.md:133: `out/` (code)
 
-### Dangling references into a folder the repository does not have (often one the workflow creates when it runs) (12)
+### Dangling references into a folder the repository does not have (often one the workflow creates when it runs) (13)
 
 - README.md:37: `.claude/skills/` (code)
 - gcc-skill-review/SKILL.md:28: `.agents/skills/` (code)
 - gcc-skill-review/SKILL.md:28: `.claude/skills/` (code)
 - gcc-skill-review/SKILL.md:41: `skill>-review/copy/` (code)
-- gcc-skill-review/SKILL.md:58: `skill>-review/copy/evals/` (code)
-- gcc-skill-review/SKILL.md:71: `skill>-review/runs/` (code)
+- gcc-skill-review/SKILL.md:50: `evidence/03-top-five.md` (code)
+- gcc-skill-review/SKILL.md:60: `skill>-review/copy/evals/` (code)
+- gcc-skill-review/SKILL.md:74: `skill>-review/runs/` (code)
 - gcc-skill-review/references/plugin-eval.md:10: `skill>-review/copy/` (code)
 - gcc-skill-review/references/plugin-eval.md:55: `out/3-top-five.md` (code)
 - gcc-skill-review/references/plugin-eval.md:71: `out/3-top-five.md` (code)
 - gcc-skill-review/references/plugin-eval.md:82: `out/3-top-five.md` (code)
-- gcc-skill-review/references/plugin-eval.md:98: `out/1-posts.md` (code)
-- gcc-skill-review/references/plugin-eval.md:107: `out/review.md` (code)
+- gcc-skill-review/references/plugin-eval.md:100: `out/1-posts.md` (code)
+- gcc-skill-review/references/plugin-eval.md:109: `out/review.md` (code)
 
 ### Not scanned for references (0)
 
@@ -173,7 +176,7 @@ None.
 
 ## 4 What the text asks for
 
-4a 0 · 4b 1 · 4c 13 · 4d 0 hits on 13 lines (10 read by a model, 3 human-facing); benign share not measured (stage 6 labels did not run). Hosts: 4, 0 not named in the docs. Confirm-first or prohibited actions in instruction text: 6, 6 with no confirmation step, 0 stated as prohibitions. Conditionals: 2 absence, 1 error, 1 environment, 1 version. Definitions: 0, 0 conflicts, 0 safety-word definitions. Long files with flagged lines: 0, 0 with some past the reader window. Sentences repeated across files: 0, 0 flagged. Lines that look like committed secrets: 0.
+4a 1 · 4b 1 · 4c 13 · 4d 0 hits on 14 lines (11 read by a model, 3 human-facing); benign share not measured (stage 6 labels did not run). Hosts: 4, 0 not named in the docs. Confirm-first or prohibited actions in instruction text: 6, 6 with no confirmation step, 0 stated as prohibitions. Conditionals: 4 absence, 1 error, 1 environment, 1 version. Definitions: 0, 0 conflicts, 0 safety-word definitions. Long files with flagged lines: 0, 0 with some past the reader window. Sentences repeated across files: 0, 0 flagged. Lines that look like committed secrets: 0.
 
 Validation: PASS (gate 153/153, negative 121/121, recall 43/43; measured 2026-11-02, same code and fixtures)
 
@@ -185,9 +188,11 @@ Every hit is a locator. Benign share not measured here; stage 6 labels, when run
 
 None.
 
-#### phrase.creds (0 lines)
+#### phrase.creds (1 line)
 
-None.
+Patterns: creds.env-enum-code 1
+
+- gcc-skill-review/references/plugin-eval.md:3 [creds.env-enum-code] (model): `` Shapes verified on Claude Code 2.1.319 (the shell sandbox and `env` facts from a refused run, 8 Nov). ``
 
 #### phrase.remote-load (0 lines)
 
@@ -207,7 +212,7 @@ None.
 
 Patterns: B.safety-adjective 1
 
-- gcc-skill-review/references/plugin-eval.md:126 [B.safety-adjective] (model): `` A kept folder is read-only, with `home/` and `tmp/` sealed (mode 000) in `sealed/`; open them with `chmod 700 <kept> <kept>/sealed`, never run git inside one, and remove the kept folders when the review is done. ``
+- gcc-skill-review/references/plugin-eval.md:132 [B.safety-adjective] (model): `` A kept folder is read-only, with `home/` and `tmp/` sealed (mode 000) in `sealed/`; open them with `chmod 700 <kept> <kept>/sealed`, never run git inside one, and remove the kept folders when the review is done. ``
 
 #### phrase.H.anti-review (0 lines)
 
@@ -223,13 +228,13 @@ None.
 
 Patterns: E.exec-primitive 1
 
-- gcc-skill-review/references/plugin-eval.md:126 [E.exec-primitive] (model): `` A kept folder is read-only, with `home/` and `tmp/` sealed (mode 000) in `sealed/`; open them with `chmod 700 <kept> <kept>/sealed`, never run git inside one, and remove the kept folders when the review is done. ``
+- gcc-skill-review/references/plugin-eval.md:132 [E.exec-primitive] (model): `` A kept folder is read-only, with `home/` and `tmp/` sealed (mode 000) in `sealed/`; open them with `chmod 700 <kept> <kept>/sealed`, never run git inside one, and remove the kept folders when the review is done. ``
 
 #### phrase.C.second-order (2 lines)
 
 Patterns: C.error-instruction 2
 
-- gcc-skill-review/references/plugin-eval.md:133 [C.error-instruction] (model): `` The `--json` file holds, per case, `arms.with[]`: one entry per run, each with `turns`, `error`, `tracePath` and `graders[]` (`name`, `passed`, `explanation`).\nCount passes per grader across the runs for the table.\n`tracePath` is that run's full session; read it for the passing run you read in full, and for any failure before you believe it. ``
+- gcc-skill-review/references/plugin-eval.md:139 [C.error-instruction] (model): `` The `--json` file holds, per case, `arms.with[]`: one entry per run, each with `turns`, `error`, `tracePath` and `graders[]` (`name`, `passed`, `explanation`).\nCount passes per grader across the runs for the table.\n`tracePath` is that run's full session; read it for the passing run you read in full, and for any failure before you believe it. ``
 - prompts.md:45 [C.error-instruction] (subagent): `step order showing passes out of five. For every failure quote that\nstep's Picked line. Give it one of four verdicts: the step was\nwrong, the skill left it open, an earlier step handed it a wrong\ninput, the check was wrong. Then read one run that passed`
 
 #### phrase.D.trust (0 lines)
@@ -249,12 +254,12 @@ Patterns: J.confirm-first 9
 - LICENSE:11 [J.confirm-first] (human): `to use, copy, modify, merge, publish, distribute, sublicense, and/or sell`
 - README.md:53 [J.confirm-first] (human): `` - **The eval report is published to claude.ai by default.** The skill always passes `--no-publish`. ``
 - gcc-skill-review/LICENSE:11 [J.confirm-first] (human): `to use, copy, modify, merge, publish, distribute, sublicense, and/or sell`
-- gcc-skill-review/SKILL.md:67 [J.confirm-first] (model): `claude plugin eval <skill>-review/copy --runs 5 --model <model> --ablation none --no-publish --keep-temp --allow-tools Write Bash --json <skill>-review/runs/<model>-before.json </dev/null`
-- gcc-skill-review/SKILL.md:70 [J.confirm-first] (model): `` `--no-publish` always (default publishes the report to claude.ai). ``
+- gcc-skill-review/SKILL.md:70 [J.confirm-first] (model): `claude plugin eval <skill>-review/copy --runs 5 --model <model> --ablation none --no-publish --keep-temp --trust-plugin --allow-tools Write Edit Bash --json <skill>-review/runs/<model>-before.json </dev/null`
+- gcc-skill-review/SKILL.md:73 [J.confirm-first] (model): `` `--no-publish` always (default publishes the report to claude.ai). `--trust-plugin` only for the copy you wrote. ``
 - gcc-skill-review/references/example.md:17 [J.confirm-first] (model): `Input: a spreadsheet of 30 invented posts (format, topic, reach, likes, comments, saves, shares).`
-- gcc-skill-review/references/plugin-eval.md:117 [J.confirm-first] (model): `claude plugin eval <skill>-review/copy --runs 5 --model <model> --ablation none --no-publish --keep-temp --allow-tools Write Bash --json <skill>-review/runs/<model>-<before|after>.json </dev/null`
-- gcc-skill-review/references/plugin-eval.md:121 [J.confirm-first] (model): `` - `--no-publish` always: by default the report is published to claude.ai. ``
-- gcc-skill-review/references/plugin-eval.md:136 [J.confirm-first] (model): `` An HTML report lands in `evals/results/<timestamp>/report.html`, local only with `--no-publish`. ``
+- gcc-skill-review/references/plugin-eval.md:121 [J.confirm-first] (model): `claude plugin eval <skill>-review/copy --runs 5 --model <model> --ablation none --no-publish --keep-temp --trust-plugin --allow-tools Write Edit Bash --json <skill>-review/runs/<model>-<before|after>.json </dev/null`
+- gcc-skill-review/references/plugin-eval.md:125 [J.confirm-first] (model): `` - `--no-publish` always: by default the report is published to claude.ai. ``
+- gcc-skill-review/references/plugin-eval.md:142 [J.confirm-first] (model): `` An HTML report lands in `evals/results/<timestamp>/report.html`, local only with `--no-publish`. ``
 
 ### 4d Talking to the human
 
@@ -264,7 +269,7 @@ None.
 
 ### Tables
 
-Hosts: 4, 0 not named in the docs. Confirm-first or prohibited actions in instruction text: 6, 6 with no confirmation step, 0 stated as prohibitions. Conditionals: 2 absence, 1 error, 1 environment, 1 version. Definitions: 0, 0 conflicts, 0 safety-word definitions. Long files with flagged lines: 0, 0 with some past the reader window. Sentences repeated across files: 0, 0 flagged. Lines that look like committed secrets: 0.
+Hosts: 4, 0 not named in the docs. Confirm-first or prohibited actions in instruction text: 6, 6 with no confirmation step, 0 stated as prohibitions. Conditionals: 4 absence, 1 error, 1 environment, 1 version. Definitions: 0, 0 conflicts, 0 safety-word definitions. Long files with flagged lines: 0, 0 with some past the reader window. Sentences repeated across files: 0, 0 flagged. Lines that look like committed secrets: 0.
 
 ### Endpoints (hosts named anywhere; documented = named in the docs) (4)
 
@@ -275,20 +280,22 @@ Hosts: 4, 0 not named in the docs. Confirm-first or prohibited actions in instru
 
 ### Confirm-first and prohibited actions in instruction text (6)
 
-- gcc-skill-review/SKILL.md:67: confirm-first, `publish`, no confirmation step: `claude plugin eval <skill>-review/copy --runs 5 --model <model> --ablation none --no-publish --keep-temp --allow-tools Write Bash --json <skill>-review/runs/<model>-before.json </dev/null`
-- gcc-skill-review/SKILL.md:70: confirm-first, `publish`, no confirmation step: `` `--no-publish` always (default publishes the report to claude.ai). ``
+- gcc-skill-review/SKILL.md:70: confirm-first, `publish`, no confirmation step: `claude plugin eval <skill>-review/copy --runs 5 --model <model> --ablation none --no-publish --keep-temp --trust-plugin --allow-tools Write Edit Bash --json <skill>-review/runs/<model>-before.json </dev/null`
+- gcc-skill-review/SKILL.md:73: confirm-first, `publish`, no confirmation step: `` `--no-publish` always (default publishes the report to claude.ai). `--trust-plugin` only for the copy you wrote. ``
 - gcc-skill-review/references/example.md:17: confirm-first, `posts (format, topic, reach, likes, comments`, no confirmation step: `Input: a spreadsheet of 30 invented posts (format, topic, reach, likes, comments, saves, shares).`
-- gcc-skill-review/references/plugin-eval.md:117: confirm-first, `publish`, no confirmation step: `claude plugin eval <skill>-review/copy --runs 5 --model <model> --ablation none --no-publish --keep-temp --allow-tools Write Bash --json <skill>-review/runs/<model>-<before|after>.json </dev/null`
-- gcc-skill-review/references/plugin-eval.md:121: confirm-first, `publish`, no confirmation step: `` - `--no-publish` always: by default the report is published to claude.ai. ``
-- gcc-skill-review/references/plugin-eval.md:136: confirm-first, `publish`, no confirmation step: `` An HTML report lands in `evals/results/<timestamp>/report.html`, local only with `--no-publish`. ``
+- gcc-skill-review/references/plugin-eval.md:121: confirm-first, `publish`, no confirmation step: `claude plugin eval <skill>-review/copy --runs 5 --model <model> --ablation none --no-publish --keep-temp --trust-plugin --allow-tools Write Edit Bash --json <skill>-review/runs/<model>-<before|after>.json </dev/null`
+- gcc-skill-review/references/plugin-eval.md:125: confirm-first, `publish`, no confirmation step: `` - `--no-publish` always: by default the report is published to claude.ai. ``
+- gcc-skill-review/references/plugin-eval.md:142: confirm-first, `publish`, no confirmation step: `` An HTML report lands in `evals/results/<timestamp>/report.html`, local only with `--no-publish`. ``
 
-### Conditionals (5)
+### Conditionals (7)
 
 - gcc-skill-review/SKILL.md:14: error: if `before believing a failed check.` then `- Open the step's file`
 - gcc-skill-review/SKILL.md:25: absence: if `If none` then `` offer to invent a small one with planted answers (shape: `references/example.md`) and have them confirm the answers. ``
-- gcc-skill-review/SKILL.md:97: absence: if `before/after or the script; anything a passing run got wrong that no check caught; what was not proven.` then `Then: the map with steps to move into code; the sentence`
-- gcc-skill-review/references/plugin-eval.md:128: environment: if `once on the one subscription; leave it at 1 on a loaded machine.` then `` - `-j <n>` runs up to 8 at ``
-- gcc-skill-review/references/plugin-eval.md:129: version: if `` if any case scores under `--threshold` (default 1.0); that is a result `` then `- The run exits 1 not a crash.`
+- gcc-skill-review/SKILL.md:82: absence: if `If no run can happen at all` then `prove the pattern checks on hand-written good and wrong files and say the rubric checks and the model's behaviour are unproven.`
+- gcc-skill-review/SKILL.md:101: absence: if `before/after or the script; anything a passing run got wrong that no check caught; what was not proven.` then `Then: the map with steps to move into code; the sentence`
+- gcc-skill-review/references/plugin-eval.md:128: absence: if `before the model starts ("Sandbox required but unavailable").` then `Without them the run is refused`
+- gcc-skill-review/references/plugin-eval.md:134: environment: if `once on the one subscription; leave it at 1 on a loaded machine.` then `` - `-j <n>` runs up to 8 at ``
+- gcc-skill-review/references/plugin-eval.md:135: version: if `` if any case scores under `--threshold` (default 1.0); that is a result `` then `- The run exits 1 not a crash.`
 
 ### Definitions (0)
 
@@ -365,7 +372,7 @@ No unfinished text, dated claims, pinned model IDs, or older tool names.
 
 ## 5 What this touches
 
-Can read your data: no · Can take outside input: no · Can send data out: no Install grants: context-injection, persistence.
+Can read your data: yes · Can take outside input: no · Can send data out: no Install grants: context-injection, persistence.
 
 Validation: PASS (gate 81/81, negative 24/24; measured 2026-11-02, same code and fixtures)
 
@@ -373,7 +380,8 @@ A map of capability, derived from stages 1 to 4; it reaches no verdict. A Bash g
 
 ### Trifecta legs
 
-- Can read your data: no (0 citations)
+- Can read your data: yes (1 citation)
+    - stage 04 phrase.creds gcc-skill-review/references/plugin-eval.md:3: phrase.creds: creds.env-enum-code
 - Can take outside input: no (0 citations)
 - Can send data out: no (0 citations)
 
@@ -395,28 +403,28 @@ Bytes at load: descriptions 601 (1, exact).
 Expected context: 32,000 tokens (a line for 200,000 beside it). Tokens are estimated from size: about 4 bytes of English text per token; text in other scripts runs high.
 
 - Every session, once installed (descriptions, hooks): 151 tokens, under 1% of 32,000, under 1% of 200,000
-- When the largest skill runs: 1,535 tokens, 5% of 32,000, under 1% of 200,000
-- That skill and everything it names: 3,871 tokens, 12% of 32,000, 2% of 200,000
+- When the largest skill runs: 1,734 tokens, 5% of 32,000, under 1% of 200,000
+- That skill and everything it names: 4,257 tokens, 13% of 32,000, 2% of 200,000
 - The largest is `gcc-skill-review/SKILL.md`, of 1 skill, agent, or command.
 
 Every skill, agent, or command, by tier (tokens):
 
-- gcc-skill-review/SKILL.md: runs 1,535, with what it names 3,871, with wildcard loads 3,871
+- gcc-skill-review/SKILL.md: runs 1,734, with what it names 4,257, with wildcard loads 4,257
 
-#### Loads into the AI: 3 files, 15.1 KB, 3,871 tokens
+#### Loads into the AI: 3 files, 16.6 KB, 4,257 tokens
 
-- `gcc-skill-review/SKILL.md`: skills, agents, and commands, 6.0 KB, 1,535 tokens
+- `gcc-skill-review/SKILL.md`: skills, agents, and commands, 6.8 KB, 1,734 tokens
 - `gcc-skill-review/references/example.md`: named by a file the AI loads, 4.0 KB, 1,035 tokens, reached from `gcc-skill-review/SKILL.md`
-- `gcc-skill-review/references/plugin-eval.md`: named by a file the AI loads, 5.1 KB, 1,301 tokens, reached from `gcc-skill-review/SKILL.md`
+- `gcc-skill-review/references/plugin-eval.md`: named by a file the AI loads, 5.8 KB, 1,488 tokens, reached from `gcc-skill-review/SKILL.md`
 
 #### Used another way: 0 files, 0 bytes, 0 tokens
 
 None.
 
-#### Not used at run time: 5 files, 10.2 KB, 2,608 tokens
+#### Not used at run time: 5 files, 10.6 KB, 2,708 tokens
 
 - `LICENSE`: written for people, 1.3 KB, 331 tokens
-- `README.md`: written for people, 4.2 KB, 1,071 tokens
+- `README.md`: written for people, 4.6 KB, 1,171 tokens
 - `gcc-skill-review/LICENSE`: written for people, 1.3 KB, 331 tokens
 - `capability.json`: nothing points to it, 295 bytes, 74 tokens
 - `prompts.md`: nothing points to it, 3.1 KB, 801 tokens
@@ -427,7 +435,7 @@ None.
 
 ### Stated limits: read-only wording a model reads, and what backs it (1)
 
-- gcc-skill-review/references/plugin-eval.md:126: stated; Stated in the text; Walkdown found no tool setting that enforces it (gcc-skill-review/SKILL.md has no tools list). `` A kept folder is read-only, with `home/` and `tmp/` sealed (mode 000) in `sealed/`; open them with `chmod 700 <kept> <kept>/sealed`, never run git inside one, and remove the kept folders when the review is done. ``
+- gcc-skill-review/references/plugin-eval.md:132: stated; Stated in the text; Walkdown found no tool setting that enforces it (gcc-skill-review/SKILL.md has no tools list). `` A kept folder is read-only, with `home/` and `tmp/` sealed (mode 000) in `sealed/`; open them with `chmod 700 <kept> <kept>/sealed`, never run git inside one, and remove the kept folders when the review is done. ``
 
 ### Pairs: Test data a model-read file references directly (0)
 
@@ -461,7 +469,7 @@ Every tool granted is one the words ask for, and nothing asks for a tool it lack
 
 ## 6 Needs a human read
 
-11 questions (10 labeling, 1 relational). Packet only: no model read (06-packet.md in the run folder).
+12 questions (11 labeling, 1 relational). Packet only: no model read (06-packet.md in the run folder).
 
 Validation: PASS (gate 125/125, negative 11/11, recall 0/165; skipped: 124 rows; measured 2026-11-02, same code and fixtures)
 
@@ -473,21 +481,23 @@ Questions a pattern cannot settle, and the answers of the backends named here. E
 
 - gcc-skill-review/SKILL.md:41 [label] Does this line tell the reader to do the matched action, tell them not to, describe it, or quote / give an example of it?
     - soft.label: skipped (no labeling backend)
-- gcc-skill-review/SKILL.md:67 [label] Does this line tell the reader to do the matched action, tell them not to, describe it, or quote / give an example of it?
-    - soft.label: skipped (no labeling backend)
 - gcc-skill-review/SKILL.md:70 [label] Does this line tell the reader to do the matched action, tell them not to, describe it, or quote / give an example of it?
+    - soft.label: skipped (no labeling backend)
+- gcc-skill-review/SKILL.md:73 [label] Does this line tell the reader to do the matched action, tell them not to, describe it, or quote / give an example of it?
     - soft.label: skipped (no labeling backend)
 - gcc-skill-review/references/example.md:17 [label] Does this line tell the reader to do the matched action, tell them not to, describe it, or quote / give an example of it?
     - soft.label: skipped (no labeling backend)
-- gcc-skill-review/references/plugin-eval.md:117 [label] Does this line tell the reader to do the matched action, tell them not to, describe it, or quote / give an example of it?
+- gcc-skill-review/references/plugin-eval.md:3 [label] Does this line tell the reader to do the matched action, tell them not to, describe it, or quote / give an example of it?
     - soft.label: skipped (no labeling backend)
 - gcc-skill-review/references/plugin-eval.md:121 [label] Does this line tell the reader to do the matched action, tell them not to, describe it, or quote / give an example of it?
     - soft.label: skipped (no labeling backend)
-- gcc-skill-review/references/plugin-eval.md:126 [label] Does this line tell the reader to do the matched action, tell them not to, describe it, or quote / give an example of it?
+- gcc-skill-review/references/plugin-eval.md:125 [label] Does this line tell the reader to do the matched action, tell them not to, describe it, or quote / give an example of it?
     - soft.label: skipped (no labeling backend)
-- gcc-skill-review/references/plugin-eval.md:133 [label] Does this line tell the reader to do the matched action, tell them not to, describe it, or quote / give an example of it?
+- gcc-skill-review/references/plugin-eval.md:132 [label] Does this line tell the reader to do the matched action, tell them not to, describe it, or quote / give an example of it?
     - soft.label: skipped (no labeling backend)
-- gcc-skill-review/references/plugin-eval.md:136 [label] Does this line tell the reader to do the matched action, tell them not to, describe it, or quote / give an example of it?
+- gcc-skill-review/references/plugin-eval.md:139 [label] Does this line tell the reader to do the matched action, tell them not to, describe it, or quote / give an example of it?
+    - soft.label: skipped (no labeling backend)
+- gcc-skill-review/references/plugin-eval.md:142 [label] Does this line tell the reader to do the matched action, tell them not to, describe it, or quote / give an example of it?
     - soft.label: skipped (no labeling backend)
 - prompts.md:45 [label] Does this line tell the reader to do the matched action, tell them not to, describe it, or quote / give an example of it?
     - soft.label: skipped (no labeling backend)
@@ -510,7 +520,7 @@ Questions a pattern cannot settle, and the answers of the backends named here. E
 - soft.label skipped for gcc-skill-review/references/plugin-eval.md: no labeling backend
 - soft.label skipped for prompts.md: no labeling backend
 - soft.read skipped for None: no relational backend
-- (06-soft) skipped: soft.label x10: no labeling backend
+- (06-soft) skipped: soft.label x11: no labeling backend
 - (06-soft) skipped: soft.read x1: no relational backend
 - Static examination only. Nothing in the artifact was executed, fetched, or installed.
 - Stage 6 answers are located observations from the backends section 6 names; they never change a stage 1 to 5 finding. Hit counts carry a benign share only when stage 6 labels ran.

@@ -1,6 +1,6 @@
 # claude plugin eval: the shapes that work here
 
-Shapes verified on Claude Code 2.1.319.
+Shapes verified on Claude Code 2.1.319 (the shell sandbox and `env` facts from a refused run, 8 Nov).
 
 ## Layout
 
@@ -86,7 +86,9 @@ match: not_contains
 ---
 ```
 
+`target` also takes `trace` (every tool call, e.g. to prove a button was never pressed), `files` or `last_message` (default).
 `match` takes `contains` (default), `not_contains` or `count:N`.
+A run that never started (0 turns) still passes every `not_contains` check; count only finished runs.
 `flags` takes JavaScript RegExp flags; `m` makes `^` match at each line, which is what anchors a check to the `Picked:` line.
 A pattern over the whole file is the trap the page caught: it finds a name in a raw ranking and passes a step that left it out of the final pick.
 
@@ -109,18 +111,22 @@ focus: {source: file, path: out/review.md}
 It recommends at least one meal prep carousel and gives a reason drawn from the posts.
 ```
 
+In `case.yaml` the same rubric is `{name, type: llm, criteria: "…", focus: …}`. A rubric judge can pass an empty message: read it.
+
 Other types the schema accepts: `tool_used`, `tool_order`, `baseline`.
 
 ## Running
 
 ```
-claude plugin eval <skill>-review/copy --runs 5 --model <model> --ablation none --no-publish --keep-temp --allow-tools Write Bash --json <skill>-review/runs/<model>-<before|after>.json </dev/null
+claude plugin eval <skill>-review/copy --runs 5 --model <model> --ablation none --no-publish --keep-temp --trust-plugin --allow-tools Write Edit Bash --json <skill>-review/runs/<model>-<before|after>.json </dev/null
 ```
 
 - `</dev/null`: keeps the run non-interactive.
 - `--no-publish` always: by default the report is published to claude.ai.
 - `--ablation none`: otherwise a skills-dir target also runs a no-skill baseline arm, doubling the runs.
-- `--allow-tools Write Bash`: Write, Edit, Bash and WebFetch are gated; a skill that saves files needs the grant.
+- `--allow-tools Write Edit Bash`: Write, Edit, Bash and WebFetch are gated; grant what the skill uses.
+- A run granted Bash needs a working sandbox: on Linux both `bwrap` and `socat`. Without them the run is refused before the model starts ("Sandbox required but unavailable").
+- `execution.env` accepts only `EVAL_*` keys; anything else (e.g. `UV_CACHE_DIR`) must be exported in the shell that launches the eval.
 - `--trust-plugin`: answers the first-run trust prompt; pass it only for a copy you wrote yourself.
 - `--keep-temp`: the run folder, its step files and its trace are deleted when the run ends unless you pass it.
   A kept folder is read-only, with `home/` and `tmp/` sealed (mode 000) in `sealed/`; open them with `chmod 700 <kept> <kept>/sealed`, never run git inside one, and remove the kept folders when the review is done.

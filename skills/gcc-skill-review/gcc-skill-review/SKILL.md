@@ -47,6 +47,8 @@ Left out: what was dropped.
 Why: one sentence.
 ```
 
+Write them at fixed paths in the folder the session starts in (e.g. `evidence/03-top-five.md`): a check cannot follow a name the model chooses.
+A step with two outputs, or whose result is the person's own words: one labelled `Picked:` line per output.
 Fix nothing else, even what you can see is unsaid.
 
 ## 3. Checks
@@ -56,26 +58,28 @@ Fact → pattern check aimed at the `Picked:` line (a whole-file pattern passes 
 Judgement → short `llm` rubric.
 No known answer for a step → ask; never invent it.
 Write them as `claude plugin eval` cases in `<skill>-review/copy/evals/` (shapes: `references/plugin-eval.md`; `--help` wins on conflict).
-Break it first: run once, show every check passes on the good files; hand-write one wrong file per step, show its check fails. A check that passes a wrong file is fixed before going on.
+Break it first: run once (this is also stage 4's trial), show every check passes on the good files; hand-write one wrong file per step, show its check fails. A check that passes a wrong file is fixed before going on.
 
 ## 4. Five runs
 
+Skill needs a shell (runs scripts): first check `command -v bwrap socat` (Linux/WSL). Either missing → the eval refuses every run at 0 turns; stop and ask the person (installing `socat` needs their go). Plain Windows: use WSL.
 Get a yes on the cost first (runs × models, each a full session on their subscription), in one structured question. Recommend 5 per model.
 One trial run, then:
 
 ```
-claude plugin eval <skill>-review/copy --runs 5 --model <model> --ablation none --no-publish --keep-temp --allow-tools Write Bash --json <skill>-review/runs/<model>-before.json </dev/null
+claude plugin eval <skill>-review/copy --runs 5 --model <model> --ablation none --no-publish --keep-temp --trust-plugin --allow-tools Write Edit Bash --json <skill>-review/runs/<model>-before.json </dev/null
 ```
 
-`--no-publish` always (default publishes the report to claude.ai).
+`--no-publish` always (default publishes the report to claude.ai). `--trust-plugin` only for the copy you wrote.
 Copy each kept run's step files into `<skill>-review/runs/`, then delete the kept folders.
 Trial produced no step files → suspect the case first: runs start in an empty folder and find the sample only by its full path in the prompt.
 
 Table: one row per check in step order, passes out of 5, one column per model.
+Count only runs that finished: a run refused at 0 turns still passes every `not_contains` check and can pass a rubric.
 Each failure: quote its `Picked:` line, give exactly one verdict: the step was wrong · the skill left it open · an earlier step handed it a wrong input · the check was wrong.
 Read one all-pass run in full; report anything wrong no check caught.
 Save `counts-before.md`.
-No `plugin eval` available: five fresh sessions, same checks by hand; say so. Plain Windows can't sandbox a skill's own scripts: use WSL.
+No `plugin eval` available: five fresh sessions, same checks by hand; say so. If no run can happen at all, prove the pattern checks on hand-written good and wrong files and say the rubric checks and the model's behaviour are unproven.
 
 ## 5. Fix and prove
 

@@ -43,16 +43,18 @@ Everything happens on a copy, and the original changes only when you say yes at 
 - Your skill.
 - One sample input where you already know the right answers. If you have none, the skill helps you invent one with planted answers.
 - Claude Code for the fresh runs (they use your own subscription; the skill asks you to confirm the number of runs before it starts). Outside Claude Code, five fresh chats and the same checks by hand do the same job.
-- On Windows, use WSL: a skill that runs its own scripts can't be tested this way on plain Windows.
+- If your skill runs its own scripts: on Linux or WSL, `bwrap` and `socat` installed (`command -v bwrap socat`), because the eval refuses to give a run a shell without its sandbox. Plain Windows can't do this; use WSL.
 
 ## Things we learned packaging it
 
 Kem's page says "run it five times with `claude plugin eval`".
-Making that work on Claude Code 2.1.319 turned up three traps, now handled in the skill ([`references/plugin-eval.md`](gcc-skill-review/references/plugin-eval.md)):
+Making that work on Claude Code 2.1.319 turned up these traps, now handled in the skill ([`references/plugin-eval.md`](gcc-skill-review/references/plugin-eval.md)):
 
 - **The eval report is published to claude.ai by default.** The skill always passes `--no-publish`.
 - **Every run starts in an empty throwaway folder.** Your sample input has to sit inside the eval case folder, granted with `add_dirs` and named by its full path in the prompt. Otherwise the model never finds it, and every check fails because of the test setup, not your skill.
 - **Run files are deleted when the run ends** unless you pass `--keep-temp`, and the page tells you to keep them.
+- **A skill that runs scripts needs the shell sandbox**: without `socat` (Linux/WSL) every run is refused before the model starts.
+- **A run that never started still passes checks**: every "nothing outside the answer" check passes on an empty run. Count only runs that finished.
 
 ## The limits
 
