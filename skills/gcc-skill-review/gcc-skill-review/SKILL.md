@@ -25,7 +25,7 @@ Ask for whatever is missing, in one structured question:
 2. One sample input with known right answers. If none, offer to invent a small one with planted answers (shape: `references/example.md`) and have them confirm the answers.
 3. Models. Recommend their usual model plus Haiku (the smallest model is the one that trips where the others do not).
 
-Skill runs scripts (needs a shell)? Check now: `command -v bwrap socat` (Linux/WSL; plain Windows: use WSL). Either missing → the eval refuses every run at 0 turns: tell the person before stage 1 (installing `socat` needs their go). If they won't install it, stages 1–3 still run: prove the pattern checks on hand-written good and wrong files, and say the rubric checks and the model's behaviour are unproven.
+Skill runs scripts (needs a shell)? Check now (Linux/WSL; plain Windows: use WSL): `command -v bwrap socat`, and `sysctl kernel.apparmor_restrict_unprivileged_userns` must not be 1 (Ubuntu 24.04+ default; every sandboxed shell command then fails with `apply-seccomp … setgroups`). The sandbox also cannot read the user's home or reach the network, so a skill that installs or downloads at run time cannot run there. Either tool missing → the eval refuses every run at 0 turns; any of these → tell the person before stage 1 and offer, in one structured question: fresh sessions instead (one at a time, each unsandboxed on its own throwaway copy of the sample, scored by the same checks; say the isolation is weaker), fixing the host (installing `socat` or changing AppArmor needs their go), or stopping after stage 3 with the pattern checks proven on hand-written good and wrong files.
 
 Working folder (`<skill>-review/` below): never inside the original, never in `.claude/skills/` or `.agents/skills/` (it would load as a skill). In Glitch: `_local/gcc-skill-review/<skill>-review/`; elsewhere: `<skill>-review/` in the project root.
 Save each stage's output there before the next stage.
@@ -76,7 +76,7 @@ Copy each kept run's step files into `<skill>-review/runs/`, then delete the kep
 Trial produced no step files → suspect the case first: runs start in an empty folder and find the sample only by its full path in the prompt.
 
 Table: one row per check in step order, passes out of finished runs (e.g. 3/4 when one of five was refused), one column per model.
-Count only runs that finished: a run refused at 0 turns still passes every `not_contains` check and can pass a rubric.
+Count a run only if its first step's evidence file exists: a run refused at 0 turns, or one that ended normally having done nothing, still passes every `not_contains` check and can pass a rubric.
 Each failure: quote its `Picked:` line, give exactly one verdict: the step was wrong · the skill left it open · an earlier step handed it a wrong input · the check was wrong.
 Read one all-pass run in full; report anything wrong no check caught.
 Save `counts-before.md`.

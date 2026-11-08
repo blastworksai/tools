@@ -1,10 +1,10 @@
-# Changes: 2026-11-08_054ca71 -> 2026-11-08_74330b1
+# Changes: 2026-11-08_1c82e3f -> 2026-11-08_8dfd6e2
 
-Old: sha256 054ca7155832, 8 files. New: sha256 74330b103263, 8 files.
+Old: sha256 1c82e3f452fa, 8 files. New: sha256 8dfd6e2ced6d, 8 files.
 
 What a newer version adds, from the findings both runs already made. Model reads (stage 6) are not compared. A change is a location to read; none is a verdict.
 
-Summary: 2 files changed; cost: largest at its fullest 4,257 -> 4,311 tokens (+54).
+Summary: 1 files changed, 2 new phrase hits, 2 phrase hits gone, 2 of the new phrase hits in text a model reads; cost: largest at its fullest 4,536 -> 4,572 tokens (+36).
 
 ## What it costs (estimated tokens)
 
@@ -12,10 +12,16 @@ Summary: 2 files changed; cost: largest at its fullest 4,257 -> 4,311 tokens (+5
 |---|---|---|---|
 | Every session | 151 | 151 | +0 |
 | Every session in this folder | none | none |  |
-| Largest at its fullest | 4,257 | 4,311 | +54 |
-| Not used at run time | 2,708 | 2,708 | +0 |
+| Largest at its fullest | 4,536 | 4,572 | +36 |
+| Not used at run time | 2,853 | 2,853 | +0 |
 
-## Files changed (2)
+## New phrase hits in text a model reads (2)
+
+- gcc-skill-review/SKILL.md:28: phrase.B.defs `Skill runs scripts (needs a shell)? Check now (Linux/WSL; plain Windows: use WSL): 'command -v bwrap socat', and 'sysctl kernel.apparmor_restrict_unprivileged_u...`
+- gcc-skill-review/SKILL.md:28: phrase.C.second-order `Skill runs scripts (needs a shell)? Check now (Linux/WSL; plain Windows: use WSL): 'command -v bwrap socat', and 'sysctl kernel.apparmor_restrict_unprivileged_u...`
+
+## Files changed (1)
 
 - gcc-skill-review/SKILL.md (model)
-- gcc-skill-review/references/plugin-eval.md (model)
+
+Phrase hits gone: 2.

@@ -59,7 +59,7 @@ graders:
 
 Seen on the trial: with a bare file name in the prompt the model searched, never found the file and wrote nothing, so every check failed on a fault of the case, not the skill.
 An absolute path outside the case folder is refused before the run ("escapes the case directory").
-A `scaffold_script` can copy the sample in instead, but it runs only with `--scaffold`, and only on case files you wrote.
+The case folder is read-only to the run: a skill that writes into the person's project cannot work on a sample left there. Copy the sample into the run folder with a `scaffold_script` (runs only with `--scaffold`, and only on case files you wrote).
 
 ## Checks (graders)
 
@@ -88,7 +88,7 @@ match: not_contains
 
 `target` also takes `trace` (every tool call, e.g. to prove a button was never pressed), `files` or `last_message` (default).
 `match` takes `contains` (default), `not_contains` or `count:N`.
-A run that never started (0 turns) still passes every `not_contains` check; count only finished runs.
+A run that never started, or ended having done nothing, still passes every `not_contains` check; count a run only if its first step's file exists.
 `flags` takes JavaScript RegExp flags; `m` makes `^` match at each line, which is what anchors a check to the `Picked:` line.
 A pattern over the whole file is the trap the page caught: it finds a name in a raw ranking and passes a step that left it out of the final pick.
 
@@ -126,7 +126,8 @@ claude plugin eval <skill>-review/copy --runs 5 --model <model> --ablation none 
 - `--ablation none`: otherwise a skills-dir target also runs a no-skill baseline arm, doubling the runs.
 - `--allow-tools Write Edit Bash`: Write, Edit, Bash and WebFetch are gated; grant what the skill uses.
 - A run granted Bash needs a working sandbox: on Linux both `bwrap` and `socat`. Without them the run is refused before the model starts ("Sandbox required but unavailable").
-- `execution.env` accepts only `EVAL_*` keys; anything else (e.g. `UV_CACHE_DIR`) must be exported in the shell that launches the eval.
+- `execution.env` accepts only `EVAL_*` keys; anything else must be exported in the shell that launches the eval. That does not open files: the sandbox cannot read the operator's home (so an exported `UV_CACHE_DIR` there is useless) and has no network.
+- On Linux with `kernel.apparmor_restrict_unprivileged_userns = 1`, every sandboxed Bash call fails (`apply-seccomp: write /proc/self/setgroups … Permission denied`) even with bwrap and socat present.
 - `--trust-plugin`: answers the first-run trust prompt; pass it only for a copy you wrote yourself.
 - `--keep-temp`: the run folder, its step files and its trace are deleted when the run ends unless you pass it.
   A kept folder is read-only, with `home/` and `tmp/` sealed (mode 000) in `sealed/`; open them with `chmod 700 <kept> <kept>/sealed`, never run git inside one, and remove the kept folders when the review is done.

@@ -43,7 +43,7 @@ Everything happens on a copy, and the original changes only when you say yes at 
 - Your skill.
 - One sample input where you already know the right answers. If you have none, the skill helps you invent one with planted answers.
 - Claude Code for the fresh runs (they use your own subscription; the skill asks you to confirm the number of runs before it starts). Outside Claude Code, five fresh chats and the same checks by hand do the same job.
-- If your skill runs its own scripts: on Linux or WSL, `bwrap` and `socat` installed (`command -v bwrap socat`), because the eval refuses to give a run a shell without its sandbox. Plain Windows can't do this; use WSL.
+- If your skill runs its own scripts: on Linux or WSL, `bwrap` and `socat` installed (`command -v bwrap socat`) and user namespaces allowed (`sysctl kernel.apparmor_restrict_unprivileged_userns` not 1, which is the Ubuntu 24.04+ default), because the eval only gives a run a shell inside its sandbox. That sandbox can't read your home folder or reach the network, so a skill that downloads or installs at run time can't be tested this way; the skill falls back to fresh sessions scored by the same checks. Plain Windows can't do this; use WSL.
 
 ## Things we learned packaging it
 
@@ -53,8 +53,9 @@ Making that work on Claude Code 2.1.319 turned up these traps, now handled in th
 - **The eval report is published to claude.ai by default.** The skill always passes `--no-publish`.
 - **Every run starts in an empty throwaway folder.** Your sample input has to sit inside the eval case folder, granted with `add_dirs` and named by its full path in the prompt. Otherwise the model never finds it, and every check fails because of the test setup, not your skill.
 - **Run files are deleted when the run ends** unless you pass `--keep-temp`, and the page tells you to keep them.
-- **A skill that runs scripts needs the shell sandbox**: without `socat` (Linux/WSL) every run is refused before the model starts.
-- **A run that never started still passes checks**: every "nothing outside the answer" check passes on an empty run. Count only runs that finished.
+- **A skill that runs scripts needs the shell sandbox**: without `socat` (Linux/WSL) every run is refused before the model starts, and with AppArmor's user-namespace restriction on (Ubuntu 24.04+) every shell command inside it fails.
+- **The eval case folder is read-only to the run**: a skill that writes into your project needs the sample copied into the run folder.
+- **A run that did nothing still passes checks**: every "nothing outside the answer" check passes on an empty run. Count a run only if its first step's file exists.
 
 ## The limits
 
