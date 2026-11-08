@@ -113,6 +113,9 @@ It recommends at least one meal prep carousel and gives a reason drawn from the 
 
 In `case.yaml` the same rubric is `{name, type: llm, criteria: "…", focus: …}`. A rubric judge can pass an empty message: read it.
 
+There is no re-grade command: graders only run inside a run, against that run's folder. Prove a regex offline with node (same JS RegExp); a rubric only inside a run.
+`file_exists` does not see files in a dot-folder (`.gt/…`).
+
 Other types the schema accepts: `tool_used`, `tool_order`, `baseline`.
 
 ## Running
@@ -131,6 +134,7 @@ claude plugin eval <skill>-review/copy --runs 5 --model <model> --ablation none 
 - `--trust-plugin`: answers the first-run trust prompt; pass it only for a copy you wrote yourself.
 - `--keep-temp`: the run folder, its step files and its trace are deleted when the run ends unless you pass it.
   A kept folder is read-only, with `home/` and `tmp/` sealed (mode 000) in `sealed/`; open them with `chmod 700 <kept> <kept>/sealed`, never run git inside one, and remove the kept folders when the review is done.
+  Kept folders are not named in run order: match each to its run by `tracePath` in the `--json` file.
   Copy each run's `evidence/` into `<skill>-review/runs/<model>-<before|after>/run-<n>/` so the evidence outlives the cleanup.
 - `-j <n>` runs up to 8 at once on the one subscription; leave it at 1 on a loaded machine.
 - The run exits 1 if any case scores under `--threshold` (default 1.0); that is a result, not a crash.

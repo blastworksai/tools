@@ -49,18 +49,24 @@ Left out: what was dropped.
 Why: one sentence.
 ```
 
-Write them at fixed paths in the folder the session starts in (e.g. `evidence/03-top-five.md`): a check cannot follow a name the model chooses.
-A step with two outputs, or whose result is the person's own words: one labelled line per output, e.g. `Picked (offered): …` and `Picked (chosen): …`; aim each check at its label (`^Picked \(chosen\):`).
+Write them at fixed paths in the folder the session starts in: a check cannot follow a name the model chooses. The skill already names an output folder → keep it and fix the file names (`out/03-top-five.md`); otherwise `evidence/03-top-five.md`.
+A step with two outputs, the person's own words, or any item a check must name: one labelled line per output, e.g. `Picked (offered): …` and `Picked (chosen): …`; aim each check at its label (`^Picked \(chosen\):`).
+A step that computes (rates, counts, averages): it also writes its numbers, one per line or a table.
 Fix nothing else, even what you can see is unsaid.
 
 ## 3. Checks
 
 Per step: one check that everything in the known answer was picked, one that nothing outside it was.
-Fact → pattern check aimed at the `Picked:` line (a whole-file pattern passes a name found in a raw ranking but dropped from the pick).
+Fact picked → pattern check aimed at the `Picked:` line (a whole-file pattern passes a name found in a raw ranking but dropped from the pick).
+Value computed → a check on the numbers in the file, never on how the rule is worded; arithmetic gets a value check even when its pick looks right.
+A structured file the skill writes (JSON, a table) → check that file by script, not the prose.
+Each unsaid flag in the map → one check that the flagged choice landed where it should (e.g. where the skill's own output went).
 Judgement → short `llm` rubric.
-No known answer for a step → ask; never invent it.
+No known answer for a step → ask; never invent it. An answer that follows directly from the planted data counts as known: write it in `sample-answers.md`, marked derived, before any run.
 Write them as `claude plugin eval` cases in `<skill>-review/copy/evals/` (shapes: `references/plugin-eval.md`; `--help` wins on conflict).
 Break it first: run once (this is also stage 4's trial), show every check passes on the good files; hand-write one wrong file per step, show its check fails. A check that passes a wrong file is fixed before going on.
+`plugin eval` cannot re-grade a file: prove pattern checks offline with the same JS RegExp (`node -e`); a rubric check can only be proven inside a run.
+One trial cannot prove a pattern on free text: if counted runs fail on wording alone, the verdict is "the check was wrong".
 
 ## 4. Five runs
 
@@ -68,10 +74,10 @@ Get a yes on the cost first (runs × models, each a full session on their subscr
 One trial run, then:
 
 ```
-claude plugin eval <skill>-review/copy --runs 5 --model <model> --ablation none --no-publish --keep-temp --trust-plugin --allow-tools Write Edit Bash --json <skill>-review/runs/<model>-before.json </dev/null
+claude plugin eval <skill>-review/copy --runs 5 --model <model> --ablation none --no-publish --keep-temp --trust-plugin -j 1 --allow-tools <only the tools the skill uses, e.g. Write Edit; add Bash only if it runs scripts> --json <skill>-review/runs/<model>-before.json </dev/null
 ```
 
-`--no-publish` always (default publishes the report to claude.ai). `--trust-plugin` only for the copy you wrote.
+`--no-publish` always (default publishes the report to claude.ai). `--trust-plugin` only for the copy you wrote. A trial-only case beside the counted one: add `--case <name>`.
 Copy each kept run's step files into `<skill>-review/runs/`, then delete the kept folders.
 Trial produced no step files → suspect the case first: runs start in an empty folder and find the sample only by its full path in the prompt.
 
@@ -80,17 +86,18 @@ Count a run only if its first step's evidence file exists: a run refused at 0 tu
 Each failure: quote its `Picked:` line, give exactly one verdict: the step was wrong · the skill left it open · an earlier step handed it a wrong input · the check was wrong.
 Read one all-pass run in full; report anything wrong no check caught.
 Save `counts-before.md`.
-No `plugin eval` available: five fresh sessions, same checks by hand; say so.
+No `plugin eval` available: five fresh sessions, same checks by hand; say so, and say what differs: the skill is read by path (its description trigger is untested), nothing is sandboxed (its rules are instructions, not walls), and the host's own guards apply.
 
 ## 5. Fix and prove
 
 Target: earliest "step was wrong" or "skill left it open"; if all passed, what you found in the all-pass run.
+Every failure is "the check was wrong" → fix the checks first and rescore the kept runs (no new sessions; it is not the round's one change), then read an all-pass run.
 
 1. Write the missing check; show it fails on the kept runs.
 2. Find the sentence that allowed it.
 3. A rule only the person knows → ask (one structured question, your proposal first). Never choose it.
 4. Change only what the failing runs show, in the copy.
-5. Arithmetic, sorting, counting, listing or saving a file → say it should be code; offer the script as the fix.
+5. Arithmetic, sorting, counting, listing or saving a file → say it should be code; offer the script as the fix. No shell allowed → one sentence, and say the step stays a guess.
 6. A wrong check → fix it, say so.
 7. Rerun 5 per model, same flags.
 
