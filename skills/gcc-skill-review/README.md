@@ -43,7 +43,7 @@ Everything happens on a copy, and the original changes only when you say yes at 
 - Your skill.
 - One sample input where you already know the right answers. If you have none, the skill helps you invent one with planted answers.
 - Claude Code for the fresh runs (they use your own subscription; the skill asks you to confirm the number of runs before it starts). Outside Claude Code, five fresh chats and the same checks by hand do the same job.
-- If your skill runs its own scripts: on Linux or WSL, `bwrap` and `socat` installed (`command -v bwrap socat`) and user namespaces allowed (`sysctl kernel.apparmor_restrict_unprivileged_userns` not 1, which is the Ubuntu 24.04+ default), because the eval only gives a run a shell inside its sandbox. That sandbox can't read your home folder or reach the network, so a skill that downloads or installs at run time can't be tested this way; the skill falls back to fresh sessions scored by the same checks. Plain Windows can't do this; use WSL.
+- If your skill runs its own scripts: on Linux or WSL, `bwrap` and `socat` installed (`command -v bwrap socat`) and user namespaces allowed (`sysctl kernel.apparmor_restrict_unprivileged_userns` not 1, which is the Ubuntu 24.04+ default), because the eval only gives a run a shell inside its sandbox. That sandbox can't read your home folder or reach the network, so a skill that downloads or installs at run time can't be tested this way; the skill then offers fresh sessions scored by the same checks, a host fix, or stopping after the checks are written. Plain Windows can't do this; use WSL.
 
 ## Things we learned packaging it
 

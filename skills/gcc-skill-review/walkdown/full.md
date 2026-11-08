@@ -1,7 +1,7 @@
 # gcc-skill-review: full report
 
-skills/gcc-skill-review | retrieved 2026-11-08 | sha256 8dfd6e2ced6dcd2a0cf53cdef010da9aa2e26184ae651f24cec249a3ba3681e4
-Run 2026-11-08_8dfd6e2 | Walkdown 0.3.1+blastworks.1
+skills/gcc-skill-review | retrieved 2026-11-08 | sha256 9eed3f2f4465526a87decb4063e8b663cfa8fd9eb397c97bb7dc67cc5c30d9aa
+Run 2026-11-08_9eed3f2 | Walkdown 0.3.1+blastworks.1
 Static examination only. Nothing executed. Every finding below is a location to look at; none is a verdict. Stage order; nothing is ranked.
 
 ## 1 What ships
@@ -10,7 +10,7 @@ Static examination only. Nothing executed. Every finding below is a location to 
 
 Validation: PASS (gate 26/26, negative 7/7; measured 2026-11-02, same code and fixtures)
 
-Pin: sha256 8dfd6e2ced6dcd2a0cf53cdef010da9aa2e26184ae651f24cec249a3ba3681e4, 8 files, 29,692 bytes.
+Pin: sha256 9eed3f2f4465526a87decb4063e8b663cfa8fd9eb397c97bb7dc67cc5c30d9aa, 8 files, 29,863 bytes.
 
 Formats: md 5, (none) 2, json 1.
 
@@ -23,9 +23,9 @@ Script languages: none.
 
 ### Structural census (3)
 
-- README.md:46: long-line: line 46: 543 characters (limit 500)
+- README.md:46: long-line: line 46: 595 characters (limit 500)
 - gcc-skill-review/SKILL.md:3: long-line: line 3: 614 characters (limit 500)
-- gcc-skill-review/SKILL.md:28: long-line: line 28: 884 characters (limit 500)
+- gcc-skill-review/SKILL.md:28: long-line: line 28: 987 characters (limit 500)
 
 ### Descriptions (always-on text) (1)
 
@@ -217,7 +217,7 @@ None.
 
 Patterns: B.safety-adjective 4
 
-- gcc-skill-review/SKILL.md:28 [B.safety-adjective] (model): `` Skill runs scripts (needs a shell)? Check now (Linux/WSL; plain Windows: use WSL): `command -v bwrap socat`, and `sysctl kernel.apparmor_restrict_unprivileged_userns` must not be 1 (Ubuntu 24.04+ default; every sandboxed shell command then fails with `apply-seccomp … setgroups`). The sandbox also cannot read the user's home or reach the network, so a skill that installs or downloads at run time cannot run there. Either tool missing → the eval refuses every run at 0 turns; any of these → tell the person before stage 1 and offer, in one structured question: fresh sessions instead (one at a time, each unsandboxed on its own throwaway copy of the sample, scored by the same checks; say the isolation is weaker), fixing the host (installing `socat` or changing AppArmor needs their go), or stopping after stage 3 with the pattern checks proven on hand-written good and wrong files. ``
+- gcc-skill-review/SKILL.md:28 [B.safety-adjective] (model): `` Skill runs scripts (needs a shell)? Check now (Linux/WSL; plain Windows: use WSL): `command -v bwrap socat`, and `sysctl kernel.apparmor_restrict_unprivileged_userns` must not be 1 (Ubuntu 24.04+ default; every sandboxed shell command then fails with `apply-seccomp … setgroups`). The sandbox also cannot read the user's home or reach the network, so a skill that installs or downloads at run time cannot run there. Either tool missing → the eval refuses every run at 0 turns; any of these → tell the person before stage 1 and put these options in the same structured question as the items above: fresh sessions instead (one at a time, each unsandboxed on its own throwaway copy of the sample, scored by the same checks; say the isolation is weaker), fixing the host (installing `socat` or changing AppArmor needs their go), or stopping after stage 3 with the pattern checks proven on hand-written good and wrong files (then say the rubric checks and the model's behaviour are unproven). ``
 - gcc-skill-review/references/plugin-eval.md:62 [B.safety-adjective] (model): `` The case folder is read-only to the run: a skill that writes into the person's project cannot work on a sample left there. Copy the sample into the run folder with a `scaffold_script` (runs only with `--scaffold`, and only on case files you wrote). ``
 - gcc-skill-review/references/plugin-eval.md:130 [B.safety-adjective] (model): `` - On Linux with `kernel.apparmor_restrict_unprivileged_userns = 1`, every sandboxed Bash call fails (`apply-seccomp: write /proc/self/setgroups … Permission denied`) even with bwrap and socat present. ``
 - gcc-skill-review/references/plugin-eval.md:133 [B.safety-adjective] (model): `` A kept folder is read-only, with `home/` and `tmp/` sealed (mode 000) in `sealed/`; open them with `chmod 700 <kept> <kept>/sealed`, never run git inside one, and remove the kept folders when the review is done. ``
@@ -242,7 +242,7 @@ Patterns: E.exec-primitive 1
 
 Patterns: C.error-instruction 4
 
-- gcc-skill-review/SKILL.md:28 [C.error-instruction] (model): `` Skill runs scripts (needs a shell)? Check now (Linux/WSL; plain Windows: use WSL): `command -v bwrap socat`, and `sysctl kernel.apparmor_restrict_unprivileged_userns` must not be 1 (Ubuntu 24.04+ default; every sandboxed shell command then fails with `apply-seccomp … setgroups`). The sandbox also cannot read the user's home or reach the network, so a skill that installs or downloads at run time cannot run there. Either tool missing → the eval refuses every run at 0 turns; any of these → tell the person before stage 1 and offer, in one structured question: fresh sessions instead (one at a time, each unsandboxed on its own throwaway copy of the sample, scored by the same checks; say the isolation is weaker), fixing the host (installing `socat` or changing AppArmor needs their go), or stopping after stage 3 with the pattern checks proven on hand-written good and wrong files. ``
+- gcc-skill-review/SKILL.md:28 [C.error-instruction] (model): `` Skill runs scripts (needs a shell)? Check now (Linux/WSL; plain Windows: use WSL): `command -v bwrap socat`, and `sysctl kernel.apparmor_restrict_unprivileged_userns` must not be 1 (Ubuntu 24.04+ default; every sandboxed shell command then fails with `apply-seccomp … setgroups`). The sandbox also cannot read the user's home or reach the network, so a skill that installs or downloads at run time cannot run there. Either tool missing → the eval refuses every run at 0 turns; any of these → tell the person before stage 1 and put these options in the same structured question as the items above: fresh sessions instead (one at a time, each unsandboxed on its own throwaway copy of the sample, scored by the same checks; say the isolation is weaker), fixing the host (installing `socat` or changing AppArmor needs their go), or stopping after stage 3 with the pattern checks proven on hand-written good and wrong files (then say the rubric checks and the model's behaviour are unproven). ``
 - gcc-skill-review/references/plugin-eval.md:60 [C.error-instruction] (model): `` Seen on the trial: with a bare file name in the prompt the model searched, never found the file and wrote nothing, so every check failed on a fault of the case, not the skill.\nAn absolute path outside the case folder is refused before the run ("escapes the case directory").\nThe case folder is read-only to the run: a skill that writes into the person's project cannot work on a sample left there. Copy the sample into the run folder with a `scaffold_script` (runs only with `--scaffold`, and only on case files you wrote). ``
 - gcc-skill-review/references/plugin-eval.md:140 [C.error-instruction] (model): `` The `--json` file holds, per case, `arms.with[]`: one entry per run, each with `turns`, `error`, `tracePath` and `graders[]` (`name`, `passed`, `explanation`).\nCount passes per grader across the runs for the table.\n`tracePath` is that run's full session; read it for the passing run you read in full, and for any failure before you believe it. ``
 - prompts.md:45 [C.error-instruction] (subagent): `step order showing passes out of five. For every failure quote that\nstep's Picked line. Give it one of four verdicts: the step was\nwrong, the skill left it open, an earlier step handed it a wrong\ninput, the check was wrong. Then read one run that passed`
@@ -412,17 +412,17 @@ Bytes at load: descriptions 601 (1, exact).
 Expected context: 32,000 tokens (a line for 200,000 beside it). Tokens are estimated from size: about 4 bytes of English text per token; text in other scripts runs high.
 
 - Every session, once installed (descriptions, hooks): 151 tokens, under 1% of 32,000, under 1% of 200,000
-- When the largest skill runs: 1,917 tokens, 6% of 32,000, under 1% of 200,000
-- That skill and everything it names: 4,572 tokens, 14% of 32,000, 2% of 200,000
+- When the largest skill runs: 1,947 tokens, 6% of 32,000, under 1% of 200,000
+- That skill and everything it names: 4,602 tokens, 14% of 32,000, 2% of 200,000
 - The largest is `gcc-skill-review/SKILL.md`, of 1 skill, agent, or command.
 
 Every skill, agent, or command, by tier (tokens):
 
-- gcc-skill-review/SKILL.md: runs 1,917, with what it names 4,572, with wildcard loads 4,572
+- gcc-skill-review/SKILL.md: runs 1,947, with what it names 4,602, with wildcard loads 4,602
 
-#### Loads into the AI: 3 files, 17.9 KB, 4,572 tokens
+#### Loads into the AI: 3 files, 18.0 KB, 4,602 tokens
 
-- `gcc-skill-review/SKILL.md`: skills, agents, and commands, 7.5 KB, 1,917 tokens
+- `gcc-skill-review/SKILL.md`: skills, agents, and commands, 7.6 KB, 1,947 tokens
 - `gcc-skill-review/references/example.md`: named by a file the AI loads, 4.0 KB, 1,035 tokens, reached from `gcc-skill-review/SKILL.md`
 - `gcc-skill-review/references/plugin-eval.md`: named by a file the AI loads, 6.3 KB, 1,620 tokens, reached from `gcc-skill-review/SKILL.md`
 
@@ -430,10 +430,10 @@ Every skill, agent, or command, by tier (tokens):
 
 None.
 
-#### Not used at run time: 5 files, 11.1 KB, 2,853 tokens
+#### Not used at run time: 5 files, 11.2 KB, 2,866 tokens
 
 - `LICENSE`: written for people, 1.3 KB, 331 tokens
-- `README.md`: written for people, 5.1 KB, 1,316 tokens
+- `README.md`: written for people, 5.2 KB, 1,329 tokens
 - `gcc-skill-review/LICENSE`: written for people, 1.3 KB, 331 tokens
 - `capability.json`: nothing points to it, 295 bytes, 74 tokens
 - `prompts.md`: nothing points to it, 3.1 KB, 801 tokens
