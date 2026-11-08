@@ -55,6 +55,7 @@ Making that work on Claude Code 2.1.319 turned up these traps, now handled in th
 - **Run files are deleted when the run ends** unless you pass `--keep-temp`, and the page tells you to keep them.
 - **A skill that runs scripts needs the shell sandbox**: without `socat` (Linux/WSL) every run is refused before the model starts, and with AppArmor's user-namespace restriction on (Ubuntu 24.04+) every shell command inside it fails.
 - **The eval case folder is read-only to the run**: a skill that writes into your project needs the sample copied into the run folder.
+- **A right pick can hide wrong arithmetic**: in a test on Kem's own example, a run miscounted a format's posts and still named the right worst format, so no pick check caught it. A step that computes gets a check on its numbers.
 - **A run that did nothing still passes checks**: every "nothing outside the answer" check passes on an empty run. Count a run only if its first step's file exists.
 
 ## The limits
