@@ -22,7 +22,7 @@ Read the skill's `SKILL.md` and every file it points at.
 Ask for whatever is missing, in one structured question:
 
 1. The skill, by name or path.
-2. One sample input with known right answers. If none, offer to invent a small one with planted answers (shape: `references/example.md`) and have them confirm the answers.
+2. One sample input with known right answers. If none, offer to invent a small one with planted answers (shape: `references/example.md`) and have them confirm the answers. Write the answers, per step, to `<skill>-review/sample-answers.md` before any run.
 3. Models. Recommend their usual model plus Haiku (the smallest model is the one that trips where the others do not).
 
 Skill runs scripts (needs a shell)? Check now (Linux/WSL; plain Windows: use WSL): `command -v bwrap socat`, and `sysctl kernel.apparmor_restrict_unprivileged_userns` must not be 1 (Ubuntu 24.04+ default; every sandboxed shell command then fails with `apply-seccomp … setgroups`). The sandbox also cannot read the user's home or reach the network, so a skill that installs or downloads at run time cannot run there. Either tool missing → the eval refuses every run at 0 turns; any of these → tell the person before stage 1 and put these options in the same structured question as the items above: fresh sessions instead (one at a time, each unsandboxed on its own throwaway copy of the sample, scored by the same checks; say the isolation is weaker), fixing the host (installing `socat` or changing AppArmor needs their go), or stopping after stage 3 with the pattern checks proven on hand-written good and wrong files (then say the rubric checks and the model's behaviour are unproven).
@@ -59,12 +59,12 @@ Fix nothing else, even what you can see is unsaid.
 Per step: one check that everything in the known answer was picked, one that nothing outside it was.
 Fact picked → pattern check aimed at the `Picked:` line (a whole-file pattern passes a name found in a raw ranking but dropped from the pick).
 Value computed → a check on the numbers in the file, never on how the rule is worded; arithmetic gets a value check even when its pick looks right.
-A structured file the skill writes (JSON, a table) → check that file by script, not the prose.
+A structured file the skill writes (JSON, a table) → a regex grader on that file, or a small script you run over the kept runs' files after the runs (no eval grader runs scripts); say which rows of the table were scored that way.
 Each unsaid flag in the map → one check that the flagged choice landed where it should (e.g. where the skill's own output went).
 Judgement → short `llm` rubric.
 No known answer for a step → ask; never invent it. An answer that follows directly from the planted data counts as known: write it in `sample-answers.md`, marked derived, before any run.
 Write them as `claude plugin eval` cases in `<skill>-review/copy/evals/` (shapes: `references/plugin-eval.md`; `--help` wins on conflict).
-Break it first: run once (this is also stage 4's trial), show every check passes on the good files; hand-write one wrong file per step, show its check fails. A check that passes a wrong file is fixed before going on.
+Break it first: run once (this is also stage 4's trial), show every check passes on the good files; hand-write one wrong file per step, show its check fails (a rubric: only provable in a run, via a scaffolded trial case holding the wrong file; else say it is unproven). A check that passes a wrong file is fixed before going on.
 `plugin eval` cannot re-grade a file: prove pattern checks offline with the same JS RegExp (`node -e`); a rubric check can only be proven inside a run.
 One trial cannot prove a pattern on free text: if counted runs fail on wording alone, the verdict is "the check was wrong".
 

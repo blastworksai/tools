@@ -1,7 +1,7 @@
 # gcc-skill-review: full report
 
-skills/gcc-skill-review | retrieved 2026-11-08 | sha256 9b9cbe361a8fc4735ad3527bddd49f310ca698c7886b831d86a63f0f01b10ef6
-Run 2026-11-08_9b9cbe3 | Walkdown 0.3.1+blastworks.1
+skills/gcc-skill-review | retrieved 2026-11-08 | sha256 33320993badae66c7c062fb79353e21b2c70c48396cca1a822bd59edf74d807c
+Run 2026-11-08_3332099 | Walkdown 0.3.1+blastworks.1
 Static examination only. Nothing executed. Every finding below is a location to look at; none is a verdict. Stage order; nothing is ranked.
 
 ## 1 What ships
@@ -10,7 +10,7 @@ Static examination only. Nothing executed. Every finding below is a location to 
 
 Validation: PASS (gate 26/26, negative 7/7; measured 2026-11-02, same code and fixtures)
 
-Pin: sha256 9b9cbe361a8fc4735ad3527bddd49f310ca698c7886b831d86a63f0f01b10ef6, 8 files, 31,992 bytes.
+Pin: sha256 33320993badae66c7c062fb79353e21b2c70c48396cca1a822bd59edf74d807c, 8 files, 32,322 bytes.
 
 Formats: md 5, (none) 2, json 1.
 
@@ -101,7 +101,7 @@ None.
 
 ## 3 What loads what
 
-2 entry points. 1 orphan. 33 dangling references (33 code; 14 of them into a folder the repository does not have). 1 dynamic load: 0 files loaded only through one (named by nothing), 1 file reached only through a mention of a folder or wildcards. Graph incomplete by construction.
+2 entry points. 1 orphan. 34 dangling references (34 code; 15 of them into a folder the repository does not have). 1 dynamic load: 0 files loaded only through one (named by nothing), 1 file reached only through a mention of a folder or wildcards. Graph incomplete by construction.
 
 Validation: PASS (gate 11/11, negative 7/7; measured 2026-11-02, same code and fixtures)
 
@@ -154,9 +154,10 @@ None.
 - gcc-skill-review/references/plugin-eval.md:136: `tmp/` (code)
 - gcc-skill-review/references/plugin-eval.md:138: `evidence/` (code)
 
-### Dangling references into a folder the repository does not have (often one the workflow creates when it runs) (14)
+### Dangling references into a folder the repository does not have (often one the workflow creates when it runs) (15)
 
 - README.md:37: `.claude/skills/` (code)
+- gcc-skill-review/SKILL.md:25: `skill>-review/sample-answers.md` (code)
 - gcc-skill-review/SKILL.md:30: `.agents/skills/` (code)
 - gcc-skill-review/SKILL.md:30: `.claude/skills/` (code)
 - gcc-skill-review/SKILL.md:43: `skill>-review/copy/` (code)
@@ -186,7 +187,7 @@ None.
 
 ## 4 What the text asks for
 
-4a 1 · 4b 5 · 4c 15 · 4d 0 hits on 19 lines (16 read by a model, 3 human-facing); benign share not measured (stage 6 labels did not run). Hosts: 4, 0 not named in the docs. Confirm-first or prohibited actions in instruction text: 6, 5 with no confirmation step, 0 stated as prohibitions. Conditionals: 3 absence, 2 error, 1 environment, 1 version. Definitions: 0, 0 conflicts, 0 safety-word definitions. Long files with flagged lines: 0, 0 with some past the reader window. Sentences repeated across files: 0, 0 flagged. Lines that look like committed secrets: 0.
+4a 1 · 4b 5 · 4c 15 · 4d 0 hits on 19 lines (16 read by a model, 3 human-facing); benign share not measured (stage 6 labels did not run). Hosts: 4, 0 not named in the docs. Confirm-first or prohibited actions in instruction text: 6, 5 with no confirmation step, 0 stated as prohibitions. Conditionals: 4 absence, 2 error, 1 environment, 1 version. Definitions: 0, 0 conflicts, 0 safety-word definitions. Long files with flagged lines: 0, 0 with some past the reader window. Sentences repeated across files: 0, 0 flagged. Lines that look like committed secrets: 0.
 
 Validation: PASS (gate 153/153, negative 121/121, recall 43/43; measured 2026-11-02, same code and fixtures)
 
@@ -285,7 +286,7 @@ None.
 
 ### Tables
 
-Hosts: 4, 0 not named in the docs. Confirm-first or prohibited actions in instruction text: 6, 5 with no confirmation step, 0 stated as prohibitions. Conditionals: 3 absence, 2 error, 1 environment, 1 version. Definitions: 0, 0 conflicts, 0 safety-word definitions. Long files with flagged lines: 0, 0 with some past the reader window. Sentences repeated across files: 0, 0 flagged. Lines that look like committed secrets: 0.
+Hosts: 4, 0 not named in the docs. Confirm-first or prohibited actions in instruction text: 6, 5 with no confirmation step, 0 stated as prohibitions. Conditionals: 4 absence, 2 error, 1 environment, 1 version. Definitions: 0, 0 conflicts, 0 safety-word definitions. Long files with flagged lines: 0, 0 with some past the reader window. Sentences repeated across files: 0, 0 flagged. Lines that look like committed secrets: 0.
 
 ### Endpoints (hosts named anywhere; documented = named in the docs) (4)
 
@@ -303,10 +304,11 @@ Hosts: 4, 0 not named in the docs. Confirm-first or prohibited actions in instru
 - gcc-skill-review/references/plugin-eval.md:128: confirm-first, `publish`, no confirmation step: `` - `--no-publish` always: by default the report is published to claude.ai. ``
 - gcc-skill-review/references/plugin-eval.md:147: confirm-first, `publish`, no confirmation step: `` An HTML report lands in `evals/results/<timestamp>/report.html`, local only with `--no-publish`. ``
 
-### Conditionals (7)
+### Conditionals (8)
 
 - gcc-skill-review/SKILL.md:14: error: if `before believing a failed check.` then `- Open the step's file`
 - gcc-skill-review/SKILL.md:25: absence: if `If none` then `` offer to invent a small one with planted answers (shape: `references/example.md`) and have them confirm the answers. ``
+- gcc-skill-review/SKILL.md:62: absence: if `after the runs (no eval grader runs scripts); say which rows of the table were scored that way.` then `A structured file the skill writes (JSON, a table) → a regex grader on that file, or a small script you run over the kept runs' files`
 - gcc-skill-review/SKILL.md:69: error: if `if counted runs fail on wording alone` then `One trial cannot prove a pattern on free text: the verdict is "the check was wrong".`
 - gcc-skill-review/SKILL.md:109: absence: if `before/after or the script; anything a passing run got wrong that no check caught; what was not proven.` then `Then: the map with steps to move into code; the sentence`
 - gcc-skill-review/references/plugin-eval.md:131: absence: if `before the model starts ("Sandbox required but unavailable").` then `Without them the run is refused`
@@ -419,17 +421,17 @@ Bytes at load: descriptions 601 (1, exact).
 Expected context: 32,000 tokens (a line for 200,000 beside it). Tokens are estimated from size: about 4 bytes of English text per token; text in other scripts runs high.
 
 - Every session, once installed (descriptions, hooks): 151 tokens, under 1% of 32,000, under 1% of 200,000
-- When the largest skill runs: 2,339 tokens, 7% of 32,000, 1% of 200,000
-- That skill and everything it names: 5,077 tokens, 16% of 32,000, 3% of 200,000
+- When the largest skill runs: 2,422 tokens, 8% of 32,000, 1% of 200,000
+- That skill and everything it names: 5,160 tokens, 16% of 32,000, 3% of 200,000
 - The largest is `gcc-skill-review/SKILL.md`, of 1 skill, agent, or command.
 
 Every skill, agent, or command, by tier (tokens):
 
-- gcc-skill-review/SKILL.md: runs 2,339, with what it names 5,077, with wildcard loads 5,077
+- gcc-skill-review/SKILL.md: runs 2,422, with what it names 5,160, with wildcard loads 5,160
 
-#### Loads into the AI: 3 files, 19.8 KB, 5,077 tokens
+#### Loads into the AI: 3 files, 20.2 KB, 5,160 tokens
 
-- `gcc-skill-review/SKILL.md`: skills, agents, and commands, 9.1 KB, 2,339 tokens
+- `gcc-skill-review/SKILL.md`: skills, agents, and commands, 9.5 KB, 2,422 tokens
 - `gcc-skill-review/references/example.md`: named by a file the AI loads, 4.0 KB, 1,035 tokens, reached from `gcc-skill-review/SKILL.md`
 - `gcc-skill-review/references/plugin-eval.md`: named by a file the AI loads, 6.7 KB, 1,703 tokens, reached from `gcc-skill-review/SKILL.md`
 
