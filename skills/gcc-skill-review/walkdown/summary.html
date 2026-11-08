@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>gcc-skill-review at a glance</title>
+<style>
+:root {
+  --bg: #f6f5f1; --card: #ffffff; --ink: #1f2328; --muted: #5d6470; --line: #e3e1da;
+  --none-bg: #e8f1ea; --none-ink: #2f6b3c; --look-bg: #fbeed6; --look-ink: #8a5a00;
+  --fact-bg: #e7eef8; --fact-ink: #2c5282;
+  --s1: #2a78d6; --s2: #eb6834; --s3: #1baf7a; --s4: #eda100;   /* validated, light, on #ffffff */
+  --meter: #2a78d6; --track: #cde2fb; --over: #2a78d6; --grid: #e1e0d9;
+  --on-s1: #ffffff; --on-light: #1f2328;
+}
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme="light"])) {
+    --bg: #17191c; --card: #212429; --ink: #e8e6e1; --muted: #a3a8b0; --line: #343840;
+    --none-bg: #1f3325; --none-ink: #8fd19e; --look-bg: #3a2e14; --look-ink: #f2c46d;
+    --fact-bg: #1e2a3a; --fact-ink: #9cbcf0;
+    --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500;   /* validated, dark, on #212429 */
+    --meter: #3987e5; --track: #184f95; --grid: #2c2c2a;
+    --on-s1: #ffffff; --on-light: #111316;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #17191c; --card: #212429; --ink: #e8e6e1; --muted: #a3a8b0; --line: #343840;
+  --none-bg: #1f3325; --none-ink: #8fd19e; --look-bg: #3a2e14; --look-ink: #f2c46d;
+  --fact-bg: #1e2a3a; --fact-ink: #9cbcf0;
+  --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500;
+  --meter: #3987e5; --track: #184f95; --grid: #2c2c2a;
+  --on-s1: #ffffff; --on-light: #111316;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink);
+       font: 17px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+main { max-width: 780px; margin: 0 auto; padding: 28px 16px 48px; }
+header h1 { font-size: 2rem; margin: 0 0 4px; letter-spacing: -0.01em; }
+.meta { color: var(--muted); font-size: 0.9rem; margin: 0 0 14px; }
+.what { margin: 0 0 6px; }
+.how { color: var(--muted); font-size: 0.95rem; margin: 0 0 26px; }
+h2 { font-size: 1.05rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin: 0 0 10px; }
+h3 { font-size: 0.98rem; margin: 18px 0 8px; }
+.rows { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
+details { background: var(--card); border: 1px solid var(--line); border-radius: 12px; }
+summary { list-style: none; cursor: pointer; padding: 14px 16px; display: grid;
+          grid-template-columns: 1fr auto; gap: 4px 12px; align-items: start; }
+summary::-webkit-details-marker { display: none; }
+.q { font-weight: 650; font-size: 1.05rem; }
+.a { grid-column: 1 / -1; }
+.chip { font-size: 0.8rem; font-weight: 650; padding: 3px 10px; border-radius: 999px; white-space: nowrap; }
+.none { background: var(--none-bg); color: var(--none-ink); }
+.look, .notes { background: var(--look-bg); color: var(--look-ink); }
+.fact { background: var(--fact-bg); color: var(--fact-ink); }
+.more { grid-column: 1 / -1; color: var(--muted); font-size: 0.85rem; }
+details[open] .more { display: none; }
+.body { padding: 0 16px 16px; border-top: 1px solid var(--line); }
+.body ul { margin: 12px 0 0; padding-left: 20px; }
+.body li { margin: 6px 0; }
+.where { color: var(--muted); font-size: 0.85rem; }
+.explain { background: var(--bg); border-radius: 8px; padding: 10px 12px; font-size: 0.92rem; margin-top: 12px; }
+code { font: 0.9em ui-monospace, "Cascadia Mono", Consolas, monospace; }
+
+/* memory table with meters */
+.tablewrap { overflow-x: auto; margin-top: 12px; }
+table.mem { width: 100%; border-collapse: collapse; font-size: 0.93rem; }
+table.mem th { text-align: left; font-weight: 650; color: var(--muted); font-size: 0.82rem;
+               padding: 6px 8px; border-bottom: 1px solid var(--grid); vertical-align: bottom; }
+table.mem td { padding: 9px 8px; border-bottom: 1px solid var(--grid); vertical-align: top; }
+table.mem th.num, table.mem td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.cell-meter { width: 24%; min-width: 64px; }
+table.mem td.rowname { min-width: 10em; }
+@media (max-width: 560px) {
+  table.mem { font-size: 0.88rem; }
+  table.mem th, table.mem td { padding-left: 5px; padding-right: 5px; }
+  .rowname small { display: none; }
+}
+.pct { font-variant-numeric: tabular-nums; font-size: 0.85rem; }
+.meter { height: 8px; background: var(--track); border-radius: 4px; margin-top: 4px; position: relative; }
+.meter > span { position: absolute; left: 0; top: 0; bottom: 0; background: var(--meter); border-radius: 4px; min-width: 2px; }
+.meter.over > span { width: 100%; }
+.meter.over::after { content: ""; position: absolute; right: -6px; top: -3px; border-left: 7px solid var(--meter);
+                     border-top: 7px solid transparent; border-bottom: 7px solid transparent; }
+.rowname small { display: block; color: var(--muted); font-size: 0.8rem; }
+
+/* skill list room */
+.room { display: grid; gap: 10px; margin-top: 8px; }
+.room .lbl { display: flex; justify-content: space-between; gap: 10px; font-size: 0.92rem; }
+
+/* package stacked bar */
+.stack { display: flex; gap: 2px; height: 30px; margin-top: 14px; background: var(--card); }
+.seg { display: flex; align-items: center; justify-content: center; font-size: 0.85rem; font-weight: 650;
+       font-variant-numeric: tabular-nums; cursor: default; }
+.seg:first-child { border-radius: 4px 0 0 4px; } .seg:last-child { border-radius: 0 4px 4px 0; }
+.seg.c1 { background: var(--s1); color: var(--on-s1); } .seg.c2 { background: var(--s2); color: var(--on-light); }
+.seg.c3 { background: var(--s3); color: var(--on-light); } .seg.c4 { background: var(--s4); color: var(--on-light); }
+.legend { list-style: none; padding: 0; margin: 10px 0 0; display: grid; gap: 6px; }
+.legend li { display: flex; gap: 8px; align-items: baseline; margin: 0; }
+.sw { width: 12px; height: 12px; border-radius: 3px; flex: none; transform: translateY(1px); }
+.sw.c1 { background: var(--s1); } .sw.c2 { background: var(--s2); } .sw.c3 { background: var(--s3); } .sw.c4 { background: var(--s4); }
+.legend .n { font-variant-numeric: tabular-nums; font-weight: 650; min-width: 1.6em; text-align: right; }
+
+/* hosts */
+.hosts { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; margin-top: 12px; }
+.host { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; font-size: 0.9rem; }
+.host b { display: block; }
+.host .st { color: var(--muted); font-size: 0.82rem; }
+.host.has { border-color: var(--s1); }
+.host.has .st { color: var(--ink); }
+
+/* what it can do */
+.can { list-style: none; padding: 0; margin: 12px 0 8px; display: grid; gap: 6px; }
+.can li { display: flex; gap: 10px; align-items: baseline; }
+.mark { font-weight: 700; width: 1.4em; text-align: center; }
+.yes { color: var(--look-ink); } .no { color: var(--none-ink); }
+
+/* tooltip */
+[data-tip] { cursor: default; }
+#tip { position: fixed; pointer-events: none; z-index: 10; background: var(--ink); color: var(--card);
+       font-size: 0.82rem; padding: 6px 9px; border-radius: 6px; max-width: 260px; display: none; }
+
+footer { margin-top: 28px; color: var(--muted); font-size: 0.9rem; }
+footer a { color: var(--fact-ink); }
+
+.sec { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px; margin: 0 0 14px; }
+.sec-head { display: flex; justify-content: space-between; gap: 12px; align-items: baseline; }
+.sec h2 { font-size: 1.2rem; text-transform: none; letter-spacing: 0; color: var(--ink); margin: 0; }
+.sec .a { margin: 6px 0 4px; font-size: 1.02rem; }
+.bul { margin: 10px 0 0; padding-left: 20px; } .bul li { margin: 5px 0; }
+.places { margin: 8px 0 0; padding-left: 20px; } .places li { margin: 5px 0; overflow-wrap: anywhere; }
+.files { list-style: none; padding: 0; margin: 6px 0 0; columns: 2 300px; } .files li { margin: 3px 0; break-inside: avoid; overflow-wrap: anywhere; }
+details.fold { border: none; border-radius: 0; margin-top: 10px; }
+details.fold > summary { display: block; padding: 6px 0; color: var(--fact-ink); font-weight: 600; font-size: 0.93rem; }
+details.fold > summary::before { content: "▸ "; } details.fold[open] > summary::before { content: "▾ "; }
+.fold-body { padding: 0 0 4px; }
+table.tbl { width: 100%; border-collapse: collapse; font-size: 0.92rem; margin-top: 8px; }
+table.tbl th { text-align: left; color: var(--muted); font-size: 0.82rem; font-weight: 650; padding: 6px 8px; border-bottom: 1px solid var(--grid); }
+table.tbl td { padding: 7px 8px; border-bottom: 1px solid var(--grid); vertical-align: top; }
+table.tbl .num { text-align: right; font-variant-numeric: tabular-nums; }
+table.grid .c { text-align: center; } table.grid td.c { font-weight: 700; }
+table.grid small { display: block; font-size: 0.78rem; }
+.hbars { display: grid; gap: 7px; margin: 10px 0 4px; }
+.hb { display: grid; grid-template-columns: minmax(10em, 44%) 1fr; gap: 10px; align-items: center; font-size: 0.86rem; }
+.hb-l { overflow-wrap: break-word; min-width: 0; }
+.hb-t { display: flex; align-items: center; gap: 6px; }
+.hb-f { height: 14px; background: var(--meter); border-radius: 0 4px 4px 0; min-width: 2px; }
+.hb-v { font-variant-numeric: tabular-nums; color: var(--muted); white-space: nowrap; }
+nav.toc { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 0.9rem; margin: 0 0 18px; }
+nav.toc a { color: var(--fact-ink); }
+
+.chip.unmeasured { background: var(--track); color: var(--muted); }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; }
+.card-head { padding: 14px 16px; display: grid; grid-template-columns: 1fr auto; gap: 4px 12px; align-items: start; }
+.sub { margin: 14px 0 0; }
+.since { margin: 10px 0 0; font-size: 0.92rem; }
+.warnline { background: var(--look-bg); color: var(--ink); border-radius: 12px; padding: 12px 16px; margin-top: 14px; font-size: 0.95rem; }
+.warnline a { color: var(--fact-ink); }
+</style>
+</head>
+<body>
+<main>
+<header><h1>gcc-skill-review</h1><p class="meta">Checked 8 November 2026 · folder 74330b1 · 8 files · License: MIT</p><p class="what">It holds <b>1 skill</b> (step-by-step instructions the AI follows for a task).</p><p class="how">Walkdown reads the files without running anything. It points things out; you decide what matters. Tap a line for more.</p></header><h2>At a glance</h2><ul class="rows"><li id="switch"><div class="card"><div class="card-head"><span class="q">Will its skills switch on when they should?</span><span class="chip none">Nothing to look at</span><span class="a">Yes. Its one skill is set up to switch on by itself.</span></div></div></li><li id="memory"><details class="card"><summary><span class="q">How much of the AI&#x27;s memory does it use?</span><span class="chip fact">up to 13%</span><span class="a">Very little on Claude. On a local AI, its biggest skill takes about 13% of the memory.</span><span class="more">More ›</span></summary><div class="body"><div class="explain">The AI holds text in pieces called <b>tokens</b> (about ¾ of a word each). A <b>local AI</b> running on your own computer typically holds about 32,000 tokens at once; <b>Claude</b> holds about 200,000. These are estimates from file sizes.</div><div class="tablewrap"><table class="mem"><thead><tr><th>What</th><th class="num">Tokens</th><th>Local AI<br>(32k tokens)</th><th>Claude<br>(200k tokens)</th></tr></thead><tbody><tr><td class="rowname">Always there once installed<small>the short descriptions of its 1 skill</small></td><td class="num">151</td><td class="cell-meter" data-tip="151 of 32,000 tokens: 0.5%"><span class="pct">under 1%</span><div class="meter"><span style="width:0.5%"></span></div></td><td class="cell-meter" data-tip="151 of 200,000 tokens: 0.1%"><span class="pct">under 1%</span><div class="meter"><span style="width:0.1%"></span></div></td></tr><tr><td class="rowname">Its biggest skill (gcc-skill-review), with everything it reads<small>only while it runs</small></td><td class="num">4,311</td><td class="cell-meter" data-tip="4,311 of 32,000 tokens: 13.5%"><span class="pct">13%</span><div class="meter"><span style="width:13.5%"></span></div></td><td class="cell-meter" data-tip="4,311 of 200,000 tokens: 2.2%"><span class="pct">2%</span><div class="meter"><span style="width:2.2%"></span></div></td></tr><tr><td class="rowname">Unused files, if the AI were told to open them all<small>5 files; only opened if something asks for them</small></td><td class="num">2,708</td><td class="cell-meter" data-tip="2,708 of 32,000 tokens: 8.5%"><span class="pct">8%</span><div class="meter"><span style="width:8.5%"></span></div></td><td class="cell-meter" data-tip="2,708 of 200,000 tokens: 1.4%"><span class="pct">1%</span><div class="meter"><span style="width:1.4%"></span></div></td></tr></tbody></table></div><h3>Room for the list of skills</h3><p class="where">The AI keeps a short list of every skill you have installed, with a set amount of room. This repository's descriptions alone take about 150 tokens.</p><div class="room"><div data-tip="150 tokens of about 320 room: 47%"><div class="lbl"><span>Local AI: about 320 tokens of room</span><span class="pct">47%</span></div><div class="meter"><span style="width:46.9%"></span></div></div><div data-tip="150 tokens of about 2,000 room: 8%"><div class="lbl"><span>Claude: about 2,000 tokens of room</span><span class="pct">8%</span></div><div class="meter"><span style="width:7.5%"></span></div></div></div><p class="since">Since run 2026-11-08_544c2c4: largest at its fullest 5,914 -&gt; 4,311 tokens (-1,603); not used at run time 3 files -&gt; 5 files (1,484 -&gt; 2,708 tokens).</p></div></details></li><li id="package"><details class="card"><summary><span class="q">What comes in the package?</span><span class="chip fact">5 extra files</span><span class="a">3 of its 8 files do the work. The other 5 come along without being used.</span><span class="more">More ›</span></summary><div class="body"><div class="stack" role="img" aria-label="8 files by how they are used"><div class="seg c1" style="flex:3" data-tip="3 files: do the work: the skills, the helpers, and the files they read">3</div><div class="seg c2" style="flex:3" data-tip="3 files: notes for people: the license, readme, and other documents">3</div><div class="seg c4" style="flex:2" data-tip="2 files: nothing refers to them">2</div></div><ul class="legend"><li><span class="sw c1"></span><span class="n">3</span><span>do the work: the skills, the helpers, and the files they read</span></li><li><span class="sw c2"></span><span class="n">3</span><span>notes for people: the license, readme, and other documents</span></li><li><span class="sw c4"></span><span class="n">2</span><span>nothing refers to them</span></li></ul><p class="where">None of the last groups is used when it runs. Leaving the tests and the files nothing refers to out of what you share would make it 3.4 KB smaller.</p></div></details></li><li id="elsewhere"><details class="card"><summary><span class="q">Will it work on someone else&#x27;s computer?</span><span class="chip look">1 to look at</span><span class="a">One thing could trip it up on another computer.</span><span class="more">More ›</span></summary><div class="body"><ul class="bul"><li>It expects these programs to be installed but never says so: <b>claude</b>.</li></ul></div></details></li><li id="hosts"><details class="card"><summary><span class="q">Will it work with AI tools other than Claude?</span><span class="chip look">2 missing for your tools</span><span class="a">No AI tool finds its files where they sit; each skill has to be installed first.</span><span class="more">More ›</span></summary><div class="body"><ul class="bul"><li>Claude Code: no instruction file it reads (CLAUDE.md, CLAUDE.local.md, .claude/CLAUDE.md, and 1 more).</li><li>Codex: no instruction file it reads (AGENTS.md).</li><li>1 skill sits where no tool looks; a tool reads them once they are installed.</li></ul><div class="hosts"><div class="host"><b>✗ Claude Code</b><span class="st">none of its files</span></div><div class="host"><b>✗ Codex</b><span class="st">none of its files</span></div><div class="host"><b>✗ Gemini CLI</b><span class="st">none of its files</span></div><div class="host"><b>✗ Cursor</b><span class="st">none of its files</span></div><div class="host"><b>✗ GitHub Copilot</b><span class="st">none of its files</span></div><div class="host"><b>✗ Windsurf</b><span class="st">none of its files</span></div><div class="host"><b>✗ Others</b><span class="st">tools that read AGENTS.md</span></div></div></div></details></li><li id="tools"><details class="card"><summary><span class="q">Does it ask only for the tools it needs?</span><span class="chip none">Nothing to look at</span><span class="a">None of its skills or helpers lists its tools; they use whatever the AI already has.</span><span class="more">More ›</span></summary><div class="body"><ul class="bul"><li>No step repeats “until it works” without a limit.</li><li>It has no hooks (commands that run by themselves on every message or action).</li></ul></div></details></li><li id="clean"><details class="card"><summary><span class="q">Is it finished and up to date?</span><span class="chip none">Nothing to look at</span><span class="a">Yes. No unfinished notes, no dates that will go stale, and no older tool names.</span><span class="more">More ›</span></summary><div class="body"><ul class="bul"><li>No AI model names fixed in place.</li></ul></div></details></li><li id="careful"><details class="card"><summary><span class="q">Anything to be careful about?</span><span class="chip none">Nothing found</span><span class="a">Walkdown found none of the security concerns it looks for.</span><span class="more">More ›</span></summary><div class="body"><p class="sub"><b>What it can do</b></p><ul class="can"><li><span class="mark yes">✓</span><span>Read your files</span></li><li><span class="mark no">✗</span><span>Take in content from outside, such as web pages or files you didn&#x27;t write</span></li><li><span class="mark no">✗</span><span>Send your data somewhere</span></li></ul><p class="where">A tool that does all three could be tricked into sending your data away. This one does one of the three. It also adds its own text to the AI&#x27;s memory before you type and can make changes that last after you close the session.</p></div></details></li></ul><footer><p>Everything behind this page: <a href="details.html">details</a> · <a href="review.html">go through each place and mark it</a> · every finding with its file and line: <a href="full.md">full.md</a></p><p>Walkdown reads a repository&#x27;s files without running anything. It points out what it finds and leaves the judgment to you. Finding nothing does not mean a repository is safe.</p></footer>
+</main>
+<div id="tip" role="tooltip"></div>
+<script>
+(function () {
+  var tip = document.getElementById("tip");
+  function show(ev) {
+    var t = ev.currentTarget.getAttribute("data-tip"); if (!t) return;
+    tip.textContent = t; tip.style.display = "block";
+    var b = ev.currentTarget.getBoundingClientRect();
+    var x = (ev.clientX || b.left) + 12, y = (ev.clientY || b.top) + 14;
+    tip.style.left = Math.min(x, window.innerWidth - tip.offsetWidth - 8) + "px"; tip.style.top = y + "px";
+  }
+  function hide() { tip.style.display = "none"; }
+  document.querySelectorAll("[data-tip]").forEach(function (el) {
+    el.setAttribute("tabindex", "0");
+    el.addEventListener("mousemove", show); el.addEventListener("mouseleave", hide);
+    el.addEventListener("focus", show); el.addEventListener("blur", hide);
+  });
+})();
+</script>
+</body>
+</html>
