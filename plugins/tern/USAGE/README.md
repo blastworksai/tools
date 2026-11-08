@@ -4,8 +4,9 @@ USAGE shows how much of each AI subscription you have used, for every account yo
 
 ```text
 Codex · Work      ◔ 8% used · Resets in 03d 09:32:55
+Codex · Personal  ◔ 7% used · login expired · 1d 2h old · Resets in 03d 20:33:01
 Claude · Personal ● 100% used · Resets in 01d 02:00:00
-Muse · Main       ◔ 35% used last-known · stale · Resets in 01d 23:56:25
+Muse · Main       ◔ 35% used last-known · stale · 2h 10m old · Resets in 01d 23:56:25
 Kimi · Main       ◇ —  usage source could not read this account
 ```
 
@@ -44,7 +45,7 @@ USAGE reads SPAWN's saved roster from SPAWN's plugin data on the same machine. S
 | Provider (SPAWN name) | How USAGE reads it | What you get |
 | --- | --- | --- |
 | Claude | Claude Code's saved OAuth login (`~/.claude/.credentials.json`, or the `--config-dir` SPAWN passes) and Anthropic's OAuth usage endpoint. | 5-hour, weekly and model-specific weekly windows. |
-| Codex (OpenAI) | A private `codex app-server` process: account read plus rate-limit read. No conversation is opened. | 5-hour and weekly windows, plus a credit balance when Codex reports one. |
+| Codex (OpenAI) | A private `codex app-server` process: account read plus rate-limit read. No conversation is opened. When the saved login reads as signed out, USAGE reads once more and lets Codex renew the login through its own refresh, the one the CLI runs itself. | 5-hour and weekly windows, plus a credit balance when Codex reports one. |
 | Antigravity | `agy --print /usage`. | Separate Gemini and Claude/GPT pools (Antigravity reports *remaining*; USAGE converts it to used). |
 | Grok | A private `grok agent stdio` process: subscription check and billing read. No session or model turn. | The current billing period. |
 | Kimi | A private `kimi web --no-open` process on a random loopback port, stopped right after the read. | Kimi's enforced counters when it reports them. |
@@ -145,7 +146,7 @@ Provider icons appear in every layout.
 
 **Used, not remaining.** Every percentage is the share of the quota already used. A full bar means 100% used. Where a provider reports *remaining* (Antigravity), USAGE converts it.
 
-**Colours.** Current percentages and their ring are coloured on a gradient from green (0% used) to red (100% used), in 10% steps. Last-known, stale and unavailable values stay grey, so an old reading never looks live. The status-bar summary uses Tern's three status tones: green, amber from 70% and red from 90%.
+**Colours.** Current percentages and their ring are coloured on a gradient from green (0% used) to red (100% used), in 10% steps. Last-known, stale and unavailable values stay grey, so an old reading never looks live. A value kept because the provider login failed is shown as a warning instead, because signing in fixes it and waiting does not. The status-bar summary uses Tern's three status tones: green, amber from 70% and red from 90%; a failed login is amber.
 
 **Compact rows** show one quota per account: a measured weekly quota when there is one (the account-wide pool before model-specific pools), otherwise the next measured window. The countdown next to it belongs to that same quota:
 
@@ -160,7 +161,11 @@ Provider icons appear in every layout.
 **Current, last-known and unavailable.** The header always accounts for the whole roster, for example `14 accounts · 7 current · 2 last-known · 5 unavailable`:
 
 - **current**: measured by the latest read and still inside its window;
-- **last-known**: an earlier measurement, kept with its original measurement and reset times because the latest read failed, the reset has passed or the reading is old (`stale`);
+- **last-known**: an earlier measurement, kept with its original measurement and reset times. The row says why and how old it is:
+  - `login expired`, `signed out` or `login refused`: the latest read failed because of the provider login. These rows are shown as warnings, whatever their age. Sign in again with the provider's CLI as the account's OS user.
+  - `last-known · stale`: the measurement is more than 15 minutes old, whatever kept it (for example Muse's cached allowance, or a Grok read that failed for another reason).
+  - `last-known · Reset passed`: the window has reset since it was measured.
+  - `last-known`: a recent read failed for a reason that is not the login.
 - **unavailable**: never measured, or nothing usable to show. The row says why, for example "usage credentials unavailable on source", "signed in with an API key; no subscription quota", "provider login expired; open the provider's CLI once to renew it", "runs on another machine over SSH", or "headless usage reads are off".
 
 Unknown usage is never shown as 0%. A real 0% is shown as 0%.
@@ -179,7 +184,7 @@ OMP has no allowance of its own. Its rows are listed under OMP as consumers of y
 
 ### Logins are not the same as quota credentials
 
-"Usage credentials unavailable on source" means USAGE could not find the saved subscription login it reads quota with. It does **not** prove the interactive CLI is signed out. For example, a shell that exports `CLAUDE_CODE_OAUTH_TOKEN`, or a CLI configured with an API key, can run normally while there is no saved subscription login for USAGE to read. USAGE does not read shell profiles, does not take tokens from running sessions and does not refresh tokens itself. An expired Claude login is reported as expired and is not sent anywhere; opening Claude once normally renews it.
+"Usage credentials unavailable on source" means USAGE could not find the saved subscription login it reads quota with. It does **not** prove the interactive CLI is signed out. For example, a shell that exports `CLAUDE_CODE_OAUTH_TOKEN`, or a CLI configured with an API key, can run normally while there is no saved subscription login for USAGE to read. USAGE does not read shell profiles, does not take tokens from running sessions and does not refresh tokens itself. An expired Claude login is reported as expired and is not sent anywhere; opening Claude once normally renews it. Codex renews its own saved login during a read: when it reads as signed out, Codex refreshes it with its own refresh flow, which first reuses a token another Codex process has already renewed. If Codex can't renew it, the row says `login expired`.
 
 ## Configuring an attached remote host
 
@@ -238,7 +243,7 @@ A binding ends by itself, and must be confirmed again, when you edit that SPAWN 
 
 ## Privacy and permissions
 
-- **What a read touches.** Claude: the saved OAuth login file, then `https://api.anthropic.com/api/oauth/usage`. Codex, Grok, Kimi, Muse, Antigravity: the provider's own CLI, run with an empty working directory, no terminal and a minimal environment. Antigravity identity uses Google's userinfo endpoint. Kimi's local web server is bound to loopback and stopped after the read.
+- **What a read touches.** Claude: the saved OAuth login file, then `https://api.anthropic.com/api/oauth/usage`. Codex, Grok, Kimi, Muse, Antigravity: the provider's own CLI, run with an empty working directory, no terminal and a minimal environment. Codex can write a renewed login to its own `auth.json` during a read, exactly as it does when you use it. Antigravity identity uses Google's userinfo endpoint. Kimi's local web server is bound to loopback and stopped after the read.
 - **What leaves the read.** Only normalized identity and quota fields. Raw responses, tokens and error text are never stored or logged.
 - **Other OS users.** If a SPAWN account names an OS `user`, USAGE reads it as that user with `sudo -n -u USER`, which only works if you already allow that without a password. The Python interpreter must be executable by that user, and the provider CLIs must be on `/usr/local/bin`, `/usr/bin`, `/bin`, or that user's `~/.local/bin` or `~/.bun/bin`. USAGE copies a small helper (code only, no credentials) to a temporary directory for the read and deletes it afterwards.
 - **Seat launchers.** A SPAWN account whose command is `/absolute/path/seat-agent-entry <user>`, with `<user>` the account's own OS `user` and no other arguments, is read as that user's default provider context. USAGE trusts the launcher only when root owns it and every directory above it and none of them is writable by group or others; any other shape is reported as "account context could not be verified".
@@ -253,7 +258,7 @@ A binding ends by itself, and must be confirmed again, when you edit that SPAWN 
 | "USAGE setup is required" | **USAGE Setup › Install private dependencies**. It needs Python 3.11+ and access to PyPI once. In a window attached to a remote host, the row is **Install private dependencies on <host>**, and Python and PyPI access are needed on that host. |
 | "USAGE is not ready on host <name>" | Install USAGE on that host (the [Install](#install) steps, run there) and reload it. Setup in an attached window configures the host's USAGE; it can't install the plugin. |
 | "usage credentials unavailable on source" | Sign in once with the provider's own CLI as the OS user SPAWN uses, then refresh. An env-token or API-key setup can work interactively without a saved subscription login. |
-| "provider login expired" | Open the provider's CLI normally once so it renews its login, then refresh. |
+| "provider login expired" / `login expired` | Open the provider's CLI normally once so it renews its login, then refresh. For Codex, USAGE has already let Codex try to renew it; run `codex login` as the account's OS user. |
 | "signed in with an API key" | That login has no subscription quota to show. |
 | "account context could not be verified" | The SPAWN command passes a flag that can switch accounts or profiles (for example `--profile` or an auth override), or wraps the provider CLI in a launcher USAGE can't see into. USAGE won't guess which account that is. Point the command at the provider CLI itself, or use a root-controlled [seat launcher](#privacy-and-permissions). |
 | "runs on another machine over SSH" | Install USAGE on that machine (and share it, if you like). |

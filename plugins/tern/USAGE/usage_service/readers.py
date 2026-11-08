@@ -410,14 +410,24 @@ def collect(provider, home, env, io):
                              rejected={401: "web_login_expired", 403: "web_login_forbidden"})
         windows = parse_claude(document, observed)
     elif provider == "openai":
-        login, quota = rpc(["codex", "app-server", "--stdio"], env,
-            {"clientInfo": {"name": "usage", "version": "1"}, "capabilities": {"experimentalApi": True}},
-            [("account/read", {"refreshToken": False}), ("account/rateLimits/read", {"excludeResetCreditDetails": True})], initialized=True)
+        def read_codex(refresh):
+            return rpc(["codex", "app-server", "--stdio"], env,
+                {"clientInfo": {"name": "usage", "version": "1"}, "capabilities": {"experimentalApi": True}},
+                [("account/read", {"refreshToken": refresh}), ("account/rateLimits/read", {"excludeResetCreditDetails": True})], initialized=True)
+        login, quota = read_codex(False)
+        # An expired access token reads as signed out. With a saved login,
+        # Codex gets one chance to renew it through its own refresh flow, the
+        # one the CLI runs on a 401: it reloads auth.json first, so a token
+        # another Codex process just renewed is reused rather than replaced.
+        saved_login = (Path(env.get("CODEX_HOME") or home / ".codex") / "auth.json").is_file()
+        if login is not None and login.get("account") is None and saved_login:
+            login, quota = read_codex(True)
         if login is None:
             raise Unavailable("vendor_usage_unavailable")
         if login.get("account") is None:
-            # Signed out: this context has no subscription login.
-            raise Unavailable("local_login_unavailable")
+            # Still signed out after Codex's own renewal: a saved login it
+            # could not renew has expired; without one there is no login.
+            raise Unavailable("web_login_expired" if saved_login else "local_login_unavailable")
         login = obj(login["account"])
         if login.get("type") != "chatgpt":
             # API-key auth is a login, but it has no ChatGPT subscription allowance.

@@ -121,21 +121,6 @@ local function wall_now(): number
 	return math.floor(os.time() * 1000)
 end
 
-local function elapsed_text(milliseconds: number): string
-	local seconds = math.max(0, math.floor(milliseconds / 1000))
-	if seconds < 60 then
-		return "<1m"
-	elseif seconds < 3600 then
-		return tostring(seconds // 60) .. "m"
-	elseif seconds < 86400 then
-		local hours = seconds // 3600
-		local minutes = (seconds % 3600) // 60
-		return tostring(hours) .. "h" .. (if minutes > 0 then " " .. tostring(minutes) .. "m" else "")
-	end
-	local days = seconds // 86400
-	local hours = (seconds % 86400) // 3600
-	return tostring(days) .. "d" .. (if hours > 0 then " " .. tostring(hours) .. "h" else "")
-end
 local function percent_text(value: number): string
 	return tostring(math.floor(value + 0.5)) .. "%"
 end
@@ -150,6 +135,11 @@ end
 
 local function reason_text(code: string): string
 	return REASONS[code] or title_key(code)
+end
+
+-- A failed login warns; every other unavailable/last-known cause stays muted.
+local function reason_span(code: string, prefix: string?): any
+	return ui.span((prefix or "") .. reason_text(code), if presentation.LOGIN_REASONS[code] ~= nil then "warning" else "muted")
 end
 
 local POOL_LABELS: { [string]: string } = {
@@ -217,7 +207,8 @@ local function window_usage(window: UsageWindow, now_ms: number): string
 	if state == "unavailable" then return reason_text(window.unavailable_reason or "unavailable") end
 	if state ~= "fresh" then
 		return "Last known " .. percent_text(window.used) .. " used"
-			.. (if state == "reset_passed" then " · reset passed" elseif state == "stale" then " · stale" else "")
+			.. (if state == "login" then " · " .. (presentation.login_problem(window) :: string)
+				elseif state == "reset_passed" then " · reset passed" elseif state == "stale" then " · stale" else "")
 	end
 	return percent_text(window.used) .. " used"
 end
@@ -231,17 +222,18 @@ local function heat_text(spans: any, role: string?): Node
 	return ui.node("row", { role = role, gap = "none" }, { node })
 end
 
-local function quota_span(text: string, role: string?): any
-	return ui.span(text, if role == nil then "muted" else nil)
+local function quota_span(text: string, style: string?): any
+	return ui.span(text, style)
 end
 
 local function window_detail_node(window: UsageWindow, now_ms: number, selected: boolean, provider: string): Node
-	local role = presentation.heat(window.used, presentation.window_state(window, now_ms))
+	local state = presentation.window_state(window, now_ms)
+	local role = presentation.heat(window.used, state)
 	local usage = if provider == "muse" and window.used == nil then presentation.MUSE_WAITING else window_usage(window, now_ms)
 	local children: { Node } = {
 		ui.node("row", { role = "usage-quota-heading" }, {
 			ui.text(ui.span(window_name(window) .. (if selected then " · summary" else ""), "strong")),
-			heat_text(quota_span(usage, role), role),
+			heat_text(quota_span(usage, presentation.text_style(state)), role),
 		}),
 	}
 	if window.used ~= nil then
@@ -256,14 +248,14 @@ local function window_detail_node(window: UsageWindow, now_ms: number, selected:
 	elseif window.reset_label ~= nil then
 		table.insert(children, ui.text(ui.span(window.reset_label, "muted")))
 	end
-	local observed = if window.observed_at_ms > 0 then "Observed " .. elapsed_text(now_ms - window.observed_at_ms) .. " ago" else "Not yet observed"
+	local observed = if window.observed_at_ms > 0 then "Observed " .. presentation.elapsed(now_ms - window.observed_at_ms) .. " ago" else "Not yet observed"
 	if window.reset_calendar ~= nil and window.reset_calendar.timezone ~= nil then
 		observed ..= " · Source timezone: " .. window.reset_calendar.timezone
 	end
 	table.insert(children, ui.text(ui.span(observed, "muted")))
 	local reason = window.unavailable_reason or window.last_known_reason
 	if reason ~= nil then
-		table.insert(children, ui.text(ui.span("Unavailable: " .. reason_text(reason), "muted")))
+		table.insert(children, ui.text(reason_span(reason, "Unavailable: ")))
 	end
 	return ui.node("col", { role = "usage-quota", gap = "xs" }, children)
 end
@@ -274,7 +266,7 @@ local function account_hovercard(account: Account, now_ms: number): Node
 		ui.node("row", { role = "usage-account-heading" }, {
 			ui.node("icon", { name = value.icon }),
 			ui.text(ui.span((account.provider_label or title_key(account.provider)) .. " · " .. account.account_label, "strong")),
-			heat_text(quota_span(value.text, value.heat), value.heat),
+			heat_text(quota_span(value.text, value.style), value.heat),
 		}),
 		ui.text(ui.span("Source: " .. (USAGE_SOURCES[account.usage_source] or account.usage_source)
 			.. (if account.plan ~= nil then " · " .. account.plan else ""), "muted")),
@@ -331,12 +323,13 @@ local function compact_view(mode: string): Node
 				local reason = window.unavailable_reason or window.last_known_reason
 				if reason ~= nil and not seen[reason] then
 					seen[reason] = true
-					table.insert(reasons, reason_text(reason))
+					if #reasons > 0 then table.insert(reasons, ui.span(" · ", "muted")) end
+					table.insert(reasons, reason_span(reason))
 				end
 			end
 			local label = (account.provider_label or title_key(account.provider)) .. " · " .. account.account_label
 			local link = ui.link(label, "usage://account/" .. view_layout.encode(account.id), "strong")
-			local quota = quota_span(value.text, value.heat)
+			local quota = quota_span(value.text, value.style)
 			local countdown = presentation.compact_countdown(value, now_ms)
 			local usage_node = heat_text(if countdown ~= nil then { quota, ui.span(" · " .. countdown, "muted") } else quota, value.heat)
 			if bottom then
@@ -352,7 +345,7 @@ local function compact_view(mode: string): Node
 						ui.text(link),
 					}),
 					usage_node,
-					ui.text(ui.span(table.concat(reasons, " · "), "muted")),
+					ui.text(if #reasons > 0 then reasons else ui.span("", "muted")),
 				}))
 			end
 		end

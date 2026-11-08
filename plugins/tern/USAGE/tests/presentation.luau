@@ -102,10 +102,33 @@ check(presentation.account_projection(muse_known, now).state == "last_known"
 local retained = table.clone(ordered[1])
 retained.windows = { window("weekly", 8) }
 retained.windows[1].last_known_reason = "local_login_unavailable"
-check(presentation.account_projection(retained, now).state == "last_known"
-	and presentation.account_projection(retained, now).used == 8
-	and retained.windows[1].observed_at_ms == now,
-	"failed headless refresh labels a retained numeric observation last-known without renewing its measurement time")
+retained.windows[1].observed_at_ms = now - (26 * 3600 + 5 * 60) * 1000
+local retained_value = presentation.account_projection(retained, now)
+check(retained_value.state == "login" and retained_value.used == 8 and retained_value.heat == nil
+	and retained.windows[1].observed_at_ms == now - (26 * 3600 + 5 * 60) * 1000,
+	"failed headless refresh keeps a retained numeric observation without renewing its measurement time")
+check(retained_value.text == "◔ 8% used · signed out · 1d 2h old" and retained_value.tone == "warn" and retained_value.style == "warning",
+	"a failed login warns with its cause and age instead of reading as an ordinary last-known value")
+retained.windows[1].last_known_reason = "web_login_expired"
+retained.windows[1].freshness = "stale"
+check(presentation.account_projection(retained, now).text == "◔ 8% used · login expired · 1d 2h old",
+	"an expired login outranks age: waiting does not fix it")
+local other_failure = table.clone(ordered[1])
+other_failure.windows = { window("weekly", 35) }
+other_failure.windows[1].last_known_reason = "server_sent_no_usage"
+other_failure.windows[1].observed_at_ms = now - 5 * 60000
+local other_value = presentation.account_projection(other_failure, now)
+check(other_value.state == "last_known" and other_value.tone == "muted" and other_value.style == "muted"
+	and other_value.text == "◔ 35% used last-known · 5m old" and presentation.login_problem(other_failure.windows[1]) == nil,
+	"a non-login failure stays an ordinary muted last-known value with its age")
+local failed_raw = { version = 3, publisher = "failed-publisher", as_of_ms = now, readings = {
+	reading("grok-old", "grok", { window("window", 35) }) } }
+failed_raw.readings[1].windows[1].resets_at_ms = now + 3600000
+failed_raw.readings[1].windows[1].last_known_reason = "server_sent_no_usage"
+local failed_source = assert(snapshot.decode(configure(failed_raw)))
+local aged = presentation.account_projection(snapshot.project({ [failed_source.publisher] = failed_source }, now + 900001).accounts[1], now + 900001)
+check(aged.state == "stale" and aged.text == "◔ 35% used last-known · stale · 15m old",
+	"an old last-known value is stale whatever kept it")
 local shuffled = table.clone(model)
 shuffled.accounts = {}
 for index = #ordered, 1, -1 do table.insert(shuffled.accounts, ordered[index]) end
