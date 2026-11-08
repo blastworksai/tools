@@ -353,6 +353,35 @@ for line in sys.stdin:
             _, usage = readers.collect("openai", Path("/source"), {}, None)
         self.assertEqual(usage["windows"][0]["used"], 25)
 
+    def test_codex_expired_login_is_renewed_once_by_codex_or_reported_expired(self):
+        quota = {"rateLimits": {"primary": {"usedPercent": 25}}}
+        signed_out = ({"account": None, "requiresOpenaiAuth": True}, None)
+        signed_in = ({"account": {"type": "chatgpt", "email": "a@example.test"}}, quota)
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            (home / ".codex").mkdir()
+            (home / ".codex" / "auth.json").write_text("{}")
+            calls = []
+            def renewed(argv, env, initialize, calls_made, **kwargs):
+                calls.append(calls_made[0][1]["refreshToken"])
+                return signed_in if calls_made[0][1]["refreshToken"] else signed_out
+            with patch.object(readers, "rpc", side_effect=renewed):
+                _, usage = readers.collect("openai", home, {}, None)
+            self.assertEqual(calls, [False, True])
+            self.assertEqual(usage["windows"][0]["used"], 25)
+            with patch.object(readers, "rpc", return_value=signed_out) as rpc, self.assertRaises(readers.Unavailable) as caught:
+                readers.collect("openai", home, {}, None)
+            self.assertEqual(caught.exception.code, "web_login_expired")
+            self.assertEqual(rpc.call_count, 2)
+            # CODEX_HOME decides where the saved login lives.
+            with patch.object(readers, "rpc", return_value=signed_out) as rpc, self.assertRaises(readers.Unavailable) as caught:
+                readers.collect("openai", home, {"CODEX_HOME": str(home / "other")}, None)
+            self.assertEqual(caught.exception.code, "local_login_unavailable")
+            self.assertEqual(rpc.call_count, 1)
+            with patch.object(readers, "rpc", return_value=signed_in) as rpc:
+                readers.collect("openai", home, {}, None)
+            self.assertEqual(rpc.call_count, 1)
+
     def test_grok_signed_out_and_vendor_errors_are_distinct(self):
         billing = {"config": {"creditUsagePercent": 28}}
         for answers, code in ((({"authenticated": False}, None), "local_login_unavailable"),

@@ -74,8 +74,23 @@ function presentation.ring(used: number?): string
 	return "◔"
 end
 
+-- Last-known because the provider login failed. Signing in fixes these and
+-- waiting does not, so they never read like an ordinary stale value.
+presentation.LOGIN_REASONS = {
+	web_login_expired = "login expired",
+	local_login_unavailable = "signed out",
+	web_login_forbidden = "login refused",
+} :: { [string]: string }
+
+function presentation.login_problem(window: any?): string?
+	if window == nil then return nil end
+	local reason = window.last_known_reason or window.unavailable_reason
+	return if reason ~= nil then presentation.LOGIN_REASONS[reason] else nil
+end
+
 function presentation.window_state(window: any?, now_ms: number?): string
 	if window == nil or window.used == nil then return "unavailable" end
+	if presentation.login_problem(window) ~= nil then return "login" end
 	local now = now_ms or math.floor(os.time() * 1000)
 	if window.resets_at_ms ~= nil and window.resets_at_ms <= now then return "reset_passed" end
 	if window.freshness == "stale" then return "stale" end
@@ -83,19 +98,48 @@ function presentation.window_state(window: any?, now_ms: number?): string
 	return "fresh"
 end
 
+-- Span style for a quota's text: current values take their heat role's colour,
+-- a failed login warns, every other non-current value stays muted.
+function presentation.text_style(state: string): string?
+	if state == "fresh" then return nil end
+	return if state == "login" then "warning" else "muted"
+end
+
+function presentation.elapsed(milliseconds: number): string
+	local seconds = math.max(0, math.floor(milliseconds / 1000))
+	if seconds < 60 then
+		return "<1m"
+	elseif seconds < 3600 then
+		return tostring(seconds // 60) .. "m"
+	elseif seconds < 86400 then
+		local hours = seconds // 3600
+		local minutes = (seconds % 3600) // 60
+		return tostring(hours) .. "h" .. (if minutes > 0 then " " .. tostring(minutes) .. "m" else "")
+	end
+	local days = seconds // 86400
+	local hours = (seconds % 86400) // 3600
+	return tostring(days) .. "d" .. (if hours > 0 then " " .. tostring(hours) .. "h" else "")
+end
+
 function presentation.account_projection(account: any, now_ms: number?): any
+	local now = now_ms or math.floor(os.time() * 1000)
 	local window = presentation.account_window(account)
 	local used = if window ~= nil then window.used else nil
-	local state = presentation.window_state(window, now_ms)
+	local state = presentation.window_state(window, now)
 	local value = if used == nil then "—" else tostring(math.floor(used + 0.5)) .. "% used"
+	local status = if state == "login" then " · " .. (presentation.login_problem(window) :: string)
+		elseif state == "stale" then " last-known · stale" elseif state == "reset_passed" then " last-known · Reset passed"
+		elseif state == "last_known" then " last-known" else ""
+	-- A value that is not current says how old it is.
+	local age = if state ~= "fresh" and used ~= nil and window.observed_at_ms > 0
+		then " · " .. presentation.elapsed(now - window.observed_at_ms) .. " old" else ""
 	return {
 		window = window, used = used, state = state, icon = presentation.icons[account.provider] or "gauge",
 		text = if used == nil and account.provider == "muse" then presentation.MUSE_WAITING
-			else presentation.ring(used) .. " " .. value
-				.. (if state == "stale" then " last-known · stale" elseif state == "reset_passed" then " last-known · Reset passed"
-					elseif state == "last_known" then " last-known" else ""),
-		tone = if state == "fresh" then presentation.tone(used) else "muted",
+			else presentation.ring(used) .. " " .. value .. status .. age,
+		tone = if state == "fresh" then presentation.tone(used) elseif state == "login" then "warn" else "muted",
 		heat = presentation.heat(used, state),
+		style = presentation.text_style(state),
 	}
 end
 

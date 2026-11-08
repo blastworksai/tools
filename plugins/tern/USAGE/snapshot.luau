@@ -373,7 +373,8 @@ function snapshot.project(snapshots: { [string]: SourceSnapshot }, now_ms: numbe
 			local window: any = value
 			local stale = now_ms - window.observed_at_ms > snapshot.LEASE_MS
 				or (window.resets_at_ms ~= nil and window.resets_at_ms <= now_ms)
-			window.freshness = if window.used == nil then "unavailable" elseif window.last_known_reason ~= nil then "last_known" elseif stale then "stale" else "fresh"
+			-- Age outranks the failure label: an old value is stale whatever kept it.
+			window.freshness = if window.used == nil then "unavailable" elseif stale then "stale" elseif window.last_known_reason ~= nil then "last_known" else "fresh"
 			if window.used ~= nil then
 				expires(window.observed_at_ms + snapshot.LEASE_MS + 1)
 				if window.resets_at_ms ~= nil then expires(window.resets_at_ms) end
