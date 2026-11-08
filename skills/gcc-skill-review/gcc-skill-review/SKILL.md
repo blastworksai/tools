@@ -25,6 +25,8 @@ Ask for whatever is missing, in one structured question:
 2. One sample input with known right answers. If none, offer to invent a small one with planted answers (shape: `references/example.md`) and have them confirm the answers.
 3. Models. Recommend their usual model plus Haiku (the smallest model is the one that trips where the others do not).
 
+Skill runs scripts (needs a shell)? Check now: `command -v bwrap socat` (Linux/WSL; plain Windows: use WSL). Either missing → the eval refuses every run at 0 turns: tell the person before stage 1 (installing `socat` needs their go). If they won't install it, stages 1–3 still run: prove the pattern checks on hand-written good and wrong files, and say the rubric checks and the model's behaviour are unproven.
+
 Working folder (`<skill>-review/` below): never inside the original, never in `.claude/skills/` or `.agents/skills/` (it would load as a skill). In Glitch: `_local/gcc-skill-review/<skill>-review/`; elsewhere: `<skill>-review/` in the project root.
 Save each stage's output there before the next stage.
 
@@ -48,7 +50,7 @@ Why: one sentence.
 ```
 
 Write them at fixed paths in the folder the session starts in (e.g. `evidence/03-top-five.md`): a check cannot follow a name the model chooses.
-A step with two outputs, or whose result is the person's own words: one labelled `Picked:` line per output.
+A step with two outputs, or whose result is the person's own words: one labelled line per output, e.g. `Picked (offered): …` and `Picked (chosen): …`; aim each check at its label (`^Picked \(chosen\):`).
 Fix nothing else, even what you can see is unsaid.
 
 ## 3. Checks
@@ -62,7 +64,6 @@ Break it first: run once (this is also stage 4's trial), show every check passes
 
 ## 4. Five runs
 
-Skill needs a shell (runs scripts): first check `command -v bwrap socat` (Linux/WSL). Either missing → the eval refuses every run at 0 turns; stop and ask the person (installing `socat` needs their go). Plain Windows: use WSL.
 Get a yes on the cost first (runs × models, each a full session on their subscription), in one structured question. Recommend 5 per model.
 One trial run, then:
 
@@ -74,12 +75,12 @@ claude plugin eval <skill>-review/copy --runs 5 --model <model> --ablation none 
 Copy each kept run's step files into `<skill>-review/runs/`, then delete the kept folders.
 Trial produced no step files → suspect the case first: runs start in an empty folder and find the sample only by its full path in the prompt.
 
-Table: one row per check in step order, passes out of 5, one column per model.
+Table: one row per check in step order, passes out of finished runs (e.g. 3/4 when one of five was refused), one column per model.
 Count only runs that finished: a run refused at 0 turns still passes every `not_contains` check and can pass a rubric.
 Each failure: quote its `Picked:` line, give exactly one verdict: the step was wrong · the skill left it open · an earlier step handed it a wrong input · the check was wrong.
 Read one all-pass run in full; report anything wrong no check caught.
 Save `counts-before.md`.
-No `plugin eval` available: five fresh sessions, same checks by hand; say so. If no run can happen at all, prove the pattern checks on hand-written good and wrong files and say the rubric checks and the model's behaviour are unproven.
+No `plugin eval` available: five fresh sessions, same checks by hand; say so.
 
 ## 5. Fix and prove
 

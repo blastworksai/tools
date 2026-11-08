@@ -52,7 +52,7 @@ runs: 5
 graders:
   - name: step3-picked-all
     type: regex
-    target: {source: file, path: out/3-top-five.md}
+    target: {source: file, path: evidence/03-top-five.md}
     pattern: "^Picked:.*P04.*P11"
     flags: m
 ```
@@ -68,7 +68,7 @@ A pattern check aimed at the `Picked:` line of one step's file:
 ```
 ---
 type: regex
-target: {source: file, path: out/3-top-five.md}
+target: {source: file, path: evidence/03-top-five.md}
 pattern: "^Picked:.*P04.*P11"
 flags: m
 ---
@@ -79,7 +79,7 @@ The "nothing outside the answer" check uses `match: not_contains`:
 ```
 ---
 type: regex
-target: {source: file, path: out/3-top-five.md}
+target: {source: file, path: evidence/03-top-five.md}
 pattern: "^Picked:.*(P07|P19)"
 flags: m
 match: not_contains
@@ -97,7 +97,7 @@ The file was written at all:
 ```
 ---
 type: file_exists
-path: out/1-posts.md
+path: evidence/01-posts.md
 ---
 ```
 
@@ -106,7 +106,7 @@ A rubric for a judgement step (paid: judged by a second model, Haiku by default)
 ```
 ---
 type: llm
-focus: {source: file, path: out/review.md}
+focus: {source: file, path: evidence/06-review.md}
 ---
 It recommends at least one meal prep carousel and gives a reason drawn from the posts.
 ```
@@ -130,7 +130,7 @@ claude plugin eval <skill>-review/copy --runs 5 --model <model> --ablation none 
 - `--trust-plugin`: answers the first-run trust prompt; pass it only for a copy you wrote yourself.
 - `--keep-temp`: the run folder, its step files and its trace are deleted when the run ends unless you pass it.
   A kept folder is read-only, with `home/` and `tmp/` sealed (mode 000) in `sealed/`; open them with `chmod 700 <kept> <kept>/sealed`, never run git inside one, and remove the kept folders when the review is done.
-  Copy each run's `out/` into `<skill>-review/runs/<model>-<before|after>/run-<n>/` so the evidence outlives the cleanup.
+  Copy each run's `evidence/` into `<skill>-review/runs/<model>-<before|after>/run-<n>/` so the evidence outlives the cleanup.
 - `-j <n>` runs up to 8 at once on the one subscription; leave it at 1 on a loaded machine.
 - The run exits 1 if any case scores under `--threshold` (default 1.0); that is a result, not a crash.
 
