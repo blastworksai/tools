@@ -1,16 +1,16 @@
 # rocket-fuel: full report
 
-/opt/glitch/workspaces/tools--publish-rocket-fuel/skills/rocket-fuel | retrieved 2026-11-09 | sha256 e2a595c030449451d48875673bded87f516a2d8a26db8b3230bb84314b5ca8dd
-Run 2026-11-09_e2a595c | Walkdown 0.3.1+blastworks.1
+/opt/glitch/workspaces/tools--publish-rocket-fuel/skills/rocket-fuel | retrieved 2026-11-09 | sha256 cb838e6fbce026fbcdc7b0271f4a582efe7544e5014ddb5bc7966abd539161c9
+Run 2026-11-09_cb838e6 | Walkdown 0.3.1+blastworks.1
 Static examination only. Nothing executed. Every finding below is a location to look at; none is a verdict. Stage order; nothing is ranked.
 
 ## 1 What ships
 
 4 files, 2 formats, 0 script languages. 0 hooks (0 host configs). 1 agent or command definition. 0 platform manifests.
 
-Validation: PASS (gate 26/26, negative 7/7)
+Validation: PASS (gate 26/26, negative 7/7; measured 2026-11-09, same code and fixtures)
 
-Pin: sha256 e2a595c030449451d48875673bded87f516a2d8a26db8b3230bb84314b5ca8dd, 4 files, 10,391 bytes.
+Pin: sha256 cb838e6fbce026fbcdc7b0271f4a582efe7544e5014ddb5bc7966abd539161c9, 4 files, 10,371 bytes.
 
 Formats: md 3, (none) 1.
 
@@ -62,7 +62,7 @@ Nothing found that ties it to one machine.
 
 4/4 files (100.0%). 0 divergences. 1 line changed by folding. 0 non-Latin runs. 0 passages in a language other than English. Validation INCOMPLETE: see 7.
 
-Validation: INCOMPLETE (gate 20/31, negative 22/24, recall 1/1; skipped: 13 rows)
+Validation: INCOMPLETE (gate 20/31, negative 22/24, recall 1/1; skipped: 13 rows; measured 2026-11-09, same code and fixtures)
 
 ### Divergences (reading A versus reading B) (0)
 
@@ -92,7 +92,7 @@ None.
 
 2 entry points. 0 orphans. 0 dangling references. 0 dynamic loads: 0 files loaded only through one (named by nothing), 0 files reached only through a mention of a folder or wildcards.
 
-Validation: PASS (gate 11/11, negative 7/7)
+Validation: PASS (gate 11/11, negative 7/7; measured 2026-11-09, same code and fixtures)
 
 Depth histogram (static = reached by direct references; dynamic = only through a load: a folder a config names, a code scan, wildcards in an instruction file; mention = only through a folder or wildcards named elsewhere): static depth 0: 2; static depth 1: 2.
 
@@ -144,7 +144,7 @@ None.
 
 4a 0 · 4b 0 · 4c 2 · 4d 0 hits on 2 lines (1 read by a model, 1 human-facing); benign share not measured (stage 6 labels did not run). Hosts: 0, 0 not named in the docs. Confirm-first or prohibited actions in instruction text: 0, 0 with no confirmation step, 0 stated as prohibitions. Conditionals: 1 absence. Definitions: 0, 0 conflicts, 0 safety-word definitions. Long files with flagged lines: 0, 0 with some past the reader window. Sentences repeated across files: 0, 0 flagged. Lines that look like committed secrets: 0.
 
-Validation: PASS (gate 153/153, negative 121/121, recall 43/43)
+Validation: PASS (gate 153/153, negative 121/121, recall 43/43; measured 2026-11-09, same code and fixtures)
 
 Every hit is a locator. Benign share not measured here; stage 6 labels, when run, read the lines a model sees (section 6). Audience is who the file addresses, by path.
 
@@ -304,7 +304,7 @@ No unfinished text, dated claims, pinned model IDs, or older tool names.
 
 Can read your data: yes · Can take outside input: no · Can send data out: no Install grants: context-injection.
 
-Validation: PASS (gate 81/81, negative 24/24)
+Validation: PASS (gate 81/81, negative 24/24; measured 2026-11-09, same code and fixtures)
 
 A map of capability, derived from stages 1 to 4; it reaches no verdict. A Bash grant is counted as private-data access and execute posture; on its own it does not count as external communication.
 
@@ -347,11 +347,11 @@ Every skill, agent, or command, by tier (tokens):
 
 None.
 
-#### Not used at run time: 3 files, 2.2 KB, 558 tokens
+#### Not used at run time: 3 files, 2.2 KB, 552 tokens
 
 - `LICENSE`: written for people, 1.0 KB, 268 tokens
-- `NOTICE.md`: written for people, 325 bytes, 82 tokens
-- `README.md`: written for people, 831 bytes, 208 tokens
+- `NOTICE.md`: written for people, 316 bytes, 79 tokens
+- `README.md`: written for people, 820 bytes, 205 tokens
 
 ### Agent and command posture (1)
 
@@ -397,7 +397,7 @@ Tools granted and never used (1): nothing the entry reads asks for the work they
 
 2 questions (1 labeling, 1 relational). Packet only: no model read (06-packet.md in the run folder).
 
-Validation: PASS (gate 125/125, negative 11/11, recall 0/165; skipped: 124 rows)
+Validation: PASS (gate 125/125, negative 11/11, recall 0/165; skipped: 124 rows; measured 2026-11-09, same code and fixtures)
 
 Questions a pattern cannot settle, and the answers of the backends named here. Every answer is a located observation; none changes a finding in sections 1 to 5.
 
@@ -412,7 +412,7 @@ Questions a pattern cannot settle, and the answers of the backends named here. E
 
 ## 7 Not examined
 
-- Stage 02-reader validation INCOMPLETE (gate 20/31, negative 22/24, recall 1/1; skipped: 13 rows): its zeros are not validated for the skipped checks.
+- Stage 02-reader validation INCOMPLETE (gate 20/31, negative 22/24, recall 1/1; skipped: 13 rows; measured 2026-11-09, same code and fixtures): its zeros are not validated for the skipped checks.
 - (02-reader) tesseract not installed (no tesseract binary, no pytesseract): images and PDF pages are skipped for OCR (read.divergence skip); images and PDFs with no text layer are listed as read.unread
 - (02-reader) html render: playwright not installed: HTML files are read with static style only (read.divergence skip, carrier rendered)
 - (02-reader) v1 limit: the language check (read.language) reads prose only: Markdown, plain text, PDF, DOCX, and OCR text; Markdown code blocks, comments in code, config values, and HTML are not checked for language, and a paragraph under five words is too short to judge
