@@ -1,0 +1,141 @@
+{
+ "stage": "01-inventory",
+ "contract": 1,
+ "findings": [
+  {
+   "check": "inv.pin",
+   "file": null,
+   "line": null,
+   "source": "/opt/glitch/workspaces/tools--publish-rocket-fuel/skills/rocket-fuel",
+   "hash": "e2a595c030449451d48875673bded87f516a2d8a26db8b3230bb84314b5ca8dd",
+   "hash_kind": "sha256",
+   "files": 4,
+   "bytes": 10391,
+   "channel": "directory",
+   "untracked": 0,
+   "extensions": {
+    "md": 3,
+    "": 1
+   },
+   "script_languages": {},
+   "magic_backend": "builtin",
+   "reader_window": {
+    "lines": 2000,
+    "bytes": 50000
+   },
+   "long_line_limit": 500,
+   "channel_filters": [],
+   "license_checked": true
+  },
+  {
+   "check": "inv.file",
+   "file": "LICENSE",
+   "line": null,
+   "ext": "",
+   "bytes": 1069,
+   "lines": 21,
+   "exec": false,
+   "encoding": "utf-8",
+   "bom": false,
+   "type": "text/plain",
+   "entry_point": null,
+   "exec_source": "stat",
+   "sha256": "dc507d42bb00c69e161682db61622c037d91a3932bf844e896811d7b92fd30b2",
+   "sha256_lf": "dc507d42bb00c69e161682db61622c037d91a3932bf844e896811d7b92fd30b2",
+   "sha256_crlf": "25eb13216de969c22ed4edd6cdc3606dd6f5f524d973aa3ded15c26cc508223b"
+  },
+  {
+   "check": "inv.file",
+   "file": "NOTICE.md",
+   "line": null,
+   "ext": "md",
+   "bytes": 325,
+   "lines": 4,
+   "exec": false,
+   "encoding": "utf-8",
+   "bom": false,
+   "type": "text/plain",
+   "entry_point": null,
+   "exec_source": "stat",
+   "sha256": "4bc66c640ea01611d79252f5faa5f0a37430ad41176dc3911328f5ec6cb790ec",
+   "sha256_lf": "4bc66c640ea01611d79252f5faa5f0a37430ad41176dc3911328f5ec6cb790ec",
+   "sha256_crlf": "8f7db3533acaec46616d8cb8bfb7cdce89537ac500d0eb465f79ee9710074e36"
+  },
+  {
+   "check": "inv.file",
+   "file": "README.md",
+   "line": null,
+   "ext": "md",
+   "bytes": 831,
+   "lines": 18,
+   "exec": false,
+   "encoding": "utf-8",
+   "bom": false,
+   "type": "text/plain",
+   "entry_point": "readme",
+   "exec_source": "stat",
+   "sha256": "f6d5914c8e6e7b19cbd0fb95c1bac634898b2a15e213f45a690374156457581d",
+   "sha256_lf": "f6d5914c8e6e7b19cbd0fb95c1bac634898b2a15e213f45a690374156457581d",
+   "sha256_crlf": "cac5b47bca0e64416cb28b81b50183d402762c986f2d2f0be7c152a170646d05"
+  },
+  {
+   "check": "inv.file",
+   "file": "SKILL.md",
+   "line": null,
+   "ext": "md",
+   "bytes": 8166,
+   "lines": 138,
+   "exec": false,
+   "encoding": "utf-8",
+   "bom": false,
+   "type": "text/plain",
+   "entry_point": "skill",
+   "exec_source": "stat",
+   "sha256": "0c4753f77d59711b9bb21d9ed12413496a7bf5debee834780678f77a1770d417",
+   "sha256_lf": "0c4753f77d59711b9bb21d9ed12413496a7bf5debee834780678f77a1770d417",
+   "sha256_crlf": "c68cd2689f33ebff0b88c4517591a30181268559a74247e9d5859aab1de3907c"
+  },
+  {
+   "check": "struct.description",
+   "file": "SKILL.md",
+   "line": 3,
+   "text": "A collaboration protocol for founder-led AI work, adapted from the Wickman/Winters Visionary/Integrator model. Invoke only when the Operator explicitly calls it. On invocation, recommend BASIC or FULL and ask the Operator which convergence budget to use.",
+   "loader": "yaml",
+   "loaders_disagree": false
+  },
+  {
+   "check": "struct.agent-tools",
+   "file": "SKILL.md",
+   "line": 7,
+   "tools": [
+    "Read",
+    "Bash",
+    "Grep",
+    "Glob"
+   ],
+   "description": "A collaboration protocol for founder-led AI work, adapted from the Wickman/Winters Visionary/Integrator model. Invoke only when the Operator explicitly calls it. On invocation, recommend BASIC or FULL and ask the Operator which convergence budget to use.",
+   "field": "allowed-tools",
+   "kind": "skill"
+  },
+  {
+   "check": "inv.license",
+   "file": "LICENSE",
+   "line": null,
+   "source": "file",
+   "field": null,
+   "license": "MIT",
+   "how": "text",
+   "stated": null
+  },
+  {
+   "check": "inv.license",
+   "file": "SKILL.md",
+   "line": 4,
+   "source": "field",
+   "field": "license",
+   "license": "MIT",
+   "how": "field",
+   "stated": "MIT"
+  }
+ ]
+}

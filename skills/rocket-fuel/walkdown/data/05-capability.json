@@ -1,0 +1,244 @@
+{
+ "stage": "05-capability",
+ "contract": 1,
+ "findings": [
+  {
+   "check": "cap.leg",
+   "file": null,
+   "line": null,
+   "leg": "private-data",
+   "present": true,
+   "evidence": [
+    {
+     "stage": "01",
+     "check": "struct.agent-tools",
+     "file": "SKILL.md",
+     "line": 7,
+     "why": "tool grant: Read, Grep, Glob, Bash"
+    }
+   ],
+   "evidence_total": 1
+  },
+  {
+   "check": "cap.leg",
+   "file": null,
+   "line": null,
+   "leg": "untrusted-content",
+   "present": false,
+   "evidence": [],
+   "evidence_total": 0
+  },
+  {
+   "check": "cap.leg",
+   "file": null,
+   "line": null,
+   "leg": "external-comms",
+   "present": false,
+   "evidence": [],
+   "evidence_total": 0
+  },
+  {
+   "check": "cap.grant",
+   "file": null,
+   "line": null,
+   "grant": "context-injection",
+   "evidence": [
+    {
+     "stage": "01",
+     "check": "struct.description",
+     "file": "SKILL.md",
+     "line": 3,
+     "why": "description: always-on text"
+    }
+   ],
+   "evidence_total": 1
+  },
+  {
+   "check": "cap.injection",
+   "file": "SKILL.md",
+   "line": 3,
+   "mechanism": "description",
+   "bytes": 254,
+   "basis": "exact",
+   "evidence": [
+    {
+     "stage": "01",
+     "check": "struct.description",
+     "file": "SKILL.md",
+     "line": 3,
+     "why": "description: always-on text"
+    }
+   ],
+   "evidence_total": 1
+  },
+  {
+   "check": "cap.load-bytes",
+   "file": null,
+   "line": null,
+   "bytes": 254,
+   "basis": "exact",
+   "unknown_parts": 0,
+   "parts": 1,
+   "evidence": [
+    {
+     "stage": "01",
+     "check": "struct.description",
+     "file": "SKILL.md",
+     "line": 3,
+     "why": "description: 254 bytes (exact)"
+    }
+   ],
+   "evidence_total": 1
+  },
+  {
+   "check": "cap.posture",
+   "file": "SKILL.md",
+   "line": 7,
+   "tools": [
+    "Read",
+    "Bash",
+    "Grep",
+    "Glob"
+   ],
+   "posture": [
+    "execute",
+    "read"
+   ],
+   "least_privilege": false,
+   "description": "A collaboration protocol for founder-led AI work, adapted from the Wickman/Winters Visionary/Integrator model. Invoke only when the Operator explicitly calls it. On invocation, recommend BASIC or FULL and ask the Operator which convergence budget to use.",
+   "evidence": [
+    {
+     "stage": "01",
+     "check": "struct.agent-tools",
+     "file": "SKILL.md",
+     "line": 7,
+     "why": "tool grant as stated"
+    }
+   ],
+   "evidence_total": 1
+  },
+  {
+   "check": "fit.unused",
+   "file": "SKILL.md",
+   "line": 7,
+   "kind_of": "skill",
+   "tool": "Bash",
+   "family": "shell",
+   "pre_approved": true,
+   "reach": 1,
+   "evidence_total": 0,
+   "evidence": []
+  },
+  {
+   "check": "fit.checked",
+   "file": null,
+   "line": null,
+   "entries": 1,
+   "with_grants": 1,
+   "inheriting": 0,
+   "evidence_total": 0,
+   "evidence": []
+  },
+  {
+   "check": "cap.ship",
+   "file": "LICENSE",
+   "line": null,
+   "group": "people",
+   "bytes": 1069,
+   "tokens": 268,
+   "evidence_total": 0,
+   "evidence": []
+  },
+  {
+   "check": "cap.ship",
+   "file": "NOTICE.md",
+   "line": null,
+   "group": "people",
+   "bytes": 325,
+   "tokens": 82,
+   "evidence_total": 0,
+   "evidence": []
+  },
+  {
+   "check": "cap.ship",
+   "file": "README.md",
+   "line": null,
+   "group": "people",
+   "bytes": 831,
+   "tokens": 208,
+   "evidence_total": 0,
+   "evidence": []
+  },
+  {
+   "check": "cap.ship",
+   "file": "SKILL.md",
+   "line": null,
+   "group": "entry",
+   "bytes": 8166,
+   "tokens": 2042,
+   "evidence_total": 0,
+   "evidence": []
+  },
+  {
+   "check": "cap.context",
+   "file": null,
+   "line": null,
+   "tier": "session",
+   "tokens": 64,
+   "bytes": 254,
+   "files": [
+    "SKILL.md"
+   ],
+   "hook_config": null,
+   "unknown": [],
+   "evidence_total": 0,
+   "evidence": []
+  },
+  {
+   "check": "cap.context",
+   "file": "SKILL.md",
+   "line": null,
+   "tier": "skill-runs",
+   "kind": "skill",
+   "tokens": 2042,
+   "bytes": 8166,
+   "files": [
+    "SKILL.md"
+   ],
+   "not_text": [],
+   "evidence_total": 0,
+   "evidence": []
+  },
+  {
+   "check": "cap.context",
+   "file": "SKILL.md",
+   "line": null,
+   "tier": "skill-full",
+   "kind": "skill",
+   "tokens": 2042,
+   "bytes": 8166,
+   "files": [
+    "SKILL.md"
+   ],
+   "not_text": [],
+   "evidence_total": 0,
+   "evidence": []
+  },
+  {
+   "check": "cap.context",
+   "file": "SKILL.md",
+   "line": null,
+   "tier": "skill-max",
+   "kind": "skill",
+   "tokens": 2042,
+   "bytes": 8166,
+   "files": [
+    "SKILL.md"
+   ],
+   "not_text": [],
+   "outside": [],
+   "evidence_total": 0,
+   "evidence": []
+  }
+ ]
+}

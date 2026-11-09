@@ -1,0 +1,50 @@
+{
+ "stage": "03-graph",
+ "contract": 1,
+ "findings": [
+  {
+   "check": "graph.entry",
+   "file": "README.md",
+   "line": null,
+   "kind": "readme"
+  },
+  {
+   "check": "graph.entry",
+   "file": "SKILL.md",
+   "line": null,
+   "kind": "skill"
+  },
+  {
+   "check": "graph.depth",
+   "file": "LICENSE",
+   "line": null,
+   "depth": 1,
+   "from": "README.md",
+   "via": "static"
+  },
+  {
+   "check": "graph.depth",
+   "file": "NOTICE.md",
+   "line": null,
+   "depth": 1,
+   "from": "README.md",
+   "via": "static"
+  },
+  {
+   "check": "graph.depth",
+   "file": "README.md",
+   "line": null,
+   "depth": 0,
+   "from": null,
+   "via": "static"
+  },
+  {
+   "check": "graph.depth",
+   "file": "SKILL.md",
+   "line": null,
+   "depth": 0,
+   "from": null,
+   "via": "static"
+  }
+ ]
+}

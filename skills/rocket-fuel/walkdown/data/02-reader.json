@@ -1,0 +1,47 @@
+{
+ "stage": "02-reader",
+ "contract": 1,
+ "findings": [
+  {
+   "check": "read.fold",
+   "file": "SKILL.md",
+   "line": 101,
+   "folded": "- **Rounds 1-3:** the strategist proposes and amends; the builder attacks. Each attack must be narrower than the previous one. Stop immediately on convergence.",
+   "removed": [
+    "U+2013"
+   ]
+  }
+ ],
+ "coverage": {
+  "files": 4,
+  "files_read": 4,
+  "bytes": 10391,
+  "bytes_read": 10391,
+  "unread": [],
+  "carriers": {},
+  "markdown_files": 3,
+  "markdown_comments": 0,
+  "language": {
+   "files": 3,
+   "judged": 35,
+   "short": 23
+  },
+  "pdf_pages": {
+   "total": 0,
+   "read": 0,
+   "low_confidence": 0
+  },
+  "html": {
+   "files": 0,
+   "drawn": 0
+  },
+  "optional_tools": {
+   "tesseract": false,
+   "playwright": false
+  },
+  "not_examined": [
+   "image and PDF page OCR (tesseract not installed)",
+   "HTML as a browser draws it (playwright not installed)"
+  ]
+ }
+}

@@ -1,0 +1,57 @@
+{
+ "nodes": [
+  {
+   "path": "LICENSE",
+   "entry": null,
+   "depth": 1
+  },
+  {
+   "path": "NOTICE.md",
+   "entry": null,
+   "depth": 1
+  },
+  {
+   "path": "README.md",
+   "entry": "readme",
+   "depth": 0
+  },
+  {
+   "path": "SKILL.md",
+   "entry": "skill",
+   "depth": 0
+  }
+ ],
+ "edges": [
+  {
+   "from": "README.md",
+   "line": 12,
+   "to": "SKILL.md",
+   "kind": "static",
+   "form": "markdown-link",
+   "text": "SKILL.md",
+   "context": "link"
+  },
+  {
+   "from": "README.md",
+   "line": 16,
+   "to": "NOTICE.md",
+   "kind": "static",
+   "form": "markdown-link",
+   "text": "NOTICE.md",
+   "context": "link"
+  },
+  {
+   "from": "README.md",
+   "line": 18,
+   "to": "LICENSE",
+   "kind": "static",
+   "form": "markdown-link",
+   "text": "LICENSE",
+   "context": "link"
+  }
+ ],
+ "complete": true,
+ "limits": [
+  "v1 limit: manifest versus disk compares skills, agents, and commands, and only the kinds a manifest names; a manifest that names none relies on its folders and is not compared, and plugins a marketplace leaves out are not compared"
+ ]
+}
