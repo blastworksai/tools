@@ -1,4 +1,4 @@
 note: tesseract not installed (no tesseract binary, no pytesseract): images and PDF pages are skipped for OCR (read.divergence skip); images and PDFs with no text layer are listed as read.unread
 note: html render: playwright not installed: HTML files are read with static style only (read.divergence skip, carrier rendered)
 note: v1 limit: the language check (read.language) reads prose only: Markdown, plain text, PDF, DOCX, and OCR text; Markdown code blocks, comments in code, config values, and HTML are not checked for language, and a paragraph under five words is too short to judge
-note: read 4/4 files, 10391/10391 bytes; 0 unread; 0 HTML comments in 3 markdown files
+note: read 4/4 files, 10371/10371 bytes; 0 unread; 0 HTML comments in 3 markdown files

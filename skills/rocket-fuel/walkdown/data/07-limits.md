@@ -1,6 +1,6 @@
-# rocket-fuel run 2026-11-09_e2a595c: not examined
+# rocket-fuel run 2026-11-09_cb838e6: not examined
 
-- Stage 02-reader validation INCOMPLETE (gate 20/31, negative 22/24, recall 1/1; skipped: 13 rows): its zeros are not validated for the skipped checks.
+- Stage 02-reader validation INCOMPLETE (gate 20/31, negative 22/24, recall 1/1; skipped: 13 rows; measured 2026-11-09, same code and fixtures): its zeros are not validated for the skipped checks.
 - (02-reader) tesseract not installed (no tesseract binary, no pytesseract): images and PDF pages are skipped for OCR (read.divergence skip); images and PDFs with no text layer are listed as read.unread
 - (02-reader) html render: playwright not installed: HTML files are read with static style only (read.divergence skip, carrier rendered)
 - (02-reader) v1 limit: the language check (read.language) reads prose only: Markdown, plain text, PDF, DOCX, and OCR text; Markdown code blocks, comments in code, config values, and HTML are not checked for language, and a paragraph under five words is too short to judge

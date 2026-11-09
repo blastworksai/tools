@@ -1,6 +1,6 @@
 # Rocket Fuel
 
-A sanitized, founder-led collaboration protocol with explicitly assigned Visionary and Integrator seats.
+A founder-led collaboration protocol with explicitly assigned Visionary and Integrator seats.
 
 Rocket Fuel is invoke-only. On invocation, it recommends **BASIC** or **FULL**, then asks the Operator which convergence budget to use:
 

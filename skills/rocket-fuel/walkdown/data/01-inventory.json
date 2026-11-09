@@ -7,10 +7,10 @@
    "file": null,
    "line": null,
    "source": "/opt/glitch/workspaces/tools--publish-rocket-fuel/skills/rocket-fuel",
-   "hash": "e2a595c030449451d48875673bded87f516a2d8a26db8b3230bb84314b5ca8dd",
+   "hash": "cb838e6fbce026fbcdc7b0271f4a582efe7544e5014ddb5bc7966abd539161c9",
    "hash_kind": "sha256",
    "files": 4,
-   "bytes": 10391,
+   "bytes": 10371,
    "channel": "directory",
    "untracked": 0,
    "extensions": {
@@ -49,7 +49,7 @@
    "file": "NOTICE.md",
    "line": null,
    "ext": "md",
-   "bytes": 325,
+   "bytes": 316,
    "lines": 4,
    "exec": false,
    "encoding": "utf-8",
@@ -57,16 +57,16 @@
    "type": "text/plain",
    "entry_point": null,
    "exec_source": "stat",
-   "sha256": "4bc66c640ea01611d79252f5faa5f0a37430ad41176dc3911328f5ec6cb790ec",
-   "sha256_lf": "4bc66c640ea01611d79252f5faa5f0a37430ad41176dc3911328f5ec6cb790ec",
-   "sha256_crlf": "8f7db3533acaec46616d8cb8bfb7cdce89537ac500d0eb465f79ee9710074e36"
+   "sha256": "ac653ea71309b4a1dc33db80f696975d0d0942025601c8cb435f9dc4de692239",
+   "sha256_lf": "ac653ea71309b4a1dc33db80f696975d0d0942025601c8cb435f9dc4de692239",
+   "sha256_crlf": "cdf7b6f955afad9ac2482b320c2b5adcab74a36ce6ff11f3f5ae82e6d8ffd02a"
   },
   {
    "check": "inv.file",
    "file": "README.md",
    "line": null,
    "ext": "md",
-   "bytes": 831,
+   "bytes": 820,
    "lines": 18,
    "exec": false,
    "encoding": "utf-8",
@@ -74,9 +74,9 @@
    "type": "text/plain",
    "entry_point": "readme",
    "exec_source": "stat",
-   "sha256": "f6d5914c8e6e7b19cbd0fb95c1bac634898b2a15e213f45a690374156457581d",
-   "sha256_lf": "f6d5914c8e6e7b19cbd0fb95c1bac634898b2a15e213f45a690374156457581d",
-   "sha256_crlf": "cac5b47bca0e64416cb28b81b50183d402762c986f2d2f0be7c152a170646d05"
+   "sha256": "9e8639d74bee34c28c4124d0faddade00d363a2f23d79560f9f4c36c55a8f641",
+   "sha256_lf": "9e8639d74bee34c28c4124d0faddade00d363a2f23d79560f9f4c36c55a8f641",
+   "sha256_crlf": "089a5359a406b36bb4060c3be70cd539dd7218fb3cc564a419639d630c1ecbca"
   },
   {
    "check": "inv.file",
