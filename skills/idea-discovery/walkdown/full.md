@@ -1,16 +1,16 @@
-# idea-discovery: full report
+# idea-discovery-final: full report
 
-/opt/blastworks/worktrees/codexbwai/idea-discovery-walkdown/skills/idea-discovery | retrieved 2026-11-12 | sha256 4dfc88357fe13037a46a3283b547354c6f3522bfb12f4bb14a48d99e1f3991a9
-Run 2026-11-12_4dfc883 | Walkdown 0.3.1+blastworks.1
+idea-discovery | retrieved 2026-11-12 | sha256 33f5afeb5bc6fbdb9291777638fdfb83799f53003f56515689a0096a71ccf4a9
+Run 2026-11-12_33f5afe | Walkdown 0.3.1+blastworks.1
 Static examination only. Nothing executed. Every finding below is a location to look at; none is a verdict. Stage order; nothing is ranked.
 
 ## 1 What ships
 
 1 file, 1 format, 0 script languages. 0 hooks (0 host configs). 0 agent or command definitions. 0 platform manifests.
 
-Validation: PASS (gate 26/26, negative 7/7)
+Validation: PASS (gate 26/26, negative 7/7; measured 2026-11-12, same code and fixtures)
 
-Pin: sha256 4dfc88357fe13037a46a3283b547354c6f3522bfb12f4bb14a48d99e1f3991a9, 1 files, 3,221 bytes.
+Pin: sha256 33f5afeb5bc6fbdb9291777638fdfb83799f53003f56515689a0096a71ccf4a9, 1 files, 4,874 bytes.
 
 Formats: md 1.
 
@@ -20,9 +20,9 @@ Script languages: none.
 
 - SKILL.md (skill)
 
-### Structural census (0)
+### Structural census (1)
 
-None.
+- SKILL.md:32: long-line: line 32: 502 characters (limit 500)
 
 ### Descriptions (always-on text) (1)
 
@@ -60,7 +60,7 @@ Nothing found that ties it to one machine.
 
 1/1 files (100.0%). 0 divergences. 0 lines changed by folding. 0 non-Latin runs. 0 passages in a language other than English. Validation INCOMPLETE: see 7.
 
-Validation: INCOMPLETE (gate 20/31, negative 22/24, recall 1/1; skipped: 13 rows)
+Validation: INCOMPLETE (gate 20/31, negative 22/24, recall 1/1; skipped: 13 rows; measured 2026-11-12, same code and fixtures)
 
 ### Divergences (reading A versus reading B) (0)
 
@@ -90,7 +90,7 @@ None.
 
 1 entry point. 0 orphans. 0 dangling references. 0 dynamic loads: 0 files loaded only through one (named by nothing), 0 files reached only through a mention of a folder or wildcards.
 
-Validation: PASS (gate 11/11, negative 7/7)
+Validation: PASS (gate 11/11, negative 7/7; measured 2026-11-12, same code and fixtures)
 
 Depth histogram (static = reached by direct references; dynamic = only through a load: a folder a config names, a code scan, wildcards in an instruction file; mention = only through a folder or wildcards named elsewhere): static depth 0: 1.
 
@@ -136,9 +136,9 @@ None.
 
 ## 4 What the text asks for
 
-4a 0 · 4b 0 · 4c 1 · 4d 0 hits on 1 lines (1 read by a model); benign share not measured (stage 6 labels did not run). Hosts: 1, 1 not named in the docs. Confirm-first or prohibited actions in instruction text: 1, 1 with no confirmation step, 0 stated as prohibitions. Conditionals: none. Definitions: 0, 0 conflicts, 0 safety-word definitions. Long files with flagged lines: 0, 0 with some past the reader window. Sentences repeated across files: 0, 0 flagged. Lines that look like committed secrets: 0.
+4a 0 · 4b 0 · 4c 1 · 4d 0 hits on 1 lines (1 read by a model); benign share not measured (stage 6 labels did not run). Hosts: 1, 1 not named in the docs. Confirm-first or prohibited actions in instruction text: 1, 1 with no confirmation step, 0 stated as prohibitions. Conditionals: 1 error. Definitions: 0, 0 conflicts, 0 safety-word definitions. Long files with flagged lines: 0, 0 with some past the reader window. Sentences repeated across files: 0, 0 flagged. Lines that look like committed secrets: 0.
 
-Validation: PASS (gate 153/153, negative 121/121, recall 43/43)
+Validation: PASS (gate 153/153, negative 121/121, recall 43/43; measured 2026-11-12, same code and fixtures)
 
 Every hit is a locator. Benign share not measured here; stage 6 labels, when run, read the lines a model sees (section 6). Audience is who the file addresses, by path.
 
@@ -200,7 +200,7 @@ None.
 
 Patterns: J.confirm-first 1
 
-- SKILL.md:33 [J.confirm-first] (model): `Do not diagnose, pressure, promise success, invent demand or request unnecessary sensitive information. Do not contact people, publish, spend, connect tools or change external systems without explicit permission for that action.`
+- SKILL.md:46 [J.confirm-first] (model): `Do not pressure, promise success, invent demand or request unnecessary sensitive information. Do not contact people, publish, spend, connect tools or change external systems without explicit permission for that action.`
 
 ### 4d Talking to the human
 
@@ -210,19 +210,19 @@ None.
 
 ### Tables
 
-Hosts: 1, 1 not named in the docs. Confirm-first or prohibited actions in instruction text: 1, 1 with no confirmation step, 0 stated as prohibitions. Conditionals: none. Definitions: 0, 0 conflicts, 0 safety-word definitions. Long files with flagged lines: 0, 0 with some past the reader window. Sentences repeated across files: 0, 0 flagged. Lines that look like committed secrets: 0.
+Hosts: 1, 1 not named in the docs. Confirm-first or prohibited actions in instruction text: 1, 1 with no confirmation step, 0 stated as prohibitions. Conditionals: 1 error. Definitions: 0, 0 conflicts, 0 safety-word definitions. Long files with flagged lines: 0, 0 with some past the reader window. Sentences repeated across files: 0, 0 flagged. Lines that look like committed secrets: 0.
 
 ### Endpoints (hosts named anywhere; documented = named in the docs) (1)
 
-- nav.al: not in the docs, other; 1 instructions; first at SKILL.md:37
+- nav.al: not in the docs, other; 1 instructions; first at SKILL.md:50
 
 ### Confirm-first and prohibited actions in instruction text (1)
 
-- SKILL.md:33: confirm-first, `publish`, no confirmation step (negated: without asking): `Do not diagnose, pressure, promise success, invent demand or request unnecessary sensitive information. Do not contact people, publish, spend, connect tools or change external systems without explicit permission for that action.`
+- SKILL.md:46: confirm-first, `publish`, no confirmation step (negated: without asking): `Do not pressure, promise success, invent demand or request unnecessary sensitive information. Do not contact people, publish, spend, connect tools or change external systems without explicit permission for that action.`
 
-### Conditionals (0)
+### Conditionals (1)
 
-None.
+- SKILL.md:34: error: if `after understanding the problem` then `Suggest different forms only for example, a reusable resource, a manual workflow, a service, a prototype or software.`
 
 ### Definitions (0)
 
@@ -296,7 +296,7 @@ No unfinished text, dated claims, pinned model IDs, or older tool names.
 
 Can read your data: no · Can take outside input: no · Can send data out: no Install grants: context-injection.
 
-Validation: PASS (gate 81/81, negative 24/24)
+Validation: PASS (gate 81/81, negative 24/24; measured 2026-11-12, same code and fixtures)
 
 A map of capability, derived from stages 1 to 4; it reaches no verdict. A Bash grant is counted as private-data access and execute posture; on its own it does not count as external communication.
 
@@ -322,17 +322,17 @@ Bytes at load: descriptions 171 (1, exact).
 Expected context: 32,000 tokens (a line for 200,000 beside it). Tokens are estimated from size: about 4 bytes of English text per token; text in other scripts runs high.
 
 - Every session, once installed (descriptions, hooks): 43 tokens, under 1% of 32,000, under 1% of 200,000
-- When the largest skill runs: 806 tokens, 3% of 32,000, under 1% of 200,000
-- That skill and everything it names: 806 tokens, 3% of 32,000, under 1% of 200,000
+- When the largest skill runs: 1,219 tokens, 4% of 32,000, under 1% of 200,000
+- That skill and everything it names: 1,219 tokens, 4% of 32,000, under 1% of 200,000
 - The largest is `SKILL.md`, of 1 skill, agent, or command.
 
 Every skill, agent, or command, by tier (tokens):
 
-- SKILL.md: runs 806, with what it names 806, with wildcard loads 806
+- SKILL.md: runs 1,219, with what it names 1,219, with wildcard loads 1,219
 
-#### Loads into the AI: 1 file, 3.1 KB, 806 tokens
+#### Loads into the AI: 1 file, 4.8 KB, 1,219 tokens
 
-- `SKILL.md`: skills, agents, and commands, 3.1 KB, 806 tokens
+- `SKILL.md`: skills, agents, and commands, 4.8 KB, 1,219 tokens
 
 #### Used another way: 0 files, 0 bytes, 0 tokens
 
@@ -384,7 +384,7 @@ Every tool granted is one the words ask for, and nothing asks for a tool it lack
 
 2 questions (1 labeling, 1 relational). Packet only: no model read (06-packet.md in the run folder).
 
-Validation: PASS (gate 125/125, negative 11/11, recall 0/165; skipped: 124 rows)
+Validation: PASS (gate 125/125, negative 11/11, recall 0/165; skipped: 124 rows; measured 2026-11-12, same code and fixtures)
 
 Questions a pattern cannot settle, and the answers of the backends named here. Every answer is a located observation; none changes a finding in sections 1 to 5.
 
@@ -392,14 +392,14 @@ Questions a pattern cannot settle, and the answers of the backends named here. E
 
 ### Questions
 
-- SKILL.md:33 [label] Does this line tell the reader to do the matched action, tell them not to, describe it, or quote / give an example of it?
+- SKILL.md:46 [label] Does this line tell the reader to do the matched action, tell them not to, describe it, or quote / give an example of it?
     - soft.label: skipped (no labeling backend)
 - (repo) [relational] Describe, as capability and not intent, how these three capabilities could combine in this artifact, citing the evidence given.
     - soft.read: skipped (no relational backend)
 
 ## 7 Not examined
 
-- Stage 02-reader validation INCOMPLETE (gate 20/31, negative 22/24, recall 1/1; skipped: 13 rows): its zeros are not validated for the skipped checks.
+- Stage 02-reader validation INCOMPLETE (gate 20/31, negative 22/24, recall 1/1; skipped: 13 rows; measured 2026-11-12, same code and fixtures): its zeros are not validated for the skipped checks.
 - (02-reader) tesseract not installed (no tesseract binary, no pytesseract): images and PDF pages are skipped for OCR (read.divergence skip); images and PDFs with no text layer are listed as read.unread
 - (02-reader) html render: playwright not installed: HTML files are read with static style only (read.divergence skip, carrier rendered)
 - (02-reader) v1 limit: the language check (read.language) reads prose only: Markdown, plain text, PDF, DOCX, and OCR text; Markdown code blocks, comments in code, config values, and HTML are not checked for language, and a paragraph under five words is too short to judge
