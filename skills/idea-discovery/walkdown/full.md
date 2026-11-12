@@ -1,7 +1,7 @@
-# idea-discovery-final: full report
+# idea-discovery-release: full report
 
-idea-discovery | retrieved 2026-11-12 | sha256 33f5afeb5bc6fbdb9291777638fdfb83799f53003f56515689a0096a71ccf4a9
-Run 2026-11-12_33f5afe | Walkdown 0.3.1+blastworks.1
+idea-discovery | retrieved 2026-11-12 | sha256 2f2f9421981d795bee48a6b0472c50736936b510d8fb1cdb4c423f3cbffdc303
+Run 2026-11-12_2f2f942 | Walkdown 0.3.1+blastworks.1
 Static examination only. Nothing executed. Every finding below is a location to look at; none is a verdict. Stage order; nothing is ranked.
 
 ## 1 What ships
@@ -10,7 +10,7 @@ Static examination only. Nothing executed. Every finding below is a location to 
 
 Validation: PASS (gate 26/26, negative 7/7; measured 2026-11-12, same code and fixtures)
 
-Pin: sha256 33f5afeb5bc6fbdb9291777638fdfb83799f53003f56515689a0096a71ccf4a9, 1 files, 4,874 bytes.
+Pin: sha256 2f2f9421981d795bee48a6b0472c50736936b510d8fb1cdb4c423f3cbffdc303, 1 files, 4,742 bytes.
 
 Formats: md 1.
 
@@ -322,17 +322,17 @@ Bytes at load: descriptions 171 (1, exact).
 Expected context: 32,000 tokens (a line for 200,000 beside it). Tokens are estimated from size: about 4 bytes of English text per token; text in other scripts runs high.
 
 - Every session, once installed (descriptions, hooks): 43 tokens, under 1% of 32,000, under 1% of 200,000
-- When the largest skill runs: 1,219 tokens, 4% of 32,000, under 1% of 200,000
-- That skill and everything it names: 1,219 tokens, 4% of 32,000, under 1% of 200,000
+- When the largest skill runs: 1,186 tokens, 4% of 32,000, under 1% of 200,000
+- That skill and everything it names: 1,186 tokens, 4% of 32,000, under 1% of 200,000
 - The largest is `SKILL.md`, of 1 skill, agent, or command.
 
 Every skill, agent, or command, by tier (tokens):
 
-- SKILL.md: runs 1,219, with what it names 1,219, with wildcard loads 1,219
+- SKILL.md: runs 1,186, with what it names 1,186, with wildcard loads 1,186
 
-#### Loads into the AI: 1 file, 4.8 KB, 1,219 tokens
+#### Loads into the AI: 1 file, 4.6 KB, 1,186 tokens
 
-- `SKILL.md`: skills, agents, and commands, 4.8 KB, 1,219 tokens
+- `SKILL.md`: skills, agents, and commands, 4.6 KB, 1,186 tokens
 
 #### Used another way: 0 files, 0 bytes, 0 tokens
 

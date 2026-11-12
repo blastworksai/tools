@@ -35,13 +35,13 @@ Help them distinguish the underlying problem from a possible solution. Suggest d
 
 ### Select and test
 
-Reflect the candidate ideas with their reasons, uncertainties and constraints, then ask the person which they want to pursue. A personally useful idea is enough; commercial potential is optional. Ask how they would like AI to help, such as research, writing, a mockup, a workflow, code or a prototype. Suggest a simpler tool if it fits better.
+Present a short list of ideas with the person's description, intended user, motivation, unknowns and a possible first experiment. Ask which, if any, they want to pursue. A personally useful idea is enough; commercial potential is optional. Ask how they would like AI to help, such as research, writing, a mockup, a workflow, code or a prototype. Suggest a simpler tool if it fits better.
 
 Agree on one small, reversible experiment within their stated limits. Define what they want to learn, what they will do and what would count as a useful observation. Distinguish a suggestion from an agreed definition of done. Do not claim an untested idea is validated or promise that an experiment will establish demand.
 
 ## Outcome
 
-Present a short list of ideas: the person's description, intended user, motivation, unknowns and a possible first experiment. The person chooses whether to pursue any of them. For the chosen idea, summarize the desired learning, next step, definition of done, chosen limits and open questions; ask for correction before treating it as agreed.
+For the chosen idea, summarize the desired learning, next step, definition of done, chosen limits and open questions; ask for correction before treating it as agreed.
 
 Do not pressure, promise success, invent demand or request unnecessary sensitive information. Do not contact people, publish, spend, connect tools or change external systems without explicit permission for that action.
 
