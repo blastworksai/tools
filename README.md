@@ -19,7 +19,7 @@ Where available, follow the Walkdown link in the table for the results.
 | [TERN PLUGIN DEVELOPMENT](skills/tern-plugin-development/README.md) | Create, test, debug, and package Tern plugins with isolated integration tests and pure Luau modules. | [results](https://blastworksai.github.io/tools/skills/tern-plugin-development/walkdown/summary.html) |
 | [GCC SKILL REVIEW](skills/gcc-skill-review/README.md) | Find the weak step in your own skill: map its steps, check each one over five fresh runs, fix the one that fails and prove the fix. Method by Kem, [Glitch Cat Club](https://glitchcatclub.com) · [@kem_glitch](https://www.instagram.com/kem_glitch/). | [results](https://blastworksai.github.io/tools/skills/gcc-skill-review/walkdown/summary.html) |
 | [GLITCH IDEA](skills/glitch-idea/README.md) | Capture a software idea, explore it step by step in a local browser page with your agent, and hand a planning prompt to `/glitch-plan`. Opens on your own computer over SSH, docked in Tern. | [results](https://blastworksai.github.io/tools/skills/glitch-idea/walkdown/summary.html) |
-| [IDEA DISCOVERY](skills/idea-discovery/SKILL.md) | Discover ideas worth exploring with AI through a guided conversation. | Not published |
+| [IDEA DISCOVERY](skills/idea-discovery/SKILL.md) | Discover ideas worth exploring with AI through a guided conversation. | [results](https://blastworksai.github.io/tools/skills/idea-discovery/walkdown/summary.html) |
 
 ## PLUGINS
 
