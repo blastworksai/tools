@@ -66,7 +66,7 @@ Where this document says "not yet qualified" it means exactly that: nothing has 
 - **PyYAML 6.0.3 (MIT)**, pinned in `glitch-idea/requirements.txt`, inside the runtime interpreter's environment.
 - A browser on the machine you sit at (the operator's own computer).
 - **pip**, which you run yourself when the installer asks for PyYAML.
-- No SSH client or SSH keys are needed. A browser on another computer than the service needs a standing tunnel you set up once (see "When the browser is on another computer").
+- The skill itself uses no SSH client and no SSH keys. A browser on another computer than the service needs a standing tunnel you set up once, with whatever client and login that tunnel uses (see "When the browser is on another computer").
 - Privacy: Discovery's prior-art question searches the web with your agent's own web tool, and the query describes your idea. Everything else stays on 127.0.0.1.
 
 The installer never downloads anything.

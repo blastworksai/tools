@@ -89,7 +89,7 @@ If `runtime_prerequisite` also appears with a message about creating the venv, y
 Pull the newer source and rerun the same install command.
 
 - An identical tree is `unchanged`; a different one is `upgraded`.
-- The installed `config.json` is preserved.
+- The installed `config.json` is preserved, except the retired SSH settings (`ssh_client`, `ssh_server_port`, `browser_mode: "ssh"`), which are dropped with one notice.
   A recognised installation with a missing or invalid `config.json` or `store_path` is refused so that the durable store never changes by accident.
 - The previous skill moves to `<skills directory>/.glitch-idea-backups/<UTC timestamp>-<id>/` and the result reports it as `backup`.
 - To roll back, stop any running service, remove the installed `glitch-idea` folder and move the backup back under its original name.
@@ -147,7 +147,8 @@ Each forward therefore uses the seat's port number on your computer and on the r
 A different local port is refused.
 
 **The click.**
-In a Tern pane, `browser-open` without `--browser` opens the page for you (5.3).
+In a Tern pane, `browser-open` without `--browser` opens the page for you when `browser_mode` is unset or `"tern"` (5.3).
+A seat set to `link` gets the link there too; pass `--browser tern` to open the page.
 In any other terminal, run it without `--browser` on a seat set to `link`, or with `--browser link`.
 It prints one link, `http://127.0.0.1:<port>/#pair=<code>`.
 Click it.

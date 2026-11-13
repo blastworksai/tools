@@ -13,7 +13,7 @@ import stat
 import subprocess
 import time
 
-# The whole pairing-URL grammar, checked locally AND by both remote scripts before any opener runs.
+# The whole pairing-URL grammar, checked here, by the idea service and by the Tern plugin before the page opens.
 PAIR_URL_PATTERN = (r'http://127\.0\.0\.1:([1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])'
                     r'/(\?binding=binding_[0-9a-f]{32})?#pair=[0-9a-f]{32}')
 URL_SHAPE = re.compile(PAIR_URL_PATTERN)
