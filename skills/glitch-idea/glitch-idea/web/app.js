@@ -365,10 +365,10 @@ export function startApp(api = new IdeaApi()) {
     save.setAttribute('title', text);
   }
 
-  // A new idea starts with the configured default workspace, once; the fields stay editable and typed text is never replaced.
+  // A new idea starts with the asking session's project, else the configured default workspace, once; the fields stay editable and typed text is never replaced.
   function prefillWorkspace() {
     if (flow.state?.idea_id) { flow.workspacePrefilled = false; return; }
-    const chosen = flow.state?.default_workspace;
+    const chosen = flow.state?.session_workspace ?? flow.state?.default_workspace;
     const current = flow.buffers.capture?.workspace;
     if (flow.workspacePrefilled || flow.inputLocked() || !chosen || typeof chosen.name !== 'string' || typeof chosen.path !== 'string' ||
         !chosen.name || !chosen.path || (current && (current.name || current.path))) return;

@@ -419,6 +419,7 @@ authorized and the store can be read; auth failures must not reveal idea state.
 A moved or delivered idea is read-only: every browser save for it is refused `idea_moved` (409) with `details.home`.
 `GET /state` and the idea list still serve it, carrying `lifecycle`, `home` and `delivered_ref`, and the list has a `lifecycles` map.
 The capture state carries the configured `default_workspace` (or null) so the page can prefill the editable workspace field.
+The state also always carries `session_workspace`: `null`, or `{name, path}` for the project the terminal that opened this one session was working in. It is a prefill only and the page prefers it over `default_workspace`.
 
 Headers: `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`,
 `Referrer-Policy: no-referrer`, CSP self-only/no inline or eval scripts,

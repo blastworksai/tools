@@ -34,7 +34,7 @@ Each item sketched in Exploration may name an inner method, or none (it then fol
 
 - Any overall method may run an item as Experiment First.
 - Full Plan Up Front items stay overall: no inner method.
-- BMAD is an overall method only: it is not an inner method.
+- Any overall method may run an item as BMAD when that item needs its own brief, requirements and architecture agreed before it is built.
 
 For Fixed Budget work, obtain the operator's cap, unit and boundary in Exploration instead of inventing them. For Experiment First work, ask in Exploration for the question, the evidence, what counts as success and when to stop. For experiments, distinguish customer/value hypotheses from technical feasibility, and label throwaway work versus production-quality exploratory code. Specify the evidence that would stop or redirect work. Method changes require the operator's decision when new evidence invalidates the old assumptions.
 

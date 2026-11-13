@@ -42,6 +42,7 @@ class TrustedContext:
     session_id: str
     selected_idea_id: str | None = None
     asset_inventory: dict | None = None  # Detached verified data; no Store/file capability.
+    session_workspace: dict | None = None  # This session's Capture prefill (dict(name, path)); never moves an idea.
 
 
 @dataclass(frozen=True)
@@ -259,15 +260,8 @@ def _agent_overlay(value, live, idea):
     return copy.deepcopy(value)
 
 
-def default_workspace(value):
-    """Validate the optional trusted default_workspace setting: None, or dict(name, path).
-
-    The path must be absolute and an existing folder; anything else is a plain config error.
-    Nothing here picks a folder: the owner names it in config.json.
-    """
-    if value is None:
-        return None
-    bad = lambda why: IdeaError('invalid_config', 'default_workspace '+why)
+def _workspace_object(value, bad):
+    # One rule set for a trusted workspace object; `bad(why)` builds the error each caller owns.
     if type(value) is not dict or set(value) != {'name', 'path'}:
         raise bad('must be an object with exactly name and path')
     name, path = value['name'], value['path']
@@ -278,6 +272,30 @@ def default_workspace(value):
     if not Path(path).is_dir():
         raise bad('path must be an existing folder: '+path)
     return dict(name=name, path=path)
+
+
+def default_workspace(value):
+    """Validate the optional trusted default_workspace setting: None, or dict(name, path).
+
+    The path must be absolute and an existing folder; anything else is a plain config error.
+    Nothing here picks a folder: the owner names it in config.json.
+    """
+    if value is None:
+        return None
+    return _workspace_object(value, lambda why: IdeaError('invalid_config', 'default_workspace '+why))
+
+
+def session_workspace(value):
+    """Validate one session's Capture prefill: None, or dict(name, path) under the default_workspace rules.
+
+    The folder must also be readable. Anything else is workspace_unavailable, raised before a session exists.
+    """
+    if value is None:
+        return None
+    result = _workspace_object(value, lambda why: IdeaError('workspace_unavailable', 'Session workspace '+why))
+    if not os.access(result['path'], os.R_OK | os.X_OK):
+        raise IdeaError('workspace_unavailable', 'Session workspace path must be a readable folder: '+result['path'])
+    return result
 
 
 class Service:
@@ -428,6 +446,7 @@ class Service:
                           resume=dict(required=True,reason='agent_disconnected'),**projection)
             result.update(copy.deepcopy(handoff_view))
             result.update(default_workspace=copy.deepcopy(self.config.get('default_workspace')),
+                          session_workspace=copy.deepcopy(self.context.session_workspace),
                           lifecycle=None, home=None, delivered_ref=None, review_cause=None)
             if idea is not None and projection['steps']['assess']['status'] == 'review-needed' and idea['revisions'][-1]['action'] == 'import':
                 result['review_cause'] = 'imported'  # the last revision is the import's own: the cause stands until Assess is accepted again
