@@ -24,6 +24,14 @@ import time
 import tempfile
 from urllib.parse import urlsplit
 
+# The owner child starts here, not in idea.py: a shared install is read-only at run time, so write no
+# bytecode into it. Set before any sibling module is imported.
+try:
+    if json.loads((Path(__file__).resolve().parent.parent/'.glitch-idea-install.json').read_bytes()[:65536]).get('shared') is True:
+        sys.dont_write_bytecode = True
+except Exception:
+    pass
+
 from idea_bridge import BridgeError, BridgeServer, Response, check
 from idea_domain import IdeaError, check_id, decode, encoded, require
 from idea_native import (open_browser, close_browser_page, browser_page_pairing, navigate_browser_page,
