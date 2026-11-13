@@ -12,7 +12,7 @@ import re
 
 from idea_domain import (MAX_INPUT, MAX_STATE, METHOD_CONTRACTS, METHOD_LABELS, assessment, check_id,
                          integer, require, text)
-from idea_workflow import (DEPENDENCIES, STEP_ORDER, derive_state, empty_workflow,
+from idea_workflow import (DEPENDENCIES, MAX_SKETCH, STEP_ORDER, derive_state, empty_workflow,
                            source_digest, validate_workflow)
 from idea_assessment import validate_actual_position
 from idea_asset_evidence import MAX_FILE, MAX_SET, MAX_MEMBERS, MIME_EXTENSIONS
@@ -353,6 +353,20 @@ def _contract_lines(method):
             'Earns the next step: '+contract['earns_next']]
 
 
+TITLE_MAX = 200
+
+
+def _one_line(title, position):
+    """A sketch title as one line of at most TITLE_MAX characters; blank titles read as their position.
+
+    Validation allows line breaks in a title, so it is flattened here: a title can never start a prompt section.
+    """
+    line = ' '.join(str(title).split()) if isinstance(title, str) else ''
+    if not line:
+        return str(position)
+    return line if len(line) <= TITLE_MAX else line[:TITLE_MAX-1]+'\u2026'
+
+
 def method_section(accepted):
     """The prompt's Method section from the accepted overall method and sketched items' inner methods."""
     method = accepted['method']['fields'].get('selection')
@@ -361,11 +375,27 @@ def method_section(accepted):
     lines = ['## Method']+_contract_lines(method)
     if method in METHOD_CONTRACTS:
         lines.append(METHOD_INSTRUCTION)
-    for item in accepted['exploration']['fields'].get('sketch') or []:
+    for position, item in enumerate(accepted['exploration']['fields'].get('sketch') or [], 1):
         inner = item.get('method')
         if inner in METHOD_LABELS:
-            lines += ['', 'Item: '+item['title']]+_contract_lines(inner)
+            lines += ['', 'Item: '+_one_line(item.get('title'), position)]+_contract_lines(inner)
     return '\n'.join(lines)+'\n\n'
+
+
+def _worst_section_chars():
+    contract = max(len('\n'.join(_contract_lines(m))) for m in METHOD_LABELS)+1
+    item = len('\nItem: ')+TITLE_MAX+1+contract
+    return len('## Method\n')+contract+len(METHOD_INSTRUCTION)+1+MAX_SKETCH*item+2
+
+
+# The Method section is new to the read-time response, which is bounded as canonical JSON (idea_store
+# _handoff_http_preflight, HandoffProvider.project and the publish replay in idea_handoff). A packet admitted
+# under the old bound (size_old <= MAX_INPUT) must not start failing because of the section. The section is
+# at most _worst_section_chars() characters (titles cut to TITLE_MAX, at most MAX_SKETCH items), and one
+# character costs at most 6 bytes in canonical JSON (\u00XX for a control character; 4 for an astral one).
+# So size_new <= size_old + METHOD_SECTION_BUDGET <= MAX_INPUT + METHOD_SECTION_BUDGET, and those three
+# bounds admit exactly that much (MAX_INPUT stays 1 MiB for every other response).
+METHOD_SECTION_BUDGET = 6*_worst_section_chars()
 
 
 def render_prompt(record, packet_path):

@@ -48,14 +48,15 @@ class MethodTablesAgree(unittest.TestCase):
     def test_contracts_are_the_one_source_for_labels_and_the_methods_table(self):
         self.assertEqual(tuple(domain.METHOD_CONTRACTS), SELECTABLE)
         table = METHODS_MD.read_text(encoding='utf-8').split('## Four development methods', 1)[1].split('\n## ', 1)[0]
-        rows = {}
+        rows = []
         for line in table.splitlines():
             cells = [c.strip() for c in line.strip().strip('|').split('|')]
             found = re.fullmatch(r'(.+) \(`([a-z-]+)`\)', cells[0]) if len(cells) == 4 else None
             if found:
-                rows[found.group(2)] = (found.group(1), cells[1], cells[2])
-        self.assertEqual(rows, {m: (c['label'], c['fixed_now'], c['earns_next'])
-                                for m, c in domain.METHOD_CONTRACTS.items()})
+                rows.append((found.group(2), found.group(1), cells[1], cells[2]))
+        # An ordered list, so a duplicated or reordered row is a difference rather than silently overwritten.
+        self.assertEqual(rows, [(m, c['label'], c['fixed_now'], c['earns_next'])
+                                for m, c in domain.METHOD_CONTRACTS.items()])
 
     def test_domain_accepts_exactly_the_readable_set(self):
         base = dict(outcome=None, scope=None, scope_reason=None, alternatives=[], method=None, method_reason=None,

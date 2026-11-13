@@ -26,9 +26,9 @@ def _exact(value,fields):
     require(type(value) is dict and set(value) == set(fields), 'Unexpected handoff fields')
 
 
-def _bounded(value,code):
+def _bounded(value,code,extra=0):
     try:
-        _request_json(value)
+        _request_json(value,extra=extra)
     except IdeaError as exc:
         if exc.code == 'too_large':
             raise IdeaError(code,'Complete response exceeds capacity') from exc
@@ -65,7 +65,7 @@ class HandoffProvider:
             return dict(handoff=None,handoff_status=dict(available=False,code='not_ready'))
         entry = entries[-1]
         result = dict(handoff=self._public(entry),handoff_status=self._current(state,idea,entry['record']))
-        return copy.deepcopy(_bounded(result,'handoff_capacity'))
+        return copy.deepcopy(_bounded(result,'handoff_capacity',codec.METHOD_SECTION_BUDGET))
 
     def __call__(self,state,idea,context=None):
         projected = self.project(state,idea,context)
@@ -105,7 +105,7 @@ class HandoffProvider:
             delivery = dict(copy.deepcopy(result),handoff=self._public(entry),handoff_current=status['available'])
             if not status['available']:
                 delivery['code'] = 'historical_handoff'
-            return _bounded(delivery,'handoff_capacity')
+            return _bounded(delivery,'handoff_capacity',codec.METHOD_SECTION_BUDGET)
 
     def publish(self,context,payload):
         _request_json(payload)
