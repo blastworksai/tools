@@ -151,8 +151,10 @@ A single-account install, and every Windows install, is unchanged.
    ```
 
    `--shared` never creates or changes a store.
-   It only reads: it refuses a store that does not exist, a root that is not like that, and any existing content its group could not use (a folder that is not group rwx and setgid, a file that is not group-readable, a file or folder in another group, a symlink), naming the count, up to five paths and the commands to run.
-   To convert an existing single-account store, run these as its owner, then rerun the install:
+   It makes one read-only check of the store's top folder: it must exist, be a real folder (not a symlink), be setgid with group read, write and execute (`2770`), and be in a group the installing account belongs to.
+   Otherwise it refuses and prints the commands.
+   It does not look inside the store.
+   Converting an existing single-account store is your step: run these as its owner before the install.
 
    ```bash
    chgrp -R <shared group> /path/to/ideas
@@ -162,6 +164,7 @@ A single-account install, and every Windows install, is unchanged.
    ```
 
    The last line keeps sealed read-only evidence (the runtime writes those files `440` in a shared store) readable by the group without making them writable.
+   The installer cannot prove the store's contents are usable by the group; the first run as a second account is the proof.
 3. **Install once** into a folder whose group is the group the accounts share:
 
    ```bash
