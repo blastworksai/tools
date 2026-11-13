@@ -66,7 +66,7 @@ Where this document says "not yet qualified" it means exactly that: nothing has 
 - **PyYAML 6.0.3 (MIT)**, pinned in `glitch-idea/requirements.txt`, inside the runtime interpreter's environment.
 - A browser on the machine you sit at (the operator's own computer).
 - **pip**, which you run yourself when the installer asks for PyYAML.
-- Optional, for SSH mode (the browser is on another computer than the one running the service): an SSH client and SSH keys in each direction; the detail is in the runbook.
+- The skill itself uses no SSH client and no SSH keys. A browser on another computer than the service needs a standing tunnel you set up once, with whatever client and login that tunnel uses (see "When the browser is on another computer").
 - Privacy: Discovery's prior-art question searches the web with your agent's own web tool, and the query describes your idea. Everything else stays on 127.0.0.1.
 
 The installer never downloads anything.
@@ -140,16 +140,17 @@ Supported keys, and only these:
 | `runtime_python` | Absolute path of the runtime interpreter. |
 | `browser_port` | `null` or absent (random port), or an integer from 1024 to 65535. The idea page listens on this fixed loopback port. |
 | `prototype_port` | The same bounds, for `prototype-serve`. When both are set they must differ. |
-| `browser_mode` | `null` or absent (unset), `"link"`, `"system"` or `"ssh"`. The default for `browser-open` when `--browser` is omitted. `"ssh"` needs `browser_port`. |
-| `ssh_client` | Optional. The ssh config alias of your computer, for SSH mode; overrides detection. |
-| `ssh_server_port` | Optional. The ssh port of the machine running the service, for SSH mode (default 22). |
+| `browser_mode` | `null` or absent (unset), `"link"`, `"system"` or `"tern"`. The default for `browser-open` when `--browser` is omitted. |
 | `default_workspace` | Optional `{"name": ..., "path": ...}`: an absolute, existing folder that capture prefills (the field stays editable). A configured folder that does not exist is an `invalid_config` error. |
 
 Unset keeps random ports: with `browser_port` and `prototype_port` null or absent, each launch picks a fresh port as before.
 Set them when a standing tunnel must forward the same port every time (see the runbook, "Tern on a remote host").
-With `browser_mode` unset, `browser-open` needs `--browser` and fails with `browser_mode_required` without it.
+With `browser_mode` unset and outside a Tern pane, `browser-open` needs `--browser` and fails with `browser_mode_required` without it.
 `--browser link` prints a click-to-open link instead of opening a tab.
 If the configured port is taken, launch fails with `port_in_use` (or `prototype_port_in_use`) and never falls back to another port.
+
+A config that still carries the retired keys `ssh_client` or `ssh_server_port`, or `browser_mode: "ssh"`, is read as if they were absent: the two keys are ignored and the mode is unset.
+The helper does this at every launch, and the installer removes them from the file and prints one line saying so.
 
 Unknown keys, a key present with `null` for `runtime_root` or `runtime_python` (omit the key instead), a relative or symlinked `runtime_root`, and over-limit values are refused with an error rather than quietly dropped.
 That validation happens when the installer runs: the helper itself reads only the keys it uses and ignores others, so after editing an installed `config.json` by hand, rerun the installer to validate it.
@@ -188,25 +189,29 @@ idea_tool=~/.codex/skills/glitch-idea/scripts/idea.py
 - The runtime root (default `.local/state/glitch-idea` under your account's home directory as the system records it, which on macOS and Linux is the password-database home, not `$HOME`) must be owned by you with mode exactly 0700, and no component of it may be a symlink.
   A looser directory is refused with `runtime_not_private`; keep it free of ACLs as well.
 
-### When the browser is on another computer (SSH)
+### When the browser is on another computer
 
 The browser opens on the computer you sit at, but the service listens on the machine where the helper ran.
-SSH mode (`browser-open --browser ssh`, or `browser_mode: "ssh"` in the configuration) finds your computer, checks the connection both ways and opens the page on it for you.
-The one-time link travels over ssh and never appears in a command line.
-On Windows with Tern and the Glitch Idea plugin, the page opens in a Tern browser pane above the focused pane; with no ready plugin you are handed the link instead. On macOS and Linux it opens in your default browser.
-The focused pane is the pane with focus in your Tern window, normally the one you just typed `/glitch-idea` in. Tern gives no way to tell which window pane a remote program runs in, so if you click another pane before the page opens, it lands above that one.
+The page port must be reachable from your computer under the same port number.
 
 Setup, once per seat:
 
 1. Give the seat a fixed `browser_port` (and `prototype_port` for prototypes).
-2. Keep a standing tunnel running on your computer that forwards that same port to the machine (`ssh -N`, left running).
-3. Give the account that runs the helper an ssh key that your computer accepts.
+2. Keep a standing tunnel running on your computer that forwards that same port to the machine, left running.
 
-If a direction is not working, the helper stops and names it (`ssh_no_key`, `ssh_tunnel_down` and the others; see the runbook, section 5.2).
-It never asks you to type a throwaway tunnel line.
-If several computers fit, set `ssh_client` to the ssh config alias of yours.
-With only a standing tunnel and no key back to your computer, use link mode (`browser_mode: "link"`): it prints a link and you click it.
-`--browser system` is for a browser on the same computer as the helper; it is not an SSH substitute.
+Then, inside a Tern pane, run `browser-open` with no `--browser` (see "Tern pane" below).
+In any other terminal use link mode (`browser_mode: "link"`): it prints a link and you click it.
+The helper never asks you to type a throwaway tunnel line.
+`--browser system` is for a browser on the same computer as the helper; it does not reach another computer.
+
+### Tern pane
+
+Inside a Tern pane, `browser-open` opens the page above or beside the pane that ran it (`--browser tern`, or `browser_mode: "tern"`).
+With neither the flag nor `browser_mode` set, the helper picks this road by itself when it runs inside a Tern pane.
+An explicit `browser_mode` always wins.
+No link is shown on success.
+It needs the Glitch Idea Tern plugin on the Tern that shows the window.
+If the page cannot be opened, you get a ready link to click and one plain reason (see the runbook, "Tern pane").
 
 ### Orca
 

@@ -26,7 +26,6 @@ from types import MappingProxyType
 from urllib.parse import parse_qsl, unquote_to_bytes, urlsplit
 
 import idea_asset_evidence as asset_codec
-from idea_runtime import expected_tunnel_proof
 from idea_domain import IdeaError, MAX_INPUT, MAX_STATE
 from idea_steps import ROUTE_SPECS, TrustedRoute, load_registry
 
@@ -66,7 +65,8 @@ STATIC = {
     **{'/steps/' + name + '.js': ('steps/' + name + '.js', 'text/javascript; charset=utf-8')
        for name in ('discovery', 'exploration', 'method', 'visualize', 'assess', 'review')},
 }
-CONTROL_PATHS = frozenset('/control/v1/' + name for name in ('probe', 'stop', 'binding-open', 'agent-credentials', 'binding-discard', 'binding-list'))
+CONTROL_PATHS = frozenset('/control/v1/' + name for name in ('probe', 'stop', 'binding-open', 'agent-credentials', 'binding-discard', 'binding-list',
+                                                              'tern-offer', 'tern-state'))
 AGENT_PATHS = frozenset('/agent/v1/' + name for name in ('events', 'respond', 'fill', 'session-close', 'asset'))
 # The agent asset door takes exactly these types; the bytes are checked again by the store write path.
 AGENT_ASSET_TYPES = frozenset(('image/png', 'application/zip'))
@@ -81,6 +81,67 @@ SECURITY_HEADERS = {
     'Referrer-Policy': 'no-referrer',
     'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' blob:; object-src 'none'; frame-ancestors 'none'; base-uri 'none'",
 }
+
+
+# The one pairing-link grammar the Tern pane road accepts (identical to idea_tern.PAIR_URL_PATTERN; a test keeps them equal).
+TERN_PAIR_URL = (r'http://127\.0\.0\.1:([1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])'
+                 r'/(?:\?binding=binding_[0-9a-f]{32})?#pair=[0-9a-f]{32}')
+TERN_RID = re.compile(r'[0-9a-f]{32}')
+TERN_HOW = frozenset(('above', 'beside', 'open_failed'))
+TERN_CLAIM_LIFE, TERN_RESULT_LIFE, TERN_MAX_OFFERS = 30, 60, 8
+
+
+class TernOffers:
+    """In-memory only: a pairing link offered by the owner's helper, claimed once by the window half.
+
+    The link lives in the entry until its single claim, then is dropped; it is never written anywhere.
+    """
+    def __init__(self, clock=time.monotonic):
+        self._clock, self._lock, self._entries = clock, threading.Lock(), {}
+
+    def _sweep(self, now):
+        for rid in [rid for rid, entry in self._entries.items()
+                    if now - entry['born'] >= (TERN_CLAIM_LIFE if entry['state'] == 'pending' else TERN_RESULT_LIFE)]:
+            del self._entries[rid]
+
+    def offer(self, rid, url, port):
+        if not (type(rid) is str and TERN_RID.fullmatch(rid) and type(url) is str and type(port) is int):
+            return False
+        match = re.fullmatch(TERN_PAIR_URL, url)
+        if match is None or int(match.group(1)) != port:
+            return False
+        with self._lock:
+            now = self._clock()
+            self._sweep(now)
+            if rid in self._entries or len(self._entries) >= TERN_MAX_OFFERS:
+                return False
+            self._entries[rid] = dict(url=url, state='pending', born=now)
+            return True
+
+    def claim(self, rid):
+        with self._lock:
+            now = self._clock()
+            self._sweep(now)
+            entry = self._entries.get(rid)
+            if entry is None or entry['state'] != 'pending':
+                return None
+            url, entry['url'], entry['state'], entry['born'] = entry['url'], None, 'claimed', now
+            return url
+
+    def result(self, rid, how):
+        with self._lock:
+            self._sweep(self._clock())
+            entry = self._entries.get(rid)
+            if entry is None or entry['state'] != 'claimed' or how not in TERN_HOW:
+                return False
+            entry['state'] = how
+            return True
+
+    def state(self, rid):
+        with self._lock:
+            self._sweep(self._clock())
+            entry = self._entries.get(rid)
+            return 'unknown' if entry is None else entry['state']
 
 
 class BridgeError(Exception):
@@ -273,7 +334,8 @@ class BoundedBody:
 
 
 def error_status(code):
-    if code in ('not_found', 'request_not_found', 'asset_not_found', 'unknown_route'):
+    if code in ('not_found', 'request_not_found', 'asset_not_found', 'unknown_route',
+                'tern_claim_unavailable', 'tern_result_unavailable'):
         return 404
     if code == 'too_large':
         return 413
@@ -295,7 +357,7 @@ class BridgeServer(ThreadingHTTPServer):
     allow_reuse_address = False
     allow_reuse_port = False
 
-    def __init__(self, policy=None, *, routes=None, body_deadline=BODY_DEADLINE, control=None, activity=None, agent=None, port=0, tunnel_probe=None):
+    def __init__(self, policy=None, *, routes=None, body_deadline=BODY_DEADLINE, control=None, activity=None, agent=None, port=0):
         self.policy = policy if policy is not None else TrustedSessionPolicy()
         _, packaged = load_registry()
         self.routes = packaged if routes is None else dict(routes)
@@ -311,9 +373,7 @@ class BridgeServer(ThreadingHTTPServer):
             raise ValueError('Invalid trusted activity tracker')
         if agent is not None and not callable(agent):
             raise ValueError('Invalid trusted agent callback')
-        if tunnel_probe is not None and not (type(tunnel_probe) is str and re.fullmatch(r'[0-9a-f]{32}', tunnel_probe)):
-            raise ValueError('Invalid tunnel probe secret')
-        self._tunnel_probe = tunnel_probe
+        self.tern = TernOffers()
         if not (type(port) is int and (port == 0 or 1024 <= port <= 65535)):
             raise ValueError('Invalid trusted port')
         self.control, self.activity, self.agent = control, activity, agent
@@ -575,9 +635,9 @@ class Handler(BaseHTTPRequestHandler):
         if path in STATIC:
             check(self.command == 'GET', 'method_refused', 405)
             return 'static', None, None
-        if path == '/api/v1/tunnel-probe':
+        if path in ('/api/v1/tern-claim', '/api/v1/tern-result'):
             check(self.command == 'GET', 'method_refused', 405)
-            return 'tunnel-probe', None, None
+            return path.rsplit('/', 1)[-1], None, None
         if path in ('/api/v1/session', '/api/v1/state'):
             check(self.command == 'GET', 'method_refused', 405)
             return path.rsplit('/', 1)[-1], None, None
@@ -646,20 +706,25 @@ class Handler(BaseHTTPRequestHandler):
         if operation.startswith('agent-'):
             self._agent(parsed, request, operation.removeprefix('agent-'), kind)
             return
-        if operation == 'tunnel-probe':
-            # Sessionless liveness proof: a hash of the owner's private secret and the caller's fresh nonce.
-            # Host/Origin pins already passed in _request; no body, no cookie, no touch of the idle clock.
+        if operation in ('tern-claim', 'tern-result'):
+            # Sessionless: Host/Origin pins passed in _request; no body, cookie or idle-clock touch.
             self._body(None)
-            check(self.server._tunnel_probe is not None, 'unknown_route', 404)
             try:
-                nonce = parse_qsl(parsed.query, keep_blank_values=True, strict_parsing=True, max_num_fields=2)
+                pairs = parse_qsl(parsed.query, keep_blank_values=True, strict_parsing=True, max_num_fields=2)
             except ValueError:
                 raise BridgeError('invalid_query') from None
-            check(len(nonce) == 1 and nonce[0][0] == 'nonce' and re.fullmatch(r'[0-9a-f]{32}', nonce[0][1]) is not None,
-                  'invalid_query')
-            proof = expected_tunnel_proof(self.server._tunnel_probe, nonce[0][1])
-            self.send(Response(json.dumps(dict(ok=True, proof=proof), separators=(',', ':')).encode('ascii'),
-                               content_type='application/json'))
+            fields = dict(pairs)
+            check(len(fields) == len(pairs) and set(fields) == ({'rid'} if operation == 'tern-claim' else {'rid', 'how'})
+                  and TERN_RID.fullmatch(fields['rid']) is not None, 'invalid_query')
+            if operation == 'tern-claim':
+                url = self.server.tern.claim(fields['rid'])
+                check(url is not None, 'tern_claim_unavailable', 404)
+                body = dict(ok=True, url=url)
+            else:
+                check(fields['how'] in TERN_HOW, 'invalid_query')
+                check(self.server.tern.result(fields['rid'], fields['how']), 'tern_result_unavailable', 404)
+                body = dict(ok=True)
+            self.send(Response(json.dumps(body, separators=(',', ':')).encode('ascii'), content_type='application/json'))
             return
         try:
             query = parse_qsl(parsed.query, keep_blank_values=True, strict_parsing=True, max_num_fields=2)

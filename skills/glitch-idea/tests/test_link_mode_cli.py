@@ -16,11 +16,18 @@ SCRIPTS=Path(__file__).resolve().parents[1]/'glitch-idea/scripts'
 sys.path.insert(0,str(SCRIPTS))
 import idea
 import idea_launch as launch
+import idea_tern
 from idea_runtime import Runtime,RuntimeError as OwnerError
 
 BINDING='binding_'+'a'*32
 CODE_PATHS={('pairing_code',),('fallback_line',),('browser','link')}
 
+
+
+def _outside_tern(case):
+    """These cells are about the other modes: never let a suite started inside a Tern pane pick the pane road or touch its terminal."""
+    for name,value in (('default_is_tern',False),('find_terminal',None)):
+        patcher=patch.object(idea_tern,name,return_value=value);patcher.start();case.addCleanup(patcher.stop)
 
 class Output:
     def __init__(self): self.buffer=io.BytesIO()
@@ -38,6 +45,7 @@ def walk(value,path=()):
 class LinkModeCliSeamTests(unittest.TestCase):
     """In-process (open_browser_session mocked): which mode the launcher resolves and what it refuses."""
     def setUp(self):
+        _outside_tern(self)
         self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
         self.directory=Path(self.temp.name)
         self.package=self.directory/'package/glitch-idea';self.package.mkdir(parents=True)
@@ -111,6 +119,7 @@ class LinkModeCliSeamTests(unittest.TestCase):
 class LinkModeRealServiceTests(unittest.TestCase):
     """Real subprocess CLI against a real owner service; open_browser_session is NOT mocked."""
     def setUp(self):
+        _outside_tern(self)
         self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
         self.directory=Path(self.temp.name)
         self.package=self.directory/'source/glitch-idea'

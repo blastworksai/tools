@@ -18,10 +18,17 @@ SCRIPTS=Path(__file__).resolve().parents[1]/'glitch-idea/scripts'
 sys.path.insert(0,str(SCRIPTS))
 import idea
 import idea_launch as launch
+import idea_tern
 from idea_domain import IdeaError
 from idea_native import OrcaBinding
 from idea_runtime import Runtime,RuntimeError as OwnerError
 
+
+
+def _outside_tern(case):
+    """These cells are about the other modes: never let a suite started inside a Tern pane pick the pane road or touch its terminal."""
+    for name,value in (('default_is_tern',False),('find_terminal',None)):
+        patcher=patch.object(idea_tern,name,return_value=value);patcher.start();case.addCleanup(patcher.stop)
 
 class Output:
     def __init__(self): self.buffer=io.BytesIO()
@@ -29,6 +36,7 @@ class Output:
 
 class CliSeamTests(unittest.TestCase):
     def setUp(self):
+        _outside_tern(self)
         self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
         self.directory=Path(self.temp.name)
         self.package=self.directory/'package/glitch-idea';self.package.mkdir(parents=True)
@@ -202,6 +210,7 @@ class CliSeamTests(unittest.TestCase):
 @unittest.skipUnless(os.name=='posix','Native Windows privacy is not qualified')
 class ActualCliTests(unittest.TestCase):
     def setUp(self):
+        _outside_tern(self)
         self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
         self.directory=Path(self.temp.name)
         self.package=self.directory/'source/glitch-idea';shutil.copytree(SCRIPTS.parent,self.package,ignore=shutil.ignore_patterns('__pycache__'))
