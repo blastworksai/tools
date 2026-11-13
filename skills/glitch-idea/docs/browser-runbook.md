@@ -121,7 +121,7 @@ A global `--store /absolute/path` goes before the verb.
 Two different folders appear in a session.
 The **store** (`--store` or `store_path` in the config) is where ideas are kept: `IDEAS.md` and one detail file per idea.
 The Capture step's **workspace** is the project the idea is for, such as the folder it would be built in.
-Give the workspace as an absolute path on the service host; over SSH that is the remote computer, not the one running the browser.
+Give the workspace as an absolute path on the service host; on a remote host that is the remote computer, not the one running the browser.
 A path that is not absolute, does not exist or cannot be read there, or is not a folder is refused with `workspace_unavailable`; the page keeps your unsaved answers.
 
 ### 5.1 Runtime root rules
@@ -133,66 +133,11 @@ A path that is not absolute, does not exist or cannot be read there, or is not a
 - A relative `--runtime-root` fails with `invalid_config`.
 - The service listens on `127.0.0.1` on an ephemeral port and accepts only that exact `http://127.0.0.1:<port>` origin.
 
-### 5.2 Browser on another computer (SSH)
-
-The browser runs on the computer you sit at; the service runs where you launched it.
-Run `browser-open --browser ssh` (or set `browser_mode: "ssh"`).
-It opens the page on your computer for you; there is no tunnel line to type.
-`browser-open --browser system` would open a browser on the remote machine, and it is not an SSH route.
-
-**What it needs.**
-- A fixed `browser_port` in the seat's config.
-- A standing tunnel on your computer that forwards that port to the machine (`ssh -N`, left running).
-- An ssh key from the account that runs the helper to your computer, and the tunnel's own key the other way.
-
-**What it does.**
-It finds your computer from the live ssh connections to this machine and from the ssh config aliases of the account, keeping only those with a working key.
-Several candidates are narrowed to the one whose tunnel proves this service, using a secret-backed probe that only the live owner answers.
-Then it opens the page on your computer: through the Glitch Idea Tern plugin on Windows, else in the default browser on macOS and Linux.
-Without a ready plugin on Windows nothing opens: you get the link back (`ssh_open_failed`) to open yourself.
-The one-time link travels on ssh's stdin, never in a command line on the VM; macOS `open` and Linux `xdg-open` take it as an argument, so it is briefly visible in that computer's own process list.
-Optional config: `ssh_client` (an ssh config alias of your computer; overrides detection) and `ssh_server_port` (default 22): the port sshd listens on, on the machine that runs the service, used only to find the live ssh connections that reveal your computer. It filters incoming connections there and cannot change how this account reaches your computer.
-
-**Errors.**
-Each one names a direction and stops the open.
-
-| Code | Meaning | Fix |
-| --- | --- | --- |
-| `ssh_requires_fixed_port` | The seat has no `browser_port`. | Set `browser_port` in the seat's config. |
-| `ssh_no_client` | No computer of yours was found. | Connect from your computer once, or set `ssh_client`. |
-| `ssh_no_key` | The key from this machine to your computer is missing or refused. | Authorise this account's key on your computer. |
-| `ssh_client_ambiguous` | More than one computer fits. | Set `ssh_client` to the alias of the right one. |
-| `ssh_client_unreachable` | Your computer did not answer over ssh. | Check it is on and its ssh server is running; if its sshd is not on port 22, set `Port` on that computer's alias in this account's ssh config (`ssh_server_port` does not affect this). |
-| `ssh_client_os_unknown` | Your computer's system could not be identified. | Check that ssh gives a normal shell there. |
-| `ssh_client_no_curl` | `curl` is missing on your computer. | Install `curl` there. |
-| `ssh_tunnel_down` | The standing tunnel from your computer to this machine is not answering. | Start the standing tunnel again. |
-| `ssh_tunnel_foreign` | Something else answers on that port on your computer. | Stop it, or move the seat to another fixed port. |
-
-The warning `ssh_open_failed` means the page did not open on your computer.
-The result still carries `browser.link` with `browser.opened` set to `false`; click or paste that link.
-`browser.failure` says why, as one fixed code:
-
-| Code | Meaning |
-| --- | --- |
-| `no_tern_window` | No Tern window is open on any Tern daemon of yours (Windows). |
-| `plugin_not_ready` | The Glitch Idea plugin is not installed or not ready in that window (Windows). |
-| `plugin_did_not_claim` | The window did not pick up the request within 4 s (Windows). |
-| `plugin_no_answer` | The window picked it up and gave no answer within 15 s (Windows). |
-| `plugin_refused` | The window answered that it could not open the page (Windows). |
-| `request_folder_unsafe` | The private request folder failed its owner or permission check (Windows). |
-| `tern_missing` | Tern is not installed for your account (Windows). |
-| `invalid_input` | The computer refused the link's shape. |
-| `timeout` / `ssh_failed` / `open_failed` | The ssh call timed out, failed, or the opener failed some other way. |
-
-On Windows an administrator's ssh login is elevated, and an elevated Tern talks to its own elevated session daemon, not the one your window uses.
-The opener tries a `TERN_DAEMON_SOCKET` already set in the ssh environment, then the default daemon, then up to 16 Tern daemon pipes that your own account owns, and uses the first one with a window and the ready plugin.
-A throwaway `ssh -L` line is no longer the way.
-
-### 5.2a Tern on a remote host
+### 5.2 Tern on a remote host
 
 Use this when you work in a Tern pane on your own computer, attached to a remote machine that runs the seat.
-The seat's config sets `browser_port`, `prototype_port` and `browser_mode: "link"` (README, Configuration), or `"ssh"` for 5.2.
-The estate keeps one standing `ssh -N` tunnel on your computer that forwards every seat's fixed ports, so nobody opens a tunnel by hand.
+The seat's config sets `browser_port`, `prototype_port` and `browser_mode: "link"` or `"tern"` (README, Configuration).
+The estate keeps one standing tunnel on your computer that forwards every seat's fixed ports, so nobody opens a tunnel by hand.
 How that tunnel is built and undone is in the estate kit's own README, kept beside the seat configs on the remote host.
 
 **Why the same port on both ends.**
@@ -202,7 +147,8 @@ Each forward therefore uses the seat's port number on your computer and on the r
 A different local port is refused.
 
 **The click.**
-Run `browser-open` without `--browser` (or with `--browser link`).
+In a Tern pane, `browser-open` without `--browser` opens the page for you (5.3).
+In any other terminal, run it without `--browser` on a seat set to `link`, or with `--browser link`.
 It prints one link, `http://127.0.0.1:<port>/#pair=<code>`.
 Click it.
 Tern opens the page, which reads the code from the link, removes it from the address bar and pairs itself within 60 seconds.
@@ -227,21 +173,21 @@ Only an account on the same host can do this; the owner accepted that risk for f
 If a seat's page ever looks or behaves oddly, clear that address's site data in the browser before clicking a new link.
 In link mode you never type a code, so a page that asks for one is not the real page: close it and run `browser-open --browser link --resume binding_ID` for a fresh link.
 
-### 5.2b Tern pane
+### 5.3 Tern pane
 
 **What is installed where.**
 The plugin (`glitch-idea/tern-plugin`, version 0.2.0, window half only) goes on the Tern that shows the window.
 Nothing is installed on a remote host's Tern.
-No ssh login happens on this road.
 
 **Same port for a remote host.**
 When the helper runs on a remote host, the idea page's port must be reachable from the window's computer under the same port number.
 The page checks Host and Origin exactly, so a different port on the window's side is refused.
-This is the same requirement link mode has: set `browser_port` and keep a standing tunnel on it (see 5.2a).
+This is the same requirement link mode has: set `browser_port` and keep a standing tunnel on it (see 5.2).
 
 **The pane title.**
 While a request is in flight, the pane's title shows `glitch-idea:1:<port>:<one-time id>` for a moment, then the fixed text `glitch-idea`.
-The id is worth one claim for 30 seconds.
+The id is worth one claim, which must come within 30 seconds of the offer.
+Once claimed, the offer lives 60 seconds counted from the claim, so the window can report its result.
 The pairing code never appears in a title.
 
 **When it fails.**
@@ -255,7 +201,7 @@ Click the link; the session is the same one, so do not run `browser-open` again.
 - `no_result`: the plugin took the request and reported nothing. Look at the pane for the page, then click the link if it is not there.
 - `offer_failed`: the helper could not hand the link to its own idea service. Check that the service is still running, then click the link.
 
-### 5.3 Orca unavailable or misrouted
+### 5.4 Orca unavailable or misrouted
 
 `browser-open --browser orca` needs `--orca-worktree 'UUID::WORKTREE_PATH'` and `--orca-terminal HANDLE`, taken from the pane that is actually running the agent; `--orca-host` is optional.
 It never uses Orca's "current" selection, because that can name a different host.
@@ -277,11 +223,11 @@ Error codes and what to do:
 | `unsafe_url` | The service root was not a plain loopback URL. | Report as a defect; do not paste a modified URL. |
 
 For a pre-session failure (`origin_missing`, `usage`) fix the arguments and rerun without `--resume`.
-For a post-session failure, either fix the connection or selector and run `browser-open --browser orca ... --resume binding_ID` with the `binding_id` from that error, or run `session-open --resume binding_ID` to print the origin and a fresh pairing code and open it in a system browser, through an SSH tunnel when the service is remote.
+For a post-session failure, either fix the connection or selector and run `browser-open --browser orca ... --resume binding_ID` with the `binding_id` from that error, or run `session-open --resume binding_ID` to print the origin and a fresh pairing code and open it in a system browser, through the standing tunnel when the service is remote.
 The helper does not switch browser routes by itself: that choice is yours.
 Orca launch success means a tab was created; it does not prove the page is usable in that pane.
 
-### 5.4 Setup: where ideas live
+### 5.5 Setup: where ideas live
 
 The browser's **Setup** pane holds one choice per store.
 Option 1, **Glitch native**, keeps ideas as Markdown in the store (the default).

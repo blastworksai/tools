@@ -10,7 +10,7 @@ import unittest
 
 SCRIPTS = Path(__file__).resolve().parents[1] / 'glitch-idea/scripts'
 sys.path.insert(0, str(SCRIPTS))
-import idea_ssh
+import idea_tern
 from idea_bridge import TERN_PAIR_URL, TernOffers
 from idea_launch import OwnerService
 from idea_runtime import Runtime, RuntimeError as OwnerError
@@ -234,7 +234,7 @@ class TernClaimTests(unittest.TestCase):
                 conn.close()
         self.assertEqual(server.tern.state(RID), 'unknown')
 
-    def test_grammar_agrees_with_the_ssh_helper(self):
+    def test_grammar_agrees_with_the_tern_module(self):
         cases = ['http://127.0.0.1:%s/%s#pair=%s' % (port, binding, code)
                  for port in ('1', '80', '9999', '10000', '49152', '65535', '65536', '99999', '0', '01', '', '-1', '1e3', '٣')
                  for binding in ('', '?binding=binding_' + 'a' * 32, '?binding=binding_' + 'A' * 32, '?binding=binding_' + 'a' * 31, '?binding=', '?x=1')
@@ -246,7 +246,7 @@ class TernClaimTests(unittest.TestCase):
         for case in cases:
             with self.subTest(case=case):
                 ours = re.fullmatch(TERN_PAIR_URL, case) is not None
-                self.assertEqual(ours, idea_ssh.URL_SHAPE.fullmatch(case) is not None)
+                self.assertEqual(ours, idea_tern.URL_SHAPE.fullmatch(case) is not None)
                 accepted += ours
         self.assertGreater(accepted, 10)
         self.assertLess(accepted, len(cases))

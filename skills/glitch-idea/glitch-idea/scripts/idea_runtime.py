@@ -32,8 +32,7 @@ MAX_BINDINGS = 8
 MAX_AGGREGATE = 192 * 1024
 SERVICE = 'glitch-idea'
 HEX = re.compile(r'[0-9a-f]{64}')
-TUNNEL_PROBE = re.compile(r'[0-9a-f]{32}')
-NONCE = TUNNEL_PROBE
+HEX32 = re.compile(r'[0-9a-f]{32}')
 BINDING = re.compile(r'binding_[0-9a-f]{32}')
 TERN_STATES = frozenset(('pending', 'claimed', 'above', 'beside', 'open_failed', 'unknown'))
 SESSION = re.compile(r'session_[0-9a-f]{32}')
@@ -262,19 +261,12 @@ def _request_mac(owner_token, operation, challenge, body):
     return hmac.new(owner_token.encode('ascii'), canonical.encode('ascii'), hashlib.sha256).hexdigest()
 
 
-def expected_tunnel_proof(secret, nonce):
-    """Proof only the live owner can give: sha256 hex of secret + ':' + nonce (both 32 lowercase hex)."""
-    if not (type(secret) is str and TUNNEL_PROBE.fullmatch(secret) and type(nonce) is str and NONCE.fullmatch(nonce)):
-        raise ValueError('invalid tunnel proof input')
-    return hashlib.sha256((secret + ':' + nonce).encode('ascii')).hexdigest()
-
-
 def _identity(value, store_sha256, *, credential):
     keys = ('schema_version', 'service', 'store_sha256', 'instance_nonce')
-    # tunnel_probe is optional in a discovery record: one written by an older owner has none (typed refusal at use).
+    # tunnel_probe is no longer written; a discovery record from the previous release still carries one (well-formed hex is ignored, malformed is corrupt).
     optional = ('tunnel_probe',) if not credential and type(value) is dict and 'tunnel_probe' in value else ()
     _exact(value, keys + (('owner_token',) if credential else ('pid', 'host', 'port')) + optional)
-    if optional: _check(type(value['tunnel_probe']) is str and TUNNEL_PROBE.fullmatch(value['tunnel_probe']) is not None)
+    if optional: _check(type(value['tunnel_probe']) is str and HEX32.fullmatch(value['tunnel_probe']) is not None)
     _check(value['service'] == SERVICE and value['store_sha256'] == store_sha256
            and type(value['instance_nonce']) is str and HEX.fullmatch(value['instance_nonce']) is not None)
     if credential:
@@ -295,7 +287,7 @@ def _after_fork():
                 setattr(instance, name, None)
         instance._owner_pid = None
         instance._mutex = threading.RLock()
-        instance._credential = None; instance._tunnel_probe = None
+        instance._credential = None
 
 
 if hasattr(os, 'register_at_fork'):
@@ -335,7 +327,7 @@ class Runtime:
         self._mutex = threading.RLock()
         self._lock_fd = self._directory_fd = self._bindings_fd = None
         self._owner_pid = None
-        self._credential = None; self._tunnel_probe = None
+        self._credential = None
         self._owned_files = {}
         self._closing = False
         self._active = 0
@@ -482,7 +474,7 @@ class Runtime:
             descriptor = getattr(self, name)
             if descriptor is not None: os.close(descriptor)
             setattr(self, name, None)
-        self._owner_pid = None; self._credential = None; self._tunnel_probe = None; self._owned_files.clear()
+        self._owner_pid = None; self._credential = None; self._owned_files.clear()
 
     def _write(self, directory, name, value):
         raw = (json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':'), allow_nan=False) + '\n').encode('utf-8')
@@ -545,7 +537,6 @@ class Runtime:
                     self._directory_fd = os.dup(directory)
                     self._bindings_fd = os.dup(bindings)
                     self._owner_pid = os.getpid(); self._closing = False
-                    self._tunnel_probe = secrets.token_hex(16)
                     self._credential = dict(schema_version=1, service=SERVICE, store_sha256=self.store_sha256,
                         instance_nonce=secrets.token_hex(32), owner_token=secrets.token_urlsafe(32))
                     self._write(directory, 'credentials.json', self._credential)
@@ -688,23 +679,9 @@ class Runtime:
             self._owner()
             self._scan(self._directory_fd, self._bindings_fd)
             value = {key: self._credential[key] for key in ('schema_version', 'service', 'store_sha256', 'instance_nonce')}
-            value.update(pid=os.getpid(), host='127.0.0.1', port=port, tunnel_probe=self._tunnel_probe)
+            value.update(pid=os.getpid(), host='127.0.0.1', port=port)
             self._write(self._directory_fd, 'discovery.json', value)
             return copy.deepcopy(value)
-
-    def owner_tunnel_probe(self):
-        """The owner's own tunnel-probe secret, for handing to its own bridge server only."""
-        with self._mutex:
-            self._owner()
-            return self._tunnel_probe
-
-    def tunnel_probe_secret(self, timeout=1):
-        deadline = self._timeout(timeout)
-        discovery, credential = self._client_pair(deadline)
-        self._call('probe', discovery, credential, deadline)  # the live owner answered its own challenge
-        secret = discovery.get('tunnel_probe')
-        if secret is None: raise RuntimeError('owner_tunnel_probe_unsupported')
-        return secret
 
     def _client_pair(self, deadline=None):
         with self._mutex, self._directories() as (directory, bindings):
@@ -917,7 +894,7 @@ class Runtime:
 
     def tern_offer(self, rid, url, timeout=1):
         """Offer a pairing link to the owner's own tern-claim door (memory only, 30 s). Returns None; refusal raises tern_offer_refused."""
-        _check(type(rid) is str and TUNNEL_PROBE.fullmatch(rid) is not None and type(url) is str, 'invalid_control')
+        _check(type(rid) is str and HEX32.fullmatch(rid) is not None and type(url) is str, 'invalid_control')
         deadline = self._timeout(timeout)
         discovery, credential = self._client_pair(deadline)
         self._call('probe', discovery, credential, deadline)
@@ -925,7 +902,7 @@ class Runtime:
 
     def tern_state(self, rid, timeout=1):
         """The offer's state: pending, claimed, above, beside, open_failed or unknown (expired or never offered)."""
-        _check(type(rid) is str and TUNNEL_PROBE.fullmatch(rid) is not None, 'invalid_control')
+        _check(type(rid) is str and HEX32.fullmatch(rid) is not None, 'invalid_control')
         deadline = self._timeout(timeout)
         discovery, credential = self._client_pair(deadline)
         self._call('probe', discovery, credential, deadline)

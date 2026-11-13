@@ -25,7 +25,7 @@ python3 "$idea_tool" --store /absolute/demo-ideas session-open --resume binding_
 **Link mode.** `--browser link` opens no tab. It prints the page link for the operator to click, which is how a remote pane reaches the page when no pane road is available. Omit `--browser` on a seat whose config sets `browser_mode`: the flag wins, else the configured mode, else the Tern pane road inside a Tern pane, else the error `browser_mode_required`. The result's `browser` is `{mode: 'link', url, link}`. `browser.url` is the root-only origin. `browser.link` is `<origin>/#pair=<code>`, so it carries the one-time code (32 lowercase hex characters, valid 60 seconds): show it alone on its own line, and show `pairing_code` and `fallback_line` only if the operator says the click did not pair. A missed or expired click is fixed with `browser-open --browser link --resume binding_ID`, which returns a fresh `browser.link`. Link mode refuses Orca selectors and `--reconnect` with `usage`.
 
 **Tern pane.** `--browser tern` (or config `browser_mode: "tern"`) opens the page inside the Tern pane the helper runs in.
-It needs the Tern plugin on the Tern that shows the window; it does no ssh login.
+It needs the Tern plugin on the Tern that shows the window.
 Default rule: when neither the flag nor `browser_mode` is set, the helper picks `tern` by itself when it finds a terminal among its ancestors and either `TERN_PANE` is set or an ancestor process is named `tern`.
 Otherwise it refuses with `browser_mode_required` as before.
 An explicit `browser_mode` (for example `"link"`) always wins.
@@ -41,18 +41,9 @@ Never run `browser-open` again to try once more: the session is the same one.
 - `no_result`: the plugin took the request and reported nothing.
 - `offer_failed`: the helper could not hand the link to its own idea service.
 
-**SSH mode.** `--browser ssh` (or config `browser_mode: "ssh"`) is for a browser on another computer than the helper. It needs `browser_port` (a fixed port) and a standing tunnel from that computer, and it enforces a key in both directions:
+A browser on another computer than the helper: inside a Tern pane use this road, with the page port reachable from the window's computer under the same port number (a standing tunnel the operator sets up once, with a fixed `browser_port`). Otherwise use link mode.
 
-1. This machine to the operator's computer. It auto-detects the computer from the live ssh connections to this host (open connections, `$SSH_CONNECTION`, login records) and from this account's ssh config aliases that have a working key, grouping the aliases of one machine. Several candidates are narrowed to the one whose tunnel proves this service.
-2. The operator's computer to this machine: the standing tunnel, proven by a secret-backed probe (`GET /api/v1/tunnel-probe?nonce=...`, answered only by the live owner).
-
-It then opens the page on the operator's computer: through the Glitch Idea Tern plugin on Windows (a request file in a private folder; no other Windows road), else the default browser (macOS `open`, Linux `xdg-open`, which take the link as an argument visible briefly in that computer's own process list). If the plugin is not ready or does not answer, nothing opens, `opened` is false with `ssh_open_failed`, and `browser.link` carries the link to show. The one-time link travels on ssh's stdin, never in a command line on the VM.
-Optional config keys: `ssh_client` (an ssh config alias; overrides detection) and `ssh_server_port` (this machine's ssh port, default 22).
-The result's `browser` is `{mode: 'ssh', url, link, client, client_os, opened, how}`. When `opened` is `false` the warning `ssh_open_failed` is added, `browser.failure` carries one fixed reason (`no_tern_window`, `plugin_not_ready`, `plugin_did_not_claim`, `plugin_no_answer`, `plugin_refused`, `request_folder_unsafe`, `tern_missing`, `invalid_input`, `timeout`, `ssh_failed` or `open_failed`; the runbook's section 5.2 says what each means), and `browser.link` is still there: show it as in link mode. On Windows the opener finds the operator's window even from an elevated ssh login: it tries an inherited `TERN_DAEMON_SOCKET`, then Tern's default daemon, then up to 16 Tern daemon pipes the user's own SID owns, and picks the first with a window and the ready plugin.
-Errors, all raised before the page opens: `ssh_requires_fixed_port` (no `browser_port`), `ssh_no_client` (no computer found), `ssh_no_key` (the key from this machine to the computer is missing or refused), `ssh_client_ambiguous` (set `ssh_client`), `ssh_client_unreachable`, `ssh_client_os_unknown`, `ssh_tunnel_down` (the computer-to-machine tunnel is not answering), `ssh_tunnel_foreign` (something else answers that port on the computer) and `ssh_client_no_curl`.
-Name the failing direction to the operator in plain words and stop. Handing out a throwaway `ssh -L` line is no longer the way.
-
-For Orca use explicit initiating selectors; system-browser mode does not substitute for SSH routing:
+For Orca use explicit initiating selectors; system-browser mode does not substitute for Orca's routing:
 
 ```bash
 python3 "$idea_tool" --store /absolute/demo-ideas browser-open --browser orca --orca-worktree 'ACTUAL_UUID::ACTUAL_WORKTREE_PATH' --orca-terminal ACTUAL_TERMINAL_HANDLE --orca-host ACTUAL_EXECUTION_HOST
@@ -80,9 +71,9 @@ Foreground `serve` keeps running and emits no pairing code. On normal interrupti
 
 A store keeps at most eight sessions (bindings). Resume an existing binding when continuing work. When a new open needs room, a session whose idea reached Review (its Review step is saved) and that has no open browser tab or terminal agent is freed automatically, the least recently used first; its ideas and receipts are untouched. A session that is unfinished or still open is never freed automatically: the open is refused with `binding_capacity` and the JSON error carries a `sessions` list. An ambiguous partial private write reports `runtime_recovery_conflict` and preserves the bytes for explicit recovery. An ambiguous partial private write reports `runtime_recovery_conflict` and preserves the bytes for explicit recovery. Domain recovery and supported Markdown edits are described in [the Markdown format](https://github.com/blastworksai/tools/tree/main/skills/glitch-idea/docs/markdown-format.md).
 
-## SSH, Orca recovery and the planning prompt
+## Remote browsers, Orca recovery and the planning prompt
 
-When the browser runs on a different computer from the helper, use SSH mode (above), or link mode with a standing tunnel on the seat's fixed port; the service accepts only its exact `127.0.0.1:<port>` origin. System-browser mode opens a browser on the machine running the helper and is not an SSH route.
+When the browser runs on a different computer from the helper, inside a Tern pane run `browser-open` with no `--browser` (the Tern pane road above); otherwise use link mode with a standing tunnel on the seat's fixed port. Either way the port is the same on both computers, and the service accepts only its exact `127.0.0.1:<port>` origin. System-browser mode opens a browser on the machine running the helper and is not a remote road.
 
 Fixed-port and mode errors, all raised before any session exists:
 
@@ -190,7 +181,7 @@ python3 "$idea_tool" --store /absolute/demo-ideas prototype-serve --session sess
 
 Read its first JSON line for `origin`, `port` and `fixed_port`.
 When `fixed_port` is `true` the seat has a configured `prototype_port` and the standing tunnel carries it, so show no tunnel line.
-When it is `false` on a remote seat, tell the operator SSH mode needs fixed ports and stop; never print an `ssh -L` line.
+When it is `false` on a remote seat, tell the operator a remote browser needs fixed ports and a standing tunnel, and stop; never print an `ssh -L` line.
 
 The agent asset door is the `asset` verb (it calls `POST /agent/v1/asset` with agent auth; credentials stay inside the helper).
 It accepts only `image/png` and `application/zip`, under the existing asset limits, one file per call:

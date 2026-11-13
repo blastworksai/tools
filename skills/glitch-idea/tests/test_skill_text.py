@@ -151,6 +151,15 @@ class SkillTextTests(unittest.TestCase):
         for reason in ("no_terminal", "plugin_no_answer", "open_failed", "no_result", "offer_failed"):
             self.assertIn("`" + reason + "`", COMMANDS)
 
+    def test_ssh_mode_is_gone_from_skill_and_commands(self):
+        for name, text in (("SKILL.md", SKILL), ("commands.md", COMMANDS)):
+            lower = text.lower()
+            self.assertNotIn("ssh mode", lower, name)
+            for gone in ("ssh_open_failed", "ssh_client", "ssh_server_port", "--browser ssh"):
+                self.assertNotIn(gone, lower, name)
+            self.assertIsNone(re.search(r"`ssh_[a-z_]+`", lower), name)
+            self.assertIsNone(re.search(r"\bssh_[a-z]", lower), name)
+
 
 class VisualizeTextTests(unittest.TestCase):
     def test_visualize_section_documents_three_choices_and_prototype(self):

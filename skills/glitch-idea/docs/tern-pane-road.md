@@ -10,7 +10,7 @@ The helper writes one terminal title escape to the terminal of the pane it runs 
 Tern raises a `title` event in the window half, and that event carries the pane id.
 The title carries a one-time request id, never the pairing link.
 The window half fetches the pairing link from the idea service with that id, then opens the page above that pane.
-No daemon half, no request file, no ssh, nothing installed on the host's Tern.
+No daemon half, no request file, nothing installed on the host's Tern.
 
 ## Why not a daemon half
 
@@ -54,16 +54,16 @@ After its wait the helper sets the title to the fixed text `glitch-idea`.
 ## Where the link travels
 
 1. The helper opens the session as link mode does and holds the pairing link in memory.
-2. It offers the link to its own idea service over the existing authenticated control channel: `rid`, link, 30 s life. The service keeps the offer in memory only.
+2. It offers the link to its own idea service over the existing authenticated control channel: `rid`, link, 30 s life to be claimed. The service keeps the offer in memory only.
 3. It writes the title.
 4. The window half validates the title, then calls `GET http://127.0.0.1:<port>/api/v1/tern-claim?rid=<rid>` with a 3 s timeout.
-5. The service answers once with the link and forgets the offer's link. A second claim, an unknown id and an expired id all answer 404.
+5. The service answers once with the link and forgets the offer's link. The claimed offer then lives 60 s counted from the claim, so the result can arrive. A second claim, an unknown id and an expired id all answer 404.
 A malformed query answers 400 `invalid_query`.
 6. The window half checks the link against the one pairing-link grammar and checks its port equals `<port>`, opens it beside, moves it above the asking pane, and reports `above`, `beside` or `open_failed` with one `GET /api/v1/tern-result?rid=<rid>&how=<value>`.
 7. The helper reads the offer's state over the control channel until it is final or the wait ends.
 
 The pairing code is never in a title, an argv, a log or a file.
-The request id is displayed for a moment; it is worth one claim, for 30 s, only against the loopback service that minted it.
+The request id is displayed for a moment; it is worth one claim, within 30 s of the offer, only against the loopback service that minted it.
 A remote host needs its page port reachable from the window's computer under the same port number, exactly as link mode already does.
 
 ## Who may ask
@@ -75,7 +75,7 @@ A window half acts only when `cx.session:pane(<pane>)` knows the pane.
 Known limit: any program whose output reaches a pane can print a well-formed title.
 The window then makes one fixed-path GET to a loopback port on its own machine and opens a page only when the answer is a valid pairing link for that same port.
 That is the reach of a printed link without the click.
-The window half takes at most one request per pane every 5 s.
+The window half takes at most one request per pane every 5 s, counted on Tern's monotonic clock.
 
 ## Claim rule and two windows
 

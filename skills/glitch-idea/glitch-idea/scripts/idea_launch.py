@@ -212,7 +212,7 @@ class OwnerService:
         except Exception:
             pass  # a store error is not a startup failure: the first real read raises the same typed error to the client
         self.server = server_factory(self.policy,routes=self.routes,control=self.control,activity=runtime,agent=self.agent,
-                                    port=self.config.get('browser_port',0),tunnel_probe=runtime.owner_tunnel_probe())
+                                    port=self.config.get('browser_port',0))
         self.worker = None
 
     def application(self,record):

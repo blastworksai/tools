@@ -26,7 +26,6 @@ from types import MappingProxyType
 from urllib.parse import parse_qsl, unquote_to_bytes, urlsplit
 
 import idea_asset_evidence as asset_codec
-from idea_runtime import expected_tunnel_proof
 from idea_domain import IdeaError, MAX_INPUT, MAX_STATE
 from idea_steps import ROUTE_SPECS, TrustedRoute, load_registry
 
@@ -84,7 +83,7 @@ SECURITY_HEADERS = {
 }
 
 
-# The one pairing-link grammar the Tern pane road accepts (identical to idea_ssh.PAIR_URL_PATTERN; a test keeps them equal).
+# The one pairing-link grammar the Tern pane road accepts (identical to idea_tern.PAIR_URL_PATTERN; a test keeps them equal).
 TERN_PAIR_URL = (r'http://127\.0\.0\.1:([1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])'
                  r'/(?:\?binding=binding_[0-9a-f]{32})?#pair=[0-9a-f]{32}')
 TERN_RID = re.compile(r'[0-9a-f]{32}')
@@ -358,7 +357,7 @@ class BridgeServer(ThreadingHTTPServer):
     allow_reuse_address = False
     allow_reuse_port = False
 
-    def __init__(self, policy=None, *, routes=None, body_deadline=BODY_DEADLINE, control=None, activity=None, agent=None, port=0, tunnel_probe=None):
+    def __init__(self, policy=None, *, routes=None, body_deadline=BODY_DEADLINE, control=None, activity=None, agent=None, port=0):
         self.policy = policy if policy is not None else TrustedSessionPolicy()
         _, packaged = load_registry()
         self.routes = packaged if routes is None else dict(routes)
@@ -374,9 +373,6 @@ class BridgeServer(ThreadingHTTPServer):
             raise ValueError('Invalid trusted activity tracker')
         if agent is not None and not callable(agent):
             raise ValueError('Invalid trusted agent callback')
-        if tunnel_probe is not None and not (type(tunnel_probe) is str and re.fullmatch(r'[0-9a-f]{32}', tunnel_probe)):
-            raise ValueError('Invalid tunnel probe secret')
-        self._tunnel_probe = tunnel_probe
         self.tern = TernOffers()
         if not (type(port) is int and (port == 0 or 1024 <= port <= 65535)):
             raise ValueError('Invalid trusted port')
@@ -639,9 +635,6 @@ class Handler(BaseHTTPRequestHandler):
         if path in STATIC:
             check(self.command == 'GET', 'method_refused', 405)
             return 'static', None, None
-        if path == '/api/v1/tunnel-probe':
-            check(self.command == 'GET', 'method_refused', 405)
-            return 'tunnel-probe', None, None
         if path in ('/api/v1/tern-claim', '/api/v1/tern-result'):
             check(self.command == 'GET', 'method_refused', 405)
             return path.rsplit('/', 1)[-1], None, None
@@ -713,23 +706,8 @@ class Handler(BaseHTTPRequestHandler):
         if operation.startswith('agent-'):
             self._agent(parsed, request, operation.removeprefix('agent-'), kind)
             return
-        if operation == 'tunnel-probe':
-            # Sessionless liveness proof: a hash of the owner's private secret and the caller's fresh nonce.
-            # Host/Origin pins already passed in _request; no body, no cookie, no touch of the idle clock.
-            self._body(None)
-            check(self.server._tunnel_probe is not None, 'unknown_route', 404)
-            try:
-                nonce = parse_qsl(parsed.query, keep_blank_values=True, strict_parsing=True, max_num_fields=2)
-            except ValueError:
-                raise BridgeError('invalid_query') from None
-            check(len(nonce) == 1 and nonce[0][0] == 'nonce' and re.fullmatch(r'[0-9a-f]{32}', nonce[0][1]) is not None,
-                  'invalid_query')
-            proof = expected_tunnel_proof(self.server._tunnel_probe, nonce[0][1])
-            self.send(Response(json.dumps(dict(ok=True, proof=proof), separators=(',', ':')).encode('ascii'),
-                               content_type='application/json'))
-            return
         if operation in ('tern-claim', 'tern-result'):
-            # Sessionless like the tunnel probe: Host/Origin pins passed in _request; no body, cookie or idle-clock touch.
+            # Sessionless: Host/Origin pins passed in _request; no body, cookie or idle-clock touch.
             self._body(None)
             try:
                 pairs = parse_qsl(parsed.query, keep_blank_values=True, strict_parsing=True, max_num_fields=2)

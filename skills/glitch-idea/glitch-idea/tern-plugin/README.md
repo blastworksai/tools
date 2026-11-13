@@ -1,6 +1,6 @@
 # Glitch Idea for Tern
 
-A small Tern window plugin.
+A small Tern window plugin (window half only).
 It opens the local idea page as a browser split above the pane that asked for it, instead of in a separate browser window.
 
 ## What it does
@@ -14,7 +14,7 @@ It opens the local idea page as a browser split above the pane that asked for it
 
 Anything inside a pane of this Tern may ask.
 Nothing outside a pane can, because a request exists only as terminal output of a pane.
-The plugin acts only when Tern knows the pane that wrote the title, and takes at most one request per pane every 5 seconds.
+The plugin acts only when Tern knows the pane that wrote the title, and takes at most one request per pane every 5 seconds, counted on Tern's monotonic clock.
 
 ## What it can never do
 
@@ -24,6 +24,9 @@ The plugin acts only when Tern knows the pane that wrote the title, and takes at
 - If the claim does not return a valid link, it does nothing and shows nothing.
 
 ## Install
+
+Install it on the Tern that shows the window.
+Nothing is installed on a remote host's Tern.
 
 ```
 tern plugin install <src>

@@ -18,7 +18,6 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "glitch-idea/scripts"))
 import idea_launch as launch
-import idea_ssh
 import idea_tern as tern
 from idea_runtime import Runtime, RuntimeError as OwnerError
 
@@ -283,10 +282,56 @@ class TernModeTests(unittest.TestCase):
         self.assertEqual(out, (None, "plugin_no_answer"))
         self.assertEqual(writes[-1], "glitch-idea")
 
-    # ---- compatibility
-    def test_ssh_names_still_import_from_idea_ssh(self):
-        for name in ("PAIR_URL_PATTERN", "URL_SHAPE", "Result", "default_runner"):
-            self.assertIs(getattr(idea_ssh, name), getattr(tern, name))
+    # ---- the pairing-link grammar and the one process runner (carried over from the retired ssh mode tests)
+    def test_the_whole_grammar_is_enforced_locally(self):
+        code = "f" * 32
+        for bad in ("http://127.0.0.1:8840@evil.example/#pair=" + code, "http://127.0.0.1:8840/x#pair=" + code,
+                    "http://127.0.0.1:0/#pair=" + code, "http://127.0.0.1:65536/#pair=" + code,
+                    "http://127.0.0.1:8840/#pair=" + code.upper(), "http://127.0.0.1:8840/#pair=" + code[:-1],
+                    "http://127.0.0.1:8840/?binding=binding_x#pair=" + code, "http://127.0.0.1:8840#pair=" + code,
+                    "http://127.0.0.1.evil.example:8840/#pair=" + code, "http://127.0.0.1:8840/\n"):
+            self.assertFalse(tern.URL_SHAPE.fullmatch(bad), bad)
+        for good in ("http://127.0.0.1:8840/#pair=" + code, "http://127.0.0.1:65535/#pair=" + code,
+                     "http://127.0.0.1:1/?binding=binding_" + "a1" * 16 + "#pair=" + code):
+            self.assertTrue(tern.URL_SHAPE.fullmatch(good), good)
+
+    def test_default_runner_is_an_argv_list_with_no_shell(self):
+        seen = {}
+        def fake_run(argv, **kw):
+            seen.update(argv=argv, kw=kw)
+            return subprocess.CompletedProcess(argv, 3, "out", "err")
+        with patch.object(tern.subprocess, "run", fake_run):
+            done = tern.default_runner(["tool", "--x"], timeout=2)
+        self.assertIs(type(seen["argv"]), list)
+        self.assertIs(seen["kw"]["shell"], False)
+        self.assertEqual((done.returncode, done.stdout, done.stderr), (3, "out", "err"))
+        self.assertEqual(seen["kw"]["stdin"], subprocess.DEVNULL)
+
+    def test_default_runner_timeout_is_124_and_a_missing_program_is_127(self):
+        def slow(argv, **kw):
+            raise subprocess.TimeoutExpired(argv, 1)
+        with patch.object(tern.subprocess, "run", slow):
+            self.assertEqual(tern.default_runner(["x"]).returncode, 124)
+        self.assertEqual(tern.default_runner(["/nonexistent-glitch-idea-program"]).returncode, 127)
+
+    # ---- ssh mode is gone: nothing may bring it back
+    def test_no_script_imports_idea_ssh_or_runs_an_ssh_program_and_no_ssh_mode_is_accepted(self):
+        # Scope: only import statements and an argv/command element that is exactly "ssh". The printed `ssh -L` hint in
+        # idea_prototype.py is a longer string and the "SSH" in idea_native.py is a comment, so neither matches.
+        scripts = Path(__file__).resolve().parents[1] / "glitch-idea/scripts"
+        self.assertFalse((scripts / "idea_ssh.py").exists())
+        imports_ssh = re.compile(r"(?m)^\s*(?:import\s+idea_ssh\b|from\s+idea_ssh\b)")
+        runs_ssh = re.compile(r"""[\[(,]\s*['"]ssh['"]\s*[,\])]""")
+        for path in sorted(scripts.glob("*.py")):
+            source = path.read_text(encoding="utf-8")
+            with self.subTest(file=path.name):
+                self.assertIsNone(imports_ssh.search(source))
+                self.assertIsNone(runs_ssh.search(source))
+                self.assertNotIn("open_ssh_session", source)
+        # idea.py names the retired mode in exactly one place: the line that reads it as unset.
+        helper = (scripts / "idea.py").read_text(encoding="utf-8")
+        self.assertEqual(helper.count("'ssh'"), 1)
+        self.assertIn("if mode=='ssh': mode=None", helper)
 
 
 class TerminalFinderTests(unittest.TestCase):

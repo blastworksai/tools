@@ -1,7 +1,7 @@
 """Contract drift: the pairing-link and request-title grammars must agree between Python and lib/request.luau.
 
 Three views of each grammar are driven through the same tables:
-  1. the Python source of truth (idea_ssh.PAIR_URL_PATTERN, and a regex written in this test for titles);
+  1. the Python source of truth (idea_tern.PAIR_URL_PATTERN, and a regex written in this test for titles);
   2. the Luau source read as text, its pattern pieces pulled out and replayed in Python;
   3. the real pure module, when a standalone `luau` binary is on PATH (otherwise that half skips loudly).
 """
@@ -15,7 +15,7 @@ from pathlib import Path
 
 PLUGIN = Path(__file__).resolve().parent.parent / 'glitch-idea' / 'tern-plugin'
 sys.path.insert(0, str(PLUGIN.parent / 'scripts'))
-import idea_ssh  # noqa: E402
+import idea_tern  # noqa: E402
 
 REQUEST_PATH = PLUGIN / 'lib' / 'request.luau'
 SOURCE = REQUEST_PATH.read_text(encoding='utf-8')
@@ -118,7 +118,7 @@ def luau_strings(call, text=CODE):
 class PythonGrammar(unittest.TestCase):
     def test_url_table_through_the_python_pattern(self):
         for url, valid in URLS:
-            matched = re.fullmatch(idea_ssh.PAIR_URL_PATTERN, url) is not None and '\n' not in url
+            matched = re.fullmatch(idea_tern.PAIR_URL_PATTERN, url) is not None and '\n' not in url
             self.assertEqual(matched, valid, repr(url))
 
     def test_title_table_through_the_python_regex(self):
@@ -180,7 +180,7 @@ class LuauSourcePieces(unittest.TestCase):
         self.assertEqual(p['max_url'], 200)
 
     def test_literal_pieces_match_the_python_pattern(self):
-        pattern = idea_ssh.PAIR_URL_PATTERN
+        pattern = idea_tern.PAIR_URL_PATTERN
         self.assertIn(r'\?binding=binding_[0-9a-f]{32}', pattern)
         self.assertIn(r'#pair=[0-9a-f]{32}', pattern)
         for piece in ('"/?binding=binding_"', '"/#pair="', '"[^0-9a-f]"'):
