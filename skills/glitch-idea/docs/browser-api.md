@@ -283,8 +283,8 @@ acceptance enforces meaningful required fields. All text is rendered as text.
 | review | `handoff_id`, `source_revision`; derived packet/checks, no archive on copy |
 
 Scope vocabulary stays `small-change`, `capability`, `project`, `epic`. Method
-vocabulary stays `bounded-plan`, `adaptive-slices`, `appetite-led`,
-`experiment-led`. The budget and experiment inputs sit in the Exploration answer. Appetite-led requires `investment:{cap,unit,boundary}` with
+vocabulary is `bounded-plan`, `bmad`, `appetite-led`, `experiment-led`;
+`adaptive-slices` is retired, still read on a saved idea and never offered. The budget and experiment inputs sit in the Exploration answer. Appetite-led requires `investment:{cap,unit,boundary}` with
 positive finite cap, nonempty unit and boundary. Experiment-led requires
 `experiment:{question,evidence,success_criterion,stop_rule}`. Other methods
 require their unused conditional fields to be null. Memory evidence is

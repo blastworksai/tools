@@ -1,5 +1,5 @@
 // Human Exploration editor; Flow owns proposal sources and acceptance.
-import {METHOD_LABELS, validExploration, conversationStatus, filledNote, disabledAcceptReason, waitingLine, FILL_KEYS} from '../folds.js';
+import {METHOD_LABELS, SELECTABLE_METHODS, validExploration, conversationStatus, filledNote, disabledAcceptReason, waitingLine, FILL_KEYS} from '../folds.js';
 
 const KEY = 'exploration';
 const SCOPES = [['small-change', 'Small change'], ['capability', 'New capability'], ['project', 'Project'], ['epic', 'Epic']];
@@ -34,6 +34,8 @@ function decimalCap(raw) {
   return Number.isFinite(number) && number > 0 && number <= 1e12 ? number : null;
 }
 const methodLabel = value => METHOD_LABELS[value] ?? null;
+// A new choice offers the selectable methods only; an item already carrying a retired one keeps showing it.
+const pickable = kept => kept != null && !SELECTABLE_METHODS.includes(kept) && kept in METHOD_LABELS ? [...SELECTABLE_METHODS, kept] : SELECTABLE_METHODS;
 // Buttons sit in a row of their own so a form column never stretches them full width.
 const actions = (element, ...buttons) => { const row = element('div', '', 'setup-actions'); row.append(...buttons); return row; };
 
@@ -233,7 +235,7 @@ export function render({body, foot, flow, element, button, field, connected, edi
       const pick = element('div', '', 'field');
       const label = element('label', 'Method for this item'); label.htmlFor = 'exploration-sketch-' + index + '-method';
       const select = element('select'); select.id = 'exploration-sketch-' + index + '-method';
-      for (const [value, text] of [['', 'Overall method'], ...Object.entries(METHOD_LABELS)]) {
+      for (const [value, text] of [['', 'Overall method'], ...pickable(item.method).map(key => [key, METHOD_LABELS[key]])]) {
         const option = element('option', text); option.value = value;
         if ((item.method ?? '') === value) option.selected = true;
         select.append(option);

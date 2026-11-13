@@ -63,8 +63,8 @@ class FillTests(unittest.TestCase):
         found = dict(status='found', sources=['memory:x'], rationale='r', preferred_method=None)
         with self.assertRaises(IdeaError):
             proposals._default_fill('method', {'memory': found})
-        found['preferred_method'] = 'adaptive-slices'
-        self.assertEqual(proposals._default_fill('method', {'memory': found})['memory']['preferred_method'], 'adaptive-slices')
+        found['preferred_method'] = 'bmad'
+        self.assertEqual(proposals._default_fill('method', {'memory': found})['memory']['preferred_method'], 'bmad')
 
     def test_method_proposal_is_memory_only(self):
         self.assertEqual(proposals._default_proposal('method', {'memory': MEMORY}), {'memory': MEMORY})

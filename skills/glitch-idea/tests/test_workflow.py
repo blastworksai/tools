@@ -220,7 +220,7 @@ class WorkflowTests(unittest.TestCase):
                 elif step == 'exploration':
                     value['next_slice'] = 'Check the second lid'
                 elif step == 'method':
-                    value['selection'] = 'adaptive-slices'
+                    value['selection'] = 'bmad'
                 elif step == 'visualize':
                     value['reason'] = 'No fixture UI'
                 else:

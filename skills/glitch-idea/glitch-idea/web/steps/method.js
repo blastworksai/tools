@@ -1,18 +1,19 @@
 // Explicit human Method choice. Four equal cards; the agent never recommends, selects or fills a method.
 // The terminal conversation can only report what your Glitch remembers (memory), shown as one line.
-import {METHOD_LABELS, validMethod, conversationStatus, disabledAcceptReason} from '../folds.js';
+import {METHOD_LABELS, SELECTABLE_METHODS, RETIRED_METHODS, validMethod, conversationStatus, disabledAcceptReason} from '../folds.js';
 
 const LINES = {
   'bounded-plan': 'Agree the scope and acceptance criteria now, then build it.',
-  'adaptive-slices': 'Fix the outcome and the next useful slice; learn as you go.',
+  'bmad': 'Fix a written brief, requirements and architecture first; then build story by story.',
   'appetite-led': 'Set how much you will invest; the scope flexes inside it.',
   'experiment-led': 'Start from one uncertainty and the evidence that settles it.',
 };
-const METHODS = Object.entries(METHOD_LABELS).map(([key, label]) => [key, label, LINES[key]]);
+// Only the selectable methods are cards. A retired method is looked up for its label, never offered.
+const METHODS = SELECTABLE_METHODS.map(key => [key, METHOD_LABELS[key], LINES[key]]);
 // Plain-language "Tell me more" text, paraphrased from references/methods.md.
 const MORE = {
-  'bounded-plan': 'You fix a clear scope and its acceptance criteria now, and the next step is earned by verifying the bounded change. It fits a change you already understand. It can still deliver a slice or an experiment inside another method.',
-  'adaptive-slices': 'You fix the outcome and the next useful increment, not the whole route. What you learn from building and using each slice reshapes the next one. It fits evolving requirements or larger work.',
+  'bounded-plan': 'You fix a clear scope and its acceptance criteria now, and the next step is earned by verifying the bounded change. It fits a change you already understand. It can still contain an experiment inside another method.',
+  'bmad': 'You fix a written brief, requirements and architecture before any building, and the next step is earned by building each story and checking it against those documents. It fits larger work where several roles\' views must agree before code.',
   'appetite-led': 'You set an investment cap and the outcome boundaries, and the scope flexes inside that cap. The next step is earned by a completed bet or an explicit stop or reshape. It fits work where the scope can vary within the cap you choose. You give the cap in Exploration.',
   'experiment-led': 'You fix a question, the evidence that would settle it and a bounded experiment. The evidence decides whether to proceed, change course or stop. It fits work whose value or feasibility is uncertain. You give the question and evidence in Exploration.',
 };
@@ -27,7 +28,7 @@ const REASONS = {
   projection_omitted: 'This memory result is saved in Markdown; its body is omitted from this view.',
 };
 
-const title = value => METHODS.find(([key]) => key === value)?.[1] ?? 'Not chosen';
+const title = value => METHOD_LABELS[value] ?? 'Not chosen';
 // One line per memory status; no other memory prose is ever shown.
 export function memoryLine(memory) {
   switch (memory?.status) {
@@ -74,6 +75,12 @@ export function render({body, foot, flow, element, button, field, connected, edi
     choices.append(choice);
   }
   cards.append(choices);
+  // A saved retired choice stays visible and readable, but is plain text: not a control, not focusable.
+  const kept = current().selection;
+  if (RETIRED_METHODS.includes(kept)) {
+    const retired = element('p', 'Current choice, no longer offered: ' + METHOD_LABELS[kept] + '. Pick one of the four methods above to replace it.', 'notice method-retired');
+    retired.id = 'method-retired-' + kept; cards.append(retired);
+  }
   const more = element('div', '', 'method-more');
   for (const [key, label] of METHODS) {
     const details = element('details'); details.id = 'method-more-' + key;

@@ -48,7 +48,7 @@ export const UPLOAD_MAX_BYTES = 25 * 1024 * 1024;
 // Fixed transport schemas. Host paths are evidence text only.
 const HANDOFF = /^handoff_[0-9a-f]{32}$/;
 const HASH = /^[0-9a-f]{64}$/;
-const METHODS = new Set(['bounded-plan', 'adaptive-slices', 'appetite-led', 'experiment-led']);
+const METHODS = new Set(['bounded-plan', 'bmad', 'appetite-led', 'experiment-led', 'adaptive-slices']);
 const HANDOFF_PAYLOAD = ['request_id', 'idea_id', 'expected_revision', 'expected_draft_version', 'expected_backlog_revision'];
 const HANDOFF_RECEIPT = ['ok', 'code', 'request_id', 'write_state', 'idea_id', 'revision', 'draft_version',
   'backlog_revision', 'handoff_index', 'handoff_id', 'path', 'sha256', 'handoff', 'handoff_current'];
