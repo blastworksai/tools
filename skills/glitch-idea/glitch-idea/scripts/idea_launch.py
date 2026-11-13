@@ -207,7 +207,7 @@ class OwnerService:
         self._restoring = False
         # Warm the store's load cache before the server listens: a large store takes seconds to parse cold, and
         # the first binding-open would otherwise spend its whole client budget on that read and fail owner_unavailable
-        # after the owner still created the session. A slow start now shows as service_readiness_timeout (safe to retry).
+        # after the owner still created the session. The helper waits for a service it started itself (see own_spawn_timeout in ensure_service).
         # A store error here propagates exactly as it does from the restore above; a cache hit makes this near-free.
         try:
             with self.store.transaction(): pass
@@ -609,20 +609,32 @@ def _check_origin_port(probe,port):
     if found != port: raise LaunchError('port_mismatch',port=port)
 
 
+OWN_SPAWN_TIMEOUT = 30
+
+
 def ensure_service(store_path,runtime_root,config=None,*,runtime_python=None,readiness_timeout=5,
-                   spawn=subprocess.Popen,clock=time.monotonic,sleep=time.sleep):
+                   spawn=subprocess.Popen,clock=time.monotonic,sleep=time.sleep,own_spawn_timeout=OWN_SPAWN_TIMEOUT):
     require(type(readiness_timeout) in (int,float) and math.isfinite(readiness_timeout) and 0 < readiness_timeout <= 5,
             'Readiness budget must be at most five seconds')
+    require(type(own_spawn_timeout) in (int,float) and math.isfinite(own_spawn_timeout) and 0 < own_spawn_timeout <= OWN_SPAWN_TIMEOUT,
+            'Own-spawn budget must be at most thirty seconds')
     runtime = Runtime(store_path,runtime_root)
     config = _config(config,runtime.store_path)
     executable = source_python(runtime_python)
-    deadline = clock()+readiness_timeout
+    started = clock()
+    short_deadline = started+readiness_timeout
+    # A service this call started itself is waited for beyond the short bound while its child is alive (a cold load of
+    # a large store takes seconds); the short bound alone decides every other case, and a child that exited ends the wait.
+    own_deadline = started+max(own_spawn_timeout,readiness_timeout)
+    child = None
     spawned = False
     mismatched = False
     busy = None
     fixed = config.get('browser_port')
     port_held = False
-    while clock() < deadline:
+    while True:
+        deadline = own_deadline if child is not None and child.poll() is None else short_deadline
+        if clock() >= deadline: break
         try:
             found = runtime.probe_owner(timeout=min(1,max(.001,deadline-clock())))
             if fixed is not None: _check_origin_port(found,fixed)

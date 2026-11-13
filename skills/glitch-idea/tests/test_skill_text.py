@@ -353,9 +353,10 @@ class RemoveIdeaTextTests(unittest.TestCase):
         self.assertIn("Removing an idea", SKILL)
 
 class ReadinessRetryTextTests(unittest.TestCase):
-    def test_skill_retries_service_readiness_timeout_once_more(self):
+    def test_skill_explains_service_readiness_timeout_after_the_own_spawn_wait(self):
         body = flat(SKILL)
-        self.assertRegex(body, r"`service_readiness_timeout`.{0,300}once more")
+        self.assertRegex(body, r"waits up to 30 seconds for a service it started itself.{0,200}`service_readiness_timeout`.{0,60}did not come up")
+        self.assertNotRegex(body, r"`service_readiness_timeout`.{0,300}once more")
 
 
 if __name__ == "__main__":
