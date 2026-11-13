@@ -89,6 +89,9 @@ function hostPath(value) {
   if (normalized.split('/').includes('..') || normalized.split('/').includes('.')) return null;
   return normalized;
 }
+function sessionWorkspace(value) {
+  return value === null || (exact(value, ['name', 'path']) && typeof value.name === 'string' && typeof value.path === 'string');
+}
 function invalidReply(uncertain = false) { throw new ApiError('invalid_response', 0, {}, uncertain); }
 const SETTINGS_WHERE = new Set(['native', 'api']);
 const SETTINGS_KEY = /^[\x21-\x7e]{8,512}$/;
@@ -333,8 +336,11 @@ export class IdeaApi {
     return this.session();
   }
 
-  state(ideaId = null) {
-    return this.request('state' + (ideaId ? '?idea_id=' + encodeURIComponent(ideaId) : ''));
+  async state(ideaId = null) {
+    const data = await this.request('state' + (ideaId ? '?idea_id=' + encodeURIComponent(ideaId) : ''));
+    // session_workspace is null or exactly {name, path}; an older service sends no such key, which the page reads as null.
+    if (data !== null && typeof data === 'object' && Object.hasOwn(data, 'session_workspace') && !sessionWorkspace(data.session_workspace)) invalidReply();
+    return data;
   }
 
   write(operation, payload) {

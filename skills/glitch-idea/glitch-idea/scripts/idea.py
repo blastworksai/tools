@@ -75,6 +75,9 @@ def parser():
             p.add_argument('--readiness-timeout',type=float,default=5)
             p.add_argument('--resume')
             p.add_argument('--idea-id')
+            # Both or neither: this one new session's Capture prefill (never a move).
+            p.add_argument('--workspace-name')
+            p.add_argument('--workspace-path')
         if name == 'browser-open':
             p.add_argument('--browser',choices=('link','orca','system','tern'))
             p.add_argument('--orca-worktree')
@@ -378,6 +381,14 @@ def run_launcher(args):
                     'Invalid binding ID','invalid_input')
             require(args.idea_id is None or (type(args.idea_id) is str and re.fullmatch(r'idea_[0-9a-f]{32}',args.idea_id)),
                     'Invalid idea ID','invalid_input')
+        prefill=None
+        if args.command!='serve':
+            name,wpath=getattr(args,'workspace_name',None),getattr(args,'workspace_path',None)
+            require((name is None)==(wpath is None),'--workspace-name and --workspace-path must be given together or not at all','usage')
+            if name is not None:
+                require(args.resume is None and getattr(args,'reconnect',None) is None,
+                        'A session workspace only goes with a new session, not --resume or --reconnect','usage')
+                prefill=dict(name=name,path=wpath)
         orcabinding=None
         if args.command=='browser-open':
             # Effective mode first: the flag, else the configured browser_mode (validated by _fixed_ports),
@@ -408,6 +419,7 @@ def run_launcher(args):
             return dict(ok=True,code='stopped',**({'runtime_root_fallback':args.runtime_root_fallback} if args.runtime_root_fallback else {}))
         options=dict(binding_id=args.resume,selected_idea_id=args.idea_id,runtime_python=executable,
                      readiness_timeout=args.readiness_timeout)
+        if prefill is not None: options['session_workspace']=prefill  # only when given: other calls stay as they were
         # Keep released open_session's five-second mutation timeout; probes remain
         # <=1s within readiness budget. Never retry an ambiguous NEW here.
         if args.command=='session-open': result=open_session(store,runtime,config,**options)

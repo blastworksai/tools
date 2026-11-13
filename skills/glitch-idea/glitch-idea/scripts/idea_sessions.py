@@ -147,7 +147,7 @@ class SessionPolicy(TrustedSessionPolicy):
             except Exception:
                 raise BridgeError('agent_cancel_failed', 503) from None
 
-    def open_binding(self, actor, receipt_session_id, selected_idea_id=None, *, binding_id=None, resume=False):
+    def open_binding(self, actor, receipt_session_id, selected_idea_id=None, *, binding_id=None, resume=False, session_workspace=None):
         """Initialize/resume an explicit trusted record; return nonsecret ID.
 
         Restart passes the same persisted binding ID/SID. A missing SID fails
@@ -162,6 +162,8 @@ class SessionPolicy(TrustedSessionPolicy):
         binding_id = binding_id if resume else 'binding_' + self._secret(16)
         record = dict(schema_version=1,binding_id=binding_id,actor=actor,
                       receipt_session_id=receipt_session_id,selected_idea_id=selected_idea_id)
+        # Only when set, so a record without a prefill is byte-for-byte what the previous release wrote.
+        if session_workspace is not None: record['session_workspace'] = copy.deepcopy(session_workspace)
         with self._registry:
             entry = self._entries.get(binding_id)
             created = entry is None

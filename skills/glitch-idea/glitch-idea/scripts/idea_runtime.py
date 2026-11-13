@@ -54,7 +54,8 @@ STAGE_SETTLE_SECONDS = 0.05
 OWNER_REFUSALS = frozenset(('busy', 'agent_unavailable', 'binding_not_found', 'not_found',
                             'session_binding_mismatch', 'session_capacity_exhausted',
                             'binding_membership_conflict', 'session_in_use', 'invalid_control', 'unknown_control',
-                            'control_unavailable', 'tern_offer_refused', 'internal_error', 'runtime_busy', 'runtime_corrupt'))
+                            'control_unavailable', 'tern_offer_refused', 'internal_error', 'runtime_busy', 'runtime_corrupt',
+                            'workspace_unavailable'))
 IDENTITY_REFUSALS = frozenset(('owner_unauthorized', 'owner_identity_mismatch'))
 
 
@@ -223,13 +224,19 @@ def _exact(value, names):
 
 
 def _binding(value):
-    _exact(value, ('schema_version', 'binding_id', 'actor', 'receipt_session_id', 'selected_idea_id'))
+    # session_workspace is optional: a record from the previous release has none and is read as before.
+    _exact(value, ('schema_version', 'binding_id', 'actor', 'receipt_session_id', 'selected_idea_id')
+           + (('session_workspace',) if type(value) is dict and 'session_workspace' in value else ()))
     _check(type(value['binding_id']) is str and BINDING.fullmatch(value['binding_id']) is not None)
     _check(type(value['receipt_session_id']) is str and SESSION.fullmatch(value['receipt_session_id']) is not None)
     _check(type(value['actor']) is str and 0 < len(value['actor']) <= 200 and bool(value['actor'].strip())
            and not any(ord(char) < 32 or 0xD800 <= ord(char) <= 0xDFFF for char in value['actor']))
     idea_id = value['selected_idea_id']
     _check(idea_id is None or (type(idea_id) is str and IDEA.fullmatch(idea_id) is not None))
+    if 'session_workspace' in value:
+        space = value['session_workspace']
+        _check(type(space) is dict and set(space) == {'name', 'path'} and type(space['name']) is str
+               and 1 <= len(space['name']) <= 100 and type(space['path']) is str and 0 < len(space['path']) <= 4096)
     return copy.deepcopy(value)
 
 
@@ -725,6 +732,9 @@ class Runtime:
         payload = dict(challenge=challenge, instance_nonce=discovery['instance_nonce'], store_sha256=self.store_sha256)
         if binding is not None:
             payload.update(mode=binding[0], binding_id=binding[1], selected_idea_id=binding[2])
+            # Only when given: a request without a prefill is byte-for-byte what the previous release sent,
+            # and an owner from that release rejects any extra key.
+            if len(binding) > 3 and binding[3] is not None: payload.update(session_workspace=binding[3])
         if agent is not None:
             payload.update(binding_id=agent[0], session_id=agent[1], expected_generation=agent[2])
         if discard is not None:
@@ -852,7 +862,7 @@ class Runtime:
         self._call('probe', discovery, credential, deadline)
         return self._call('stop', discovery, credential, deadline)
 
-    def open_binding(self, mode, binding_id=None, selected_idea_id=None, timeout=1):
+    def open_binding(self, mode, binding_id=None, selected_idea_id=None, timeout=1, session_workspace=None):
         """Fixed private launcher request; returns only the one-time pairing code.
 
         Reusable owner/agent credentials never leave this module. A NEW ambiguous
@@ -863,6 +873,9 @@ class Runtime:
                (mode in ('resume', 'repair') and type(binding_id) is str and BINDING.fullmatch(binding_id) is not None), 'invalid_control')
         _check(mode != 'repair' or selected_idea_id is None, 'invalid_control')
         _check(selected_idea_id is None or (type(selected_idea_id) is str and IDEA.fullmatch(selected_idea_id) is not None), 'invalid_control')
+        # A prefill belongs to a NEW session only: a resumed session keeps what it was opened with.
+        _check(session_workspace is None or (mode == 'new' and type(session_workspace) is dict
+               and set(session_workspace) == {'name', 'path'}), 'invalid_control')
         # One overall deadline: binding reads settle within its first half, so a settle never
         # leaves the control call no time (which would read owner_unavailable).
         deadline = self._timeout(timeout)
@@ -872,7 +885,8 @@ class Runtime:
         discovery, credential = self._client_pair(deadline)
         self._call('probe', discovery, credential, deadline)
         try:
-            value = self._call('binding-open', discovery, credential, deadline, (mode, binding_id, selected_idea_id))
+            value = self._call('binding-open', discovery, credential, deadline,
+                               (mode, binding_id, selected_idea_id) + (() if session_workspace is None else (session_workspace,)))
         except RuntimeError as exc:
             if mode != 'new' or exc.code != 'session_capacity_exhausted': raise
             # Refused: nothing finished and idle to free. The list is fetched over the authenticated channel, never from the refusal.

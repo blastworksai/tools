@@ -21,6 +21,12 @@ Read [commands.md](references/commands.md) before using the bundled Python helpe
 
 The Capture **workspace** is the project the idea is for (the folder it would be built in), named and given as an absolute path on the service host. It is not the ideas store, which `--store` or the config selects. The service refuses with `workspace_unavailable` a path that is not absolute, does not exist or cannot be read there, or is not a folder.
 
+When the session is already working in a project, pass that project's name and its absolute folder to `browser-open` with `--workspace-name` and `--workspace-path`, so Capture shows it for a new idea.
+The project comes from what this session is already working in.
+For a brand-new idea with no project, pass nothing and the configured default shows.
+Never ask the operator for a path only to prefill it, and never guess one.
+Do not pass them together with `--resume`.
+
 For a new idea, save the original wording verbatim with `capture` **before questions or analysis**. Read the returned ID and state before claiming it is saved. For an existing personal ID, use `show`; use `list` to resolve an ambiguous reference. Do not import or modify another backlog; the one exception is `import-idea`, only on the operator's yes after its preview (see "Bringing an idea in from another store" in `references/commands.md`). Never remove an idea unasked: `remove-idea` is always previewed first and run with `--confirm` only on the operator's explicit yes; the preview lists this seat's saved browser sessions that select the idea and `--confirm` drops them with it, so one yes covers both (see "Removing an idea" in `references/commands.md`).
 
 Immediately after capture, explicitly request the operator's **urgency (1–10)** and **importance (1–10)** as two separate answers, unless already supplied. Never infer either rating, even when asked to “score it yourself”; supply a separate brain assessment instead. If the operator stops or cannot answer, keep null ratings and return the saved ID. Capture and resumption never depend on completed scoring.

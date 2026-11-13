@@ -20,6 +20,13 @@ class SkillTextTests(unittest.TestCase):
     def test_skill_names_the_system_browser_flag(self):
         self.assertIn("--browser system", SKILL)
 
+    def test_capture_prefill_paragraph(self):
+        flat = " ".join(SKILL.split())
+        for needle in ("`--workspace-name`", "`--workspace-path`", "`browser-open`",
+                       "Never ask the operator for a path only to prefill it, and never guess one",
+                       "Do not pass them together with `--resume`"):
+            self.assertIn(needle, flat)
+
     def test_apiv_framing_line(self):
         self.assertIn("This is Align, the A of APIV (Align · Plan · Implement · Verify); /glitch-plan is the P", SKILL)
 

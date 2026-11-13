@@ -29,7 +29,7 @@ from idea_domain import IdeaError, check_id, decode, encoded, require
 from idea_native import (open_browser, close_browser_page, browser_page_pairing, navigate_browser_page,
                          NativeError, OrcaBinding)
 from idea_runtime import Runtime, RuntimeError as OwnerError, MAX_BINDINGS
-from idea_service import Service, TrustedContext
+from idea_service import Service, TrustedContext, session_workspace as validate_session_workspace
 from idea_sessions import SessionPolicy, AgentBinding
 from idea_steps import load_registry, TrustedRoute
 from idea_proposals import Broker
@@ -47,6 +47,8 @@ CREDENTIAL_FIELDS = COMMON | {'binding_id','session_id','expected_generation'}
 DISCARD_FIELDS = COMMON | {'binding_id','confirm'}
 TERN_OFFER_FIELDS = COMMON | {'rid','url'}
 TERN_STATE_FIELDS = COMMON | {'rid'}
+# Keys a request MAY add to a control message. Only present when used, so every request without them is the previous release's.
+CONTROL_OPTIONAL = {'binding-open':{'session_workspace'}}
 CONTROL_FIELDS = {'binding-open':OPEN_FIELDS,'agent-credentials':CREDENTIAL_FIELDS,'binding-discard':DISCARD_FIELDS,'binding-list':COMMON,
                   'tern-offer':TERN_OFFER_FIELDS,'tern-state':TERN_STATE_FIELDS}
 CHILD = Path(__file__).resolve()
@@ -187,7 +189,7 @@ class OwnerService:
             check(record['actor'] == self.actor,'session_binding_mismatch',403)
             try:
                 self.policy.open_binding(self.actor,record['receipt_session_id'],record['selected_idea_id'],
-                                         binding_id=record['binding_id'],resume=True)
+                                         binding_id=record['binding_id'],resume=True,session_workspace=record.get('session_workspace'))
             except IdeaError as exc:
                 # The ideas store is shared, so an idea can be removed while a saved session still selects it; one
                 # such session must not keep the whole service from starting. Set it aside (never deleted) only when
@@ -217,6 +219,7 @@ class OwnerService:
 
     def application(self,record):
         return Service(self.store,self.config,TrustedContext(record['actor'],record['receipt_session_id'],record['selected_idea_id']),
+                       session_workspace=record.get('session_workspace'),
                        handlers=self.handlers,workspace_resolver=self.workspace_resolver,agent_provider=self.agent_provider,
                        handoff_provider=self.handoff_provider)
 
@@ -440,6 +443,9 @@ class OwnerService:
               (mode in ('resume','repair') and type(binding_id) is str and re.fullmatch(r'binding_[0-9a-f]{32}',binding_id)), 'invalid_control')
         check(mode != 'repair' or selected is None, 'invalid_control')
         check(selected is None or (type(selected) is str and re.fullmatch(r'idea_[0-9a-f]{32}',selected)), 'invalid_control')
+        prefill = payload.get('session_workspace')
+        check(prefill is None or mode == 'new','invalid_control')
+        prefill = validate_session_workspace(prefill)  # a bad folder is refused here, before any session is allocated
         with self.admission:
             check(not self.stopped.is_set(),'busy',503)
             records = {record['binding_id']:record for record in self.runtime.list_bindings()}
@@ -458,7 +464,7 @@ class OwnerService:
                     with self.store.transaction() as state:
                         check(selected in state['ideas'],'not_found',404)
                 sid = self.store.create_session()
-                binding_id = self.policy.open_binding(self.actor,sid,selected)
+                binding_id = self.policy.open_binding(self.actor,sid,selected,session_workspace=prefill)
                 self.members.add(binding_id)
             elif mode == 'repair':
                 # A rebuilt tab: browser credentials only; the agent generation stays as it is.
@@ -474,7 +480,8 @@ class OwnerService:
                 check(prior['actor'] == self.actor,'session_binding_mismatch',403)
                 sid = prior['receipt_session_id']
                 selected = prior['selected_idea_id'] if selected is None else selected
-                self.policy.open_binding(self.actor,sid,selected,binding_id=binding_id,resume=True)
+                self.policy.open_binding(self.actor,sid,selected,binding_id=binding_id,resume=True,
+                                         session_workspace=prior.get('session_workspace'))
             code = self.policy.issue_pairing(binding_id)
             return dict(binding_id=binding_id,session_id=sid,selected_idea_id=selected,pairing_code=code)
 
@@ -484,7 +491,8 @@ class OwnerService:
             if operation in ('probe','stop'):
                 body,callback = self.runtime.control(operation,payload,request.header('Authorization'),self.request_stop)
                 return Response(body,after_send=callback)
-            check(operation in CONTROL_FIELDS and type(payload) is dict and set(payload) == CONTROL_FIELDS[operation],'invalid_control')
+            check(operation in CONTROL_FIELDS and type(payload) is dict and CONTROL_FIELDS[operation] <= set(payload)
+                  <= CONTROL_FIELDS[operation] | CONTROL_OPTIONAL.get(operation,set()),'invalid_control')
             body = self.runtime.validate_owner({key:payload[key] for key in COMMON},request.header('Authorization'),operation,payload)
             body.update({'binding-open':self._open,'agent-credentials':self._credentials,
                          'binding-discard':self._discard,'binding-list':self._list,
@@ -656,13 +664,17 @@ def ensure_service(store_path,runtime_root,config=None,*,runtime_python=None,rea
 
 
 def open_session(store_path,runtime_root,config=None,*,binding_id=None,selected_idea_id=None,runtime_python=None,
-                 readiness_timeout=5,timeout=5,spawn=subprocess.Popen):
+                 readiness_timeout=5,timeout=5,spawn=subprocess.Popen,session_workspace=None):
     # Validate typed caller selections before starting a child or allocating SID.
     if selected_idea_id is not None: check_id(selected_idea_id)
+    # The Capture prefill for this one new session: refused before any service starts or session exists.
+    require(session_workspace is None or binding_id is None,'A resumed session keeps the workspace it was opened with','usage')
+    session_workspace = validate_session_workspace(session_workspace)
     require(binding_id is None or (type(binding_id) is str and re.fullmatch(r'binding_[0-9a-f]{32}',binding_id)), 'Invalid binding ID')
     ensure_service(store_path,runtime_root,config,runtime_python=runtime_python,readiness_timeout=readiness_timeout,spawn=spawn)
     # One binding-open only. Never auto-retry a NEW request after wire ambiguity.
-    return Runtime(store_path,runtime_root).open_binding('new' if binding_id is None else 'resume',binding_id,selected_idea_id,timeout)
+    return Runtime(store_path,runtime_root).open_binding('new' if binding_id is None else 'resume',binding_id,selected_idea_id,timeout,
+                                                         session_workspace=session_workspace)
 
 
 def _check_orcabinding(orcabinding):
