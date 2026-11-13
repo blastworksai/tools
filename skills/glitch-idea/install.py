@@ -230,6 +230,8 @@ def effective_config(source, destination, explicit_store, recognized, explicit_r
     if registry is not None:
         if os.name != "posix":
             raise InstallError("account_ports_file is not supported on Windows")
+        if not _clean_text(registry):
+            raise InstallError("account_ports_file must be a path of clean text (no control characters), the same rule the helper applies")
         registry = absolute_path(registry, "account_ports_file")
         if os.path.isdir(registry):
             raise InstallError(f"account_ports_file must name a file, not a folder: {registry}")
@@ -344,7 +346,7 @@ def install(source, skills_root, store=None, dry_run=False, runtime_python=None,
     same = recognized and current == payload and was_shared == shared
     drift = same and shared and _shared_drift(destination, payload, source, _skills_gid(skills_root))
     action = ("repaired" if drift else "unchanged" if same else "upgraded" if recognized else "installed")
-    store_facts = _store_gate(config["store_path"], skills_root, dry_run, _skills_gid(skills_root)) if shared else None
+    store_facts = _store_gate(config["store_path"], skills_root) if shared else None
     result = _publish(source, skills_root, destination, config, payload, action, recognized,
                       venv, dry_run, shared)
     if store_facts is not None:
@@ -415,32 +417,87 @@ def _skills_gid(skills_root):
     return skills_root.stat().st_gid if skills_root.exists() else os.getgid()
 
 
-def _store_gate(store, skills_root, dry_run, shared_group):
-    """A shared install needs a store root several accounts can write: setgid, group-writable, in a group this account belongs to.
+STORE_ENTRY_LIMIT = 100000  # the walk of an existing store stops here and refuses
 
-    This is idea_platform.is_shared_root's definition (a test keeps the two in agreement)."""
+
+def _clean_text(value, limit=4096):
+    """The runtime's clean-text rule (idea.py's _clean_text; a test keeps the two in agreement)."""
+    return (type(value) is str and bool(value.strip()) and len(value) <= limit
+            and all(32 <= ord(c) != 127 and not 0xD800 <= ord(c) <= 0xDFFF for c in value))
+
+
+def _store_problems(store, group):
+    """Walk an existing store without following symlinks; return (entries seen, problem list or a bound message).
+
+    The rule is what the runtime itself writes inside a shared root: directories group rwx and setgid (2770,
+    idea_platform.SHARED_DIR_MODE), files group-readable and group-writable (0660, SHARED_FILE_MODE) or sealed read-only
+    (0440, SHARED_SEAL_MODE: no write bit at all), every entry in the root's group. Symlinks are refused, as the runtime does."""
+    problems = []
+    seen = 0
+    pending = [store]
+    while pending:
+        folder = pending.pop()
+        with os.scandir(folder) as entries:
+            for entry in entries:
+                seen += 1
+                if seen > STORE_ENTRY_LIMIT:
+                    return seen, None
+                info = entry.stat(follow_symlinks=False)
+                mode = info.st_mode
+                if stat.S_ISLNK(mode):
+                    problems.append((entry.path, "is a symlink, which the runtime refuses inside a store"))
+                elif stat.S_ISDIR(mode):
+                    if info.st_gid != group:
+                        problems.append((entry.path, f"belongs to group {_group_name(info.st_gid)}"))
+                    elif (mode & 0o2770) != 0o2770:
+                        problems.append((entry.path, f"is a folder with mode {stat.S_IMODE(mode):o}, not group rwx and setgid"))
+                    pending.append(entry.path)
+                elif stat.S_ISREG(mode):
+                    sealed = not mode & 0o222
+                    if info.st_gid != group:
+                        problems.append((entry.path, f"belongs to group {_group_name(info.st_gid)}"))
+                    elif not mode & stat.S_IRGRP or not (mode & stat.S_IWGRP or sealed):
+                        problems.append((entry.path, f"is a file with mode {stat.S_IMODE(mode):o}, not group-readable and writable"))
+                else:
+                    problems.append((entry.path, "is neither a file nor a folder"))
+    return seen, problems
+
+
+def _store_gate(store, skills_root):
+    """A shared install needs a store several accounts can use. Read-only: nothing is created, changed or left behind.
+
+    The root must satisfy idea_platform.is_shared_root (a test keeps the two in agreement), be a real directory in a group
+    this account belongs to, and everything already inside must be usable by that group."""
     store = Path(store)
-    run = f"chgrp {_group_name(shared_group)} '{store}' && chmod 2770 '{store}'"
-    if store.exists() or store.is_symlink():
-        info = store.stat()
-        if not stat.S_ISDIR(info.st_mode):
-            raise InstallError(f"The store {store} is not a directory; nothing changed")
-        if not (info.st_mode & stat.S_ISGID and info.st_mode & stat.S_IWGRP):
-            raise InstallError(f"A shared install needs a store several accounts can write, and {store} is owner-only "
-                               f"(its root must be setgid and group-writable). Run: {run} ; then rerun the install. Nothing changed")
-        if info.st_gid not in {os.getgid(), *os.getgroups()}:
-            raise InstallError(f"The store {store} belongs to group {_group_name(info.st_gid)}, which this account is not in; "
-                               f"use a store in one of your groups, or run: {run} ; nothing changed")
-        return {"path": str(store), "status": "ready"}
-    if not dry_run:
-        store.mkdir(parents=True, exist_ok=True)
-        try:
-            os.chown(store, -1, shared_group)
-        except OSError as exc:
-            raise InstallError(f"Cannot give the new store {store} to group {_group_name(shared_group)}: {exc.strerror}") from exc
-        os.chmod(store, 0o2770)
-    return {"path": str(store), "status": "would_create" if dry_run else "created", "mode": "2770",
-            "group": _group_name(shared_group)}
+    skills_group = _group_name(_skills_gid(skills_root))
+    create = f"mkdir '{store}' && chgrp {skills_group} '{store}' && chmod 2770 '{store}'"
+    for component in (store, *store.parents):
+        if component.is_symlink():
+            raise InstallError(f"The store path contains a symlink ({component}), which the runtime refuses; nothing changed")
+    if not store.exists():
+        raise InstallError(f"A shared install needs its store to exist first, and {store} does not. Create it, then rerun: {create} ; nothing changed")
+    info = store.stat()
+    if not stat.S_ISDIR(info.st_mode):
+        raise InstallError(f"The store {store} is not a directory; nothing changed")
+    repair_root = f"chgrp {skills_group} '{store}' && chmod 2770 '{store}'"
+    if not (info.st_mode & stat.S_ISGID and info.st_mode & stat.S_IWGRP):
+        raise InstallError(f"A shared install needs a store several accounts can write, and {store} is owner-only "
+                           f"(its root must be setgid and group-writable). Run: {repair_root} ; then rerun. Nothing changed")
+    if info.st_gid not in {os.getgid(), *os.getgroups()}:
+        raise InstallError(f"The store {store} belongs to group {_group_name(info.st_gid)}, which this account is not in; "
+                           f"run: {repair_root} ; nothing changed")
+    seen, problems = _store_problems(store, info.st_gid)
+    if problems is None:
+        raise InstallError(f"The store {store} holds more than {STORE_ENTRY_LIMIT} entries, too many to check; "
+                           "check and repair it yourself, then rerun with a store you have verified; nothing changed")
+    if problems:
+        examples = "; ".join(f"{path} {why}" for path, why in problems[:5])
+        group = _group_name(info.st_gid)
+        repair = (f"chgrp -R {group} '{store}' && find '{store}' -type d -exec chmod 2770 {{}} + "
+                  f"&& find '{store}' -type f -perm /200 -exec chmod 660 {{}} + && find '{store}' -type f ! -perm /200 -exec chmod 440 {{}} +")
+        raise InstallError(f"The store {store} has {len(problems)} entries its group cannot use, for example: {examples}. "
+                           f"Run: {repair} ; then rerun. Nothing changed")
+    return {"path": str(store), "status": "ready", "entries": seen}
 
 
 def _share(stage, payload, source, gid):

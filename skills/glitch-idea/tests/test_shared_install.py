@@ -65,6 +65,8 @@ class Base(unittest.TestCase):
         self.destination = self.skills / 'glitch-idea'
         self.store = self.root / 'ideas'
         self.registry = self.root / 'ports.json'
+        self.store.mkdir()  # a shared install never creates the store: the operator does, as the README says
+        os.chmod(self.store, 0o2770)
 
     def write_registry(self, rows):
         self.registry.write_text(json.dumps({'schema': 1, 'host': 'testhost', 'seats': rows}))
@@ -197,7 +199,6 @@ class SharedInstallTests(Base):
         self.assertNotIn('shared', plain)
 
     def test_an_owner_only_store_is_refused_with_the_command_to_run(self):
-        self.store.mkdir(mode=0o700)
         os.chmod(self.store, 0o700)
         self.write_registry({'alice': {'browser_port': 41001, 'prototype_port': 41002}})
         result, _ = self.install('--shared', '--account-ports-file', self.registry, success=False)
@@ -208,28 +209,125 @@ class SharedInstallTests(Base):
         self.assertEqual(mode(self.store), 0o700)
 
     def test_a_group_safe_store_is_accepted_and_left_alone(self):
-        self.store.mkdir()
-        os.chmod(self.store, 0o2770)
         self.write_registry({'alice': {'browser_port': 41001, 'prototype_port': 41002}})
         result, _ = self.install('--shared', '--account-ports-file', self.registry)
         self.assertEqual(result['store']['status'], 'ready')
         self.assertEqual(mode(self.store), 0o2770)
 
-    def test_an_absent_store_is_created_2770_with_the_skills_root_group(self):
-        others = [gid for gid in os.getgroups() if gid != os.getgid()]
-        if others:
-            os.chown(self.skills, -1, others[0])
-        self.write_registry({'alice': {'browser_port': 41001, 'prototype_port': 41002}})
-        result, _ = self.install('--shared', '--account-ports-file', self.registry)
-        self.assertEqual(result['store']['status'], 'created')
-        self.assertEqual(mode(self.store), 0o2770)
-        self.assertEqual(self.store.stat().st_gid, self.skills.stat().st_gid)
+    def tree(self):
+        """Every path under the temp root with its mode, group and content hash: any change on disk shows."""
+        result = {}
+        for path in sorted([self.root, *self.root.rglob('*')]):
+            info = path.lstat()
+            result[str(path)] = (stat.S_IMODE(info.st_mode), info.st_gid,
+                                 None if path.is_dir() or path.is_symlink() else hashlib.sha256(path.read_bytes()).hexdigest())
+        return result
 
-    def test_dry_run_creates_no_store(self):
+    def refused(self, *needles, dry_run=False):
         self.write_registry({'alice': {'browser_port': 41001, 'prototype_port': 41002}})
-        result, _ = self.install('--shared', '--account-ports-file', self.registry, '--dry-run')
-        self.assertEqual(result['store']['status'], 'would_create')
+        before = self.tree()
+        args = ['--shared', '--account-ports-file', self.registry] + (['--dry-run'] if dry_run else [])
+        result, _ = self.install(*args, success=False)
+        for needle in needles:
+            self.assertIn(needle, result['error']['message'])
+        self.assertEqual(self.tree(), before, 'a refused install changes nothing on disk')
+        self.assertFalse(self.destination.exists())
+        return result['error']['message']
+
+    def test_an_absent_store_is_refused_and_nothing_is_created(self):
+        self.store.rmdir()
+        message = self.refused('does not', 'mkdir', 'chgrp', 'chmod 2770')
+        self.assertIn(self.store.name, message)
         self.assertFalse(self.store.exists())
+
+    def test_a_dry_run_changes_nothing_and_reports_the_store(self):
+        self.write_registry({'alice': {'browser_port': 41001, 'prototype_port': 41002}})
+        before = self.tree()
+        result, _ = self.install('--shared', '--account-ports-file', self.registry, '--dry-run')
+        self.assertEqual(result['store']['status'], 'ready')
+        self.assertEqual(self.tree(), before)
+
+    def test_a_refused_dry_run_also_changes_nothing(self):
+        os.chmod(self.store, 0o700)
+        self.refused('chmod 2770', dry_run=True)
+
+    def test_a_group_unsafe_root_is_refused_whatever_the_contents(self):
+        for wanted in (0o700, 0o750, 0o770, 0o2750):
+            os.chmod(self.store, wanted)
+            self.refused('chmod 2770')
+
+    def test_a_private_file_or_folder_inside_is_refused_with_its_path(self):
+        (self.store / 'state.json').write_text('{}')
+        os.chmod(self.store / 'state.json', 0o600)
+        (self.store / 'sub').mkdir()
+        os.chmod(self.store / 'sub', 0o700)
+        message = self.refused(str(self.store / 'state.json'), str(self.store / 'sub'), '2 entries', 'chgrp -R', 'find')
+        self.assertIn('-exec chmod 2770', message)
+        self.assertIn('chmod 660', message)
+
+    def test_an_entry_in_another_group_is_refused_even_with_good_modes(self):
+        others = [gid for gid in os.getgroups() if gid != os.getgid()]
+        if not others:
+            self.skipTest('this account has no second group')
+        stray = self.store / 'stray.json'
+        stray.write_text('{}')
+        os.chmod(stray, 0o660)
+        os.chown(stray, -1, others[0])
+        self.refused(str(stray), 'belongs to group')
+
+    def test_the_refusal_lists_at_most_five_examples_and_counts_all(self):
+        for index in range(8):
+            (self.store / f'f{index}').write_text('x')
+            os.chmod(self.store / f'f{index}', 0o600)
+        message = self.refused('8 entries')
+        self.assertEqual(message.count(str(self.store / 'f')), 5)
+
+    def test_a_symlink_inside_is_refused_and_a_linked_root_is_judged_at_its_target(self):
+        (self.store / 'link').symlink_to(self.root)
+        self.refused('symlink', str(self.store / 'link'))
+        (self.store / 'link').unlink()
+        real = self.root / 'real-store'
+        self.store.rmdir()
+        real.mkdir()
+        os.chmod(real, 0o2770)
+        self.store.symlink_to(real)
+        # The installer stores the resolved location (as it always has), so the runtime never meets the link:
+        # the gate judges the real folder it will use.
+        self.write_registry({'alice': {'browser_port': 41001, 'prototype_port': 41002}})
+        self.install('--shared', '--account-ports-file', self.registry)
+        self.assertEqual(self.config()['store_path'], str(real))
+
+    def test_the_entry_count_is_bounded(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location('installer_bound', INSTALLER)
+        installer = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(installer)
+        for index in range(6):
+            (self.store / f'f{index}').write_text('x')
+            os.chmod(self.store / f'f{index}', 0o660)
+        installer.STORE_ENTRY_LIMIT = 5
+        with self.assertRaises(installer.InstallError) as caught:
+            installer._store_gate(self.store, self.skills)
+        self.assertIn('more than 5 entries', str(caught.exception))
+        installer.STORE_ENTRY_LIMIT = 6
+        self.assertEqual(installer._store_gate(self.store, self.skills)['entries'], 6)
+
+    def test_a_control_character_in_the_registry_path_is_refused_at_install(self):
+        for bad in ('/tmp/a\nb.json', '/tmp/a\x01b.json', '/tmp/a\x7fb.json'):
+            result, _ = self.install('--shared', '--account-ports-file', bad, success=False)
+            self.assertIn('clean text', result['error']['message'])
+            self.assertFalse(self.destination.exists())
+
+    def test_the_installers_clean_text_rule_agrees_with_the_helpers(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location('installer_clean', INSTALLER)
+        installer = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(installer)
+        samples = ['/a/b', '/a\nb', '/a\x00b', '/a\x1fb', '/a b', '/a\x7fb', '/a\ud800b', '', '   ', '/é/ü', '/' + 'x' * 4096,
+                   '/' + 'x' * 4095, 7, None]
+        for sample in samples:
+            self.assertEqual(installer._clean_text(sample), idea._clean_text(sample), repr(sample))
+            self.assertEqual(installer._clean_text(sample, 256), idea._clean_text(sample, 256), repr(sample))
 
     def test_the_installers_store_rule_agrees_with_the_platforms_definition(self):
         import importlib.util
@@ -242,7 +340,7 @@ class SharedInstallTests(Base):
             folder.mkdir()
             os.chmod(folder, wanted)
             try:
-                installer._store_gate(folder, self.skills, True, os.getgid())
+                installer._store_gate(folder, self.skills)
                 accepted = True
             except installer.InstallError:
                 accepted = False
@@ -367,6 +465,46 @@ class SharedRunTimeTests(Base):
         after = snapshot(self.destination)
         self.assertEqual(after, before)
         self.assertEqual([name for name in after if name.endswith('.pyc') or '__pycache__' in name], [])
+
+    def installer(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location('installer_runtime', INSTALLER)
+        installer = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(installer)
+        return installer
+
+    def test_a_store_the_runtime_wrote_under_a_shared_root_passes_the_gate(self):
+        self.shared_install({self.account: {'browser_port': self.ports[0], 'prototype_port': self.ports[1]}})
+        runtime = self.root / 'runtime'
+        output = type('Output', (), {'buffer': io.BytesIO()})()
+        installed_script = self.destination / 'scripts' / 'idea.py'
+        try:
+            with patch.object(idea, '__file__', str(installed_script)), patch.object(idea.sys, 'stdout', output):
+                self.assertEqual(idea.main(['session-open', '--runtime-root', str(runtime), '--readiness-timeout', '5']), 0)
+            opened = json.loads(output.buffer.getvalue())
+            self.assertEqual(self.capture(opened, 'Written by the runtime', 'gate-proof')[0], 200)
+        finally:
+            self.stop(self.store, runtime)
+        entries = [p for p in self.store.rglob('*')]
+        self.assertGreater(len(entries), 3, 'the runtime wrote a real store')
+        facts = self.installer()._store_gate(self.store, self.skills)
+        self.assertEqual(facts['status'], 'ready')
+        self.assertEqual(facts['entries'], len(entries))
+
+    def test_a_sealed_read_only_file_is_what_the_runtime_writes_for_blobs_and_passes(self):
+        installer = self.installer()
+        blobs = self.store / 'assets' / 'blobs'
+        blobs.mkdir(parents=True)
+        os.chmod(self.store / 'assets', 0o2770)
+        os.chmod(blobs, 0o2770)
+        sealed = blobs / 'a.bin'
+        sealed.write_bytes(b'x')
+        os.chmod(sealed, 0o440)
+        self.assertEqual(installer._store_gate(self.store, self.skills)['status'], 'ready')
+        os.chmod(sealed, 0o400)  # owner-only seal of a single-account store: the group cannot read it
+        with self.assertRaises(installer.InstallError) as caught:
+            installer._store_gate(self.store, self.skills)
+        self.assertIn(str(sealed), str(caught.exception))
 
     def test_the_sweep_would_catch_a_bytecode_write(self):
         """The sweep's own control: a non-shared install does write bytecode when it runs, and the snapshot sees it."""

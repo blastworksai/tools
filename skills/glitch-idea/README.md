@@ -143,8 +143,25 @@ A single-account install, and every Windows install, is unchanged.
 
    Each key under `seats` is an OS account name.
    Ports are integers from 1024 to 65535, and no port may appear twice anywhere in the file.
-2. **Prepare the store** if it already exists: the idea store only accepts writes from several accounts when its root is setgid and group-writable (`chgrp <shared group> /path/to/ideas && chmod 2770 /path/to/ideas`), in a group the installing account belongs to.
-   `--shared` refuses an existing store that is not like that and prints the exact command; a store that does not exist yet is created `2770` with the group of `--skills-root`.
+2. **Create the store before the first shared install.**
+   The idea store only accepts writes from several accounts when its root is setgid and group-writable, in a group the installing account belongs to:
+
+   ```bash
+   mkdir /path/to/ideas && chgrp <shared group> /path/to/ideas && chmod 2770 /path/to/ideas
+   ```
+
+   `--shared` never creates or changes a store.
+   It only reads: it refuses a store that does not exist, a root that is not like that, and any existing content its group could not use (a folder that is not group rwx and setgid, a file that is not group-readable, a file or folder in another group, a symlink), naming the count, up to five paths and the commands to run.
+   To convert an existing single-account store, run these as its owner, then rerun the install:
+
+   ```bash
+   chgrp -R <shared group> /path/to/ideas
+   find /path/to/ideas -type d -exec chmod 2770 {} +
+   find /path/to/ideas -type f -perm /200 -exec chmod 660 {} +
+   find /path/to/ideas -type f ! -perm /200 -exec chmod 440 {} +
+   ```
+
+   The last line keeps sealed read-only evidence (the runtime writes those files `440` in a shared store) readable by the group without making them writable.
 3. **Install once** into a folder whose group is the group the accounts share:
 
    ```bash
