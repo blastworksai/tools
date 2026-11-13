@@ -51,20 +51,30 @@ class HandoffProvider:
             return dict(available=False,code=exc.code)
         return dict(available=True,code='ok')
 
-    def _public(self,entry):
+    def _public(self,entry,prompt=None):
         record,link = entry['record'],entry['evidence']
         path = codec.recorded_packet_path(record,link)
         return dict(handoff_id=record['handoff_id'],source_revision=record['source_revision'],
             source_digest=record['source_digest'],path=path,sha256=link['sha256'],
-            prompt=codec.render_prompt(record,path),source_files=copy.deepcopy(record['source_files']),
-            design_set=copy.deepcopy(record['design_set']))
+            prompt=codec.render_prompt(record,path) if prompt is None else prompt,
+            source_files=copy.deepcopy(record['source_files']),design_set=copy.deepcopy(record['design_set']))
+
+    def _fitted(self,entry,build):
+        """The public handoff whose prompt keeps build(handoff)'s whole response inside the 1 MiB bound."""
+        record = entry['record']
+        path = codec.recorded_packet_path(record,entry['evidence'])
+        prompt = codec.render_prompt_that_fits(record,path,
+            lambda text:_bounded(build(self._public(entry,text)),'handoff_capacity'),'handoff_capacity')
+        return self._public(entry,prompt)
 
     def project(self,state,idea,context):
         entries = self.store.handoffs(state,idea['idea_id'],with_links=True)
         if not entries:
             return dict(handoff=None,handoff_status=dict(available=False,code='not_ready'))
         entry = entries[-1]
-        result = dict(handoff=self._public(entry),handoff_status=self._current(state,idea,entry['record']))
+        status = self._current(state,idea,entry['record'])
+        result = dict(handoff=self._fitted(entry,lambda handoff:dict(handoff=handoff,handoff_status=status)),
+                      handoff_status=status)
         return copy.deepcopy(_bounded(result,'handoff_capacity'))
 
     def __call__(self,state,idea,context=None):
@@ -102,10 +112,12 @@ class HandoffProvider:
                     (record['session_id'] == context.session_id and record['request_id'] == request_id),
                     'Applied handoff receipt differs from original publisher','corrupt_receipts')
             status = self._current(state,state['ideas'][key],record)
-            delivery = dict(copy.deepcopy(result),handoff=self._public(entry),handoff_current=status['available'])
-            if not status['available']:
-                delivery['code'] = 'historical_handoff'
-            return _bounded(delivery,'handoff_capacity')
+            def deliver(handoff):
+                delivery = dict(copy.deepcopy(result),handoff=handoff,handoff_current=status['available'])
+                if not status['available']:
+                    delivery['code'] = 'historical_handoff'
+                return delivery
+            return _bounded(deliver(self._fitted(entry,deliver)),'handoff_capacity')
 
     def publish(self,context,payload):
         _request_json(payload)

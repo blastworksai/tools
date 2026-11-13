@@ -2506,14 +2506,16 @@ class Store:
 
     def _handoff_http_preflight(self, packet, link, result):
         """Bound the full real HTTP representation before any publication."""
-        from idea_handoff_evidence import render_prompt, recorded_packet_path
+        from idea_handoff_evidence import render_prompt_that_fits, recorded_packet_path
         absolute = recorded_packet_path(packet,link)
-        handoff = dict(handoff_id=packet['handoff_id'],source_revision=packet['source_revision'],
-            source_digest=packet['source_digest'],path=absolute,sha256=link['sha256'],
-            prompt=render_prompt(packet,absolute),source_files=packet['source_files'],design_set=packet['design_set'])
-        try:
+        def check(prompt):
+            handoff = dict(handoff_id=packet['handoff_id'],source_revision=packet['source_revision'],
+                source_digest=packet['source_digest'],path=absolute,sha256=link['sha256'],
+                prompt=prompt,source_files=packet['source_files'],design_set=packet['design_set'])
             _request_json(dict(result,handoff=handoff,handoff_current=True))
             _request_json(dict(result,code='historical_handoff',handoff=handoff,handoff_current=False))
+        try:
+            render_prompt_that_fits(packet,absolute,check,'too_large')
         except IdeaError as exc:
             if exc.code == 'too_large':
                 raise IdeaError('handoff_capacity','Full handoff response exceeds the 1 MiB limit') from exc

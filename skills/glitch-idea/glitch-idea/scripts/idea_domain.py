@@ -18,6 +18,22 @@ METHOD_LABELS = {'bounded-plan': 'Full Plan Up Front', 'bmad': 'BMAD (Roles and 
                  'adaptive-slices': 'Vertical Slicing (Agile)'}
 SELECTABLE_METHODS = ('bounded-plan', 'bmad', 'appetite-led', 'experiment-led')
 RETIRED_METHODS = ('adaptive-slices',)
+# The one source for each selectable method's contract: its label and its two owner-approved lines.
+# references/methods.md and the planning prompt's Method section must read exactly these words.
+METHOD_CONTRACTS = {
+    'bounded-plan': {'label': METHOD_LABELS['bounded-plan'],
+                     'fixed_now': 'Clear scope and acceptance criteria',
+                     'earns_next': 'Verification of the bounded change'},
+    'bmad': {'label': METHOD_LABELS['bmad'],
+             'fixed_now': 'A written brief, requirements and architecture before any building',
+             'earns_next': 'Each story is built and checked against those documents'},
+    'appetite-led': {'label': METHOD_LABELS['appetite-led'],
+                     'fixed_now': "Operator's investment cap and outcome boundaries",
+                     'earns_next': 'Completed bet or explicit stop/reshape'},
+    'experiment-led': {'label': METHOD_LABELS['experiment-led'],
+                       'fixed_now': 'A question, evidence criterion and bounded experiment',
+                       'earns_next': 'Evidence supports proceeding, changing or stopping'},
+}
 ASSESS_KEYS = {'method','version','inputs','basis','assumptions','confidence','provenance'}
 
 
