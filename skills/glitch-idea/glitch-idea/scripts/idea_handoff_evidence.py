@@ -10,7 +10,8 @@ import math
 from pathlib import PurePosixPath, PureWindowsPath
 import re
 
-from idea_domain import MAX_INPUT, MAX_STATE, assessment, check_id, integer, require, text
+from idea_domain import (MAX_INPUT, MAX_STATE, METHOD_CONTRACTS, METHOD_LABELS, assessment, check_id,
+                         integer, require, text)
 from idea_workflow import (DEPENDENCIES, STEP_ORDER, derive_state, empty_workflow,
                            source_digest, validate_workflow)
 from idea_assessment import validate_actual_position
@@ -339,6 +340,34 @@ def _discovery_for_prompt(fields):
     return dict(fields, prior_art='Not checked')
 
 
+METHOD_INSTRUCTION = ('Plan to this contract: what is fixed now comes first in the plan; '
+                      'nothing later starts before it has earned the next step.')
+
+
+def _contract_lines(method):
+    """Label, then Fixed now and Earns lines; a retired method keeps its old label only."""
+    contract = METHOD_CONTRACTS.get(method)
+    if contract is None:
+        return [METHOD_LABELS[method]]
+    return [contract['label'], 'Fixed now: '+contract['fixed_now'],
+            'Earns the next step: '+contract['earns_next']]
+
+
+def method_section(accepted):
+    """The prompt's Method section from the accepted overall method and sketched items' inner methods."""
+    method = accepted['method']['fields'].get('selection')
+    if method not in METHOD_LABELS:
+        return ''
+    lines = ['## Method']+_contract_lines(method)
+    if method in METHOD_CONTRACTS:
+        lines.append(METHOD_INSTRUCTION)
+    for item in accepted['exploration']['fields'].get('sketch') or []:
+        inner = item.get('method')
+        if inner in METHOD_LABELS:
+            lines += ['', 'Item: '+item['title']]+_contract_lines(inner)
+    return '\n'.join(lines)+'\n\n'
+
+
 def render_prompt(record, packet_path):
     checked = validate_record(record)
     packet = _absolute(packet_path)
@@ -357,7 +386,7 @@ def render_prompt(record, packet_path):
             'Align is done; this is the input for Plan. '
             'Retain this exact Idea trace in the plan.\n\n## Idea trace\n'
             'idea_id: '+checked['idea_id']+'\nidea_revision: '+str(checked['source_revision'])+
-            '\n\n## Planning source\n'+''.join('    '+line+'\n' for line in _literal(planning, 2).split('\n')))
+            '\n\n'+method_section(accepted)+'## Planning source\n'+''.join('    '+line+'\n' for line in _literal(planning, 2).split('\n')))
 
 
 def recorded_packet_path(record, link):
