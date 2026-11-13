@@ -35,6 +35,7 @@ HEX = re.compile(r'[0-9a-f]{64}')
 TUNNEL_PROBE = re.compile(r'[0-9a-f]{32}')
 NONCE = TUNNEL_PROBE
 BINDING = re.compile(r'binding_[0-9a-f]{32}')
+TERN_STATES = frozenset(('pending', 'claimed', 'above', 'beside', 'open_failed', 'unknown'))
 SESSION = re.compile(r'session_[0-9a-f]{32}')
 IDEA = re.compile(r'idea_[0-9a-f]{32}')
 TOKEN = re.compile(r'[A-Za-z0-9_-]{43}')
@@ -54,7 +55,7 @@ STAGE_SETTLE_SECONDS = 0.05
 OWNER_REFUSALS = frozenset(('busy', 'agent_unavailable', 'binding_not_found', 'not_found',
                             'session_binding_mismatch', 'session_capacity_exhausted',
                             'binding_membership_conflict', 'session_in_use', 'invalid_control', 'unknown_control',
-                            'control_unavailable', 'internal_error', 'runtime_busy', 'runtime_corrupt'))
+                            'control_unavailable', 'tern_offer_refused', 'internal_error', 'runtime_busy', 'runtime_corrupt'))
 IDENTITY_REFUSALS = frozenset(('owner_unauthorized', 'owner_identity_mismatch'))
 
 
@@ -742,7 +743,7 @@ class Runtime:
         finally:
             os.close(descriptor)
 
-    def _call(self, operation, discovery, credential, deadline, binding=None, agent=None, discard=None):
+    def _call(self, operation, discovery, credential, deadline, binding=None, agent=None, discard=None, tern=None):
         challenge = secrets.token_hex(32)
         payload = dict(challenge=challenge, instance_nonce=discovery['instance_nonce'], store_sha256=self.store_sha256)
         if binding is not None:
@@ -751,6 +752,8 @@ class Runtime:
             payload.update(binding_id=agent[0], session_id=agent[1], expected_generation=agent[2])
         if discard is not None:
             payload.update(binding_id=discard[0], confirm=discard[1])
+        if tern is not None:
+            payload.update(rid=tern[0], **({'url': tern[1]} if operation == 'tern-offer' else {}))
         raw = json.dumps(payload, separators=(',', ':')).encode('utf-8')
         remaining = deadline - time.monotonic()
         _check(remaining > 0, 'owner_unavailable')
@@ -817,6 +820,8 @@ class Runtime:
                 extra_keys = {'sessions'}
             if discard is not None:
                 extra_keys = {'binding_id', 'was_in_use'}
+            if operation == 'tern-state':
+                extra_keys = {'state'}
             _check(set(value) == identity_keys | extra_keys
                    and value['ok'] is True and type(value['schema_version']) is int and value['schema_version'] == 1
                    and value['code'] == ('stopping' if operation == 'stop' else 'ok')
@@ -837,6 +842,8 @@ class Runtime:
                 _check(binding[2] is None or value['selected_idea_id'] == binding[2], 'owner_identity_mismatch')
             if operation == 'binding-list':
                 value['sessions'] = _sessions(value['sessions'])
+            if operation == 'tern-state':
+                _check(value['state'] in TERN_STATES, 'owner_identity_mismatch')
             if discard is not None:
                 _check(value['binding_id'] == discard[0] and type(value['was_in_use']) is bool, 'owner_identity_mismatch')
             if agent is not None:
@@ -907,6 +914,22 @@ class Runtime:
         discovery, credential = self._client_pair(deadline)
         self._call('probe', discovery, credential, deadline)
         return self._call('binding-list', discovery, credential, deadline)['sessions']
+
+    def tern_offer(self, rid, url, timeout=1):
+        """Offer a pairing link to the owner's own tern-claim door (memory only, 30 s). Returns None; refusal raises tern_offer_refused."""
+        _check(type(rid) is str and TUNNEL_PROBE.fullmatch(rid) is not None and type(url) is str, 'invalid_control')
+        deadline = self._timeout(timeout)
+        discovery, credential = self._client_pair(deadline)
+        self._call('probe', discovery, credential, deadline)
+        self._call('tern-offer', discovery, credential, deadline, tern=(rid, url))
+
+    def tern_state(self, rid, timeout=1):
+        """The offer's state: pending, claimed, above, beside, open_failed or unknown (expired or never offered)."""
+        _check(type(rid) is str and TUNNEL_PROBE.fullmatch(rid) is not None, 'invalid_control')
+        deadline = self._timeout(timeout)
+        discovery, credential = self._client_pair(deadline)
+        self._call('probe', discovery, credential, deadline)
+        return self._call('tern-state', discovery, credential, deadline, tern=(rid, None))['state']
 
     def discard_binding(self, binding_id, confirm=False, timeout=1):
         """Operator discard of one retained session. In use and not confirmed -> session_in_use, nothing changes."""

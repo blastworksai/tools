@@ -45,7 +45,10 @@ COMMON = {'challenge','instance_nonce','store_sha256'}
 OPEN_FIELDS = COMMON | {'mode','binding_id','selected_idea_id'}
 CREDENTIAL_FIELDS = COMMON | {'binding_id','session_id','expected_generation'}
 DISCARD_FIELDS = COMMON | {'binding_id','confirm'}
-CONTROL_FIELDS = {'binding-open':OPEN_FIELDS,'agent-credentials':CREDENTIAL_FIELDS,'binding-discard':DISCARD_FIELDS,'binding-list':COMMON}
+TERN_OFFER_FIELDS = COMMON | {'rid','url'}
+TERN_STATE_FIELDS = COMMON | {'rid'}
+CONTROL_FIELDS = {'binding-open':OPEN_FIELDS,'agent-credentials':CREDENTIAL_FIELDS,'binding-discard':DISCARD_FIELDS,'binding-list':COMMON,
+                  'tern-offer':TERN_OFFER_FIELDS,'tern-state':TERN_STATE_FIELDS}
 CHILD = Path(__file__).resolve()
 _children = []  # Retain handles; no killing/ownership authority follows from PID.
 _children_lock = threading.Lock()
@@ -419,6 +422,17 @@ class OwnerService:
             self._free(binding_id)
             return dict(binding_id=binding_id,was_in_use=was)
 
+    def _tern_offer(self,payload):
+        rid,url = payload['rid'],payload['url']
+        check(type(rid) is str and type(url) is str,'invalid_control')
+        check(self.server.tern.offer(rid,url,self.server.server_port),'tern_offer_refused',409)
+        return {}
+
+    def _tern_state(self,payload):
+        rid = payload['rid']
+        check(type(rid) is str and re.fullmatch(r'[0-9a-f]{32}',rid),'invalid_control')
+        return dict(state=self.server.tern.state(rid))
+
     def _open(self,payload):
         mode,binding_id,selected = (payload[key] for key in ('mode','binding_id','selected_idea_id'))
         check(type(mode) is str and mode in ('new','resume','repair'),'invalid_control')
@@ -473,7 +487,8 @@ class OwnerService:
             check(operation in CONTROL_FIELDS and type(payload) is dict and set(payload) == CONTROL_FIELDS[operation],'invalid_control')
             body = self.runtime.validate_owner({key:payload[key] for key in COMMON},request.header('Authorization'),operation,payload)
             body.update({'binding-open':self._open,'agent-credentials':self._credentials,
-                         'binding-discard':self._discard,'binding-list':self._list}[operation](payload))
+                         'binding-discard':self._discard,'binding-list':self._list,
+                         'tern-offer':self._tern_offer,'tern-state':self._tern_state}[operation](payload))
             return Response(body)
         except OwnerError as exc:
             return Response(dict(ok=False,code=exc.code),401 if exc.code == 'owner_unauthorized' else 409)

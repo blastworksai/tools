@@ -58,6 +58,7 @@ After its wait the helper sets the title to the fixed text `glitch-idea`.
 3. It writes the title.
 4. The window half validates the title, then calls `GET http://127.0.0.1:<port>/api/v1/tern-claim?rid=<rid>` with a 3 s timeout.
 5. The service answers once with the link and forgets the offer's link. A second claim, an unknown id and an expired id all answer 404.
+A malformed query answers 400 `invalid_query`.
 6. The window half checks the link against the one pairing-link grammar and checks its port equals `<port>`, opens it beside, moves it above the asking pane, and reports `above`, `beside` or `open_failed` with one `GET /api/v1/tern-result?rid=<rid>&how=<value>`.
 7. The helper reads the offer's state over the control channel until it is final or the wait ends.
 
@@ -105,4 +106,5 @@ An explicit `browser_mode` or `--browser` always wins.
 - A macOS window, and a local Tern on Windows or macOS (the helper needs another way to reach the pane's terminal there).
 - OSC 7 and OSC 133 across the remote link.
 - Two windows showing the same pane at once.
+- The pure Luau module under a standalone `luau` binary (none on the build host); it ran inside an isolated Tern 0.9.16 with the real claim routes: a never-offered id opened nothing, an offered id went `pending` then `above`.
 - An agent screen that repaints at the instant of the write.
