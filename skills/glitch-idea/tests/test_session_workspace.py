@@ -141,8 +141,9 @@ class SessionWorkspaceTests(Case):
         # A helper that skipped its own check still cannot make the owner allocate a session.
         self.start_owner();self.open();before=(self.records(),self.recovery())
         for value in (dict(name='x',path='relative'),dict(name='x',path=str(self.directory/'nope')),dict(name='n'*101,path=str(self.a))):
-            with self.subTest(value),self.assertRaises(OwnerError):
+            with self.subTest(value),self.assertRaises(OwnerError) as refused:
                 Runtime(self.store,self.private).open_binding('new',None,None,5,session_workspace=value)
+            self.assertEqual(refused.exception.code,'workspace_unavailable')
             self.assertEqual((self.records(),self.recovery()),before)
 
     def test_two_sessions_on_one_store_keep_their_own_value(self):

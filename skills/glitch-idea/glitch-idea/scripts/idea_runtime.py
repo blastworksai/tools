@@ -54,7 +54,8 @@ STAGE_SETTLE_SECONDS = 0.05
 OWNER_REFUSALS = frozenset(('busy', 'agent_unavailable', 'binding_not_found', 'not_found',
                             'session_binding_mismatch', 'session_capacity_exhausted',
                             'binding_membership_conflict', 'session_in_use', 'invalid_control', 'unknown_control',
-                            'control_unavailable', 'tern_offer_refused', 'internal_error', 'runtime_busy', 'runtime_corrupt'))
+                            'control_unavailable', 'tern_offer_refused', 'internal_error', 'runtime_busy', 'runtime_corrupt',
+                            'workspace_unavailable'))
 IDENTITY_REFUSALS = frozenset(('owner_unauthorized', 'owner_identity_mismatch'))
 
 
