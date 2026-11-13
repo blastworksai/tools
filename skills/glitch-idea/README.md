@@ -140,14 +140,14 @@ Supported keys, and only these:
 | `runtime_python` | Absolute path of the runtime interpreter. |
 | `browser_port` | `null` or absent (random port), or an integer from 1024 to 65535. The idea page listens on this fixed loopback port. |
 | `prototype_port` | The same bounds, for `prototype-serve`. When both are set they must differ. |
-| `browser_mode` | `null` or absent (unset), `"link"`, `"system"` or `"ssh"`. The default for `browser-open` when `--browser` is omitted. `"ssh"` needs `browser_port`. |
+| `browser_mode` | `null` or absent (unset), `"link"`, `"system"`, `"ssh"` or `"tern"`. The default for `browser-open` when `--browser` is omitted. `"ssh"` needs `browser_port`. |
 | `ssh_client` | Optional. The ssh config alias of your computer, for SSH mode; overrides detection. |
 | `ssh_server_port` | Optional. The ssh port of the machine running the service, for SSH mode (default 22). |
 | `default_workspace` | Optional `{"name": ..., "path": ...}`: an absolute, existing folder that capture prefills (the field stays editable). A configured folder that does not exist is an `invalid_config` error. |
 
 Unset keeps random ports: with `browser_port` and `prototype_port` null or absent, each launch picks a fresh port as before.
 Set them when a standing tunnel must forward the same port every time (see the runbook, "Tern on a remote host").
-With `browser_mode` unset, `browser-open` needs `--browser` and fails with `browser_mode_required` without it.
+With `browser_mode` unset and outside a Tern pane, `browser-open` needs `--browser` and fails with `browser_mode_required` without it.
 `--browser link` prints a click-to-open link instead of opening a tab.
 If the configured port is taken, launch fails with `port_in_use` (or `prototype_port_in_use`) and never falls back to another port.
 
@@ -207,6 +207,15 @@ It never asks you to type a throwaway tunnel line.
 If several computers fit, set `ssh_client` to the ssh config alias of yours.
 With only a standing tunnel and no key back to your computer, use link mode (`browser_mode: "link"`): it prints a link and you click it.
 `--browser system` is for a browser on the same computer as the helper; it is not an SSH substitute.
+
+### Tern pane
+
+Inside a Tern pane, `browser-open` opens the page above or beside the pane that ran it (`--browser tern`, or `browser_mode: "tern"`).
+With neither the flag nor `browser_mode` set, the helper picks this road by itself when it runs inside a Tern pane.
+An explicit `browser_mode` always wins.
+No link is shown and no ssh login happens.
+It needs the Glitch Idea Tern plugin on the Tern that shows the window.
+If the page cannot be opened, you get a ready link to click and one plain reason (see the runbook, "Tern pane").
 
 ### Orca
 

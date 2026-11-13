@@ -77,7 +77,7 @@ def parser():
             p.add_argument('--resume')
             p.add_argument('--idea-id')
         if name == 'browser-open':
-            p.add_argument('--browser',choices=('link','orca','system','ssh'))
+            p.add_argument('--browser',choices=('link','orca','system','ssh','tern'))
             p.add_argument('--orca-worktree')
             p.add_argument('--orca-terminal')
             p.add_argument('--orca-host')
@@ -143,7 +143,7 @@ def _fixed_ports(value):
         require(port is None or (type(port) is int and 1024<=port<=65535),'Invalid '+key.replace('_',' '),'invalid_config')
         ports[key]=port
     mode=value.get('browser_mode')
-    require(mode is None or mode in ('link','system','ssh'),'Invalid browser mode','invalid_config')
+    require(mode is None or mode in ('link','system','ssh','tern'),'Invalid browser mode','invalid_config')
     client=value.get('ssh_client')
     require(client is None or valid_ssh_alias(client),'Invalid ssh client','invalid_config')
     sshd=value.get('ssh_server_port')
@@ -386,8 +386,12 @@ def run_launcher(args):
                     'Invalid idea ID','invalid_input')
         orcabinding=None
         if args.command=='browser-open':
-            # Effective mode first: the flag, else the configured browser_mode (validated by _fixed_ports).
+            # Effective mode first: the flag, else the configured browser_mode (validated by _fixed_ports),
+            # else pane mode when this process sits in a Tern pane (a default only: the plugin's claim is the proof).
             if args.browser is None: args.browser=_fixed_ports(_configuration_source()[0])[2]
+            if args.browser is None:
+                import idea_tern
+                if idea_tern.default_is_tern(): args.browser='tern'
             require(args.browser is not None,'Browser mode is required: pass --browser or set browser_mode','browser_mode_required')
         reconnect=getattr(args,'reconnect',None)
         if reconnect is not None:
@@ -421,6 +425,9 @@ def run_launcher(args):
             source=_configuration_source()[0]
             result=open_ssh_session(store,runtime,config,ssh_client=source.get('ssh_client'),
                                     ssh_server_port=source.get('ssh_server_port'),**options)
+        elif args.browser=='tern':
+            import idea_tern
+            result=idea_tern.open_tern_session(store,runtime,config,terminal=idea_tern.find_terminal(),**options)
         else: result=open_browser_session(store,runtime,config,mode=args.browser,orcabinding=orcabinding,**options)
         if args.runtime_root_fallback: result=dict(result,runtime_root_fallback=args.runtime_root_fallback)
         return dict(ok=True,**result)

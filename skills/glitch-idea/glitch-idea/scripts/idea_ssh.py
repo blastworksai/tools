@@ -25,10 +25,8 @@ SSH_BASE = ['ssh', '-T', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=5', '-o', 
 UTMP_PATH = '/run/utmp'  # a missing file means no logins
 UTMP_FORMAT = '<h2xi32s4s32s256shhiii16s20x'  # glibc x86_64/aarch64 struct utmp, 384 bytes
 USER_PROCESS = 7
-# The whole pairing-URL grammar, checked locally AND by both remote scripts before any opener runs.
-PAIR_URL_PATTERN = (r'http://127\.0\.0\.1:([1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])'
-                    r'/(\?binding=binding_[0-9a-f]{32})?#pair=[0-9a-f]{32}')
-URL_SHAPE = re.compile(PAIR_URL_PATTERN)
+# The pairing-URL grammar, Result and default_runner live in idea_tern (shared with pane mode) and stay importable here.
+from idea_tern import PAIR_URL_PATTERN, URL_SHAPE, Result, default_runner  # noqa: E402,F401
 
 
 MESSAGES = {
@@ -51,23 +49,6 @@ def valid_ssh_alias(value):
     """One ssh config Host alias: a non-empty one-word string, never an option (no leading dash)."""
     return (type(value) is str and 1 <= len(value) <= 255 and not value.startswith('-')
             and not any(ch.isspace() or ord(ch) < 32 or ord(ch) == 127 for ch in value))
-
-
-class Result:
-    def __init__(self, returncode, stdout='', stderr=''):
-        self.returncode, self.stdout, self.stderr = returncode, stdout, stderr
-
-
-def default_runner(argv, *, input=None, timeout=15):
-    """The one place a process is started: argv list, no shell, bounded, text in and out."""
-    try:
-        done = subprocess.run(argv, input=input, capture_output=True, text=True, timeout=timeout, shell=False,
-                              stdin=None if input is not None else subprocess.DEVNULL, errors='replace')
-    except subprocess.TimeoutExpired:
-        return Result(124, '', 'timeout')
-    except OSError:
-        return Result(127, '', 'not found')
-    return Result(done.returncode, done.stdout or '', done.stderr or '')
 
 
 def _ssh(runner, alias, remote, *, input=None, timeout=15):

@@ -53,7 +53,12 @@ Show the result's `fallback_line` (the 60-second typed pairing code) only when t
 Ready first: before a typed code is ever issued (plain `session-open`, or `session-open --resume <binding_id>` after an expired or failed pairing), ask the operator ONE question, "ready to type a code?", and run the verb only on their yes, then give the origin and the fresh code in the same message that carries it. The code lasts 60 seconds: measured, 12 seconds when the operator is at the box, expired when the code travels through a prompt first.
 With `browser-open --browser orca --resume`, the reconnect opens the new tab first and then closes that binding's previous Orca tab, so only the new paired tab remains. An old tab still open elsewhere (a system browser, say) says it was replaced by a newer one (`session_superseded`).
 
-**Link mode (Tern and other remote panes).** When the seat's config sets `browser_mode: "link"` (or the operator works in a remote terminal), run `browser-open` without `--browser` (or with `--browser link`). It opens nothing and returns `browser.link`: the origin plus `/#pair=<code>`, single use, valid for 60 seconds.
+**Tern pane road.** Inside a Tern pane, run `browser-open` without `--browser`: the helper picks the pane road by itself.
+When `browser.opened` is `true`, tell the operator the page is open above the pane (or beside it, as `browser.how` says) and show no link.
+On the warning `tern_open_failed`, show `browser.link` alone on its own line as in link mode, name `browser.failure` once in plain words, and do not retry or work around it.
+The session is the same one: never run `browser-open` again to try once more.
+
+**Link mode (remote panes, and the fallback of the Tern pane road).** When the seat's config sets `browser_mode: "link"`, run `browser-open` without `--browser`; in any other remote terminal that is not a Tern pane, run it with `--browser link`. It opens nothing and returns `browser.link`: the origin plus `/#pair=<code>`, single use, valid for 60 seconds.
 Show `browser.link` straight away, alone on its own line as a bare URL, with one short sentence: "Click to open your idea page (pairs itself within 60 s)."
 Never print `pairing_code` or `fallback_line` unless the operator says the click did not pair.
 If the link expired or the click was missed, run `browser-open --browser link --resume <binding_id>` and show the new link the same way. In link mode this replaces the "ready to type a code?" question; the typed-code path above keeps its Ready-first rule.

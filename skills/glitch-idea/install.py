@@ -227,8 +227,8 @@ def effective_config(source, destination, explicit_store, recognized, explicit_r
     if "browser_port" in result and "prototype_port" in result and result["browser_port"] == result["prototype_port"]:
         raise InstallError("browser_port and prototype_port must differ")
     if config.get("browser_mode") is not None:
-        if config["browser_mode"] not in ("link", "system", "ssh"):
-            raise InstallError("browser_mode must be 'link', 'system' or 'ssh'")
+        if config["browser_mode"] not in ("link", "system", "ssh", "tern"):
+            raise InstallError("browser_mode must be 'link', 'system', 'ssh' or 'tern'")
         result["browser_mode"] = config["browser_mode"]
     if config.get("ssh_client") is not None:  # a JSON null is unset, as the helper reads it
         client = config["ssh_client"]

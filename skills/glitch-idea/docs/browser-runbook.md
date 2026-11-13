@@ -227,6 +227,34 @@ Only an account on the same host can do this; the owner accepted that risk for f
 If a seat's page ever looks or behaves oddly, clear that address's site data in the browser before clicking a new link.
 In link mode you never type a code, so a page that asks for one is not the real page: close it and run `browser-open --browser link --resume binding_ID` for a fresh link.
 
+### 5.2b Tern pane
+
+**What is installed where.**
+The plugin (`glitch-idea/tern-plugin`, version 0.2.0, window half only) goes on the Tern that shows the window.
+Nothing is installed on a remote host's Tern.
+No ssh login happens on this road.
+
+**Same port for a remote host.**
+When the helper runs on a remote host, the idea page's port must be reachable from the window's computer under the same port number.
+The page checks Host and Origin exactly, so a different port on the window's side is refused.
+This is the same requirement link mode has: set `browser_port` and keep a standing tunnel on it (see 5.2a).
+
+**The pane title.**
+While a request is in flight, the pane's title shows `glitch-idea:1:<port>:<one-time id>` for a moment, then the fixed text `glitch-idea`.
+The id is worth one claim for 30 seconds.
+The pairing code never appears in a title.
+
+**When it fails.**
+The result carries the warning `tern_open_failed` and a ready link.
+Click the link; the session is the same one, so do not run `browser-open` again.
+`browser.failure` says why, and what to check first:
+
+- `no_terminal`: the helper found no terminal it may write to, so it is not running inside a pane. Run it from a Tern pane, or use link mode.
+- `plugin_no_answer`: nothing claimed the request in time. Check that the plugin is installed on the Tern that shows the window. After an install or update, change focus once so the window half starts. Check that the page port is reachable from the window's computer under the same number. Check that this is Tern.
+- `open_failed`: the plugin took the request but Tern could not open the page. Check that the pane is still open, then click the link.
+- `no_result`: the plugin took the request and reported nothing. Look at the pane for the page, then click the link if it is not there.
+- `offer_failed`: the helper could not hand the link to its own idea service. Check that the service is still running, then click the link.
+
 ### 5.3 Orca unavailable or misrouted
 
 `browser-open --browser orca` needs `--orca-worktree 'UUID::WORKTREE_PATH'` and `--orca-terminal HANDLE`, taken from the pane that is actually running the agent; `--orca-host` is optional.

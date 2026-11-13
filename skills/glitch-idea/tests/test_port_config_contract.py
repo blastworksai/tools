@@ -16,7 +16,7 @@ from idea_domain import IdeaError
 
 GOOD = (1024, 8840, 65535)
 BAD = (True, False, 0, 80, 1023, 65536, '8840', 8840.0, [], {}, -1)
-MODES_GOOD = ('link', 'system', 'ssh')
+MODES_GOOD = ('link', 'system', 'ssh', 'tern')
 MODES_BAD = ('orca', '', 1, True, 0, [], 'LINK')
 CLIENTS_GOOD = ('workstation', 'a' * 255, 'workstation.tailnet.example.net', 'x-1')
 CLIENTS_BAD = ('', 'a' * 256, 'two words', 'tab\there', 'new\nline', 'nul\x00', '-oProxyCommand=x', '-J', 1, True, 0, [], {})

@@ -91,7 +91,9 @@ A request never reaches the focused pane without a claim.
 ## Answers the helper can give
 
 `opened` with `how` = `above` or `beside`.
-Failures, fixed: `no_terminal` (no terminal this account may write was found among the ancestors), `plugin_no_answer` (no claim in time: plugin missing, window half not started, port unreachable from the window, or not a Tern), `open_failed` (claimed, the open failed), `no_result` (claimed, nothing reported).
+Failures, fixed: `no_terminal` (no terminal this account may write was found among the ancestors), `plugin_no_answer` (no claim in time: plugin missing, window half not started, port unreachable from the window, or not a Tern), `open_failed` (claimed, the open failed), `no_result` (claimed, nothing reported), `offer_failed` (the helper could not hand the link to its own service).
+A success result carries no link, no pairing code and no fallback line.
+Waits: 4 s for a claim, then 6 s for the result.
 The window cannot report an unreachable port, because the port is its only way back; that case reads `plugin_no_answer`.
 On every failure the helper returns the live link, as link mode does, and never opens a second session.
 

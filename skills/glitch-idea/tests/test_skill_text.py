@@ -139,6 +139,18 @@ class SkillTextTests(unittest.TestCase):
         self.assertIn("browser.link", flat)
         self.assertIn("--resume", flat)
 
+    def test_tern_pane_road_names_opened_and_failure_warning(self):
+        para = next(p for p in SKILL.split("\n\n") if p.startswith("**Tern pane road"))
+        flat = " ".join(para.split())
+        self.assertIn("browser.opened", flat)
+        self.assertIn("tern_open_failed", flat)
+        self.assertIn("browser.link", flat)
+
+    def test_commands_document_tern_flag_and_five_failure_reasons(self):
+        self.assertIn("--browser tern", COMMANDS)
+        for reason in ("no_terminal", "plugin_no_answer", "open_failed", "no_result", "offer_failed"):
+            self.assertIn("`" + reason + "`", COMMANDS)
+
 
 class VisualizeTextTests(unittest.TestCase):
     def test_visualize_section_documents_three_choices_and_prototype(self):
