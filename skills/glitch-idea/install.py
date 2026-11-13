@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -340,10 +341,15 @@ def install(source, skills_root, store=None, dry_run=False, runtime_python=None,
     payload["config.json"] = json_bytes(config)
     current = tree_files(destination) if recognized else {}
     current.pop(MANIFEST, None)
-    action = ("unchanged" if recognized and current == payload and was_shared == shared
-              else "upgraded" if recognized else "installed")
-    return _publish(source, skills_root, destination, config, payload, action, recognized,
-                    venv, dry_run, shared)
+    same = recognized and current == payload and was_shared == shared
+    drift = same and shared and _shared_drift(destination, payload, source, _skills_gid(skills_root))
+    action = ("repaired" if drift else "unchanged" if same else "upgraded" if recognized else "installed")
+    store_facts = _store_gate(config["store_path"], skills_root, dry_run, _skills_gid(skills_root)) if shared else None
+    result = _publish(source, skills_root, destination, config, payload, action, recognized,
+                      venv, dry_run, shared)
+    if store_facts is not None:
+        result["store"] = store_facts
+    return result
 
 
 def _publish(source, skills_root, destination, config, payload, action, recognized, venv, dry_run, shared=False):
@@ -383,6 +389,60 @@ def _group_name(gid):
         return str(gid)
 
 
+def _shared_mode(path, relative, payload, source):
+    """The mode a shared install gives this path: folders 2750, files 640, 750 for a source script that is executable."""
+    if path.is_dir():
+        return 0o2750
+    runnable = relative in payload and (source / relative).is_file() and (source / relative).stat().st_mode & 0o111
+    return 0o750 if runnable else 0o640
+
+
+def _shared_drift(destination, payload, source, gid):
+    """True when an installed shared tree no longer has the modes, group or executable bits an install gives it."""
+    for path in [destination, *destination.rglob("*")]:
+        if path.is_symlink():
+            continue
+        relative = path.relative_to(destination).as_posix()
+        if "__pycache__" in path.parts or path.suffix == ".pyc":
+            continue
+        info = path.stat()
+        if info.st_gid != gid or stat.S_IMODE(info.st_mode) != _shared_mode(path, relative, payload, source):
+            return True
+    return False
+
+
+def _skills_gid(skills_root):
+    return skills_root.stat().st_gid if skills_root.exists() else os.getgid()
+
+
+def _store_gate(store, skills_root, dry_run, shared_group):
+    """A shared install needs a store root several accounts can write: setgid, group-writable, in a group this account belongs to.
+
+    This is idea_platform.is_shared_root's definition (a test keeps the two in agreement)."""
+    store = Path(store)
+    run = f"chgrp {_group_name(shared_group)} '{store}' && chmod 2770 '{store}'"
+    if store.exists() or store.is_symlink():
+        info = store.stat()
+        if not stat.S_ISDIR(info.st_mode):
+            raise InstallError(f"The store {store} is not a directory; nothing changed")
+        if not (info.st_mode & stat.S_ISGID and info.st_mode & stat.S_IWGRP):
+            raise InstallError(f"A shared install needs a store several accounts can write, and {store} is owner-only "
+                               f"(its root must be setgid and group-writable). Run: {run} ; then rerun the install. Nothing changed")
+        if info.st_gid not in {os.getgid(), *os.getgroups()}:
+            raise InstallError(f"The store {store} belongs to group {_group_name(info.st_gid)}, which this account is not in; "
+                               f"use a store in one of your groups, or run: {run} ; nothing changed")
+        return {"path": str(store), "status": "ready"}
+    if not dry_run:
+        store.mkdir(parents=True, exist_ok=True)
+        try:
+            os.chown(store, -1, shared_group)
+        except OSError as exc:
+            raise InstallError(f"Cannot give the new store {store} to group {_group_name(shared_group)}: {exc.strerror}") from exc
+        os.chmod(store, 0o2770)
+    return {"path": str(store), "status": "would_create" if dry_run else "created", "mode": "2770",
+            "group": _group_name(shared_group)}
+
+
 def _share(stage, payload, source, gid):
     """Shared modes, applied to the staged tree before it is renamed in: group first, since chown clears setgid."""
     for path in [stage, *sorted(stage.rglob("*"))]:
@@ -393,12 +453,7 @@ def _share(stage, payload, source, gid):
         except OSError as exc:
             raise InstallError(f"Cannot give {path.name} to the skills folder's group ({_group_name(gid)}): {exc.strerror}; "
                                "the installing account must belong to that group") from exc
-        if path.is_dir():
-            os.chmod(path, 0o2750)
-        else:
-            relative = path.relative_to(stage).as_posix()
-            runnable = relative in payload and (source / relative).is_file() and (source / relative).stat().st_mode & 0o111
-            os.chmod(path, 0o750 if runnable else 0o640)
+        os.chmod(path, _shared_mode(path, path.relative_to(stage).as_posix(), payload, source))
 
 
 def _install_files(source, skills_root, destination, config, payload, action, recognized, venv, dry_run,
@@ -414,7 +469,7 @@ def _install_files(source, skills_root, destination, config, payload, action, re
               "store_path": config["store_path"], "dry_run": dry_run, "runtime": runtime}
     gid = None
     if shared:
-        gid = skills_root.stat().st_gid if skills_root.exists() else os.getgid()
+        gid = _skills_gid(skills_root)
         result["shared"] = {"account_ports_file": config["account_ports_file"], "group": _group_name(gid),
                             "folder_mode": "2750", "file_mode": "640"}
     if dry_run or action == "unchanged":

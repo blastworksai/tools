@@ -199,6 +199,104 @@ class AccountPortsTests(unittest.TestCase):
             idea.launcher_configuration(idea.parser().parse_args(['session-open']))
         self.assertEqual(reads.count(str(self.registry)), 1)
 
+    def launcher_commands(self):
+        """Every launcher-facing verb, with arguments that pass its own checks before the configuration is read."""
+        session = 'session_' + '0' * 32
+        picture = self.directory / 'x.png'
+        picture.write_bytes(b'x')
+        runtime = ['--runtime-root', str(self.directory / 'rt')]
+        correlation = {'request_id': 'r', 'session_id': session, 'idea_id': None, 'accepted_revision': 1,
+                       'draft_version': 1, 'operation': 'o', 'source_digest': 'd'}
+        commands = [['serve', *runtime], ['session-open', *runtime], ['browser-open', '--browser', 'link', *runtime],
+                    ['prototype-serve', *runtime, '--session', 's', '--dir', 'd'], ['sessions', *runtime],
+                    ['session-discard', *runtime, '--binding', 'binding_' + '0' * 32],
+                    ['events', *runtime, '--session', session], ['session-close', *runtime, '--session', session]]
+        for verb, key in (('respond', 'proposal'), ('fill', 'fields')):
+            payload = self.directory / (verb + '.json')
+            payload.write_text(json.dumps(dict(correlation, **{key: {}})))
+            commands.append([verb, *runtime, '--session', session, '--request', 'r', '--payload', str(payload)])
+        commands.append(['asset', *runtime, '--session', session, '--idea', 'i', '--revision', '1', '--request', 'r', '--file', str(picture)])
+        return commands
+
+    def test_every_launcher_verb_keeps_the_registry_diagnostic(self):
+        self.account = 'carol'
+        self.use_registry()
+        for command in self.launcher_commands():
+            status, body = self.invoke(*command)
+            self.assertEqual((status, body['error']['code']), (1, 'invalid_config'), command)
+            self.assertIn(str(self.registry), body['error']['message'], command)
+            self.assertIn('carol', body['error']['message'], command)
+        self.registry.unlink()
+        for command in self.launcher_commands():
+            status, body = self.invoke(*command)
+            self.assertEqual(body['error']['code'], 'invalid_config', command)
+            self.assertIn(str(self.registry), body['error']['message'], command)
+
+    def test_other_launcher_errors_stay_reduced_to_their_code(self):
+        self.config(default_workspace={'name': 'secret-name', 'path': '/nonexistent/secret-path'})
+        status, body = self.invoke('session-open', '--runtime-root', str(self.directory / 'rt'))
+        self.assertEqual(status, 1)
+        self.assertEqual(body['error']['message'], body['error']['code'])
+        self.assertNotIn('secret', json.dumps(body))
+
+    def test_unclean_registry_text_is_a_typed_error_without_an_echo(self):
+        for rows in ('{"\\ud800": {"browser_port": 41001, "prototype_port": 41002}}',
+                     '{"a\\u0000b": {"browser_port": 41001, "prototype_port": 41002}}',
+                     '{"a\\nb": {"browser_port": 41001, "prototype_port": 41002}}'):
+            self.registry.write_text('{"schema": 1, "seats": %s}' % rows)
+            self.use_registry()
+            for command in (['list'], ['session-open', '--runtime-root', str(self.directory / 'rt')]):
+                status, body = self.invoke(*command)
+                self.assertEqual((status, body['error']['code']), (1, 'invalid_config'))
+                self.assertIn('not clean text', body['error']['message'])
+                self.assertNotIn('\\ud800', json.dumps(body))
+
+    def test_a_registry_path_that_is_not_clean_text_is_refused_unechoed(self):
+        for bad in ('/tmp/\ud800/ports.json', '/tmp/a\x00b', '/tmp/a\nb'):
+            self.config(account_ports_file=bad)
+            status, body = self.invoke('list')
+            self.assertEqual((status, body['error']['code']), (1, 'invalid_config'))
+            self.assertIn('clean text', body['error']['message'])
+
+    def test_an_account_name_that_is_not_clean_text_is_refused(self):
+        self.use_registry()
+        self.account = 'a\ud800'
+        status, body = self.invoke('list')
+        self.assertEqual((status, body['error']['code']), (1, 'invalid_config'))
+
+    def reads_of_the_registry(self, *command, patches=()):
+        real = idea.read_bytes
+        reads = []
+
+        def counting(path, *args, **kwargs):
+            reads.append(str(path))
+            return real(path, *args, **kwargs)
+        with patch.object(idea, 'read_bytes', counting):
+            for item in patches:
+                item.start()
+            try:
+                self.invoke(*command)
+            finally:
+                for item in patches:
+                    item.stop()
+        return reads.count(str(self.registry))
+
+    def test_each_verb_reads_the_registry_once(self):
+        import idea_launch
+        self.use_registry(browser_mode='link')
+        runtime = ['--runtime-root', str(self.directory / 'rt')]
+        self.assertEqual(self.reads_of_the_registry('browser-open', *runtime, patches=[
+            patch.object(idea_launch, 'open_browser_session', return_value={})]), 1)
+        self.assertEqual(self.reads_of_the_registry('prototype-serve', *runtime, '--session', 's', '--dir', 'd', patches=[
+            patch.object(idea_prototype, 'serve_prototype', return_value={'ok': True})]), 1)
+        self.assertEqual(self.reads_of_the_registry('remove-idea', '--idea', 'idea_' + '0' * 32, '--actor', 'a', *runtime), 1)
+
+    def test_a_config_changed_between_two_invocations_is_read_again(self):
+        self.use_registry()
+        self.assertEqual(self.invoke('list')[0], 0)
+        self.config(account_ports_file=str(self.directory / 'gone.json'))
+        self.assertEqual(self.invoke('list')[0], 1)
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -129,7 +129,16 @@ def parser():
     return cli
 
 
+_SOURCE_CACHE=None  # set only while main() runs, so one invocation reads its configuration (and registry) once
+
+
 def _configuration_source():
+    if _SOURCE_CACHE is None: return _read_configuration_source()
+    if 'value' not in _SOURCE_CACHE: _SOURCE_CACHE['value']=_read_configuration_source()
+    return _SOURCE_CACHE['value']
+
+
+def _read_configuration_source():
     skill_dir=Path(__file__).resolve().parent.parent
     installed=(skill_dir/'.glitch-idea-install.json').exists()
     require(not installed or (skill_dir/'config.json').is_file(),'Installed skill config.json is missing; restore its durable store and validator configuration','invalid_config')
@@ -150,25 +159,43 @@ def _configuration_source():
 ACCOUNT_PORTS_LIMIT=65536
 
 
+class PortsError(IdeaError):
+    """An account-registry fault. Its message is built here from the registry path and the account name only (both checked
+    as clean text first), so launcher verbs may show it; every other error stays reduced to its code there."""
+    def __init__(self,message): super().__init__('invalid_config',message)
+
+
+def _shown(exc):
+    """What a launcher-facing verb says: the code, or the registry diagnostic that is safe by construction."""
+    return str(exc) if isinstance(exc,PortsError) else exc.code
+
+
+def _clean_text(value,limit=4096):
+    return (type(value) is str and bool(value.strip()) and len(value)<=limit
+            and all(32<=ord(c)!=127 and not 0xD800<=ord(c)<=0xDFFF for c in value))
+
+
 def _account_name():
     """The OS account this process runs as; the registry row key. Tests replace this to act as another account."""
-    require(os.name=='posix','account_ports_file is not supported on Windows','invalid_config')
+    if os.name!='posix': raise PortsError('account_ports_file is not supported on Windows')
     import pwd
     try: return pwd.getpwuid(os.getuid()).pw_name
-    except KeyError: raise IdeaError('invalid_config','This account has no name the ports registry can be looked up by') from None
+    except KeyError: raise PortsError('This account has no name the ports registry can be looked up by') from None
 
 
 def _account_registry(path):
     """Read and validate the registry once: {account: (browser_port, prototype_port)}; every fault is invalid_config naming the file."""
     try: registry=decode(read_bytes(path,limit=ACCOUNT_PORTS_LIMIT))
     except (IdeaError,OSError) as exc:
-        raise IdeaError('invalid_config','account_ports_file %s cannot be read: %s'%(path,exc.code if isinstance(exc,IdeaError) else exc.strerror or 'io_error')) from None
+        raise PortsError('account_ports_file %s cannot be read: %s'%(path,exc.code if isinstance(exc,IdeaError) else exc.strerror or 'io_error')) from None
     problem=None
     seats={}
     if type(registry) is not dict or type(registry.get('schema')) is not int or registry['schema']!=1: problem='it is not schema 1'
     elif type(registry.get('seats')) is not dict: problem='seats must be an object'
     else:
         used={}
+        if not all(_clean_text(account,256) for account in registry['seats']):
+            raise PortsError('account_ports_file %s is invalid: an account name is not clean text'%path)
         for account,row in registry['seats'].items():
             if type(row) is not dict or set(row)!={'browser_port','prototype_port'} or not account:
                 problem='the row for "%s" is malformed'%account;break
@@ -179,7 +206,7 @@ def _account_registry(path):
                 used[port]=account
             if problem: break
             seats[account]=(row['browser_port'],row['prototype_port'])
-    require(problem is None,'account_ports_file %s is invalid: %s'%(path,problem),'invalid_config')
+    if problem is not None: raise PortsError('account_ports_file %s is invalid: %s'%(path,problem))
     return seats
 
 
@@ -187,14 +214,14 @@ def _with_account_ports(value):
     """With account_ports_file set, this account's two ports come from its registry row, as if written in config.json."""
     registry=value.get('account_ports_file')
     if registry is None: return value
-    require(type(registry) is str and registry.strip() and '\x00' not in registry and len(registry)<=4096 and os.path.isabs(registry),
-            'account_ports_file must be an absolute path','invalid_config')
-    require(os.name=='posix','account_ports_file is not supported on Windows','invalid_config')
-    require('browser_port' not in value and 'prototype_port' not in value,
-            'account_ports_file and browser_port or prototype_port are two sources of one fact; remove the ports from the configuration','invalid_config')
+    if not (_clean_text(registry) and os.path.isabs(registry)): raise PortsError('account_ports_file must be an absolute path of clean text')
+    if os.name!='posix': raise PortsError('account_ports_file is not supported on Windows')
+    if 'browser_port' in value or 'prototype_port' in value:
+        raise PortsError('account_ports_file and browser_port or prototype_port are two sources of one fact; remove the ports from the configuration')
     account=_account_name()
+    if not _clean_text(account,256): raise PortsError('This account has no name the ports registry can be looked up by')
     seats=_account_registry(registry)
-    require(account in seats,'account_ports_file %s has no row for account "%s"'%(registry,account),'invalid_config')
+    if account not in seats: raise PortsError('account_ports_file %s has no row for account "%s"'%(registry,account))
     return dict(value,browser_port=seats[account][0],prototype_port=seats[account][1])
 
 
@@ -494,7 +521,7 @@ def run_launcher(args):
         if args.runtime_root_fallback: result=dict(result,runtime_root_fallback=args.runtime_root_fallback)
         return dict(ok=True,**result)
     except (LaunchError,NativeError,RuntimeError,BridgeError,IdeaError) as exc:
-        result=dict(ok=False,error=dict(code=exc.code,message=exc.code),
+        result=dict(ok=False,error=dict(code=exc.code,message=_shown(exc)),
                     **_safe_launch_details(getattr(exc,'details',{})))
         sessions=_safe_sessions(getattr(exc,'sessions',None)) if exc.code=='binding_capacity' else None
         if sessions is not None: result['sessions']=sessions
@@ -525,7 +552,7 @@ def run_sessions(args):
             return dict(ok=False,error=dict(code='session_in_use',message='session_in_use'),warning=DISCARD_WARNING)
         return dict(ok=True,binding_id=value['binding_id'],was_in_use=value['was_in_use'])
     except (RuntimeError,IdeaError) as exc:
-        return dict(ok=False,error=dict(code=exc.code,message=exc.code))
+        return dict(ok=False,error=dict(code=exc.code,message=_shown(exc)))
     except Exception:
         return dict(ok=False,error=dict(code='launcher_failed',message='launcher_failed'))
 
@@ -543,7 +570,7 @@ def run_prototype(args):
         extra={} if prototype_port is None else dict(port=prototype_port)
         return serve_prototype(args.session,args.dir,store,runtime,**extra)
     except (RuntimeError,IdeaError) as exc:
-        return dict(ok=False,error=dict(code=exc.code,message=exc.code))
+        return dict(ok=False,error=dict(code=exc.code,message=_shown(exc)))
     except Exception:
         return dict(ok=False,error=dict(code='launcher_failed',message='launcher_failed'))
 
@@ -597,7 +624,7 @@ def run_agent(args):
         if args.command=='asset': return client.asset(**asset)
         return client.session_close()
     except (AgentClientError,RuntimeError,BridgeError,IdeaError) as exc:
-        result=dict(ok=False,error=dict(code=exc.code,message=exc.code))
+        result=dict(ok=False,error=dict(code=exc.code,message=_shown(exc)))
         state=getattr(exc,'write_state',None)
         if type(state) is str and state in ('not_applied','committed_uncertain'):
             result['write_state']=state
@@ -607,6 +634,13 @@ def run_agent(args):
 
 
 def main(argv=None):
+    global _SOURCE_CACHE
+    _SOURCE_CACHE={}
+    try: return _main(argv)
+    finally: _SOURCE_CACHE=None
+
+
+def _main(argv=None):
     values=sys.argv[1:] if argv is None else list(argv)
     launching=_launcher_requested(values)
     try:
@@ -630,7 +664,7 @@ def main(argv=None):
             else:
                 result=dict(ok=True,**run(args,configuration()))
     except IdeaError as exc:
-        result=dict(ok=False,error=dict(code=exc.code,message=exc.code if launching else str(exc)),
+        result=dict(ok=False,error=dict(code=exc.code,message=_shown(exc) if launching else str(exc)),
                     **({} if launching else exc.details))
     except (OSError,UnicodeError,ValueError,RecursionError) as exc:
         result=dict(ok=False,error=dict(code='launcher_failed' if launching else 'io_error',

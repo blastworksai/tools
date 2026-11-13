@@ -196,6 +196,90 @@ class SharedInstallTests(Base):
         plain, _ = self.install('--dry-run')
         self.assertNotIn('shared', plain)
 
+    def test_an_owner_only_store_is_refused_with_the_command_to_run(self):
+        self.store.mkdir(mode=0o700)
+        os.chmod(self.store, 0o700)
+        self.write_registry({'alice': {'browser_port': 41001, 'prototype_port': 41002}})
+        result, _ = self.install('--shared', '--account-ports-file', self.registry, success=False)
+        message = result['error']['message']
+        self.assertIn('chmod 2770', message)
+        self.assertIn(str(self.store), message)
+        self.assertFalse(self.destination.exists())
+        self.assertEqual(mode(self.store), 0o700)
+
+    def test_a_group_safe_store_is_accepted_and_left_alone(self):
+        self.store.mkdir()
+        os.chmod(self.store, 0o2770)
+        self.write_registry({'alice': {'browser_port': 41001, 'prototype_port': 41002}})
+        result, _ = self.install('--shared', '--account-ports-file', self.registry)
+        self.assertEqual(result['store']['status'], 'ready')
+        self.assertEqual(mode(self.store), 0o2770)
+
+    def test_an_absent_store_is_created_2770_with_the_skills_root_group(self):
+        others = [gid for gid in os.getgroups() if gid != os.getgid()]
+        if others:
+            os.chown(self.skills, -1, others[0])
+        self.write_registry({'alice': {'browser_port': 41001, 'prototype_port': 41002}})
+        result, _ = self.install('--shared', '--account-ports-file', self.registry)
+        self.assertEqual(result['store']['status'], 'created')
+        self.assertEqual(mode(self.store), 0o2770)
+        self.assertEqual(self.store.stat().st_gid, self.skills.stat().st_gid)
+
+    def test_dry_run_creates_no_store(self):
+        self.write_registry({'alice': {'browser_port': 41001, 'prototype_port': 41002}})
+        result, _ = self.install('--shared', '--account-ports-file', self.registry, '--dry-run')
+        self.assertEqual(result['store']['status'], 'would_create')
+        self.assertFalse(self.store.exists())
+
+    def test_the_installers_store_rule_agrees_with_the_platforms_definition(self):
+        import importlib.util
+        import idea_platform
+        spec = importlib.util.spec_from_file_location('installer_under_test', INSTALLER)
+        installer = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(installer)
+        for index, wanted in enumerate((0o700, 0o750, 0o770, 0o775, 0o2700, 0o2750, 0o2770, 0o2775, 0o1770, 0o3770)):
+            folder = self.root / f'store-{index}'
+            folder.mkdir()
+            os.chmod(folder, wanted)
+            try:
+                installer._store_gate(folder, self.skills, True, os.getgid())
+                accepted = True
+            except installer.InstallError:
+                accepted = False
+            self.assertEqual(accepted, idea_platform.is_shared_root(folder), oct(wanted))
+
+    def test_a_rerun_repairs_drifted_modes_group_and_executable_bits(self):
+        self.write_registry({'alice': {'browser_port': 41001, 'prototype_port': 41002}})
+        self.install('--shared', '--account-ports-file', self.registry)
+        target = self.destination / 'scripts' / 'idea.py'
+        os.chmod(target, 0o600)
+        result, _ = self.install('--shared')
+        self.assertEqual(result['action'], 'repaired')
+        self.assertEqual(mode(target), 0o640)
+        os.chmod(self.destination / 'scripts', 0o755)
+        self.assertEqual(self.install('--shared')[0]['action'], 'repaired')
+        self.assertEqual(mode(self.destination / 'scripts'), 0o2750)
+        self.assertEqual(self.install('--shared')[0]['action'], 'unchanged')
+        runner = self.source / 'scripts' / 'run_me.sh'
+        runner.write_text('#!/bin/sh\n')
+        self.install('--shared')
+        runner.chmod(0o755)
+        self.assertEqual(self.install('--shared')[0]['action'], 'repaired')
+        self.assertEqual(mode(self.destination / 'scripts' / 'run_me.sh'), 0o750)
+        runner.chmod(0o644)
+        self.assertEqual(self.install('--shared')[0]['action'], 'repaired')
+        self.assertEqual(mode(self.destination / 'scripts' / 'run_me.sh'), 0o640)
+
+    def test_a_rerun_repairs_a_drifted_group(self):
+        others = [gid for gid in os.getgroups() if gid != os.getgid()]
+        if not others:
+            self.skipTest('this account has no second group')
+        self.write_registry({'alice': {'browser_port': 41001, 'prototype_port': 41002}})
+        self.install('--shared', '--account-ports-file', self.registry)
+        os.chown(self.destination / 'config.json', -1, others[0])
+        self.assertEqual(self.install('--shared')[0]['action'], 'repaired')
+        self.assertEqual((self.destination / 'config.json').stat().st_gid, self.skills.stat().st_gid)
+
 
 @unittest.skipUnless(os.name == 'posix', 'accounts and symlinks are POSIX')
 class SharedRunTimeTests(Base):

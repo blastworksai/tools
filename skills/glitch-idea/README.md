@@ -143,7 +143,9 @@ A single-account install, and every Windows install, is unchanged.
 
    Each key under `seats` is an OS account name.
    Ports are integers from 1024 to 65535, and no port may appear twice anywhere in the file.
-2. **Install once** into a folder whose group is the group the accounts share:
+2. **Prepare the store** if it already exists: the idea store only accepts writes from several accounts when its root is setgid and group-writable (`chgrp <shared group> /path/to/ideas && chmod 2770 /path/to/ideas`), in a group the installing account belongs to.
+   `--shared` refuses an existing store that is not like that and prints the exact command; a store that does not exist yet is created `2770` with the group of `--skills-root`.
+3. **Install once** into a folder whose group is the group the accounts share:
 
    ```bash
    python3 install.py --shared --account-ports-file /absolute/path/to/ports.json --skills-root /shared/skills --store /absolute/path/to/ideas --runtime-python /absolute/path/to/python
@@ -154,12 +156,13 @@ A single-account install, and every Windows install, is unchanged.
    The installed `config.json` carries `account_ports_file` and no `browser_port` or `prototype_port`: ports left over from an earlier install are dropped, with one line on stderr.
    `--shared` takes no `runtime_root`, because one folder would be every account's runtime.
    The install marker records `"shared": true`; `--dry-run` reports the same plan plus the registry, group and modes.
-3. **Link it** from each account's skills folder: `ln -s /shared/skills/glitch-idea ~/.codex/skills/glitch-idea`.
+4. **Link it** from each account's skills folder: `ln -s /shared/skills/glitch-idea ~/.codex/skills/glitch-idea`.
    Run as that account, the helper finds its own row by account name and uses those two ports exactly as if they were written in `config.json`.
-4. **Deploy a release** by rerunning the install command once, as the account that owns the shared folder; every account sees the new version through its link.
+5. **Deploy a release** by rerunning the install command once, as the account that owns the shared folder; every account sees the new version through its link.
+   A rerun also repairs modes, group or executable bits that have drifted, and reports `repaired` instead of `unchanged`.
 
 The shared folder's group-write bits are your choice of folder: the installer sets `2750`, so only the installing account can change the tree, and anything looser is your own decision.
-The registry, or a missing row for an account, is reported as `invalid_config` naming the registry and the account.
+The registry, or a missing row for an account, is reported as `invalid_config` naming the registry and the account, on every verb including the launcher verbs.
 The accounts share one idea store if you point them at one; each account runs its own owner service from its own runtime folder.
 
 ## Configuration
