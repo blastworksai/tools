@@ -10,9 +10,9 @@ import math
 from pathlib import PurePosixPath, PureWindowsPath
 import re
 
-from idea_domain import (MAX_INPUT, MAX_STATE, METHOD_CONTRACTS, METHOD_LABELS, assessment, check_id,
-                         integer, require, text)
-from idea_workflow import (DEPENDENCIES, MAX_SKETCH, STEP_ORDER, derive_state, empty_workflow,
+from idea_domain import (MAX_INPUT, MAX_STATE, METHOD_CONTRACTS, METHOD_LABELS, IdeaError, assessment,
+                         check_id, integer, require, text)
+from idea_workflow import (DEPENDENCIES, STEP_ORDER, derive_state, empty_workflow,
                            source_digest, validate_workflow)
 from idea_assessment import validate_actual_position
 from idea_asset_evidence import MAX_FILE, MAX_SET, MAX_MEMBERS, MIME_EXTENSIONS
@@ -382,23 +382,27 @@ def method_section(accepted):
     return '\n'.join(lines)+'\n\n'
 
 
-def _worst_section_chars():
-    contract = max(len('\n'.join(_contract_lines(m))) for m in METHOD_LABELS)+1
-    item = len('\nItem: ')+TITLE_MAX+1+contract
-    return len('## Method\n')+contract+len(METHOD_INSTRUCTION)+1+MAX_SKETCH*item+2
+def render_prompt_that_fits(record, packet_path, check, code):
+    """The prompt with its Method section, or without it when only the section tips the response over the bound.
+
+    check(prompt) builds the real response around that prompt and bounds it, raising IdeaError with `code`
+    when it is too large. A handoff that fitted before the Method section existed still fits, with exactly
+    its old prompt; one that never fitted fails with the same error as before. Every place that bounds a
+    response carrying the prompt goes through here.
+    """
+    prompt = render_prompt(record, packet_path)
+    try:
+        check(prompt)
+        return prompt
+    except IdeaError as exc:
+        if exc.code != code:
+            raise
+    prompt = render_prompt(record, packet_path, with_method=False)
+    check(prompt)
+    return prompt
 
 
-# The Method section is new to the read-time response, which is bounded as canonical JSON (idea_store
-# _handoff_http_preflight, HandoffProvider.project and the publish replay in idea_handoff). A packet admitted
-# under the old bound (size_old <= MAX_INPUT) must not start failing because of the section. The section is
-# at most _worst_section_chars() characters (titles cut to TITLE_MAX, at most MAX_SKETCH items), and one
-# character costs at most 6 bytes in canonical JSON (\u00XX for a control character; 4 for an astral one).
-# So size_new <= size_old + METHOD_SECTION_BUDGET <= MAX_INPUT + METHOD_SECTION_BUDGET, and those three
-# bounds admit exactly that much (MAX_INPUT stays 1 MiB for every other response).
-METHOD_SECTION_BUDGET = 6*_worst_section_chars()
-
-
-def render_prompt(record, packet_path):
+def render_prompt(record, packet_path, with_method=True):
     checked = validate_record(record)
     packet = _absolute(packet_path)
     detail = _absolute(checked['source_files']['detail']['path'])
@@ -416,7 +420,7 @@ def render_prompt(record, packet_path):
             'Align is done; this is the input for Plan. '
             'Retain this exact Idea trace in the plan.\n\n## Idea trace\n'
             'idea_id: '+checked['idea_id']+'\nidea_revision: '+str(checked['source_revision'])+
-            '\n\n'+method_section(accepted)+'## Planning source\n'+''.join('    '+line+'\n' for line in _literal(planning, 2).split('\n')))
+            '\n\n'+(method_section(accepted) if with_method else '')+'## Planning source\n'+''.join('    '+line+'\n' for line in _literal(planning, 2).split('\n')))
 
 
 def recorded_packet_path(record, link):

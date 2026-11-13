@@ -217,7 +217,7 @@ def _request_ids(session_id, request_id=_UNSET_REQUEST_ID):
     return 'session-recovery/'+session_id+'.json'
 
 
-def _request_json(value, *, object_required=True, extra=0):
+def _request_json(value, *, object_required=True):
     """Bound canonical JSON at the trusted service/Store seam; no credentials.
 
     Service validates operation schemas and binds actors. This routine validates
@@ -250,7 +250,7 @@ def _request_json(value, *, object_required=True, extra=0):
         raw = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':'), allow_nan=False).encode('utf-8')
     except (ValueError, UnicodeError, RecursionError) as exc:
         raise IdeaError('invalid_input', 'Cannot encode bounded request JSON') from exc
-    require(len(raw) <= MAX_INPUT+extra, 'Request/result exceeds 1 MiB', 'too_large')
+    require(len(raw) <= MAX_INPUT, 'Request/result exceeds 1 MiB', 'too_large')
     return raw
 
 
@@ -2506,14 +2506,16 @@ class Store:
 
     def _handoff_http_preflight(self, packet, link, result):
         """Bound the full real HTTP representation before any publication."""
-        from idea_handoff_evidence import render_prompt, recorded_packet_path, METHOD_SECTION_BUDGET
+        from idea_handoff_evidence import render_prompt_that_fits, recorded_packet_path
         absolute = recorded_packet_path(packet,link)
-        handoff = dict(handoff_id=packet['handoff_id'],source_revision=packet['source_revision'],
-            source_digest=packet['source_digest'],path=absolute,sha256=link['sha256'],
-            prompt=render_prompt(packet,absolute),source_files=packet['source_files'],design_set=packet['design_set'])
+        def check(prompt):
+            handoff = dict(handoff_id=packet['handoff_id'],source_revision=packet['source_revision'],
+                source_digest=packet['source_digest'],path=absolute,sha256=link['sha256'],
+                prompt=prompt,source_files=packet['source_files'],design_set=packet['design_set'])
+            _request_json(dict(result,handoff=handoff,handoff_current=True))
+            _request_json(dict(result,code='historical_handoff',handoff=handoff,handoff_current=False))
         try:
-            _request_json(dict(result,handoff=handoff,handoff_current=True),extra=METHOD_SECTION_BUDGET)
-            _request_json(dict(result,code='historical_handoff',handoff=handoff,handoff_current=False),extra=METHOD_SECTION_BUDGET)
+            render_prompt_that_fits(packet,absolute,check,'too_large')
         except IdeaError as exc:
             if exc.code == 'too_large':
                 raise IdeaError('handoff_capacity','Full handoff response exceeds the 1 MiB limit') from exc

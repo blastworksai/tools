@@ -422,13 +422,14 @@ class HandoffPublicationTests(unittest.TestCase):
             absolute = codec.recorded_packet_path(packet,link)
             handoff = dict(handoff_id=packet['handoff_id'],source_revision=packet['source_revision'],
                 source_digest=packet['source_digest'],path=absolute,sha256=link['sha256'],
-                prompt=codec.render_prompt(packet,absolute),source_files=packet['source_files'],design_set=packet['design_set'])
+                prompt=codec.render_prompt(packet,absolute,with_method=False),source_files=packet['source_files'],design_set=packet['design_set'])
+            # The helper retries without the Method section, so the envelope is measured the way it finally refuses.
             current = dict(result,handoff=handoff,handoff_current=True)
             historical = dict(result,code='historical_handoff',handoff=handoff,handoff_current=False)
             limit = len(storage._request_json(current))
             self.assertGreater(len(storage._request_json(historical)),limit)
             reached.append(True)
-            with patch.object(storage,'MAX_INPUT',limit-codec.METHOD_SECTION_BUDGET): preflight(packet,link,result)
+            with patch.object(storage,'MAX_INPUT',limit): preflight(packet,link,result)
         with patch.object(self.store,'_handoff_http_preflight',side_effect=boundary):
             self.refused(self.publish,'handoff_capacity')
         self.assertEqual(reached,[True]); self.assertEqual(self.files(),before)

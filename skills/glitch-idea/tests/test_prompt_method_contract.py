@@ -134,68 +134,124 @@ class TitleAndCapacityTests(unittest.TestCase):
         self.assertIn('\nItem: '+'x'*199+'\u2026\n', block)
         self.assertNotIn('x'*200, block)
 
-    def test_a_packet_admitted_before_the_section_is_never_refused_because_of_it(self):
+    # Capacity: the Method section never makes a response larger than what was admitted before.
+    def _record(self):
         items = [dict(title='\x01'*200, why_next='W', done_when='D', method=m)
                  for m in ('bmad', 'experiment-led', 'appetite-led', 'bounded-plan', 'bmad')]
-        _, (_, _, _, record) = prompt_for('bounded-plan', items), prompt_for('bounded-plan', items)[1]
-        raw = codec.encode_record(record); link = codec.record_link(record, raw)
-        result = dict(ok=True, code='ok', request_id='handoff:fixture-1')
-        def sizes(without):
-            out = []
-            for variant in (dict(result, handoff_current=True),
-                            dict(result, code='historical_handoff', handoff_current=False)):
-                response = dict(variant, handoff=self._response(record, link, result)['handoff'])
-                if without:
-                    response['handoff'] = dict(response['handoff'], prompt=response['handoff']['prompt'].replace(
-                        codec.method_section(record['accepted']), ''))
-                out.append(len(storage._request_json(response)))
-            return max(out)
-        old_size, new_size = sizes(True), sizes(False)
-        self.assertGreater(new_size-old_size, 0); self.assertLessEqual(new_size-old_size, codec.METHOD_SECTION_BUDGET)
-        historical = dict(result, code='historical_handoff', handoff_current=False,
-                          handoff=self._response(record, link, result)['handoff'])
-        # The old bound admitted exactly old_size bytes: with MAX_INPUT there, the new response must still be admitted.
-        with mock.patch.object(storage, 'MAX_INPUT', old_size):
-            storage.Store._handoff_http_preflight(None, record, link, result)
-            handoffs._bounded(historical, 'handoff_capacity', codec.METHOD_SECTION_BUDGET)
-            # Controls: without the extra allowance the same responses are refused, so the allowance is what admits them.
-            with self.assertRaises(IdeaError) as caught:
-                handoffs._bounded(historical, 'handoff_capacity')
-            self.assertEqual(caught.exception.code, 'handoff_capacity')
-            with self.assertRaises(IdeaError):
-                storage._request_json(historical)
-        # Nothing else is loosened: one byte under the old size still refuses, with or without the allowance.
-        with mock.patch.object(storage, 'MAX_INPUT', old_size-codec.METHOD_SECTION_BUDGET-1):
-            with self.assertRaises(IdeaError) as caught:
-                storage.Store._handoff_http_preflight(None, record, link, result)
-            self.assertEqual(caught.exception.code, 'handoff_capacity')
+        state, idea, _, record = prompt_for('bmad', items)[1]
+        raw = codec.encode_record(record)
+        return state, idea, record, codec.record_link(record, raw)
 
-    def test_the_read_time_projection_admits_what_the_old_bound_admitted(self):
-        items = [dict(title='\x01'*200, why_next='W', done_when='D', method='bmad')]*5
-        _, (state, idea, _, record) = prompt_for('bmad', items), prompt_for('bmad', items)[1]
-        raw = codec.encode_record(record); link = codec.record_link(record, raw)
-        store = mock.Mock(); store.handoffs.return_value = [dict(record=record, evidence=link)]
-        provider = handoffs.HandoffProvider(store)
-        status = dict(available=True, code='ok')
-        with mock.patch.object(provider, '_current', return_value=status):
-            full = provider.project(state, idea, None)
-            old = copy.deepcopy(full)
-            old['handoff']['prompt'] = old['handoff']['prompt'].replace(codec.method_section(record['accepted']), '')
-            old_size = len(storage._request_json(old))
-            self.assertGreater(len(storage._request_json(full)), old_size)
-            with mock.patch.object(storage, 'MAX_INPUT', old_size):
-                self.assertEqual(provider.project(state, idea, None), full)
-            with mock.patch.object(storage, 'MAX_INPUT', old_size-codec.METHOD_SECTION_BUDGET-1):
-                with self.assertRaises(IdeaError) as caught:
-                    provider.project(state, idea, None)
-                self.assertEqual(caught.exception.code, 'handoff_capacity')
+    def _recorder(self):
+        """Wrap the one helper so a test sees which prompt each site settled on."""
+        seen = []
+        real = codec.render_prompt_that_fits
+        def wrapped(*args):
+            seen.append(real(*args)); return seen[-1]
+        return seen, mock.patch.object(codec, 'render_prompt_that_fits', wrapped)
 
-    def _response(self, record, link, result):
+    def _sizes(self, record, link, build):
         path = codec.recorded_packet_path(record, link)
-        handoff = dict(handoff_id=record['handoff_id'], source_revision=record['source_revision'],
-            source_digest=record['source_digest'], path=path, sha256=link['sha256'],
-            prompt=codec.render_prompt(record, path), source_files=record['source_files'], design_set=record['design_set'])
-        return dict(result, handoff=handoff, handoff_current=True)
+        public = handoffs.HandoffProvider(mock.Mock())._public
+        def size(prompt):
+            return len(storage._request_json(build(public(dict(record=record, evidence=link), prompt))))
+        return (size(codec.render_prompt(record, path, with_method=False)), size(codec.render_prompt(record, path)))
+
+    def _site_cases(self):
+        """(name, build, run, fits_before) for the three sites; build wraps a handoff into the site's whole response."""
+        state, idea, record, link = self._record()
+        status = dict(available=True, code='ok')
+        entry = dict(record=record, evidence=link)
+        result = dict(ok=True, code='ok', request_id='handoff:fixture-1')
+        def preflight(packet=record):
+            storage.Store._handoff_http_preflight(None, record, link, result)
+        provider = handoffs.HandoffProvider(mock.Mock(handoffs=mock.Mock(return_value=[entry])))
+        def project():
+            with mock.patch.object(provider, '_current', return_value=status):
+                return provider.project(state, idea, None)['handoff']['prompt']
+        def replay():
+            return provider._fitted(entry, lambda handoff: dict(result, handoff=handoff, handoff_current=True))['prompt']
+        return record, link, result, preflight, project, replay, provider, entry, state, idea
+
+    def test_the_helper_keeps_the_section_unless_it_alone_tips_the_response_over(self):
+        _, _, record, link = self._record()
+        path = codec.recorded_packet_path(record, link)
+        def measure(limit):
+            def check(prompt):
+                if len(prompt) > limit:
+                    raise IdeaError('too_large', 'over')
+            return check
+        without, full = (len(codec.render_prompt(record, path, with_method=False)), len(codec.render_prompt(record, path)))
+        self.assertGreater(full, without)
+        self.assertIn('\n## Method\n', codec.render_prompt_that_fits(record, path, measure(full), 'too_large'))
+        old = codec.render_prompt_that_fits(record, path, measure(full-1), 'too_large')
+        self.assertEqual(old, codec.render_prompt(record, path, with_method=False))
+        self.assertNotIn('## Method', old)
+        with self.assertRaises(IdeaError) as caught:      # never fitted: refused with the same code as before
+            codec.render_prompt_that_fits(record, path, measure(without-1), 'too_large')
+        self.assertEqual(caught.exception.code, 'too_large')
+        with self.assertRaises(IdeaError) as caught:      # another error is not swallowed
+            codec.render_prompt_that_fits(record, path, lambda p: (_ for _ in ()).throw(IdeaError('other', 'x')), 'too_large')
+        self.assertEqual(caught.exception.code, 'other')
+
+    def test_each_site_admits_the_old_size_with_the_old_prompt_and_gives_the_section_one_byte_more(self):
+        record, link, result, preflight, project, replay, provider, entry, state, idea = self._site_cases()
+        status = dict(available=True, code='ok')
+        sites = {
+            # name: (response builder over a handoff, how to run the site and get the prompt it settled on)
+            'preflight': (lambda h: max((dict(result, handoff=h, handoff_current=True),
+                                         dict(result, code='historical_handoff', handoff=h, handoff_current=False)),
+                                        key=lambda r: len(storage._request_json(r))), None),
+            'project': (lambda h: dict(handoff=h, handoff_status=status), project),
+            'replay': (lambda h: dict(result, handoff=h, handoff_current=True), replay),
+        }
+        for name, (build, run) in sites.items():
+            with self.subTest(site=name):
+                old_size, new_size = self._sizes(record, link, build)
+                self.assertGreater(new_size, old_size)
+                seen, patch = self._recorder()
+                for limit, section in ((old_size, False), (new_size-1, False), (new_size, True)):
+                    del seen[:]
+                    with mock.patch.object(storage, 'MAX_INPUT', limit), patch:
+                        (run or preflight)()
+                    self.assertEqual('\n## Method\n' in seen[-1], section, (name, limit))
+                    self.assertEqual(seen[-1].startswith('/glitch-plan'), True)
+                # Never fitted without the section: refused with the code it always had.
+                with mock.patch.object(storage, 'MAX_INPUT', old_size-1):
+                    with self.assertRaises(IdeaError) as caught:
+                        (run or preflight)()
+                    self.assertEqual(caught.exception.code, 'handoff_capacity')
+
+    def test_the_publish_replay_site_goes_through_the_helper(self):
+        record, link, result, *_ = self._site_cases()
+        state, idea, _, _ = self._record()
+        session, request = 'session_'+'5'*32, 'handoff:fixture-1'
+        receipt = dict(ok=True, code='ok', request_id=request, write_state='applied', idea_id=idea['idea_id'],
+                       revision=idea['revision'], draft_version=1, backlog_revision=2, handoff_index=1,
+                       handoff_id=record['handoff_id'], path=link['path'], sha256=link['sha256'])
+        expected = dict(operation='handoff', payload=dict(request_id=request, idea_id=idea['idea_id'],
+            expected_revision=idea['revision'], expected_draft_version=1, expected_backlog_revision=2))
+        store = mock.MagicMock()
+        store.transaction.return_value.__enter__.return_value = dict(ideas={idea['idea_id']: idea})
+        store._read_receipts.return_value = (None, None, dict(receipts={request: dict(result=receipt,
+            payload_sha256=handoffs.digest(storage._request_json(expected)))}))
+        store.handoffs.return_value = [dict(record=record, evidence=link)]
+        provider = handoffs.HandoffProvider(store)
+        context = mock.Mock(session_id=session)
+        def run():
+            with mock.patch.object(provider, '_current', return_value=dict(available=True, code='ok')):
+                return provider.reconcile(receipt, context, request)['handoff']['prompt']
+        path = codec.recorded_packet_path(record, link)
+        build = lambda h: dict(receipt, handoff=h, handoff_current=True)
+        old_size, new_size = self._sizes(record, link, build)
+        with mock.patch.object(storage, 'MAX_INPUT', old_size):
+            self.assertNotIn('## Method', run())
+        with mock.patch.object(storage, 'MAX_INPUT', new_size):
+            self.assertIn('\n## Method\n', run())
+        with mock.patch.object(storage, 'MAX_INPUT', old_size-1):
+            with self.assertRaises(IdeaError) as caught:
+                run()
+            self.assertEqual(caught.exception.code, 'handoff_capacity')
 
 
 if __name__ == '__main__':
