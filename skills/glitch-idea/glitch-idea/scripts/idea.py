@@ -1,12 +1,21 @@
 #!/usr/bin/env python3
 """Local idea lifecycle CLI adapter. Python 3.10+."""
 import argparse
+import json as _json
 import math
 import os
 import re
 import stat
 from pathlib import Path
 import sys
+
+# A shared install is read-only at run time: write no bytecode beside the scripts. This runs before any
+# sibling module is imported, so none of them leaves a .pyc in the shared folder.
+try:
+    _marker=Path(__file__).resolve().parent.parent/'.glitch-idea-install.json'
+    if _json.loads(_marker.read_bytes()[:65536]).get('shared') is True: sys.dont_write_bytecode=True
+except Exception:
+    pass
 
 from idea_domain import IdeaError, decode, encoded, number, require, text
 from idea_store import read_bytes
@@ -134,7 +143,59 @@ def _configuration_source():
     timeout=value.get('validator_timeout_seconds',30)
     number(timeout,'validator_timeout_seconds',1,120)
     base=path.parent if path else skill_dir.parent
+    value=_with_account_ports(value)
     return value,base,skill_dir,installed,argv,timeout
+
+
+ACCOUNT_PORTS_LIMIT=65536
+
+
+def _account_name():
+    """The OS account this process runs as; the registry row key. Tests replace this to act as another account."""
+    require(os.name=='posix','account_ports_file is not supported on Windows','invalid_config')
+    import pwd
+    try: return pwd.getpwuid(os.getuid()).pw_name
+    except KeyError: raise IdeaError('invalid_config','This account has no name the ports registry can be looked up by') from None
+
+
+def _account_registry(path):
+    """Read and validate the registry once: {account: (browser_port, prototype_port)}; every fault is invalid_config naming the file."""
+    try: registry=decode(read_bytes(path,limit=ACCOUNT_PORTS_LIMIT))
+    except (IdeaError,OSError) as exc:
+        raise IdeaError('invalid_config','account_ports_file %s cannot be read: %s'%(path,exc.code if isinstance(exc,IdeaError) else exc.strerror or 'io_error')) from None
+    problem=None
+    seats={}
+    if type(registry) is not dict or type(registry.get('schema')) is not int or registry['schema']!=1: problem='it is not schema 1'
+    elif type(registry.get('seats')) is not dict: problem='seats must be an object'
+    else:
+        used={}
+        for account,row in registry['seats'].items():
+            if type(row) is not dict or set(row)!={'browser_port','prototype_port'} or not account:
+                problem='the row for "%s" is malformed'%account;break
+            for key in ('browser_port','prototype_port'):
+                port=row[key]
+                if type(port) is not int or not 1024<=port<=65535: problem='%s of "%s" must be an integer from 1024 to 65535'%(key,account);break
+                if port in used: problem='port %d is used twice ("%s" and "%s")'%(port,used[port],account);break
+                used[port]=account
+            if problem: break
+            seats[account]=(row['browser_port'],row['prototype_port'])
+    require(problem is None,'account_ports_file %s is invalid: %s'%(path,problem),'invalid_config')
+    return seats
+
+
+def _with_account_ports(value):
+    """With account_ports_file set, this account's two ports come from its registry row, as if written in config.json."""
+    registry=value.get('account_ports_file')
+    if registry is None: return value
+    require(type(registry) is str and registry.strip() and '\x00' not in registry and len(registry)<=4096 and os.path.isabs(registry),
+            'account_ports_file must be an absolute path','invalid_config')
+    require(os.name=='posix','account_ports_file is not supported on Windows','invalid_config')
+    require('browser_port' not in value and 'prototype_port' not in value,
+            'account_ports_file and browser_port or prototype_port are two sources of one fact; remove the ports from the configuration','invalid_config')
+    account=_account_name()
+    seats=_account_registry(registry)
+    require(account in seats,'account_ports_file %s has no row for account "%s"'%(registry,account),'invalid_config')
+    return dict(value,browser_port=seats[account][0],prototype_port=seats[account][1])
 
 
 def _fixed_ports(value):

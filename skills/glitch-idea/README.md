@@ -126,6 +126,42 @@ The default skills root is `~/.codex/skills` (`--skills-root` selects another pe
 No configuration file is required; the default store is the `ideas/` folder inside this checkout (`<checkout>/ideas`), outside the installed skill, so deleting the checkout deletes that store unless you chose another with `--store`.
 Keep that directory when replacing or removing the checkout.
 
+## Shared install for several accounts
+
+One installed copy can serve several OS accounts on one Linux or macOS machine.
+Each account reaches it through a symlink in its own skills folder; the only thing that differs per account is its two ports.
+Nothing is written into any home by the install, and nothing is written into the shared folder when the skill runs: the helper and the owner service write no bytecode, and the runtime folder stays per account (the default is under each account's own home, `~/.local/state/glitch-idea`).
+A single-account install, and every Windows install, is unchanged.
+
+1. **Write the registry** once, as one JSON file the accounts can read:
+
+   ```json
+   {"schema": 1, "host": "this-machine",
+    "seats": {"alice": {"browser_port": 41001, "prototype_port": 41002},
+              "bob":   {"browser_port": 41003, "prototype_port": 41004}}}
+   ```
+
+   Each key under `seats` is an OS account name.
+   Ports are integers from 1024 to 65535, and no port may appear twice anywhere in the file.
+2. **Install once** into a folder whose group is the group the accounts share:
+
+   ```bash
+   python3 install.py --shared --account-ports-file /absolute/path/to/ports.json --skills-root /shared/skills --store /absolute/path/to/ideas --runtime-python /absolute/path/to/python
+   ```
+
+   `--shared` makes folders `2750` (setgid) and files `640`, with the group of `--skills-root`; a source script that is executable stays executable (`750`).
+   It needs `--account-ports-file` on a fresh install, or an installed config that already has the key.
+   The installed `config.json` carries `account_ports_file` and no `browser_port` or `prototype_port`: ports left over from an earlier install are dropped, with one line on stderr.
+   `--shared` takes no `runtime_root`, because one folder would be every account's runtime.
+   The install marker records `"shared": true`; `--dry-run` reports the same plan plus the registry, group and modes.
+3. **Link it** from each account's skills folder: `ln -s /shared/skills/glitch-idea ~/.codex/skills/glitch-idea`.
+   Run as that account, the helper finds its own row by account name and uses those two ports exactly as if they were written in `config.json`.
+4. **Deploy a release** by rerunning the install command once, as the account that owns the shared folder; every account sees the new version through its link.
+
+The shared folder's group-write bits are your choice of folder: the installer sets `2750`, so only the installing account can change the tree, and anything looser is your own decision.
+The registry, or a missing row for an account, is reported as `invalid_config` naming the registry and the account.
+The accounts share one idea store if you point them at one; each account runs its own owner service from its own runtime folder.
+
 ## Configuration
 
 Copy `config.example.json` to `config.json` beside `install.py` if you need custom settings before installation.
@@ -141,6 +177,7 @@ Supported keys, and only these:
 | `browser_port` | `null` or absent (random port), or an integer from 1024 to 65535. The idea page listens on this fixed loopback port. |
 | `prototype_port` | The same bounds, for `prototype-serve`. When both are set they must differ. |
 | `browser_mode` | `null` or absent (unset), `"link"`, `"system"` or `"tern"`. The default for `browser-open` when `--browser` is omitted. |
+| `account_ports_file` | Absolute path of a registry that gives each OS account its two ports (see "Shared install for several accounts"). Set it instead of `browser_port` and `prototype_port`, never beside them. Not supported on Windows. |
 | `default_workspace` | Optional `{"name": ..., "path": ...}`: an absolute, existing folder that capture prefills (the field stays editable). A configured folder that does not exist is an `invalid_config` error. |
 
 Unset keeps random ports: with `browser_port` and `prototype_port` null or absent, each launch picks a fresh port as before.
