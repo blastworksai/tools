@@ -42,7 +42,6 @@ class TrustedContext:
     session_id: str
     selected_idea_id: str | None = None
     asset_inventory: dict | None = None  # Detached verified data; no Store/file capability.
-    session_workspace: dict | None = None  # This session's Capture prefill (dict(name, path)); never moves an idea.
 
 
 @dataclass(frozen=True)
@@ -299,13 +298,17 @@ def session_workspace(value):
 
 
 class Service:
-    def __init__(self,store,config,trusted_context,*,handlers=None,workspace_resolver=None,handoff_provider=None,agent_provider=None):
+    def __init__(self,store,config,trusted_context,*,handlers=None,workspace_resolver=None,handoff_provider=None,agent_provider=None,
+                 session_workspace=None):
         require(isinstance(trusted_context,TrustedContext), 'Trusted caller context is required')
         text(trusted_context.actor,'trusted actor',200)
         require(type(trusted_context.session_id) is str and re.fullmatch(r'session_[0-9a-f]{32}',trusted_context.session_id) is not None, 'Invalid durable session ID')
         if trusted_context.selected_idea_id is not None: check_id(trusted_context.selected_idea_id)
         require(type(config) is dict, 'Trusted configuration must be an object')
         self.store, self.config, self.context = store, copy.deepcopy(config), trusted_context
+        # This session's Capture prefill (dict(name, path)), validated by the owner. It never moves an idea and is kept off
+        # the trusted context, so step handlers never see it.
+        self.session_workspace = copy.deepcopy(session_workspace)
         # The plain migration line: kept from this service's own first open, shown once, then cleared.
         self._migrated, self._notified = [], False
         self._note_migration()
@@ -446,7 +449,7 @@ class Service:
                           resume=dict(required=True,reason='agent_disconnected'),**projection)
             result.update(copy.deepcopy(handoff_view))
             result.update(default_workspace=copy.deepcopy(self.config.get('default_workspace')),
-                          session_workspace=copy.deepcopy(self.context.session_workspace),
+                          session_workspace=copy.deepcopy(self.session_workspace),
                           lifecycle=None, home=None, delivered_ref=None, review_cause=None)
             if idea is not None and projection['steps']['assess']['status'] == 'review-needed' and idea['revisions'][-1]['action'] == 'import':
                 result['review_cause'] = 'imported'  # the last revision is the import's own: the cause stands until Assess is accepted again

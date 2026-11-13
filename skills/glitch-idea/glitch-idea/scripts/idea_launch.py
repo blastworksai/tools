@@ -218,8 +218,8 @@ class OwnerService:
         self.worker = None
 
     def application(self,record):
-        return Service(self.store,self.config,TrustedContext(record['actor'],record['receipt_session_id'],record['selected_idea_id'],
-                                                             session_workspace=record.get('session_workspace')),
+        return Service(self.store,self.config,TrustedContext(record['actor'],record['receipt_session_id'],record['selected_idea_id']),
+                       session_workspace=record.get('session_workspace'),
                        handlers=self.handlers,workspace_resolver=self.workspace_resolver,agent_provider=self.agent_provider,
                        handoff_provider=self.handoff_provider)
 
