@@ -94,17 +94,23 @@ class LegacyMethodRoundtrip(unittest.TestCase):
         self.assertEqual([l for l in detail(drafted).decode().splitlines() if OLD_LABEL in l],
                          [l for l in before.decode().splitlines() if OLD_LABEL in l])
 
-    def test_memory_preferred_method_unchanged_passes_and_new_is_refused(self):
+    def test_memory_may_report_a_retired_preference_and_the_choice_is_still_refused(self):
         idea = legacy_idea(selection='bmad', preferred=True)
         value = copy.deepcopy(idea['workflow']['steps']['method']['fields'])
         value['reason'] = 'Reworded'
         after = accept(idea, 'method', value)['idea']
         self.assertEqual(after['workflow']['steps']['method']['fields']['memory']['preferred_method'], OLD)
+        # Memory reports what was observed, so a fresh idea may record a retired preference beside a current choice.
         fresh = legacy_idea(selection='bmad')
-        for operation in (self.draft, accept):
-            changed = copy.deepcopy(fresh['workflow']['steps']['method']['fields'])
-            changed['memory'] = dict(FOUND)
-            self.refused(lambda: operation(fresh, 'method', changed))
+        changed = copy.deepcopy(fresh['workflow']['steps']['method']['fields'])
+        changed['memory'] = dict(FOUND)
+        self.draft(fresh, 'method', changed)
+        saved = accept(fresh, 'method', changed)['idea']['workflow']['steps']['method']['fields']
+        self.assertEqual((saved['selection'], saved['memory']['preferred_method']), ('bmad', OLD))
+        # The choice itself is still refused, with or without that memory.
+        changed['selection'] = OLD
+        self.refused(lambda: self.draft(fresh, 'method', changed))
+        self.refused(lambda: accept(fresh, 'method', changed))
 
     def test_sketch_item_with_the_retired_inner_method(self):
         idea = legacy_idea(sketch_method=OLD)
@@ -124,10 +130,6 @@ class LegacyMethodRoundtrip(unittest.TestCase):
         idea = accept(idea, 'priorities')['idea']
         value = fields()['method']
         value['selection'] = OLD
-        self.refused(lambda: self.draft(idea, 'method', value))
-        self.refused(lambda: accept(idea, 'method', value))
-        value = fields()['method']
-        value['memory'] = dict(FOUND)
         self.refused(lambda: self.draft(idea, 'method', value))
         self.refused(lambda: accept(idea, 'method', value))
         done = legacy_idea(selection='bmad')

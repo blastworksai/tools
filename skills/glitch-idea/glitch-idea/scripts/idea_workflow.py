@@ -473,17 +473,15 @@ def _chosen(value, stored, name):
 def refuse_new_retired(workflow, step, fields):
     """Refuse choosing a retired method; the stored accepted fields and draft say what is unchanged.
 
-    Method selection and memory.preferred_method compare with the same field already saved.
+    The method selection compares with the selection already saved.
     A sketch item compares with the saved item at its position or with the same title.
+    memory.preferred_method is not a choice: it records what the operator's memory reports, which may be a retired
+    method, so it is read and never refused here.
     """
     old = [f for f in (workflow['steps'][step]['fields'], workflow['drafts'].get(step)) if f]
     if step == 'method':
         if 'selection' in fields:
             _chosen(fields['selection'], [f.get('selection') for f in old], 'method.selection')
-        memory = fields.get('memory')
-        if type(memory) is dict:
-            _chosen(memory.get('preferred_method'),
-                    [(f.get('memory') or {}).get('preferred_method') for f in old], 'method.memory.preferred_method')
     elif step == 'exploration':
         for index, item in enumerate(fields.get('sketch') or []):
             _chosen(item.get('method'),
