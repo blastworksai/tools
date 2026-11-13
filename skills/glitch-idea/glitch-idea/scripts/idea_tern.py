@@ -136,12 +136,11 @@ def write_title(path, text, *, opener=os.open, writer=os.write):
     """One write of the title escape to the terminal. Never raises; False when it could not be written."""
     try:
         data = title_escape(text)
-        fd = opener(path, os.O_WRONLY | getattr(os, 'O_NOCTTY', 0))
+        fd = opener(path, os.O_WRONLY | getattr(os, 'O_NOCTTY', 0) | getattr(os, 'O_NONBLOCK', 0))
         try:
-            writer(fd, data)
+            return writer(fd, data) == len(data)
         finally:
             os.close(fd)
-        return True
     except Exception:
         return False
 
@@ -155,14 +154,14 @@ def send_request(runtime, url, port, *, terminal, sleep=time.sleep, clock=time.m
         raise LaunchError('invalid_pair_url')
     if terminal is None:
         return None, 'no_terminal'
-    rid = token(16)
     try:
+        rid = token(16)
         runtime.tern_offer(rid, url)
     except Exception:
         return None, 'offer_failed'
-    if not write(terminal, 'glitch-idea:1:%d:%s' % (port, rid)):
-        return None, 'no_terminal'
     try:
+        if not write(terminal, 'glitch-idea:1:%d:%s' % (port, rid)):
+            return None, 'no_terminal'
         claim_deadline, claimed_at = clock() + claim_wait, None
         while True:
             try:
@@ -195,7 +194,12 @@ def open_tern_session(store_path, runtime_root, config=None, *, terminal=None, s
     code = result['pairing_code']
     origin = result['origin']
     link = origin.rstrip('/') + '/#pair=' + code
-    how, failure = sender(idea_runtime.Runtime(store_path, runtime_root), link, urlsplit(origin).port, terminal=terminal)
+    try:
+        how, failure = sender(idea_runtime.Runtime(store_path, runtime_root), link, urlsplit(origin).port, terminal=terminal)
+    except idea_launch.LaunchError:
+        raise
+    except Exception:
+        how, failure = None, 'no_result'
     fallback = f'Only if the tab did not open paired: type {code} within 60 s.'
     if how is not None:
         result = {key: value for key, value in result.items() if key != 'pairing_code'}

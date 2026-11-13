@@ -161,8 +161,26 @@ class TernModeTests(unittest.TestCase):
         self.assertEqual(self.titles, [])
 
     def test_unwritable_terminal_is_no_terminal(self):
-        res = self.open(write=lambda path, text: False)
+        calls = []
+        res = self.open(write=lambda path, text: calls.append(text) or False)
         self.assert_failure(res, "no_terminal", terminal_written=False)
+        self.assertEqual(len(calls), 2)  # the failed request write, then exactly one reset attempt
+        self.assertRegex(calls[0], TITLE)
+        self.assertEqual(calls[1], "glitch-idea")
+
+    def test_token_failure_is_offer_failed_with_no_write(self):
+        calls = []
+        sender = partial(tern.send_request, write=lambda path, text: calls.append(text) or True,
+                         token=lambda n: 1 / 0, **FAST)
+        res = tern.open_tern_session(self.store, self.root, None, terminal=self.terminal, sender=sender, spawn=self.spawn)
+        self.assert_failure(res, "offer_failed", terminal_written=False)
+        self.assertEqual(calls, [])
+
+    def test_a_sender_that_raises_keeps_the_session_and_the_link(self):
+        def boom(*a, **k): raise RuntimeError("sender broke")
+        res = tern.open_tern_session(self.store, self.root, None, terminal=self.terminal, sender=boom, spawn=self.spawn)
+        self.assert_failure(res, "no_result", terminal_written=False)
+        self.assertEqual(self.titles, [])
 
     def test_plugin_no_answer(self):
         self.plugin_mode = "silent"
@@ -359,6 +377,19 @@ class TitleTests(unittest.TestCase):
         self.assertEqual(seen[1], b"\x1b]2;glitch-idea\x07")
         self.assertEqual(len(seen), 2)
         self.assertTrue(seen[0][1] & os.O_NOCTTY and seen[0][1] & os.O_WRONLY)
+        self.assertTrue(seen[0][1] & os.O_NONBLOCK)
+
+    def test_write_title_short_write_is_false(self):
+        calls = []
+        ok = tern.write_title("/x", "glitch-idea", opener=lambda p, f: os.open(os.devnull, os.O_WRONLY),
+                              writer=lambda fd, d: calls.append(d) or len(d) - 1)
+        self.assertFalse(ok)
+        self.assertEqual(len(calls), 1)  # one write, never a loop
+
+    def test_write_title_would_block_is_false(self):
+        def blocked(fd, data): raise BlockingIOError(11, "again")
+        self.assertFalse(tern.write_title("/x", "glitch-idea", opener=lambda p, f: os.open(os.devnull, os.O_WRONLY),
+                                          writer=blocked))
 
     def test_write_title_never_raises(self):
         def boom(*a): raise OSError("no")

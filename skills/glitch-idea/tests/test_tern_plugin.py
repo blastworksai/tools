@@ -101,6 +101,10 @@ class TernPlugin(unittest.TestCase):
         self.assertIn('RATE_MS = 5000', REQUEST_CODE)
         self.assertIn('now_ms - last_ms >= RATE_MS', REQUEST_CODE)
 
+    def test_rate_clock_is_the_monotonic_tern_clock(self):
+        self.assertIn('tern.now()', CODE)
+        self.assertNotIn('os.time', CODE)
+
     def test_rate_table_is_bounded_by_pane_closed(self):
         self.assertIn('tern.on("pane_closed"', CODE)
         self.assertIn('last_asked[ev.pane] = nil', CODE)

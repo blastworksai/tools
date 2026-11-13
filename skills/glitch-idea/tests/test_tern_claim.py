@@ -97,13 +97,20 @@ class TernClaimTests(unittest.TestCase):
         self.assertEqual(self.result('beside'), (404, dict(ok=False, code='tern_result_unavailable')))  # twice
         self.assertEqual(self.owner.server.tern.state(RID), 'above')
 
-    def test_result_window_is_60_seconds_from_the_offer(self):
+    def test_result_window_is_60_seconds_from_the_claim(self):
         self.offer()
         self.clock.now += 29
         self.claim()
         self.clock.now += 31
-        self.assertEqual(self.result('above')[0], 404)
-        self.assertEqual(self.owner.server.tern.state(RID), 'unknown')
+        self.assertEqual(self.result('above')[0], 200)
+        self.assertEqual(self.owner.server.tern.state(RID), 'above')
+        other = 'ef' * 16
+        self.assertTrue(self.offer(other))
+        self.clock.now += 29
+        self.claim(other)
+        self.clock.now += 60
+        self.assertEqual(self.result('above', other)[0], 404)
+        self.assertEqual(self.owner.server.tern.state(other), 'unknown')
 
     def test_state_transitions(self):
         for how in ('above', 'beside', 'open_failed'):

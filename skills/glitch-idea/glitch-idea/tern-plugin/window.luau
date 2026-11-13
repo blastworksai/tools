@@ -7,7 +7,7 @@ local request = require("./lib/request")
 local last_asked = {} -- pane -> ms of its last accepted request; dropped when the pane closes
 
 local function now_ms()
-    local okay, value = pcall(function() return os.time() * 1000 end)
+    local okay, value = pcall(function() return tern.now() end)
     if okay and type(value) == "number" then return value end
     return nil
 end

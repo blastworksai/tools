@@ -137,6 +137,45 @@ class TernModeGridTests(Base):
         self.assertEqual((status,body['error']['code']),(1,'invalid_config'));tern.assert_not_called()
 
 
+class TernModeDetectionTests(Base):
+    """The real default_is_tern is never patched: its inputs (terminal, TERN_PANE, ancestor) pick the mode."""
+    FIXTURE=dict(binding_id=BINDING,browser=dict(mode='tern',url='http://127.0.0.1:1/',opened=True,how='above'))
+
+    def cell(self,terminal,pane,named):
+        self.config()
+        env={key:value for key,value in os.environ.items() if key!='TERN_PANE'}
+        if pane: env['TERN_PANE']='1'
+        with patch.dict(os.environ,env,clear=True),\
+             patch.object(idea_tern,'find_terminal',return_value=terminal),\
+             patch.object(idea_tern,'ancestor_named',return_value=named) as ancestor,\
+             patch.object(idea_tern,'open_tern_session',return_value=self.FIXTURE) as tern,\
+             patch.object(launch,'open_browser_session') as browser,\
+             patch.object(launch,'open_session') as session:
+            status,body=self.invoke()
+        return status,body,tern,browser,session,ancestor
+
+    def test_terminal_and_tern_pane_select_tern_mode(self):
+        status,body,tern,browser,session,_=self.cell('/dev/pts/999',True,False)
+        self.assertEqual(status,0);tern.assert_called_once()
+        self.assertEqual(tern.call_args.kwargs['terminal'],'/dev/pts/999')
+        self.assertEqual(body['browser'],self.FIXTURE['browser']);browser.assert_not_called()
+
+    def test_a_named_ancestor_without_tern_pane_selects_tern_mode(self):
+        status,body,tern,_,_,ancestor=self.cell('/dev/pts/999',False,True)
+        self.assertEqual(status,0);tern.assert_called_once();ancestor.assert_called_once_with('tern')
+
+    def test_no_terminal_is_browser_mode_required(self):
+        status,body,tern,browser,session,_=self.cell(None,True,True)
+        self.assertEqual((status,body['error']['code']),(1,'browser_mode_required'))
+        for mock in (tern,browser,session): mock.assert_not_called()
+
+    def test_terminal_without_tern_pane_or_named_ancestor_is_browser_mode_required(self):
+        status,body,tern,browser,session,ancestor=self.cell('/dev/pts/999',False,False)
+        self.assertEqual((status,body['error']['code']),(1,'browser_mode_required'))
+        for mock in (tern,browser,session): mock.assert_not_called()
+        ancestor.assert_called_once_with('tern')
+
+
 @unittest.skipUnless(os.name=='posix','Native Windows privacy is not qualified')
 class TernModeRealServiceTests(Base):
     """Real owner service through the CLI path; the terminal is a temp file and a watcher thread is the plugin."""

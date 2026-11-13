@@ -121,11 +121,12 @@ class TernOffers:
 
     def claim(self, rid):
         with self._lock:
-            self._sweep(self._clock())
+            now = self._clock()
+            self._sweep(now)
             entry = self._entries.get(rid)
             if entry is None or entry['state'] != 'pending':
                 return None
-            url, entry['url'], entry['state'] = entry['url'], None, 'claimed'
+            url, entry['url'], entry['state'], entry['born'] = entry['url'], None, 'claimed', now
             return url
 
     def result(self, rid, how):
