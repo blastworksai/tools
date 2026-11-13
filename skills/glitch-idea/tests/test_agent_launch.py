@@ -410,12 +410,12 @@ class AgentLaunchTests(unittest.TestCase):
                     preferred_method='bounded-plan')
         self.operation_reply('memory',memory,'memory-found')
         self.draft('method',{'memory':memory},'memory-method-buffer')
-        chosen=dict(fields()['method'],memory=memory,selection='adaptive-slices',reason='Human chose adaptive delivery')
+        chosen=dict(fields()['method'],memory=memory,selection='bmad',reason='Human chose adaptive delivery')
         self.draft('method',chosen,'human-method-buffer')
         # Grounded by the connected agent's own memory evidence (no linked Method proposal here).
         accepted=self.accept_fields('method',chosen,'human-method-accept')
         self.assertNotIn('proposal_id',accepted)
-        state=self.browser('state');self.assertEqual(state['accepted']['method']['selection'],'adaptive-slices')
+        state=self.browser('state');self.assertEqual(state['accepted']['method']['selection'],'bmad')
         self.assertNotEqual(state['accepted']['method']['selection'],memory['preferred_method'])
         self.assertEqual(state['accepted']['method']['memory'],memory)
         previous=state['agent_generation']

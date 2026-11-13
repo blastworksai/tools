@@ -12,8 +12,12 @@ MAX_STATE = 64 * MAX_INPUT
 MAX_NUMBER = 10**12
 SHAPE_KEYS = {'outcome','scope','scope_reason','alternatives','method','method_reason','assumptions','next_slice','learning'}
 # The one human label per method id (stored ids never change).
-METHOD_LABELS = {'bounded-plan': 'Full Plan Up Front', 'adaptive-slices': 'Vertical Slicing (Agile)',
-                 'appetite-led': 'Fixed Budget, Build what Fits', 'experiment-led': 'Experiment First'}
+# adaptive-slices is retired: a saved idea still reads and shows it, it can no longer be chosen.
+METHOD_LABELS = {'bounded-plan': 'Full Plan Up Front', 'bmad': 'BMAD (Roles and Stories)',
+                 'appetite-led': 'Fixed Budget, Build what Fits', 'experiment-led': 'Experiment First',
+                 'adaptive-slices': 'Vertical Slicing (Agile)'}
+SELECTABLE_METHODS = ('bounded-plan', 'bmad', 'appetite-led', 'experiment-led')
+RETIRED_METHODS = ('adaptive-slices',)
 ASSESS_KEYS = {'method','version','inputs','basis','assumptions','confidence','provenance'}
 
 
@@ -72,7 +76,7 @@ def shape(value):
         if value[key] is not None:
             text(value[key],key)
     require(value['scope'] in (None,'small-change','capability','project','epic'),'Invalid scope')
-    require(value['method'] in (None,'bounded-plan','adaptive-slices','appetite-led','experiment-led'),'Invalid method')
+    require(value['method'] is None or value['method'] in SELECTABLE_METHODS + RETIRED_METHODS,'Invalid method')
     require(isinstance(value['alternatives'],list) and len(value['alternatives'])<=1000,'alternatives must be a list')
     for alternative in value['alternatives']:
         exact(alternative,{'route','reason'},'alternative')

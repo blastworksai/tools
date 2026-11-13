@@ -9,8 +9,8 @@ const {Flow, STEPS} = await import(foldsUrl);
 const methodSource = (await readFile(new URL('steps/method.js', web), 'utf8')).replace("'../folds.js'", JSON.stringify(foldsUrl));
 const {render} = await import(moduleUrl(methodSource));
 const css = await readFile(new URL('styles.css', web), 'utf8');
-const LABELS = {'bounded-plan': 'Full Plan Up Front', 'adaptive-slices': 'Vertical Slicing (Agile)', 'appetite-led': 'Fixed Budget, Build what Fits', 'experiment-led': 'Experiment First'};
-const KEYS = ['bounded-plan', 'adaptive-slices', 'appetite-led', 'experiment-led'];
+const LABELS = {'bounded-plan': 'Full Plan Up Front', 'bmad': 'BMAD (Roles and Stories)', 'appetite-led': 'Fixed Budget, Build what Fits', 'experiment-led': 'Experiment First'};
+const KEYS = ['bounded-plan', 'bmad', 'appetite-led', 'experiment-led'];
 
 class Node {
   constructor(tag, text = '', className = '') {this.tag = tag; this.textContent = text; this.className = className; this.children = []; this.listeners = {}; this.disabled = false;}
@@ -69,7 +69,7 @@ test('selecting a card sets aria-pressed on that card only', () => {
     return KEYS.map(key => body.all().find(node => node.id === 'method-choice-' + key)['aria-pressed']);
   };
   assert.deepEqual(pressed(null), ['false', 'false', 'false', 'false']);
-  assert.deepEqual(pressed('adaptive-slices'), ['false', 'true', 'false', 'false']);
+  assert.deepEqual(pressed('bmad'), ['false', 'true', 'false', 'false']);
 });
 
 test('each method has a native collapsible Tell me more', () => {
@@ -91,4 +91,43 @@ test('the method grid gives every card the same size', () => {
   assert.match(rule[1], /display:\s*grid/);
   assert.match(rule[1], /grid-auto-rows:\s*1fr/);
   assert.match(rule[1], /repeat\(2,\s*minmax\(0,\s*1fr\)\)/);
+});
+
+test('the BMAD card carries the approved wording', () => {
+  const body = draw();
+  const card = body.all().find(node => node.id === 'method-choice-bmad');
+  assert.equal(card.children[0].text(), 'BMAD (Roles and Stories)');
+  assert.equal(card.children[1].text(), 'Fix a written brief, requirements and architecture first; then build story by story.');
+  const more = body.all().find(node => node.id === 'method-more-bmad').text();
+  for (const line of ['a written brief, requirements and architecture before any building', 'building each story and checking it against those documents', "larger work where several roles' views must agree before code"]) assert.ok(more.includes(line), line);
+});
+
+test('a saved retired method shows its old label read-only beside the four cards', () => {
+  const body = draw('adaptive-slices');
+  assert.equal(body.all().some(node => node.id === 'method-choice-adaptive-slices'), false, 'not offered as a card');
+  assert.deepEqual(body.all().find(node => node.id === 'method-cards').children.map(node => node.id), KEYS.map(key => 'method-choice-' + key));
+  assert.deepEqual(KEYS.map(key => body.all().find(node => node.id === 'method-choice-' + key)['aria-pressed']), ['false', 'false', 'false', 'false']);
+  const kept = body.all().find(node => node.id === 'method-retired-adaptive-slices');
+  assert.ok(kept, 'read-only retired line');
+  assert.equal(kept.tag, 'p'); assert.equal(kept.listeners.click, undefined); assert.equal(kept.tabIndex, undefined);
+  assert.match(kept.text(), /Vertical Slicing \(Agile\)/); assert.match(kept.text(), /no longer offered/);
+  assert.ok(body.all().some(node => node.textContent === 'Your choice: Vertical Slicing (Agile)'), 'summary line keeps the old label');
+  assert.equal(body.all().find(node => node.id === 'method-accept') === undefined, true, 'accept sits in the footer');
+});
+
+test('a saved retired choice still counts as a method choice', async () => {
+  const {validMethod, SELECTABLE_METHODS, RETIRED_METHODS, METHOD_LABELS} = await import(foldsUrl);
+  const memory = {status: 'unavailable', sources: [], rationale: null};
+  assert.equal(validMethod({selection: 'adaptive-slices', reason: '', memory}), true);
+  assert.equal(validMethod({selection: 'nope', reason: '', memory}), false);
+  assert.deepEqual([...SELECTABLE_METHODS], ['bounded-plan', 'bmad', 'appetite-led', 'experiment-led']);
+  assert.deepEqual([...RETIRED_METHODS], ['adaptive-slices']);
+  assert.deepEqual(Object.keys(METHOD_LABELS), ['bounded-plan', 'bmad', 'appetite-led', 'experiment-led', 'adaptive-slices']);
+});
+
+test('no line on the method page teaches vertical slicing as a principle', () => {
+  for (const pick of [null, 'adaptive-slices', 'bmad']) {
+    const text = draw(pick).text().replaceAll('Vertical Slicing (Agile)', '');
+    assert.equal(/slic/i.test(text), false, String(pick));
+  }
 });

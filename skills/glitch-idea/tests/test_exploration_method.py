@@ -287,7 +287,7 @@ class MethodHttpTests(unittest.TestCase):
         recommendation={'memory':memory}
         reply=self.operation_reply('method',recommendation,'method-proposed')
         before=self.browser('state');self.assertIsNone(before['accepted']['method'])
-        chosen=dict(fields()['method'],memory=memory,selection='adaptive-slices',reason='Human chooses useful increments')
+        chosen=dict(fields()['method'],memory=memory,selection='bmad',reason='Human chooses useful increments')
         self.draft('method',chosen,'method-human-draft')
         result=self.accept_fields('method',chosen,'method-human-accept',reply['evidence']['proposal_id'])
         after=self.browser('state');self.assertEqual(after['accepted']['method'],chosen)

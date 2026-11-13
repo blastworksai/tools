@@ -201,7 +201,7 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(self.domain()['ideas'][key]['workflow']['steps']['exploration']['acceptance'],old)
 
     def test_method_change_after_exploration_marks_exploration_review_needed(self):
-        changed=fields()['method'];changed['selection']='adaptive-slices'
+        changed=fields()['method'];changed['selection']='bmad'
         self.accepted_change_marks_exploration('method',changed)
 
     def test_discovery_change_after_exploration_marks_exploration_review_needed(self):

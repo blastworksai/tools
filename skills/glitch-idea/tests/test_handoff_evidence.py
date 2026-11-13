@@ -192,7 +192,7 @@ class HandoffEvidenceTests(unittest.TestCase):
         cases = [(dict(selection='appetite-led'), dict(investment=dict(cap=3,unit='days',boundary='One page'))),
                  (dict(selection='experiment-led'), dict(experiment=dict(question='Does it help?',
                      evidence='Observed completion', success_criterion='More completions', stop_rule='Stop after ten'))),
-                 (dict(selection='adaptive-slices'), {})]
+                 (dict(selection='bmad'), {})]
         for method, exploration in cases:
             with self.subTest(method=method):
                 state, idea, design, record = fixture(method=method, exploration=exploration)
