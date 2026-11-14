@@ -162,13 +162,21 @@ class _AgentProvider:
         return record
 
 
+SAVED_LOADS = 'loads'  # beside runtime/stores: that folder admits only its own four names
+
+
+def saved_load_path(runtime):
+    """The owner's saved load for this store: private to the account, kept between starts."""
+    return runtime.runtime_root / SAVED_LOADS / (runtime.store_sha256 + '.json')
+
+
 class OwnerService:
     """Composition under one owned Runtime; no public owner secret access."""
     def __init__(self,runtime,config=None,*,workspace_resolver=None,server_factory=BridgeServer):
         self.runtime = runtime
         self.config = _config(config,runtime.store_path)
         self.actor = _actor()
-        self.store = Store(runtime.store_path,observer=self.actor)
+        self.store = Store(runtime.store_path,observer=self.actor,saved_load=saved_load_path(runtime))
         self.handlers, self.routes = load_registry()
         self.workspace_resolver = workspace_resolver
         self.admission = threading.RLock()
