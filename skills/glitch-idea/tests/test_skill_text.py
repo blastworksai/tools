@@ -197,6 +197,17 @@ class VisualizeTextTests(unittest.TestCase):
         self.assertRegex(commands, r"`origin` is `http://127\.0\.0\.1:<port>/<key>/`")
         self.assertRegex(commands, r"without it, from any account, answers `not found`")
         self.assertRegex(commands, r"linked relatively")
+        # The link never rides a command line: other accounts can read every command's arguments.
+        self.assertRegex(flat, r"Show `origin` to the operator alone on its own line")
+        self.assertRegex(flat, r"Never hand `origin` to a command.{0,200}arguments")
+        self.assertNotIn("tab create --url <origin>", SKILL)
+        self.assertNotRegex(flat, r"Open a second tab on `origin` \(")
+        self.assertRegex(commands, r"Never pass `origin` to a command")
+        self.assertRegex(flat, r"never write it into a `fill`, a `reply` to the page.{0,60}The one place it goes is your own message to the operator")
+        self.assertRegex(flat, r"no `curl`.{0,80}no `echo` into a file.{0,80}or in its environment")
+        self.assertRegex(flat, r"do not fetch the link yourself")
+        self.assertRegex(commands, r"in your own message in the terminal.{0,80}one place it goes")
+        self.assertRegex(commands, r"as an argument or in its environment")
 
     def test_prototype_order_is_upload_fill_then_reply_last(self):
         order = r"upload both files.{0,200}then `?fill`?.{0,200}reply `?prototype_skill: \"available\"`? last.{0,200}unavailable\W{1,3} at once"
