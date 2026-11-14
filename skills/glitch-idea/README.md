@@ -245,6 +245,8 @@ idea_tool=~/.codex/skills/glitch-idea/scripts/idea.py
   `--resume binding_ID` re-pairs the same binding and keeps its saved selection and save receipts.
   A lost or uncertain NEW result is never retried automatically, and an error carrying `resume_required` must be resumed, not replaced by a fresh session.
 - The service accepts only its exact `127.0.0.1:<port>` origin.
+- A prototype is served on its own port under a private link, `http://127.0.0.1:<port>/<key>/`, with a key made for each launch.
+  Its port is fixed and known to every account on the machine, so the key is what keeps other accounts out: without it every address answers `not found`.
   It exits after 15 minutes without authenticated activity; saved ideas survive and the next launch needs fresh pairing.
 - The runtime root (default `.local/state/glitch-idea` under your account's home directory as the system records it, which on macOS and Linux is the password-database home, not `$HOME`) must be owned by you with mode exactly 0700, and no component of it may be a symlink.
   A looser directory is refused with `runtime_not_private`; keep it free of ACLs as well.
