@@ -308,7 +308,7 @@ class SharedInstallTests(Base):
             self.assertEqual(installer._clean_text(sample), idea._clean_text(sample), repr(sample))
             self.assertEqual(installer._clean_text(sample, 256), idea._clean_text(sample, 256), repr(sample))
 
-    def test_the_installers_store_rule_is_stricter_than_the_platforms_and_never_looser(self):
+    def test_the_installers_store_rule_is_the_platforms_rule(self):
         import idea_platform
         installer = self.installer_module()
         accepted_modes = []
@@ -326,9 +326,10 @@ class SharedInstallTests(Base):
                 accepted = True
             except installer.InstallError:
                 accepted = False
+            # SKILLS-159: the two rules are equal, both ways, on every mode tried.
+            self.assertEqual(accepted, idea_platform.is_shared_root(folder), oct(wanted))
             if accepted:
                 accepted_modes.append(wanted)
-                self.assertTrue(idea_platform.is_shared_root(folder), oct(wanted))
             folder.rmdir()
         self.assertTrue(accepted_modes and all(mode & 0o2070 == 0o2070 and mode & 0o070 == 0o070 for mode in accepted_modes))
         for refused in (0o2720, 0o2730):

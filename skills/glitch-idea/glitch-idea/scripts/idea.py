@@ -640,9 +640,21 @@ def main(argv=None):
     finally: _SOURCE_CACHE=None
 
 
+def _not_shared(exc,args):
+    """The named error for a permission refusal on this command's store, or None; never raises."""
+    try:
+        from idea_platform import not_shared_error
+        store=getattr(args,'store',None)
+        if store is None: store=configuration()['store_path']
+        return not_shared_error(exc,os.path.realpath(str(Path(store).expanduser())))
+    except Exception:
+        return None
+
+
 def _main(argv=None):
     values=sys.argv[1:] if argv is None else list(argv)
     launching=_launcher_requested(values)
+    args=None
     try:
         cli=parser();cli.launcher_errors=launching
         args=cli.parse_args(values)
@@ -667,8 +679,13 @@ def _main(argv=None):
         result=dict(ok=False,error=dict(code=exc.code,message=_shown(exc) if launching else str(exc)),
                     **({} if launching else exc.details))
     except (OSError,UnicodeError,ValueError,RecursionError) as exc:
-        result=dict(ok=False,error=dict(code='launcher_failed' if launching else 'io_error',
-                    message='launcher_failed' if launching else str(exc)))
+        # A store verb names the refused path and the fix. Launch verbs keep their fixed, redacted errors.
+        refused=None if launching else _not_shared(exc,args)
+        if refused is not None:
+            result=dict(ok=False,error=dict(code=refused.code,message=str(refused)),**refused.details)
+        else:
+            result=dict(ok=False,error=dict(code='launcher_failed' if launching else 'io_error',
+                        message='launcher_failed' if launching else str(exc)))
     fallback=result.get('runtime_root_fallback') if launching else None
     if type(fallback) is dict:
         sys.stderr.write('Runtime folder: the home folder is shared on this account, so Glitch idea uses %s for this login.\n'%fallback['to'])

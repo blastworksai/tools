@@ -209,6 +209,13 @@ class VisualizeTextTests(unittest.TestCase):
         self.assertRegex(commands, r"in your own message in the terminal.{0,80}one place it goes")
         self.assertRegex(commands, r"as an argument or in its environment")
 
+    def test_commands_document_store_not_shared(self):
+        # SKILLS-159: the agent shows the named error and its commands, and never widens the store itself.
+        commands = " ".join(COMMANDS.split())
+        self.assertRegex(commands, r"`store_not_shared`: a store command was refused permission.{0,200}`path`.{0,60}`store` and `fix`")
+        self.assertRegex(commands, r"never run the commands yourself.{0,120}unseal")
+        self.assertRegex(commands, r"run `list` to get this error with its path")
+
     def test_prototype_order_is_upload_fill_then_reply_last(self):
         order = r"upload both files.{0,200}then `?fill`?.{0,200}reply `?prototype_skill: \"available\"`? last.{0,200}unavailable\W{1,3} at once"
         self.assertRegex(" ".join(section(SKILL, "Visualize").split()), order)
