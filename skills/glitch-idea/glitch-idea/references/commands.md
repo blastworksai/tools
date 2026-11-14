@@ -27,6 +27,7 @@ python3 "$idea_tool" --store /absolute/demo-ideas session-open --resume binding_
 **Tern pane.** `--browser tern` (or config `browser_mode: "tern"`) opens the page inside the Tern pane the helper runs in.
 It needs the Tern plugin on the Tern that shows the window.
 Default rule: when neither the flag nor `browser_mode` is set, the helper picks `tern` by itself when it finds a terminal among its ancestors and either `TERN_PANE` is set or an ancestor process is named `tern`.
+Under an agent whose commands do not run under the pane (today Codex, recognised by `CODEX_THREAD_ID`), it also picks `tern` when this account's own agent front end sits in a Tern pane; the page then opens above that pane when it is focused, else beside the focused pane.
 Otherwise it refuses with `browser_mode_required` as before.
 An explicit `browser_mode` (for example `"link"`) always wins.
 On success `browser` is `{mode: 'tern', url, opened: true, how}`: `url` is the origin only and `how` is `above` or `beside`.

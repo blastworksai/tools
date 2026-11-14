@@ -406,6 +406,109 @@ class TerminalFinderTests(unittest.TestCase):
                         self.assertIs(tern.default_is_tern(env, terminal=terminal, named=named), expected)
 
 
+class ScriptedRuntime(FakeRuntime):
+    """tern_state answers from a script: a string is a state, an exception instance is raised."""
+    def __init__(self, script, last="pending"):
+        super().__init__(); self.script, self.last = list(script), last
+
+    def tern_state(self, rid, timeout=1):
+        self.calls.append(("state", rid))
+        step = self.script.pop(0) if self.script else self.last
+        if isinstance(step, BaseException): raise step
+        return step
+
+
+class ManyTerminalsTests(unittest.TestCase):
+    """SKILLS-160: one request id, one title per candidate terminal, version 2 for the account lookup."""
+    URL = "http://127.0.0.1:8841/#pair=" + "ab" * 16
+
+    def send(self, runtime, terminal, ok=lambda p: True, **kw):
+        writes = []
+        def write(path, text):
+            writes.append((path, text)); return ok(path)
+        options = dict(FAST, sleep=lambda s: None); options.update(kw)
+        return tern.send_request(runtime, self.URL, 8841, terminal=terminal, write=write, **options), writes
+
+    def test_version_two_title_goes_to_every_terminal_with_one_request_id(self):
+        runtime = ScriptedRuntime(["pending", "above"])
+        out, writes = self.send(runtime, ["/dev/pts/25", "/dev/pts/31"], version=2)
+        self.assertEqual(out, ("above", None))
+        rid = runtime.calls[0][1]
+        self.assertEqual(writes, [("/dev/pts/25", "glitch-idea:2:8841:" + rid), ("/dev/pts/31", "glitch-idea:2:8841:" + rid),
+                                  ("/dev/pts/25", "glitch-idea"), ("/dev/pts/31", "glitch-idea")])
+        self.assertEqual([c for c in runtime.calls if c[0] == "offer"], [("offer", rid)])
+
+    def test_a_string_terminal_and_no_version_is_todays_version_one(self):
+        runtime = ScriptedRuntime(["beside"])
+        out, writes = self.send(runtime, "/dev/pts/7")
+        self.assertEqual(out, ("beside", None))
+        self.assertEqual([t for _, t in writes], ["glitch-idea:1:8841:" + runtime.calls[0][1], "glitch-idea"])
+        self.assertEqual({p for p, _ in writes}, {"/dev/pts/7"})
+
+    def test_one_written_terminal_is_enough(self):
+        runtime = ScriptedRuntime(["above"])
+        out, writes = self.send(runtime, ["/dev/pts/25", "/dev/pts/31"], ok=lambda p: p == "/dev/pts/31", version=2)
+        self.assertEqual(out, ("above", None))
+
+    def test_none_written_is_no_terminal_and_every_terminal_gets_the_fixed_title(self):
+        runtime = ScriptedRuntime([])
+        out, writes = self.send(runtime, ["/dev/pts/25", "/dev/pts/31"], ok=lambda p: False, version=2)
+        self.assertEqual(out, (None, "no_terminal"))
+        self.assertEqual(writes[-2:], [("/dev/pts/25", "glitch-idea"), ("/dev/pts/31", "glitch-idea")])
+        self.assertNotIn("state", [c[0] for c in runtime.calls])
+
+    def test_an_empty_list_is_no_terminal_with_no_offer(self):
+        runtime = ScriptedRuntime([])
+        self.assertEqual(self.send(runtime, [], version=2)[0], (None, "no_terminal"))
+        self.assertEqual(runtime.calls, [])
+
+    def test_a_bad_version_refuses_before_any_offer(self):
+        for version in (0, 3, "2", None, True):
+            with self.subTest(version=version):
+                runtime = ScriptedRuntime([])
+                with self.assertRaises(ValueError):
+                    self.send(runtime, ["/dev/pts/25"], version=version)
+                self.assertEqual(runtime.calls, [])
+
+    def test_a_transient_busy_in_the_state_poll_is_asked_again(self):
+        for code in ("busy", "runtime_busy"):
+            with self.subTest(code=code):
+                runtime = ScriptedRuntime([OwnerError(code), "pending", OwnerError(code), "beside"])
+                self.assertEqual(self.send(runtime, ["/dev/pts/25"], version=2)[0], ("beside", None))
+
+    def test_busy_never_outlives_the_claim_deadline(self):
+        ticks = iter(range(0, 1000))
+        runtime = ScriptedRuntime([], last=OwnerError("busy"))
+        out, writes = self.send(runtime, ["/dev/pts/25"], version=2, clock=lambda: next(ticks), claim_wait=4.0)
+        self.assertEqual(out, (None, "plugin_no_answer"))
+        self.assertEqual(writes[-1], ("/dev/pts/25", "glitch-idea"))
+
+    def test_busy_after_a_claim_still_ends_at_the_result_deadline(self):
+        ticks = iter(range(0, 1000))
+        runtime = ScriptedRuntime(["claimed"], last=OwnerError("busy"))
+        out, _ = self.send(runtime, ["/dev/pts/25"], version=2, clock=lambda: next(ticks), claim_wait=50.0, result_wait=3.0)
+        self.assertEqual(out, (None, "no_result"))
+
+    def test_any_other_state_failure_stays_offer_failed(self):
+        for exc in (OwnerError("internal_error"), OwnerError("owner_unauthorized"), OSError("x"), ValueError("y")):
+            with self.subTest(exc=exc):
+                runtime = ScriptedRuntime([exc])
+                self.assertEqual(self.send(runtime, ["/dev/pts/25"], version=2)[0], (None, "offer_failed"))
+
+    def test_open_tern_session_passes_terminals_and_version_through(self):
+        seen = {}
+        def sender(runtime, link, port, **kw):
+            seen.update(kw); return "above", None
+        fake = dict(pairing_code="ab" * 16, origin="http://127.0.0.1:8841/", binding_id="binding_" + "a1" * 16)
+        with patch.object(launch, "open_session", return_value=fake):
+            res = tern.open_tern_session("/s", "/r", None, terminal=["/dev/pts/25"], version=2, sender=sender)
+        self.assertEqual(seen, dict(terminal=["/dev/pts/25"], version=2))
+        self.assertTrue(res["browser"]["opened"])
+        with patch.object(launch, "open_session", return_value=fake):
+            tern.open_tern_session("/s", "/r", None, terminal="/dev/pts/7", sender=sender)
+        self.assertEqual(seen, dict(terminal="/dev/pts/7", version=1))
+
+
 class TitleTests(unittest.TestCase):
     def test_title_escape(self):
         self.assertEqual(tern.title_escape("glitch-idea"), b"\x1b]2;glitch-idea\x07")

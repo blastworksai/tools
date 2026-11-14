@@ -99,9 +99,34 @@ On every failure the helper returns the live link, as link mode does, and never 
 
 ## Default mode
 
-Pane mode is the default only when the helper finds a terminal among its ancestors and either `TERN_PANE` is set or an ancestor process is named `tern`.
+Pane mode is the default when the helper finds a terminal among its ancestors and either `TERN_PANE` is set or an ancestor process is named `tern`.
+With no terminal among its ancestors, it is also the default when the account lookup below finds at least one candidate in Tern.
 That test only picks a default; the plugin's claim is the proof.
 An explicit `browser_mode` or `--browser` always wins.
+
+## Agents whose commands do not run under the pane
+
+Measured 14 Nov 2026 on codexbwai (Codex 0.167.2): the TUI runs on the pane's terminal, but commands are children of the account's long-lived app-server daemon, which has no terminal.
+The ancestor walk therefore finds nothing, and before SKILLS-160 the helper answered `browser_mode_required`.
+Codex sets `CODEX_THREAD_ID` for its commands; nothing found ties that id to a TUI process.
+`/proc/<pid>/stat` is world-readable and its `tty_nr` names the process's controlling terminal.
+
+The ancestor road stays first and unchanged.
+Only when it finds nothing and an agent marker variable is present does the helper look up the account's own agent front ends.
+The marker table is closed: `CODEX_THREAD_ID` maps to the front-end process name `codex`; a new agent is one row, added after it is measured.
+A candidate is a process of that name whose real uid is this account's and whose `tty_nr` decodes to a Unix98 pseudo-terminal (majors 136 to 143) this account owns and may write.
+A candidate counts only when it is in Tern: `TERN_PANE` set in its own environ, or an ancestor named `tern`; a candidate outside Tern is never written to.
+Candidates are deduplicated by terminal, sorted, and capped at 8 (the service's offer cap).
+A process that vanishes or cannot be read mid-scan is skipped; the lookup is empty when `/proc` cannot be read at all.
+Another account's environ is never read.
+
+Every request found this way is title version 2, `glitch-idea:2:<port>:<rid>`, whatever the number of candidates, because a lone candidate may be another session's pane (the asker may be a headless `codex exec`).
+One request id goes to every candidate terminal, the helper waits once, then writes the fixed title back to each.
+Version 2 is focus-gated in the window plugin (0.3.0 and later): see Focus rule below.
+With plugin 0.2.0 a version 2 request is ignored and reads `plugin_no_answer`, so the helper falls back to the link as before.
+A transient `busy` from the helper's own service during the state poll is asked again within the same deadlines.
+
+Limits: same account only, the front-end name table, Linux `/proc` only (Windows and macOS hosts keep today's behaviour).
 
 ## Not tested
 

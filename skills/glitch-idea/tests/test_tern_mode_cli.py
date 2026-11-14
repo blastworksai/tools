@@ -277,4 +277,41 @@ class TernModeRealServiceTests(Base):
         self.assertEqual(len(self.bindings()),1)
 
 
+class AgentRoadGridTests(Base):
+    """SKILLS-160 through the real CLI: no ancestor terminal, the account lookup decides the default and the terminals."""
+    def run_cell(self,agents):
+        with patch.object(idea_tern,'find_terminal',return_value=None),\
+             patch.object(idea_tern,'agent_terminals',return_value=agents) as lookup,\
+             patch.object(idea_tern,'open_tern_session',return_value=dict(browser=dict(mode='tern',opened=True,how='above'))) as tern,\
+             patch.object(launch,'open_session') as session:
+            status,body=self.invoke()
+        return status,body,tern,lookup,session
+
+    def test_two_in_tern_candidates_are_one_version_two_request(self):
+        self.config()
+        status,body,tern,lookup,_=self.run_cell(['/dev/pts/25','/dev/pts/31'])
+        self.assertEqual(status,0);tern.assert_called_once()
+        self.assertEqual((tern.call_args.kwargs['terminal'],tern.call_args.kwargs['version']),(['/dev/pts/25','/dev/pts/31'],2))
+
+    def test_one_candidate_is_still_version_two_as_a_list(self):
+        self.config()
+        status,body,tern,_,_=self.run_cell(['/dev/pts/25'])
+        self.assertEqual(status,0)
+        self.assertEqual((tern.call_args.kwargs['terminal'],tern.call_args.kwargs['version']),(['/dev/pts/25'],2))
+
+    def test_no_candidate_keeps_browser_mode_required(self):
+        self.config()
+        status,body,tern,_,session=self.run_cell([])
+        self.assertEqual((status,body['error']['code']),(1,'browser_mode_required'))
+        tern.assert_not_called();session.assert_not_called()
+
+    def test_flag_tern_with_no_candidate_is_no_terminal_road(self):
+        self.config()
+        with patch.object(idea_tern,'find_terminal',return_value=None),\
+             patch.object(idea_tern,'agent_terminals',return_value=[]),\
+             patch.object(idea_tern,'open_tern_session',return_value=dict(browser=dict(mode='tern',opened=False))) as tern:
+            status,body=self.invoke('--browser','tern')
+        self.assertEqual((tern.call_args.kwargs['terminal'],tern.call_args.kwargs['version']),(None,1))
+
+
 if __name__=='__main__':unittest.main()
