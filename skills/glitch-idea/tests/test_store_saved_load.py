@@ -206,10 +206,29 @@ class SavedLoadTests(unittest.TestCase):
         self.assertEqual(loads, 1)
         self.assertEqual(result, outcome(self.root)[0])
 
-    def rewrite(self, change):
-        value = json.loads(self.saved.read_bytes())
-        change(value)
-        self.saved.write_bytes(json.dumps(value).encode())
+    def rewrite(self, change, checksum=True):
+        """Change the payload; by default re-seal it, so the check under test is the one that refuses."""
+        outer = json.loads(self.saved.read_bytes())
+        change(outer['payload'])
+        if checksum:
+            outer['checksum'] = storage.hashlib.sha256(storage._canonical_json(outer['payload'])).hexdigest()
+        self.saved.write_bytes(json.dumps(outer).encode())
+
+    def test_a_damaged_payload_misses(self):
+        # Only the saved state changes; every byte it records still matches the store.
+        self.assert_miss(lambda: self.rewrite(lambda v: v['state']['order'].reverse(), checksum=False))
+
+    def test_a_resealed_payload_is_the_accepted_trust_line(self):
+        # einh's ruling: a deliberate edit by the owning account, checksum recomputed, is not detected.
+        # Recorded so the boundary is explicit and a change to it is a visible decision.
+        self.start()
+        self.rewrite(lambda v: v['state']['order'].reverse())
+        result, loads = self.start()
+        self.assertEqual(loads, 0)
+        self.assertEqual(stat.S_IMODE(self.saved.stat().st_mode) & 0o077, 0)
+
+    def test_over_deep_json_misses(self):
+        self.assert_miss(lambda: self.saved.write_bytes(b'['*200000+b']'*200000))
 
     def test_garbage_bytes_miss(self):
         self.assert_miss(lambda: self.saved.write_bytes(b'\x00not json'))

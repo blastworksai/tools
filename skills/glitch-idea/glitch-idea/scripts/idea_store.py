@@ -165,6 +165,14 @@ MAX_ORPHAN_IDS = 128
 SAVED_LOAD_FORMAT = 1
 MAX_SAVED_LOAD = 2 * MAX_STORE_BYTES
 _SAVED_LOAD_KEYS = frozenset(('format', 'fingerprint', 'store', 'state', 'entries', 'files', 'receipts', 'docs', 'held'))
+# Trust line (einh, 14 Nov 2026, SKILLS-157): the checksum makes accidental damage a miss. A deliberate
+# edit by the account that owns the file is accepted: that account can already write any valid state
+# through the command line, and every publish re-checks what it is about to write.
+_SAVED_LOAD_FAILURES = (OSError, ValueError, TypeError, KeyError, AttributeError, RecursionError, IdeaError)
+
+
+def _canonical_json(value):
+    return json.dumps(value, allow_nan=False, sort_keys=True, separators=(',', ':')).encode('utf-8')
 _code_fingerprint_value = None
 
 
@@ -221,13 +229,16 @@ def encode_saved_load(store_path, loaded, held):
                        for path, doc in docs.items()},
                  held=dict(held=held_map, raw=held_raw,
                            prints={key: None if raw is None else _b64(raw) for key, raw in held_prints.items()}))
-    return json.dumps(value, allow_nan=False, sort_keys=True, separators=(',', ':')).encode('utf-8')
+    return _canonical_json(dict(checksum=hashlib.sha256(_canonical_json(value)).hexdigest(), payload=value))
 
 
 def decode_saved_load(raw, store_path):
     """(loaded, held) from saved bytes; raises on any doubt. The caller treats a raise as a miss."""
-    value = json.loads(raw.decode('utf-8'))
+    outer = json.loads(raw.decode('utf-8'))
+    require(type(outer) is dict and set(outer) == {'checksum', 'payload'}, 'Saved load has the wrong shape')
+    value = outer['payload']
     require(type(value) is dict and set(value) == _SAVED_LOAD_KEYS, 'Saved load has the wrong shape')
+    require(outer['checksum'] == hashlib.sha256(_canonical_json(value)).hexdigest(), 'Saved load is damaged')
     require(value['format'] == SAVED_LOAD_FORMAT and type(value['format']) is int, 'Unknown saved load format')
     require(value['fingerprint'] == code_fingerprint(), 'Saved load was made by other code')
     require(value['store'] == str(store_path), 'Saved load belongs to another store')
@@ -271,7 +282,7 @@ def read_saved_load(path, store_path):
         if len(raw) > MAX_SAVED_LOAD:
             return None
         return decode_saved_load(raw, store_path)
-    except (OSError, ValueError, TypeError, KeyError, AttributeError, IdeaError):
+    except _SAVED_LOAD_FAILURES:
         return None
 
 
@@ -304,7 +315,7 @@ def write_saved_load(path, store_path, loaded, held):
         os.replace(stage, path)
         stage = None
         return True
-    except (OSError, ValueError, TypeError, KeyError, AttributeError, IdeaError):
+    except _SAVED_LOAD_FAILURES:
         return False
     finally:
         if stage is not None:
