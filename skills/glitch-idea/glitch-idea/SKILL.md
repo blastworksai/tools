@@ -205,7 +205,9 @@ It serves on its own loopback port, sandboxed by CSP, with no cookies.
 Use `origin` exactly as printed: never shorten it, never rebuild it from `port`, and never write it into a fill, a reply, the store, a ticket or any file.
 A new launch makes a new key, so after a restart read the new `origin` and open that.
 Build the prototype with relative links to its own files (`app.js`, `./style.css`, never `/app.js`): a link that starts with `/` leaves the key behind and answers `not found`.
-Open a second tab on `origin` (Orca `tab create --url <origin>` in the same worktree, or the system browser).
+Show `origin` to the operator alone on its own line and ask them to open it in a second tab; that click is how it opens.
+Never hand `origin` to a command: no `curl`, no browser or tab-opening command, no `echo` into a file, nothing that takes it as an argument or in its environment. Other accounts on the same computer can read every running command's arguments, so a link passed that way gives the key away for as long as the command runs.
+To check the server is up, look for its start line or its `port`; do not fetch the link yourself.
 When the browser is on another computer and `fixed_port` is `true`, the same standing tunnel carries the prototype, so show no tunnel or ssh line. When `fixed_port` is `false` on a remote seat, tell the operator a remote browser needs fixed ports (`browser_port` and `prototype_port`) and a standing tunnel, and stop; never print an `ssh -L` line.
 Take a PNG screenshot (`orca screenshot --page <id> --format png`, or the browser's own screenshot as a fallback) and zip the prototype folder.
 Upload each file with one `idea.py asset --session <session_id> --idea <idea_id> --revision <N> --request <request_id> --file <path>` call (a `.png` and a `.zip`; the type follows the extension, or pass `--type`; the usual asset limits apply; see commands.md).
