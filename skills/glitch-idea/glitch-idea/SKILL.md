@@ -201,6 +201,10 @@ When it is installed, run the prototype skill and build the prototype into `<run
 Then start `idea.py prototype-serve --session <session_id> --dir <that folder>`; it runs until the session ends, so start it in the background (a background job or `&`).
 Read its first JSON line for `origin`, `port` and `fixed_port`.
 It serves on its own loopback port, sandboxed by CSP, with no cookies.
+`origin` is the prototype's private link: it ends in a key made for this launch, and without that key every address on the port answers `not found`, to the operator and to every other account alike.
+Use `origin` exactly as printed: never shorten it, never rebuild it from `port`, and never write it into a fill, a reply, the store, a ticket or any file.
+A new launch makes a new key, so after a restart read the new `origin` and open that.
+Build the prototype with relative links to its own files (`app.js`, `./style.css`, never `/app.js`): a link that starts with `/` leaves the key behind and answers `not found`.
 Open a second tab on `origin` (Orca `tab create --url <origin>` in the same worktree, or the system browser).
 When the browser is on another computer and `fixed_port` is `true`, the same standing tunnel carries the prototype, so show no tunnel or ssh line. When `fixed_port` is `false` on a remote seat, tell the operator a remote browser needs fixed ports (`browser_port` and `prototype_port`) and a standing tunnel, and stop; never print an `ssh -L` line.
 Take a PNG screenshot (`orca screenshot --page <id> --format png`, or the browser's own screenshot as a fallback) and zip the prototype folder.

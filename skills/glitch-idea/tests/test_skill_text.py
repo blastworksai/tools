@@ -186,6 +186,18 @@ class VisualizeTextTests(unittest.TestCase):
         self.assertIn("asset --session", flat)
         self.assertNotIn("see `idea.py --help`", flat)
 
+    def test_prototype_link_is_private_and_used_as_printed(self):
+        # SKILLS-158: the agent opens the keyed link exactly as printed and never stores or rebuilds it.
+        flat = " ".join(SKILL.split())
+        self.assertRegex(flat, r"`origin` is the prototype's private link.{0,80}key made for this launch.{0,120}`not found`")
+        self.assertRegex(flat, r"Use `origin` exactly as printed.{0,60}never rebuild it from `port`.{0,60}never write it into")
+        self.assertRegex(flat, r"new launch makes a new key")
+        self.assertRegex(flat, r"relative links.{0,120}never `/app\.js`")
+        commands = " ".join(COMMANDS.split())
+        self.assertRegex(commands, r"`origin` is `http://127\.0\.0\.1:<port>/<key>/`")
+        self.assertRegex(commands, r"without it, from any account, answers `not found`")
+        self.assertRegex(commands, r"linked relatively")
+
     def test_prototype_order_is_upload_fill_then_reply_last(self):
         order = r"upload both files.{0,200}then `?fill`?.{0,200}reply `?prototype_skill: \"available\"`? last.{0,200}unavailable\W{1,3} at once"
         self.assertRegex(" ".join(section(SKILL, "Visualize").split()), order)
