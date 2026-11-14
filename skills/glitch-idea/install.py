@@ -427,7 +427,7 @@ def _store_gate(store, skills_root):
     """A shared install checks the store's top folder, read-only, with one lstat: nothing is created, changed or left behind.
 
     The root must be a real directory, setgid, with group read, write and execute (2770), in a group this account belongs
-    to. This is stricter than idea_platform.is_shared_root, which omits read and execute (a test keeps the two consistent).
+    to. idea_platform.is_shared_root applies the same test at run time (a test keeps the two equal).
     What is already inside the store is not checked: converting a single-account store is the operator's step."""
     store = Path(store)
     group = _group_name(_skills_gid(skills_root))

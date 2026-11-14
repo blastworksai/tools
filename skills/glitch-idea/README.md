@@ -144,7 +144,7 @@ A single-account install, and every Windows install, is unchanged.
    Each key under `seats` is an OS account name.
    Ports are integers from 1024 to 65535, and no port may appear twice anywhere in the file.
 2. **Create the store before the first shared install.**
-   The idea store only accepts writes from several accounts when its root is setgid and group-writable, in a group the installing account belongs to:
+   The idea store only counts as shared when its root is setgid with group read, write and execute (`2770`), in a group the installing account belongs to. The installer and the running skill apply the same test; a root the group can write but not enter or list is treated as one account's private store:
 
    ```bash
    mkdir /path/to/ideas && chgrp <shared group> /path/to/ideas && chmod 2770 /path/to/ideas
