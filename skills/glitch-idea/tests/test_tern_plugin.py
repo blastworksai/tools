@@ -24,7 +24,7 @@ DENY_LIST = ('odin', 'cmdr', 'claudekk', 'claudebwai', 'codexkk', 'blastworks', 
 class TernPlugin(unittest.TestCase):
     def test_manifest(self):
         meta = tomllib.loads((PLUGIN / 'plugin.toml').read_text(encoding='utf-8'))
-        self.assertEqual(meta, dict(schema=1, id='glitch-idea', name=meta['name'], version='0.2.0',
+        self.assertEqual(meta, dict(schema=1, id='glitch-idea', name=meta['name'], version='0.3.0',
                                     description=meta['description'], window='window.luau'))
         self.assertNotIn('host', meta)
         self.assertTrue(meta['name'] and meta['description'])
@@ -46,7 +46,7 @@ class TernPlugin(unittest.TestCase):
 
     def test_window_fetches_only_the_two_route_shapes(self):
         calls = re.findall(r'tern\.fetch\((request\.claim_url\([^)]*\)|url),', CODE)
-        self.assertEqual(sorted(calls), ['request.claim_url(port, rid)', 'url'])
+        self.assertEqual(sorted(calls), ['request.claim_url(port, rid, deferred)', 'url'])
         self.assertIn('local url = request.result_url(port, rid, how)', CODE)
         self.assertNotIn('http', CODE)  # every URL is built by lib/request
         self.assertIn('/api/v1/tern-claim?rid=', REQUEST_CODE)
@@ -85,7 +85,7 @@ class TernPlugin(unittest.TestCase):
 
     def test_fresh_cx_in_the_callback_never_retained(self):
         self.assertIn('function(res, fresh)', CODE)
-        self.assertIn('pcall(on_claim, res, fresh, port, rid, asker)', CODE)
+        self.assertIn('pcall(on_claim, res, fresh, port, rid, asker, deferred)', CODE)
         title = CODE[CODE.index('local function on_title'):]
         self.assertEqual(title.count('cx:open'), 0)  # the title handler's cx is never used to open
 
@@ -100,6 +100,30 @@ class TernPlugin(unittest.TestCase):
         self.assertIn('last_asked[asker] = now', title)
         self.assertIn('RATE_MS = 5000', REQUEST_CODE)
         self.assertIn('now_ms - last_ms >= RATE_MS', REQUEST_CODE)
+
+    def test_version_two_is_focus_gated(self):
+        title = CODE[CODE.index('local function on_title'):]
+        self.assertIn('local port, rid, version = request.parse_title(ev.title)', title)
+        self.assertIn('local deferred = version == 2 and not focused(cx, asker)', title)
+        self.assertLess(title.index('cx.session:pane(asker)'), title.index('local deferred'))
+        gate = CODE[CODE.index('local function focused'):CODE.index('local function report')]
+        self.assertIn('cx.session:focused()', gate)
+        self.assertIn('okay and type(page) == "number" and page == asker', gate)  # unknown focus defers, never lifts
+
+    def test_rate_stamp_only_on_a_direct_claim(self):
+        title = CODE[CODE.index('local function on_title'):]
+        start = title.index('if not deferred then')
+        block = title[start:title.index('\n    end\n', start)]  # the if block's own body, nothing after its end
+        self.assertIn('request.rate_ok(last_asked[asker], now)', block)
+        self.assertIn('last_asked[asker] = now', block)
+        self.assertEqual(title.count('last_asked[asker] = now'), 1)
+
+    def test_a_deferred_claim_opens_beside_and_never_moves(self):
+        self.assertIn('local how = place(cx, url, asker, not deferred)', CODE)
+        place = CODE[CODE.index('local function place'):CODE.index('local function on_claim')]
+        self.assertLess(place.index('cx:open('), place.index('if not lift then return "beside" end'))
+        self.assertLess(place.index('if not lift then return "beside" end'), place.index('cx.layout:move'))
+        self.assertIn('&defer=1', REQUEST_CODE)
 
     def test_rate_clock_is_the_monotonic_tern_clock(self):
         self.assertIn('tern.now()', CODE)

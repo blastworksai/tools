@@ -45,7 +45,9 @@ A probe plugin logged every event it heard.
 
 ## Request grammar
 
-Title text: `glitch-idea:1:<port>:<rid>`.
+Title text: `glitch-idea:<version>:<port>:<rid>`, version 1 or 2.
+Version 1 (the ancestor road): claim at once, place above the asking pane.
+Version 2 (the account lookup, SKILLS-160): focus-gated, see Focus rule.
 `<port>` is the idea service's port, 1024 to 65535, no leading zero.
 `<rid>` is 32 lowercase hex characters from a secure random source, new for every request.
 Anything else is ignored without an answer.
@@ -76,6 +78,7 @@ Known limit: any program whose output reaches a pane can print a well-formed tit
 The window then makes one fixed-path GET to a loopback port on its own machine and opens a page only when the answer is a valid pairing link for that same port.
 That is the reach of a printed link without the click.
 The window half takes at most one request per pane every 5 s, counted on Tern's monotonic clock.
+Only a direct claim stamps that limit; a deferred claim (Focus rule) neither checks nor stamps it, so one request written to several panes never locks the others out of their own next request.
 
 ## Claim rule and two windows
 
@@ -103,6 +106,18 @@ Pane mode is the default when the helper finds a terminal among its ancestors an
 With no terminal among its ancestors, it is also the default when the account lookup below finds at least one candidate in Tern.
 That test only picks a default; the plugin's claim is the proof.
 An explicit `browser_mode` or `--browser` always wins.
+
+## Focus rule
+
+A version 2 request may reach several panes at once, one request id for all of them.
+The pane that is focused claims it directly and the page goes above it, as in version 1.
+Every other pane that sees it claims with `defer=1`.
+The service holds a deferred claim for up to 1.5 s: a direct claim in that time wins and the deferred claimer gets 404; still pending after it, the first deferred claimer gets the link and the window opens it beside the focused pane with no move, reporting `beside`.
+At most 2 deferred claims wait at once across the service (it has 8 ordinary handler slots); a third answers 404 at once, so waits never starve the helper's state poll.
+The window's 3 s fetch timeout covers the 1.5 s wait.
+An unknown focus never counts as the asker: such a pane defers.
+Known risk: when focus moved while the agent worked, the page follows the focus, not the pane that asked.
+The "page beside" outcome lives in the service, not in a window timer, because no window timer was proven in the spike.
 
 ## Agents whose commands do not run under the pane
 

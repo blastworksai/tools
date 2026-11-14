@@ -89,6 +89,9 @@ TERN_PAIR_URL = (r'http://127\.0\.0\.1:([1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9
 TERN_RID = re.compile(r'[0-9a-f]{32}')
 TERN_HOW = frozenset(('above', 'beside', 'open_failed'))
 TERN_CLAIM_LIFE, TERN_RESULT_LIFE, TERN_MAX_OFFERS = 30, 60, 8
+# SKILLS-160: a candidate pane that is not focused claims with defer=1. It gets the link only when no direct claim came
+# within TERN_DEFER_WAIT seconds; at most TERN_MAX_DEFERRED wait at once, so waits never starve the 8 handler slots.
+TERN_DEFER_WAIT, TERN_MAX_DEFERRED = 1.5, 2
 
 
 class TernOffers:
@@ -96,8 +99,10 @@ class TernOffers:
 
     The link lives in the entry until its single claim, then is dropped; it is never written anywhere.
     """
-    def __init__(self, clock=time.monotonic):
+    def __init__(self, clock=time.monotonic, wait=None):
         self._clock, self._lock, self._entries = clock, threading.Lock(), {}
+        self._changed, self._waiting = threading.Condition(self._lock), 0
+        self._wait = wait if wait is not None else (lambda condition, timeout: condition.wait(timeout))
 
     def _sweep(self, now):
         for rid in [rid for rid, entry in self._entries.items()
@@ -118,15 +123,37 @@ class TernOffers:
             self._entries[rid] = dict(url=url, state='pending', born=now)
             return True
 
-    def claim(self, rid):
+    def _take(self, entry, now):
+        url, entry['url'], entry['state'], entry['born'] = entry['url'], None, 'claimed', now
+        self._changed.notify_all()
+        return url
+
+    def claim(self, rid, deferred=False, wait=None):
+        """Direct: the link at once if pending. Deferred: wait up to `wait` (TERN_DEFER_WAIT) for a direct claim; still
+        pending after that -> the link; claimed or gone meanwhile -> None. A deferred claimer over the cap -> None at once."""
         with self._lock:
             now = self._clock()
             self._sweep(now)
             entry = self._entries.get(rid)
             if entry is None or entry['state'] != 'pending':
                 return None
-            url, entry['url'], entry['state'], entry['born'] = entry['url'], None, 'claimed', now
-            return url
+            if not deferred:
+                return self._take(entry, now)
+            if self._waiting >= TERN_MAX_DEFERRED:
+                return None
+            self._waiting += 1
+            try:
+                end = now + (TERN_DEFER_WAIT if wait is None else wait)
+                while True:
+                    now = self._clock()
+                    self._sweep(now)
+                    if self._entries.get(rid) is not entry or entry['state'] != 'pending':
+                        return None
+                    if now >= end:
+                        return self._take(entry, now)
+                    self._wait(self._changed, end - now)
+            finally:
+                self._waiting -= 1
 
     def result(self, rid, how):
         with self._lock:
@@ -714,10 +741,11 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError:
                 raise BridgeError('invalid_query') from None
             fields = dict(pairs)
-            check(len(fields) == len(pairs) and set(fields) == ({'rid'} if operation == 'tern-claim' else {'rid', 'how'})
+            shapes = ({'rid'}, {'rid', 'defer'}) if operation == 'tern-claim' else ({'rid', 'how'},)
+            check(len(fields) == len(pairs) and set(fields) in shapes and fields.get('defer', '1') == '1'
                   and TERN_RID.fullmatch(fields['rid']) is not None, 'invalid_query')
             if operation == 'tern-claim':
-                url = self.server.tern.claim(fields['rid'])
+                url = self.server.tern.claim(fields['rid'], deferred='defer' in fields)
                 check(url is not None, 'tern_claim_unavailable', 404)
                 body = dict(ok=True, url=url)
             else:

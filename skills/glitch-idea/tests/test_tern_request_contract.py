@@ -67,7 +67,14 @@ TITLES = [
     ('glitch-idea:1:0:' + H32, False),
     ('glitch-idea:1::' + H32, False),
     ('glitch-idea:1:123456:' + H32, False),
-    ('glitch-idea:2:8845:' + H32, False),
+    ('glitch-idea:2:8845:' + H32, True),
+    ('glitch-idea:2:1024:' + H32, True),
+    ('glitch-idea:2:1023:' + H32, False),
+    ('glitch-idea:3:8845:' + H32, False),
+    ('glitch-idea:0:8845:' + H32, False),
+    ('glitch-idea:12:8845:' + H32, False),
+    ('glitch-idea::8845:' + H32, False),
+    ('glitch-idea:2:8845:' + H32.upper(), False),
     ('glitch-idea:8845:' + H32, False),
     ('glitch-idea', False),
     ('glitch-idea:1:8845:' + H32[:31], False),
@@ -96,13 +103,13 @@ PORT_OF_URL = [
 
 def python_title(text):
     """The grammar as written in the design note: port 1024..65535, no leading zero, rid 32 lowercase hex."""
-    match = re.fullmatch(r'glitch-idea:1:([1-9][0-9]{0,4}):([0-9a-f]{32})', text)
+    match = re.fullmatch(r'glitch-idea:([12]):([1-9][0-9]{0,4}):([0-9a-f]{32})', text)
     if not match or '\n' in text:
         return None
-    port = int(match.group(1))
+    port = int(match.group(2))
     if port < 1024 or port > 65535:
         return None
-    return port, match.group(2)
+    return port, match.group(3), int(match.group(1))
 
 
 def lua_to_python_pattern(lua):
@@ -124,6 +131,32 @@ class PythonGrammar(unittest.TestCase):
     def test_title_table_through_the_python_regex(self):
         for title, valid in TITLES:
             self.assertEqual(python_title(title) is not None, valid, repr(title))
+
+
+class PythonWriter(unittest.TestCase):
+    """The titles the helper actually writes, for every version it accepts, read by the same table grammar."""
+    def written(self, version, port=8845):
+        class Runtime:
+            def tern_offer(self, rid, url): pass
+            def tern_state(self, rid): return 'above'
+        titles = []
+        url = 'http://127.0.0.1:%d/#pair=%s' % (port, H32)
+        idea_tern.send_request(Runtime(), url, port, terminal=['/dev/pts/1'], version=version, token=lambda n: H32,
+                               write=lambda path, text: titles.append(text) or True, sleep=lambda s: None)
+        return titles[0]
+
+    def test_versions_one_and_two_are_written_in_the_shared_grammar(self):
+        for version in (1, 2):
+            for port in (1024, 8845, 65535):
+                with self.subTest(version=version, port=port):
+                    title = self.written(version, port)
+                    self.assertEqual(python_title(title), (port, H32, version))
+                    self.assertIn((title, True), TITLES + [(title, True)])
+
+    def test_no_other_version_is_ever_written(self):
+        for version in (0, 3, '1', None):
+            with self.subTest(version=version), self.assertRaises(ValueError):
+                self.written(version)
 
 
 class LuauSourcePieces(unittest.TestCase):
@@ -190,7 +223,7 @@ class LuauSourcePieces(unittest.TestCase):
     def test_title_table_through_the_luau_pieces(self):
         body = CODE[CODE.index('function M.parse_title'):CODE.index('function M.url_port')]
         pat = re.search(r'string\.match\(text, "([^"]*)"\)', body).group(1)
-        self.assertEqual(pat, '^glitch%-idea:1:([0-9]+):([0-9a-f]+)$')
+        self.assertEqual(pat, '^glitch%-idea:([12]):([0-9]+):([0-9a-f]+)$')
         floor = int(re.search(r'number < (\d+) then return nil', body).group(1))
         cap = int(re.search(r'#text > (\d+)', body).group(1))
         port_body = CODE[CODE.index('local function port_number'):CODE.index('function M.valid_url')]
@@ -201,7 +234,7 @@ class LuauSourcePieces(unittest.TestCase):
         for title, valid in TITLES:
             ok = len(title) <= cap and re.match(regex, title) is not None
             if ok:
-                port, rid = re.match(regex, title).groups()
+                version, port, rid = re.match(regex, title).groups()
                 ok = (len(rid) == hexlen and len(port) <= digits and not port.startswith('0')
                       and floor <= int(port) <= top)
             self.assertEqual(ok, valid, repr(title))
@@ -212,6 +245,7 @@ class LuauSourcePieces(unittest.TestCase):
         self.assertIn('"/api/v1/tern-result?rid=" .. rid .. "&how=" .. how', CODE)
         for how in ('above', 'beside', 'open_failed'):
             self.assertIn('how ~= "%s"' % how, CODE)
+        self.assertIn('if deferred == true then return url .. "&defer=1" end', CODE)
         self.assertIn('RATE_MS = 5000', CODE)
         self.assertIn('now_ms - last_ms >= RATE_MS', CODE)
         self.assertIn('value.ok ~= true or type(value.url) ~= "string"', CODE)
@@ -232,7 +266,7 @@ class PureModuleUnderLuau(unittest.TestCase):
         for i, (url, _) in enumerate(URLS):
             lines.append('print("url", %d, tostring(M.valid_url(%s)))' % (i, lua_str(url)))
         for i, (title, _) in enumerate(TITLES):
-            lines.append('do local p, r = M.parse_title(%s); print("title", %d, tostring(p), tostring(r)) end'
+            lines.append('do local p, r, v = M.parse_title(%s); print("title", %d, tostring(p), tostring(r), tostring(v)) end'
                          % (lua_str(title), i))
         for i, (url, _) in enumerate(PORT_OF_URL):
             lines.append('print("port", %d, tostring(M.url_port(%s)), tostring(M.same_port(%s, 8845)))'
@@ -240,6 +274,8 @@ class PureModuleUnderLuau(unittest.TestCase):
         lines += [
             'print("rate", tostring(M.rate_ok(nil, 1)), tostring(M.rate_ok(1000, 5999)), tostring(M.rate_ok(1000, 6000)))',
             'print("claim", M.claim_url(8845, %s))' % lua_str(H32),
+            'print("claimdefer", M.claim_url(8845, %s, true))' % lua_str(H32),
+            'print("claimdirect", M.claim_url(8845, %s, false))' % lua_str(H32),
             'for _, how in {"above", "beside", "open_failed", "other"} do '
             'print("result", how, tostring(M.result_url(8845, %s, how))) end' % lua_str(H32),
             'local function dec(body) if body == "bad" then error("x") end; return body end',
@@ -267,7 +303,7 @@ class PureModuleUnderLuau(unittest.TestCase):
             expected = python_title(title)
             self.assertEqual(row[2] != 'nil', valid, repr(title))
             if expected:
-                self.assertEqual((int(float(row[2])), row[3]), expected)
+                self.assertEqual((int(float(row[2])), row[3], int(float(row[4]))), expected)
         ports = [r for r in rows if r[0] == 'port']
         for (url, port), row in zip(PORT_OF_URL, ports):
             self.assertEqual(row[2], 'nil' if port is None else str(port))
@@ -275,6 +311,8 @@ class PureModuleUnderLuau(unittest.TestCase):
         by = {r[0] if r[0] != 'result' else 'result:' + r[1]: r for r in rows}
         self.assertEqual(by['rate'][1:], ['true', 'false', 'true'])
         self.assertEqual(by['claim'][1], 'http://127.0.0.1:8845/api/v1/tern-claim?rid=' + H32)
+        self.assertEqual(by['claimdirect'][1], 'http://127.0.0.1:8845/api/v1/tern-claim?rid=' + H32)
+        self.assertEqual(by['claimdefer'][1], 'http://127.0.0.1:8845/api/v1/tern-claim?rid=' + H32 + '&defer=1')
         for how in ('above', 'beside', 'open_failed'):
             self.assertEqual(by['result:' + how][2], 'http://127.0.0.1:8845/api/v1/tern-result?rid=%s&how=%s' % (H32, how))
         self.assertEqual(by['result:other'][2], 'nil')

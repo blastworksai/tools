@@ -5,7 +5,7 @@ It opens the local idea page as a browser split above the pane that asked for it
 
 ## What it does
 
-- Listens for a pane title of the form `glitch-idea:1:<port>:<request id>`.
+- Listens for a pane title of the form `glitch-idea:<version>:<port>:<request id>`, version 1 or 2.
 - Fetches the pairing link once from `http://127.0.0.1:<port>/` on your computer, using that request id.
 - Opens the link above the asking pane, then tells the idea service whether it went `above`, `beside` or `open_failed`.
 - The pairing link never travels in a title.
@@ -15,6 +15,14 @@ It opens the local idea page as a browser split above the pane that asked for it
 Anything inside a pane of this Tern may ask.
 Nothing outside a pane can, because a request exists only as terminal output of a pane.
 The plugin acts only when Tern knows the pane that wrote the title, and takes at most one request per pane every 5 seconds, counted on Tern's monotonic clock.
+
+## Focus rule (version 2)
+
+Some agents run their commands away from the pane, so the idea skill cannot always tell which of your panes asked; it then writes one version 2 request to each pane that could have.
+The pane you are focused on takes it and the page opens above that pane.
+When none of those panes is focused, the page opens beside the pane you are focused on, after a short wait.
+If you switch panes while the agent is still working, the page follows your focus, not the pane that asked.
+A version 2 request from a pane that is not focused does not count toward that pane's 5-second limit.
 
 ## What it can never do
 
