@@ -159,13 +159,13 @@ _ASSET_BLOB = re.compile(r'(asset_[0-9a-f]{32})\.bin')
 _ASSET_STAGE = re.compile(r'upload_([0-9a-f]{32})\.([0-9a-f]{32})\.part')
 MAX_ORPHAN_IDS = 128
 
-# Saved load (SKILLS-157): the last clean load, kept between service starts in a private
+# Saved load: the last clean load, kept between service starts in a private
 # file of the account that runs the service. Base64 makes bytes 4/3 larger; the decoded
 # state rides beside them.
 SAVED_LOAD_FORMAT = 1
 MAX_SAVED_LOAD = 2 * MAX_STORE_BYTES
 _SAVED_LOAD_KEYS = frozenset(('format', 'fingerprint', 'store', 'state', 'entries', 'files', 'receipts', 'docs', 'held'))
-# Trust line (einh, 14 Nov 2026, SKILLS-157): the checksum makes accidental damage a miss. A deliberate
+# Trust line (the owner's ruling): the checksum makes accidental damage a miss. A deliberate
 # edit by the account that owns the file is accepted: that account can already write any valid state
 # through the command line, and every publish re-checks what it is about to write.
 _SAVED_LOAD_FAILURES = (OSError, ValueError, TypeError, KeyError, AttributeError, RecursionError, IdeaError)
@@ -740,7 +740,7 @@ class Store:
     def __init__(self, path, *, observer=None, saved_load=None):
         # Preserve spelling until safety checks: resolve() would hide symlinks.
         self.path = Path(path).expanduser().absolute()
-        # SKILLS-157: a private file holding the last clean load between service starts.
+        # A private file holding the last clean load between service starts.
         # Only the owner service passes one; it is read once, by the first transaction.
         self._saved_load = None if saved_load is None else Path(saved_load)
         self._saved_load_tried = False

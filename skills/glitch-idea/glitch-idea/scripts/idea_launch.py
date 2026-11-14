@@ -166,7 +166,7 @@ SAVED_LOADS = 'loads'  # beside runtime/stores: that folder admits only its own 
 
 
 def saved_load_path(runtime):
-    """The owner's saved load for this store: private to the account, kept between starts (SKILLS-157)."""
+    """The owner's saved load for this store: private to the account, kept between starts."""
     return runtime.runtime_root / SAVED_LOADS / (runtime.store_sha256 + '.json')
 
 
