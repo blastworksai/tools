@@ -516,7 +516,7 @@ def run_launcher(args):
                                              runtime_python=executable,readiness_timeout=args.readiness_timeout)
         elif args.browser=='tern':
             import idea_tern
-            paths,version=idea_tern.pane_terminals()  # the ancestor road first; else the account's agent pane (SKILLS-160)
+            paths,version=idea_tern.pane_terminals()  # the ancestor road first; else the account's agent pane
             terminal=(paths[0] if version==1 else paths) if paths else None  # one path stays a string, as before
             result=idea_tern.open_tern_session(store,runtime,config,terminal=terminal,version=version,**options)
         else: result=open_browser_session(store,runtime,config,mode=args.browser,orcabinding=orcabinding,**options)

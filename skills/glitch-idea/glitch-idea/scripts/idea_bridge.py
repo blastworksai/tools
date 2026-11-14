@@ -89,7 +89,7 @@ TERN_PAIR_URL = (r'http://127\.0\.0\.1:([1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9
 TERN_RID = re.compile(r'[0-9a-f]{32}')
 TERN_HOW = frozenset(('above', 'beside', 'open_failed'))
 TERN_CLAIM_LIFE, TERN_RESULT_LIFE, TERN_MAX_OFFERS = 30, 60, 8
-# SKILLS-160: a candidate pane that is not focused claims with defer=1. It gets the link only when no direct claim came
+# A candidate pane that is not focused claims with defer=1. It gets the link only when no direct claim came
 # within TERN_DEFER_WAIT seconds; at most TERN_MAX_DEFERRED wait at once, so waits never starve the 8 handler slots.
 TERN_DEFER_WAIT, TERN_MAX_DEFERRED = 1.5, 2
 
