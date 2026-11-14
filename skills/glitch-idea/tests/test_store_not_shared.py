@@ -137,7 +137,9 @@ class NamedErrorTests(unittest.TestCase):
         return pwd.getpwuid(os.geteuid()).pw_name
 
     def commands(self, group):
+        import shlex
         where = str(self.store)
+        group = platform_.SHARED_GROUP_PLACEHOLDER if group is None else shlex.quote(group)
         return ['chgrp -R %s %s' % (group, where),
                 'find %s -type d -exec chmod 2770 {} +' % where,
                 'find %s -type f -perm /200 -exec chmod 660 {} +' % where,
@@ -188,7 +190,7 @@ class NamedErrorTests(unittest.TestCase):
             status, value, _ = run_cli(self.store, 'list')
             self.assertEqual((status, value['error']['code']), (1, 'store_not_shared'), (oct(mode), value))
             self.assertEqual(value['store'], str(self.store))
-            fix = self.commands('<shared group>')
+            fix = self.commands(None)
             self.assertEqual(value['fix'], fix)
             self.assertEqual(value['error']['message'], '\n'.join([
                 'This account cannot use the store %s: its top folder is not shared with it (mode %04o, owner %s). '
@@ -334,7 +336,10 @@ class HelperTests(unittest.TestCase):
         subprocess.run(commands[0], shell=True, stdin=subprocess.DEVNULL, capture_output=True)
         self.assertFalse(marker.exists())
         self.assertEqual(platform_.conversion_commands(self.store, 'agents')[0], 'chgrp -R agents %s' % self.store)
-        self.assertIn('chgrp -R <shared group> ', platform_.conversion_commands(self.store, platform_.SHARED_GROUP_PLACEHOLDER)[0])
+        self.assertIn('chgrp -R <shared group> ', platform_.conversion_commands(self.store, None)[0])
+        # A real group that happens to be spelled like the placeholder is still quoted: provenance, not spelling, decides.
+        self.assertEqual(platform_.conversion_commands(self.store, '<shared group>')[0], "chgrp -R '<shared group>' %s" % self.store)
+        self.assertEqual(platform_.conversion_commands(self.store, 'Domain Users')[0], "chgrp -R 'Domain Users' %s" % self.store)
 
     def test_bytes_filename_and_missing_owner_never_raise(self):
         as_bytes = PermissionError(errno.EACCES, 'Permission denied', os.fsencode(str(self.store / 'idea.md')))

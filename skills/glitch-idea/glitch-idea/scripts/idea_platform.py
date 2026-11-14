@@ -98,7 +98,7 @@ def _owner_name(path, stop):
 SHARED_GROUP_PLACEHOLDER = '<shared group>'
 
 
-def conversion_commands(root, group):
+def conversion_commands(root, group=None):
     """The four commands that make an existing store usable by a group, as its owner runs them.
 
     Writable files become 660 and sealed read-only files stay read-only (440): a blanket recursive group-write
@@ -106,8 +106,9 @@ def conversion_commands(root, group):
     """
     import shlex
     where = shlex.quote(str(root))
-    # A group name comes from the system's group database and is pasted into a shell: quote it like the path.
-    group = group if group == SHARED_GROUP_PLACEHOLDER else shlex.quote(str(group))
+    # A real group name comes from the system's group database and is pasted into a shell: always quoted.
+    # Only an unknown group (None) shows the placeholder, which the owner replaces before running anything.
+    group = SHARED_GROUP_PLACEHOLDER if group is None else shlex.quote(str(group))
     return ['chgrp -R %s %s' % (group, where),
             'find %s -type d -exec chmod 2770 {} +' % where,
             'find %s -type f -perm /200 -exec chmod 660 {} +' % where,
@@ -119,7 +120,7 @@ def _group_name(root):
         import grp
         return grp.getgrgid(os.lstat(root).st_gid).gr_name
     except Exception:
-        return SHARED_GROUP_PLACEHOLDER
+        return None
 
 
 def not_shared_error(exc, store):
@@ -156,7 +157,7 @@ def not_shared_error(exc, store):
             except OSError:
                 mode = 'unknown'
             # The top folder's present group may be its owner's own; only the owner knows the group to share with.
-            fix = conversion_commands(root, SHARED_GROUP_PLACEHOLDER)
+            fix = conversion_commands(root, None)
             text = ('This account cannot use the store %s: its top folder is not shared with it (mode %s, owner %s). '
                     'To share it, its owner runs:' % (root, mode, _owner_name(root, root)))
         return IdeaError('store_not_shared', '\n'.join([text, *('  ' + line for line in fix)]),
