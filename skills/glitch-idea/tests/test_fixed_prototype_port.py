@@ -110,7 +110,7 @@ class BindTests(Base):
         server = proto.PrototypeServer(self.root, port=port)
         thread = self.serve_thread(server)
         conn = http.client.HTTPConnection('127.0.0.1', port, timeout=5)
-        conn.request('GET', '/index.html', headers={'Connection': 'close'})
+        conn.request('GET', '/%s/index.html' % server.key, headers={'Connection': 'close'})
         self.assertEqual(conn.getresponse().read(), b'hi')
         conn.close()
         server.shutdown()
@@ -128,7 +128,7 @@ class BindTests(Base):
         thread = self.serve_thread(server)
         client = socket.create_connection(('127.0.0.1', port), timeout=5)
         self.addCleanup(client.close)
-        client.sendall(('GET /index.html HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nConnection: close\r\n\r\n' % port).encode())
+        client.sendall(('GET /%s/index.html HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nConnection: close\r\n\r\n' % (server.key, port)).encode())
         buf = b''
         while not buf.endswith(b'hi'):
             buf += client.recv(4096)
@@ -180,7 +180,8 @@ class ReadyLineTests(Base):
         self.assertTrue(line['ok'])
         self.assertEqual(line['port'], port)
         self.assertIs(line['fixed_port'], True)
-        self.assertEqual(line['origin'], 'http://127.0.0.1:%d/' % port)
+        # SKILLS-158: origin is the same address plus the launch's key as its one path segment.
+        self.assertRegex(line['origin'], r'\Ahttp://127\.0\.0\.1:%d/[A-Za-z0-9_-]{43}/\Z' % port)
         self.assertEqual(line['ssh_line'], 'ssh -L %d:127.0.0.1:%d <host>' % (port, port))
 
     def test_default_ready_line_keeps_every_old_key(self):
@@ -189,7 +190,7 @@ class ReadyLineTests(Base):
         for key in ('ok', 'origin', 'port', 'ssh_line'):
             self.assertIn(key, line)
         self.assertEqual(set(line), {'ok', 'origin', 'port', 'ssh_line', 'fixed_port'})
-        self.assertEqual(line['origin'], 'http://127.0.0.1:%d/' % line['port'])
+        self.assertRegex(line['origin'], r'\Ahttp://127\.0\.0\.1:%d/[A-Za-z0-9_-]{43}/\Z' % line['port'])
 
 
 class RunPrototypeTests(unittest.TestCase):
