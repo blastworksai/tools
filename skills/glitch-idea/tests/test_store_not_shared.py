@@ -166,7 +166,7 @@ class NamedErrorTests(unittest.TestCase):
         self.lock_out(victim)
         message = self.assert_named(run_cli(self.store, 'list'), victim)
         fix = self.commands(self.group())
-        self.assertEqual(message, '\n'.join(['This account cannot read %s in a shared store. Its owner (%s) must convert the store:'
+        self.assertEqual(message, '\n'.join(['This account was refused permission on %s in a shared store. Its owner (%s) must convert the store:'
                                              % (victim, self.owner()), *('  ' + line for line in fix)]))
         self.assertEqual(run_cli(self.store, 'list')[1]['fix'], fix)
         # A blanket recursive group-write would unseal the store's read-only evidence files: never offered.
@@ -194,6 +194,21 @@ class NamedErrorTests(unittest.TestCase):
                 'This account cannot use the store %s: its top folder is not shared with it (mode %04o, owner %s). '
                 'To share it, its owner runs:' % (self.store, mode, self.owner()), *('  ' + line for line in fix)]))
             self.let_in()
+
+    def test_a_symlinked_store_root_is_refused_by_the_store_itself(self):
+        # The store never runs on a symlinked root, so the named error cannot be reached that way from the
+        # command line; the helper's own symlink handling is tested directly below.
+        link = self.tmp / 'link-to-store'
+        os.symlink(self.store, link)
+        status, value, _ = run_cli(link, 'list')
+        self.assertEqual((status, value['error']['code']), (1, 'corrupt_store'), value)
+
+    def test_a_write_refusal_is_named_without_calling_it_a_read(self):
+        folder = self.store / 'history'
+        refusal = PermissionError(errno.EACCES, 'Permission denied', str(folder / 'new-file.md'))
+        error = platform_.not_shared_error(refusal, self.store)
+        self.assertIn('was refused permission on %s in a shared store' % (folder / 'new-file.md'), str(error))
+        self.assertNotIn('cannot read', str(error))
 
     def test_file_in_a_private_store_gets_the_top_folder_message(self):
         self.share(0o700)
@@ -296,6 +311,30 @@ class HelperTests(unittest.TestCase):
             self.assertIsNone(platform_.not_shared_error(self.refusal(self.store / 'idea.md'), self.store))
         with patch.object(platform_, 'conversion_commands', broken):
             self.assertIsNone(platform_.not_shared_error(self.refusal(self.store / 'idea.md'), self.store))
+
+    def test_a_link_inside_the_store_that_points_outside_is_not_named(self):
+        outside = self.tmp / 'outside.md'
+        outside.write_text('x')
+        os.symlink(outside, self.store / 'link.md')
+        self.assertIsNone(platform_.not_shared_error(self.refusal(self.store / 'link.md'), self.store))
+        os.symlink(self.tmp, self.store / 'dir-link')
+        self.assertIsNone(platform_.not_shared_error(self.refusal(self.store / 'dir-link' / 'outside.md'), self.store))
+        through = self.tmp / 'through'
+        os.symlink(self.store, through)
+        error = platform_.not_shared_error(self.refusal(through / 'idea.md'), self.store)
+        self.assertEqual(error.details['path'], str(through / 'idea.md'))
+        error = platform_.not_shared_error(self.refusal(self.store / 'idea.md'), through)
+        self.assertEqual(error.code, 'store_not_shared')
+
+    def test_group_name_is_quoted_and_cannot_run_anything(self):
+        marker = self.tmp / 'ran'
+        hostile = 'Domain Users; touch %s; $(touch %s)' % (marker, marker)
+        commands = platform_.conversion_commands(self.store, hostile)
+        self.assertTrue(commands[0].startswith("chgrp -R 'Domain Users; touch "), commands[0])
+        subprocess.run(commands[0], shell=True, stdin=subprocess.DEVNULL, capture_output=True)
+        self.assertFalse(marker.exists())
+        self.assertEqual(platform_.conversion_commands(self.store, 'agents')[0], 'chgrp -R agents %s' % self.store)
+        self.assertIn('chgrp -R <shared group> ', platform_.conversion_commands(self.store, platform_.SHARED_GROUP_PLACEHOLDER)[0])
 
     def test_bytes_filename_and_missing_owner_never_raise(self):
         as_bytes = PermissionError(errno.EACCES, 'Permission denied', os.fsencode(str(self.store / 'idea.md')))

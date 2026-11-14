@@ -95,6 +95,9 @@ def _owner_name(path, stop):
         return str(uid)
 
 
+SHARED_GROUP_PLACEHOLDER = '<shared group>'
+
+
 def conversion_commands(root, group):
     """The four commands that make an existing store usable by a group, as its owner runs them.
 
@@ -103,6 +106,8 @@ def conversion_commands(root, group):
     """
     import shlex
     where = shlex.quote(str(root))
+    # A group name comes from the system's group database and is pasted into a shell: quote it like the path.
+    group = group if group == SHARED_GROUP_PLACEHOLDER else shlex.quote(str(group))
     return ['chgrp -R %s %s' % (group, where),
             'find %s -type d -exec chmod 2770 {} +' % where,
             'find %s -type f -perm /200 -exec chmod 660 {} +' % where,
@@ -114,7 +119,7 @@ def _group_name(root):
         import grp
         return grp.getgrgid(os.lstat(root).st_gid).gr_name
     except Exception:
-        return '<shared group>'
+        return SHARED_GROUP_PLACEHOLDER
 
 
 def not_shared_error(exc, store):
@@ -133,12 +138,17 @@ def not_shared_error(exc, store):
             return None
         root = Path(os.path.abspath(str(store)))
         target = Path(os.path.abspath(refused))
-        if target != root and root not in target.parents:
+        # Inside-or-not is decided on resolved paths: a store reached through a symlink still counts, and a link
+        # inside the store that points outside it does not. The path shown is the one that was refused.
+        real_root = Path(os.path.realpath(root))
+        real_target = Path(os.path.realpath(target))
+        if real_target != real_root and real_root not in real_target.parents:
             return None
+        at_root = real_target == real_root
         usable = is_shared_root(root) and os.access(root, os.R_OK | os.W_OK | os.X_OK)
-        if usable and target != root:
+        if usable and not at_root:
             fix = conversion_commands(root, _group_name(root))
-            text = ('This account cannot read %s in a shared store. Its owner (%s) must convert the store:'
+            text = ('This account was refused permission on %s in a shared store. Its owner (%s) must convert the store:'
                     % (target, _owner_name(target, root)))
         else:
             try:
@@ -146,7 +156,7 @@ def not_shared_error(exc, store):
             except OSError:
                 mode = 'unknown'
             # The top folder's present group may be its owner's own; only the owner knows the group to share with.
-            fix = conversion_commands(root, '<shared group>')
+            fix = conversion_commands(root, SHARED_GROUP_PLACEHOLDER)
             text = ('This account cannot use the store %s: its top folder is not shared with it (mode %s, owner %s). '
                     'To share it, its owner runs:' % (root, mode, _owner_name(root, root)))
         return IdeaError('store_not_shared', '\n'.join([text, *('  ' + line for line in fix)]),
