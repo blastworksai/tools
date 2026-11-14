@@ -39,6 +39,9 @@ class Base(unittest.TestCase):
         fake=self.package/'scripts/idea.py';fake.parent.mkdir();fake.write_text('fixture')
         self.store=self.directory/'ideas';self.runtime=self.directory/'runtime'
         patcher=patch.object(idea,'__file__',str(fake));patcher.start();self.addCleanup(patcher.stop)
+        # Never read this machine's agent panes: under Codex (CODEX_THREAD_ID set) the lookup would scan the real /proc
+        # and could write a title to a real pane. A test of the lookup patches it again inside its own cell.
+        patcher=patch.object(idea_tern,'agent_terminals',return_value=[]);patcher.start();self.addCleanup(patcher.stop)
 
     def config(self,**extra):
         (self.package/'config.json').write_text(json.dumps(dict(store_path=str(self.store),plan_validator_argv=None,
