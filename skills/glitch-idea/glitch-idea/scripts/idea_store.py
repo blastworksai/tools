@@ -159,6 +159,160 @@ _ASSET_BLOB = re.compile(r'(asset_[0-9a-f]{32})\.bin')
 _ASSET_STAGE = re.compile(r'upload_([0-9a-f]{32})\.([0-9a-f]{32})\.part')
 MAX_ORPHAN_IDS = 128
 
+# Saved load (SKILLS-157): the last clean load, kept between service starts in a private
+# file of the account that runs the service. Base64 makes bytes 4/3 larger; the decoded
+# state rides beside them.
+SAVED_LOAD_FORMAT = 1
+MAX_SAVED_LOAD = 2 * MAX_STORE_BYTES
+_SAVED_LOAD_KEYS = frozenset(('format', 'fingerprint', 'store', 'state', 'entries', 'files', 'receipts', 'docs', 'held'))
+_code_fingerprint_value = None
+
+
+def code_fingerprint():
+    """One hash over every module of this skill's scripts plus the PyYAML and Python versions.
+
+    A saved load is reused only by the code that made it: a hit also skips the migration
+    chain, which is sound only for the same code.
+    """
+    global _code_fingerprint_value
+    if _code_fingerprint_value is None:
+        import sys
+        import yaml
+        here = Path(__file__).resolve().parent
+        h = hashlib.sha256()
+        for path in sorted(p for p in here.rglob('*.py') if '__pycache__' not in p.parts):
+            name = path.relative_to(here).as_posix().encode('utf-8')
+            raw = path.read_bytes()
+            h.update(len(name).to_bytes(4, 'big') + name + len(raw).to_bytes(8, 'big') + raw)
+        h.update(('pyyaml ' + yaml.__version__ + '\npython ' + sys.version).encode('utf-8'))
+        _code_fingerprint_value = h.hexdigest()
+    return _code_fingerprint_value
+
+
+def _private_directory(path):
+    """True iff path is a real directory owned by this account that nobody else can enter."""
+    info = os.lstat(path)
+    return stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid() and not info.st_mode & 0o077
+
+
+def _b64(raw):
+    import base64
+    return base64.b64encode(raw).decode('ascii')
+
+
+def _unb64(value):
+    import base64
+    require(type(value) is str, 'Saved load bytes must be text')
+    return base64.b64decode(value.encode('ascii'), validate=True)
+
+
+def encode_saved_load(store_path, loaded, held):
+    """The saved form of a clean load: exact bytes of every file it read, never only their hashes."""
+    state, files, docs, imported, receipts, entries, _ = loaded
+    require(imported == state, 'Only a load that needed no normalising write is saved')
+    document = _markdown().Document
+    require(all(type(doc) is document for doc in docs.values()), 'Saved load documents must be Documents')
+    held_map, held_raw, held_prints = held
+    value = dict(format=SAVED_LOAD_FORMAT, fingerprint=code_fingerprint(), store=str(store_path),
+                 state=state, entries=entries,
+                 files={path: _b64(raw) for path, raw in files.items()},
+                 receipts={path: _b64(raw) for path, raw in receipts.items()},
+                 docs={path: dict(metadata=doc.metadata, body=doc.body, has_comments=doc.has_comments)
+                       for path, doc in docs.items()},
+                 held=dict(held=held_map, raw=held_raw,
+                           prints={key: None if raw is None else _b64(raw) for key, raw in held_prints.items()}))
+    return json.dumps(value, allow_nan=False, sort_keys=True, separators=(',', ':')).encode('utf-8')
+
+
+def decode_saved_load(raw, store_path):
+    """(loaded, held) from saved bytes; raises on any doubt. The caller treats a raise as a miss."""
+    value = json.loads(raw.decode('utf-8'))
+    require(type(value) is dict and set(value) == _SAVED_LOAD_KEYS, 'Saved load has the wrong shape')
+    require(value['format'] == SAVED_LOAD_FORMAT and type(value['format']) is int, 'Unknown saved load format')
+    require(value['fingerprint'] == code_fingerprint(), 'Saved load was made by other code')
+    require(value['store'] == str(store_path), 'Saved load belongs to another store')
+    require(type(value['state']) is dict and type(value['entries']) is dict, 'Saved load has the wrong shape')
+    document = _markdown().Document
+    docs = {}
+    for path, doc in value['docs'].items():
+        require(type(doc) is dict and set(doc) == {'metadata', 'body', 'has_comments'}
+                and type(doc['metadata']) is dict and type(doc['body']) is str and type(doc['has_comments']) is bool,
+                'Saved load document has the wrong shape')
+        docs[path] = document(doc['metadata'], doc['body'], doc['has_comments'])
+    files = {path: _unb64(item) for path, item in value['files'].items()}
+    receipts = {path: _unb64(item) for path, item in value['receipts'].items()}
+    held = value['held']
+    require(type(held) is dict and set(held) == {'held', 'raw', 'prints'}
+            and all(type(held[name]) is dict for name in held), 'Saved held ideas have the wrong shape')
+    prints = {key: None if item is None else _unb64(item) for key, item in held['prints'].items()}
+    state = value['state']
+    loaded = (state, files, docs, copy.deepcopy(state), receipts, value['entries'], None)
+    return loaded, (held['held'], held['raw'], prints)
+
+
+def read_saved_load(path, store_path):
+    """The saved load at path, or None on any doubt: never an error the operator sees."""
+    if os.name != 'posix' or path is None:
+        return None
+    try:
+        path = Path(path)
+        if not _private_directory(path.parent):
+            return None
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            info = os.fstat(descriptor)
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077 \
+                    or info.st_size > MAX_SAVED_LOAD:
+                return None
+            with os.fdopen(os.dup(descriptor), 'rb') as stream:
+                raw = stream.read(MAX_SAVED_LOAD + 1)
+        finally:
+            os.close(descriptor)
+        if len(raw) > MAX_SAVED_LOAD:
+            return None
+        return decode_saved_load(raw, store_path)
+    except (OSError, ValueError, TypeError, KeyError, AttributeError, IdeaError):
+        return None
+
+
+def write_saved_load(path, store_path, loaded, held):
+    """Save a clean load atomically and owner-only; any failure leaves no saved load, never an error."""
+    if os.name != 'posix' or path is None:
+        return False
+    path = Path(path)
+    stage = None
+    try:
+        raw = encode_saved_load(store_path, loaded, held)
+        if len(raw) > MAX_SAVED_LOAD:
+            return False
+        # Prove the round trip before trusting it: a codec slip saves nothing.
+        again, again_held = decode_saved_load(raw, store_path)
+        if again[:6] != tuple(loaded[:6]) or again_held != tuple(held):
+            return False
+        try:
+            os.mkdir(path.parent, 0o700)
+        except FileExistsError:
+            pass
+        if not _private_directory(path.parent):
+            return False
+        stage = path.parent / ('.' + path.name + '.' + uuid.uuid4().hex + '.tmp')
+        descriptor = os.open(stage, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+        with os.fdopen(descriptor, 'wb') as stream:
+            stream.write(raw)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(stage, path)
+        stage = None
+        return True
+    except (OSError, ValueError, TypeError, KeyError, AttributeError, IdeaError):
+        return False
+    finally:
+        if stage is not None:
+            try:
+                os.unlink(stage)
+            except OSError:
+                pass
+
 
 MAX_SESSION_RECEIPTS = 128
 MAX_RECEIPT_BYTES = MAX_INPUT
@@ -572,9 +726,13 @@ def _import_read_source(root, idea_id):
 
 
 class Store:
-    def __init__(self, path, *, observer=None):
+    def __init__(self, path, *, observer=None, saved_load=None):
         # Preserve spelling until safety checks: resolve() would hide symlinks.
         self.path = Path(path).expanduser().absolute()
+        # SKILLS-157: a private file holding the last clean load between service starts.
+        # Only the owner service passes one; it is read once, by the first transaction.
+        self._saved_load = None if saved_load is None else Path(saved_load)
+        self._saved_load_tried = False
         self.state_path = self.path / 'state.json'
         self._contexts = threading.local()
         # Last clean markdown load (J6e). In memory only; read and written solely
@@ -934,6 +1092,27 @@ class Store:
         """Cache a load only when it needed no normalizing write (imported == state)."""
         state, files, docs, imported, receipts, entries, paths = loaded
         self._load_cache = copy.deepcopy(loaded) if imported == state else None
+        if self._load_cache is not None and self._saved_load is not None:
+            write_saved_load(self._saved_load, self.path, loaded,
+                             (self.held, self._held_raw, self._held_prints))
+
+    def _adopt_saved_load(self):
+        """Once per Store: put a saved load in the in-memory cache slot so _reuse_load decides.
+
+        Returns the held fields it replaced (to put back on a miss), or None when nothing
+        was adopted. _reuse_load's exact-byte check is the only judge of a hit.
+        """
+        if self._saved_load is None or self._saved_load_tried or self._load_cache is not None:
+            return None
+        self._saved_load_tried = True
+        saved = read_saved_load(self._saved_load, self.path)
+        if saved is None:
+            return None
+        loaded, (held, held_raw, held_prints) = saved
+        prior = (self.held, self._held_raw, self._held_prints)
+        self.held, self._held_raw, self._held_prints = held, held_raw, held_prints
+        self._load_cache = loaded
+        return prior
 
     def _reuse_load(self):
         """Return a private deep copy of the cached load iff every byte it read is unchanged.
@@ -1345,7 +1524,12 @@ class Store:
                 files, docs, kind = {}, {}, 'legacy'
             elif index.exists():
                 migration_evidence = self._migration_evidence(read_bytes(index, MAX_STATE))
+                adopted = self._adopt_saved_load()
                 loaded = self._reuse_load()
+                if loaded is None and adopted is not None:
+                    # The saved load missed: forget it and put back what it replaced.
+                    self._load_cache = None
+                    self.held, self._held_raw, self._held_prints = adopted
                 if loaded is None:
                     # One place, under the store lock, after recover, on a cache miss only: a hit proves
                     # every byte is unchanged since a load that already ran the chain.
