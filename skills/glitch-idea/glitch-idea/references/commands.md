@@ -185,7 +185,7 @@ python3 "$idea_tool" --store /absolute/demo-ideas prototype-serve --session sess
 Read its first JSON line for `origin`, `port` and `fixed_port`.
 `origin` is `http://127.0.0.1:<port>/<key>/`: the key is made for this launch and is the first part of every address the server answers.
 Any request without it, from any account, answers `not found`, exactly like a missing file; `http://127.0.0.1:<port>/<key>` without the closing slash does too.
-Show `origin` to the operator exactly as printed, for them to open, and keep it out of fills, replies, the store and every file; a new launch makes a new key and the old link stops working.
+Show `origin` to the operator exactly as printed, in your own message in the terminal, for them to open; that message is the one place it goes. Keep it out of every `fill` and `reply` sent to the page, the store and every file; a new launch makes a new key and the old link stops working.
 Never pass `origin` to a command as an argument or in its environment (`curl`, a browser or tab opener): on a shared computer every account can read the arguments of every running command.
 The prototype's own files must be linked relatively (`app.js`, not `/app.js`), so each request stays under the key.
 When `fixed_port` is `true` the seat has a configured `prototype_port` and the standing tunnel carries it, so show no tunnel line.

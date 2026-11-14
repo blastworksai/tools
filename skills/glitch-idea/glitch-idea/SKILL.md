@@ -202,7 +202,8 @@ Then start `idea.py prototype-serve --session <session_id> --dir <that folder>`;
 Read its first JSON line for `origin`, `port` and `fixed_port`.
 It serves on its own loopback port, sandboxed by CSP, with no cookies.
 `origin` is the prototype's private link: it ends in a key made for this launch, and without that key every address on the port answers `not found`, to the operator and to every other account alike.
-Use `origin` exactly as printed: never shorten it, never rebuild it from `port`, and never write it into a fill, a reply, the store, a ticket or any file.
+Use `origin` exactly as printed: never shorten it, never rebuild it from `port`, and never write it into a `fill`, a `reply` to the page, the store, a ticket or any file.
+The one place it goes is your own message to the operator in the terminal.
 A new launch makes a new key, so after a restart read the new `origin` and open that.
 Build the prototype with relative links to its own files (`app.js`, `./style.css`, never `/app.js`): a link that starts with `/` leaves the key behind and answers `not found`.
 Show `origin` to the operator alone on its own line and ask them to open it in a second tab; that click is how it opens.
