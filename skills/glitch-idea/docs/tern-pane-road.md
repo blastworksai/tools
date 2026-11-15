@@ -45,9 +45,9 @@ A probe plugin logged every event it heard.
 
 ## Request grammar
 
-Title text: `glitch-idea:<version>:<port>:<rid>`, version 1 or 2.
+Title text: `glitch-idea:<version>:<port>:<rid>`, version 1, 2 or 3.
 Version 1 (the ancestor road): claim at once, place above the asking pane.
-Version 2 (the account lookup, SKILLS-160): focus-gated, see Focus rule.
+Versions 2 and 3 (the account lookup): focus-gated, see Focus rule; 3 when the lookup found one candidate, 2 when it found several.
 `<port>` is the idea service's port, 1024 to 65535, no leading zero.
 `<rid>` is 32 lowercase hex characters from a secure random source, new for every request.
 Anything else is ignored without an answer.
@@ -109,18 +109,19 @@ An explicit `browser_mode` or `--browser` always wins.
 
 ## Focus rule
 
-A version 2 request may reach several panes at once, one request id for all of them.
+A version 2 request reaches several panes at once, one request id for all of them; a version 3 request reaches the only candidate.
 The pane that is focused claims it directly and the page goes above it, as in version 1.
 Every other pane that sees it claims with `defer=1`.
 The service holds a deferred claim for up to 1.5 s: a direct claim in that time wins and the deferred claimer gets 404; still pending after it, the first deferred claimer gets the link, and the window opens it beside the focused pane, reporting `beside`.
-When that claimer was the only pane of the window that raised the request id, the window then moves the page beside the claimer with `focus = false`: the page lands in the claimer's own tab and the person's focus stays where it is (window plugin 0.3.1).
-When several panes raised it (two sessions of one account), the first deferred claimer is simply the first terminal written, not necessarily the asker, so the page stays beside the focused pane (0.3.2; 0.3.1 moved it beside that first claimer, which put it in the wrong tab, measured 15 Nov 2026).
+For version 3 (the helper's only candidate) the window then moves the page beside the claimer with `focus = false`: the page lands in the claimer's own tab and the person's focus stays where it is.
+For version 2 (several candidates) the first deferred claimer is simply the first terminal written, not necessarily the asker, so the page stays beside the focused pane (window plugin 0.3.3; 0.3.1 moved every deferred page beside its claimer, which put it in the wrong tab with two Codex sessions of one account, measured 15 Nov 2026).
+The helper, not the window, decides the version, because only the helper knows how many terminals it wrote to; a window sees only the panes it shows.
 Nothing ties a Codex session to its front end: the front end holds no thread file and its log rows carry no thread id.
 At most 2 deferred claims wait at once across the service (it has 8 ordinary handler slots); a third answers 404 at once, so waits never starve the helper's state poll.
 The window's 3 s fetch timeout covers the 1.5 s wait.
 An unknown focus never counts as the asker: such a pane defers.
 Measured 15 Nov 2026 in an isolated Tern 0.9.21: with focus in tab 2 and the asker in tab 1, `move(page, asker, "right", {focus = false})` returned true, the page joined tab 1 beside the asker and focus stayed in tab 2; with `focus = true` the window switched to tab 1.
-Known limit: with several candidates and none focused, the first deferred claimer wins, so in different tabs the page joins one of them, not necessarily the pane whose agent ran the command.
+Known limit: with several candidates and none focused, the page opens beside the focused pane, not beside the pane whose agent ran the command, which cannot be known.
 The "page beside" outcome lives in the service, not in a window timer, because no window timer was proven in the spike.
 
 ## Agents whose commands do not run under the pane
@@ -139,10 +140,10 @@ Candidates are deduplicated by terminal, sorted, and capped at 8 (the service's 
 A process that vanishes or cannot be read mid-scan is skipped; the lookup is empty when `/proc` cannot be read at all.
 Another account's environ is never read.
 
-Every request found this way is title version 2, `glitch-idea:2:<port>:<rid>`, whatever the number of candidates, because a lone candidate may be another session's pane (the asker may be a headless `codex exec`).
+Every request found this way is focus-gated, version 3 for one candidate and version 2 for several, because a lone candidate may be another session's pane (the asker may be a headless `codex exec`).
 One request id goes to every candidate terminal, the helper waits once, then writes the fixed title back to each.
-Version 2 is focus-gated in the window plugin (0.3.0 and later; from 0.3.2 a deferred page joins the asker only when it is the lone pane that raised the request): see Focus rule below.
-With plugin 0.2.0 a version 2 request is ignored and reads `plugin_no_answer`, so the helper falls back to the link as before.
+Version 2 is focus-gated in the window plugin 0.3.0 and later, version 3 in 0.3.3 and later: see Focus rule below.
+With plugin 0.2.0 a version 2 request is ignored, and with plugins before 0.3.3 a version 3 request is ignored; either reads `plugin_no_answer`, so the helper falls back to the link as before.
 A transient `busy` from the helper's own service during the state poll is asked again within the same deadlines.
 
 Limits: same account only, the front-end name table, Linux `/proc` only (Windows and macOS hosts keep today's behaviour).

@@ -463,7 +463,7 @@ class ManyTerminalsTests(unittest.TestCase):
         self.assertEqual(runtime.calls, [])
 
     def test_a_bad_version_refuses_before_any_offer(self):
-        for version in (0, 3, "2", None, True):
+        for version in (0, 4, "2", None, True):
             with self.subTest(version=version):
                 runtime = ScriptedRuntime([])
                 with self.assertRaises(ValueError):

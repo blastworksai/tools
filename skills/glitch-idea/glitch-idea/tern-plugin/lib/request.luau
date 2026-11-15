@@ -34,11 +34,12 @@ function M.valid_url(url)
     return hex32(string.sub(fragment, 8))
 end
 
--- Title grammar: glitch-idea:<version 1 or 2>:<port 1024..65535, no leading zero>:<rid, 32 lowercase hex>
--- Version 1: claim at once, place above the asker. Version 2: focus-gated (the asker may not be the pane that asked).
+-- Title grammar: glitch-idea:<version 1, 2 or 3>:<port 1024..65535, no leading zero>:<rid, 32 lowercase hex>
+-- Version 1: claim at once, place above the asker. Versions 2 and 3: focus-gated (the asker may not be the pane that
+-- asked); 3 means the helper found this pane as its only candidate, 2 that it wrote to several.
 function M.parse_title(text)
     if type(text) ~= "string" or #text > 100 then return nil end
-    local version, port, rid = string.match(text, "^glitch%-idea:([12]):([0-9]+):([0-9a-f]+)$")
+    local version, port, rid = string.match(text, "^glitch%-idea:([123]):([0-9]+):([0-9a-f]+)$")
     if not version or not hex32(rid) then return nil end
     local number = port_number(port)
     if not number or number < 1024 then return nil end
@@ -70,37 +71,6 @@ end
 function M.result_url(port, rid, how)
     if how ~= "above" and how ~= "beside" and how ~= "open_failed" then return nil end
     return "http://127.0.0.1:" .. tostring(port) .. "/api/v1/tern-result?rid=" .. rid .. "&how=" .. how
-end
-
-local ASK_MS = 30000 -- an offer's life at the idea service
-local MAX_ASKS = 16
-
--- Tally of the panes that raised one request id, so a deferred claim can tell a lone asker from a tie (two sessions
--- of one account each get the same request). book is the caller's table; now is the monotonic ms clock or nil.
--- Without a clock, or with the book full, nothing is recorded, which reads as a tie: the page stays beside focus.
-function M.note_asker(book, rid, pane, now)
-    if type(book) ~= "table" or type(now) ~= "number" then return end
-    local count = 0
-    for key, entry in pairs(book) do
-        if now - entry.at > ASK_MS or now < entry.at then book[key] = nil else count = count + 1 end
-    end
-    local entry = book[rid]
-    if entry == nil then
-        if count >= MAX_ASKS then return end
-        entry = { at = now, n = 0, panes = {} }
-        book[rid] = entry
-    end
-    if not entry.panes[pane] then
-        entry.panes[pane] = true
-        entry.n = entry.n + 1
-    end
-end
-
--- True only when exactly one pane of this window raised rid.
-function M.sole_asker(book, rid)
-    if type(book) ~= "table" then return false end
-    local entry = book[rid]
-    return entry ~= nil and entry.n == 1
 end
 
 -- decode is injected (tern.json.decode drops members whose value is null).

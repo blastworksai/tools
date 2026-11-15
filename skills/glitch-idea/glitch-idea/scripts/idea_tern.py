@@ -211,13 +211,15 @@ def agent_terminals(env=None, *, proc='/proc', uid=None, devcheck=None):
 
 
 def pane_terminals(env=None, *, pid=None, proc='/proc', uid=None, devcheck=None):
-    """(paths, title version). The ancestor road first, unchanged: ([path], 1). Else the account lookup: (paths, 2) for any
-    count from one, because a lone candidate may be another session's pane. Else ([], 1)."""
+    """(paths, title version). The ancestor road first, unchanged: ([path], 1). Else the account lookup, focus-gated because
+    a lone candidate may be another session's pane: ([path], 3) for one candidate, (paths, 2) for several. Else ([], 1)."""
     path = find_terminal(pid, proc=proc, uid=uid, devcheck=devcheck)
     if path:
         return [path], 1
     paths = agent_terminals(env, proc=proc, uid=uid, devcheck=devcheck)
-    return (paths, 2) if paths else ([], 1)
+    if not paths:
+        return [], 1
+    return paths, (3 if len(paths) == 1 else 2)
 
 
 # ---- the request --------------------------------------------------------------------------------------
@@ -242,7 +244,8 @@ def write_title(path, text, *, opener=os.open, writer=os.write):
         return False
 
 
-TITLE_VERSIONS = (1, 2)  # 1: claim at once, place above the asker. 2: focus-gated (plugin 0.3.0 and later).
+TITLE_VERSIONS = (1, 2, 3)  # 1: claim at once, place above the asker. 2: focus-gated, one of several candidates
+# (plugin 0.3.0 and later). 3: focus-gated, the only candidate; a deferred page joins its tab (plugin 0.3.3 and later).
 TRANSIENT = ('busy', 'runtime_busy')
 
 
