@@ -24,7 +24,7 @@ DENY_LIST = ('odin', 'cmdr', 'claudekk', 'claudebwai', 'codexkk', 'blastworks', 
 class TernPlugin(unittest.TestCase):
     def test_manifest(self):
         meta = tomllib.loads((PLUGIN / 'plugin.toml').read_text(encoding='utf-8'))
-        self.assertEqual(meta, dict(schema=1, id='glitch-idea', name=meta['name'], version='0.3.0',
+        self.assertEqual(meta, dict(schema=1, id='glitch-idea', name=meta['name'], version='0.3.1',
                                     description=meta['description'], window='window.luau'))
         self.assertNotIn('host', meta)
         self.assertTrue(meta['name'] and meta['description'])
@@ -78,7 +78,7 @@ class TernPlugin(unittest.TestCase):
     def test_place_and_report_values(self):
         self.assertIn('cx:open(url, "beside", { focus = true })', CODE)
         self.assertIn('cx.layout:move(page, asker, "up")', CODE)
-        self.assertIn('page ~= asker', CODE)
+        self.assertIn('page == asker then return "beside" end', CODE)  # never moves the asker onto itself
         for how in ('"above"', '"beside"', '"open_failed"'):
             self.assertIn('return ' + how, CODE)
         self.assertIn('cx.session:focused()', CODE)
@@ -118,11 +118,20 @@ class TernPlugin(unittest.TestCase):
         self.assertIn('last_asked[asker] = now', block)
         self.assertEqual(title.count('last_asked[asker] = now'), 1)
 
-    def test_a_deferred_claim_opens_beside_and_never_moves(self):
+    def test_a_deferred_claim_goes_beside_the_asker_and_leaves_focus_where_it_is(self):
+        # The person may have moved to another tab while the agent worked: the page joins the asking pane
+        # (in its own tab), beside it, and focus stays where the person is.
         self.assertIn('local how = place(cx, url, asker, not deferred)', CODE)
         place = CODE[CODE.index('local function place'):CODE.index('local function on_claim')]
-        self.assertLess(place.index('cx:open('), place.index('if not lift then return "beside" end'))
-        self.assertLess(place.index('if not lift then return "beside" end'), place.index('cx.layout:move'))
+        self.assertEqual(place.count('cx.layout:move('), 2)
+        start = place.index('if lift then')
+        lift = place[start:place.index('\n    end\n', start)]
+        self.assertIn('cx.layout:move(page, asker, "up")', lift)  # the direct road is unchanged
+        self.assertNotIn('"right"', lift)
+        rest = place[place.index('\n    end\n', start):]
+        self.assertIn('cx.layout:move(page, asker, "right", { focus = false })', rest)
+        self.assertLess(place.index('cx:open('), place.index('cx.layout:move(page, asker, "right"'))
+        self.assertLess(place.index('page == asker'), start)  # never moves the asker onto itself
         self.assertIn('&defer=1', REQUEST_CODE)
 
     def test_rate_clock_is_the_monotonic_tern_clock(self):

@@ -112,11 +112,12 @@ An explicit `browser_mode` or `--browser` always wins.
 A version 2 request may reach several panes at once, one request id for all of them.
 The pane that is focused claims it directly and the page goes above it, as in version 1.
 Every other pane that sees it claims with `defer=1`.
-The service holds a deferred claim for up to 1.5 s: a direct claim in that time wins and the deferred claimer gets 404; still pending after it, the first deferred claimer gets the link and the window opens it beside the focused pane with no move, reporting `beside`.
+The service holds a deferred claim for up to 1.5 s: a direct claim in that time wins and the deferred claimer gets 404; still pending after it, the first deferred claimer gets the link, and the window opens it and moves it beside that claimer with `focus = false`, reporting `beside`: the page lands in the claimer's own tab and the person's focus stays where it is (window plugin 0.3.1; 0.3.0 left it beside the focused pane, which could be another tab).
 At most 2 deferred claims wait at once across the service (it has 8 ordinary handler slots); a third answers 404 at once, so waits never starve the helper's state poll.
 The window's 3 s fetch timeout covers the 1.5 s wait.
 An unknown focus never counts as the asker: such a pane defers.
-Known risk: when focus moved while the agent worked, the page follows the focus, not the pane that asked.
+Measured 15 Nov 2026 in an isolated Tern 0.9.21: with focus in tab 2 and the asker in tab 1, `move(page, asker, "right", {focus = false})` returned true, the page joined tab 1 beside the asker and focus stayed in tab 2; with `focus = true` the window switched to tab 1.
+Known limit: with several candidates and none focused, the first deferred claimer wins, so in different tabs the page joins one of them, not necessarily the pane whose agent ran the command.
 The "page beside" outcome lives in the service, not in a window timer, because no window timer was proven in the spike.
 
 ## Agents whose commands do not run under the pane
@@ -137,7 +138,7 @@ Another account's environ is never read.
 
 Every request found this way is title version 2, `glitch-idea:2:<port>:<rid>`, whatever the number of candidates, because a lone candidate may be another session's pane (the asker may be a headless `codex exec`).
 One request id goes to every candidate terminal, the helper waits once, then writes the fixed title back to each.
-Version 2 is focus-gated in the window plugin (0.3.0 and later): see Focus rule below.
+Version 2 is focus-gated in the window plugin (0.3.0 and later; 0.3.1 places a deferred page beside the asker): see Focus rule below.
 With plugin 0.2.0 a version 2 request is ignored and reads `plugin_no_answer`, so the helper falls back to the link as before.
 A transient `busy` from the helper's own service during the state poll is asked again within the same deadlines.
 
