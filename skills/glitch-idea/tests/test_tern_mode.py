@@ -450,6 +450,15 @@ class ManyTerminalsTests(unittest.TestCase):
         out, writes = self.send(runtime, ["/dev/pts/25", "/dev/pts/31"], ok=lambda p: p == "/dev/pts/31", version=2)
         self.assertEqual(out, ("above", None))
 
+    def test_a_failed_write_never_upgrades_a_tie_to_version_three(self):
+        """Two candidates, one write fails: the failed pane may be the asker, so the one written stays version 2 (the page
+        stays beside focus) and is never told it is the only candidate."""
+        runtime = ScriptedRuntime(["beside"])
+        out, writes = self.send(runtime, ["/dev/pts/25", "/dev/pts/31"], ok=lambda p: p == "/dev/pts/31", version=2)
+        rid = runtime.calls[0][1]
+        self.assertEqual(writes[:2], [("/dev/pts/25", "glitch-idea:2:8841:" + rid), ("/dev/pts/31", "glitch-idea:2:8841:" + rid)])
+        self.assertEqual(out, ("beside", None))
+
     def test_none_written_is_no_terminal_and_every_terminal_gets_the_fixed_title(self):
         runtime = ScriptedRuntime([])
         out, writes = self.send(runtime, ["/dev/pts/25", "/dev/pts/31"], ok=lambda p: False, version=2)
@@ -463,7 +472,7 @@ class ManyTerminalsTests(unittest.TestCase):
         self.assertEqual(runtime.calls, [])
 
     def test_a_bad_version_refuses_before_any_offer(self):
-        for version in (0, 3, "2", None, True):
+        for version in (0, 4, "2", None, True):
             with self.subTest(version=version):
                 runtime = ScriptedRuntime([])
                 with self.assertRaises(ValueError):

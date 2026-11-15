@@ -62,10 +62,10 @@ class AgentTerminalTests(unittest.TestCase):
                 self.assertIsNone(tern._tty_path(bad))
 
     # ---- the road
-    def test_reported_shape_finds_the_tui_pane_as_version_two(self):
+    def test_reported_shape_finds_the_tui_pane_as_version_three(self):
         self.reported_shape()
         self.assertIsNone(tern.find_terminal(2101, **self.kw()))
-        self.assertEqual(tern.pane_terminals(CODEX, pid=2101, **self.kw()), (["/dev/pts/25"], 2))
+        self.assertEqual(tern.pane_terminals(CODEX, pid=2101, **self.kw()), (["/dev/pts/25"], 3))  # the lone candidate
 
     def test_claude_shape_keeps_the_ancestor_road_and_never_scans(self):
         self.reported_shape()
@@ -167,13 +167,13 @@ class AgentTerminalTests(unittest.TestCase):
         self.assertNotIn(str(self.proc / "1500" / "environ"), opened)
         self.assertIn(str(self.proc / "1361660" / "environ"), opened)
 
-    def test_a_lone_codex_exec_in_tern_gets_version_two_not_one(self):
+    def test_a_lone_codex_exec_in_tern_gets_version_three_not_one(self):
         """The asker may be headless while another session's pane is the only candidate: focus-gated, never placed blind."""
         self.process(1, 0, "systemd"); self.process(900, 1, "tern")
         self.process(1400, 900, "codex", tty=tty_nr(31), environ={"TERN_PANE": "4"})   # `codex exec` in another pane
         self.process(2000, 1, "codex", environ={})
         self.process(2101, 2000, "python3", environ=CODEX)
-        self.assertEqual(tern.pane_terminals(CODEX, pid=2101, **self.kw()), (["/dev/pts/31"], 2))
+        self.assertEqual(tern.pane_terminals(CODEX, pid=2101, **self.kw()), (["/dev/pts/31"], 3))
 
     def test_at_most_eight_terminals(self):
         self.process(1, 0, "systemd"); self.process(900, 1, "tern")

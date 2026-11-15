@@ -296,11 +296,11 @@ class AgentRoadGridTests(Base):
         self.assertEqual(status,0);tern.assert_called_once()
         self.assertEqual((tern.call_args.kwargs['terminal'],tern.call_args.kwargs['version']),(['/dev/pts/25','/dev/pts/31'],2))
 
-    def test_one_candidate_is_still_version_two_as_a_list(self):
+    def test_one_candidate_is_version_three_as_a_list(self):
         self.config()
         status,body,tern,_,_=self.run_cell(['/dev/pts/25'])
         self.assertEqual(status,0)
-        self.assertEqual((tern.call_args.kwargs['terminal'],tern.call_args.kwargs['version']),(['/dev/pts/25'],2))
+        self.assertEqual((tern.call_args.kwargs['terminal'],tern.call_args.kwargs['version']),(['/dev/pts/25'],3))
 
     def test_no_candidate_keeps_browser_mode_required(self):
         self.config()

@@ -24,7 +24,7 @@ DENY_LIST = ('odin', 'cmdr', 'claudekk', 'claudebwai', 'codexkk', 'blastworks', 
 class TernPlugin(unittest.TestCase):
     def test_manifest(self):
         meta = tomllib.loads((PLUGIN / 'plugin.toml').read_text(encoding='utf-8'))
-        self.assertEqual(meta, dict(schema=1, id='glitch-idea', name=meta['name'], version='0.3.1',
+        self.assertEqual(meta, dict(schema=1, id='glitch-idea', name=meta['name'], version='0.3.3',
                                     description=meta['description'], window='window.luau'))
         self.assertNotIn('host', meta)
         self.assertTrue(meta['name'] and meta['description'])
@@ -85,7 +85,7 @@ class TernPlugin(unittest.TestCase):
 
     def test_fresh_cx_in_the_callback_never_retained(self):
         self.assertIn('function(res, fresh)', CODE)
-        self.assertIn('pcall(on_claim, res, fresh, port, rid, asker, deferred)', CODE)
+        self.assertIn('pcall(on_claim, res, fresh, port, rid, asker, deferred, sole)', CODE)
         title = CODE[CODE.index('local function on_title'):]
         self.assertEqual(title.count('cx:open'), 0)  # the title handler's cx is never used to open
 
@@ -104,7 +104,7 @@ class TernPlugin(unittest.TestCase):
     def test_version_two_is_focus_gated(self):
         title = CODE[CODE.index('local function on_title'):]
         self.assertIn('local port, rid, version = request.parse_title(ev.title)', title)
-        self.assertIn('local deferred = version == 2 and not focused(cx, asker)', title)
+        self.assertIn('local deferred = version >= 2 and not focused(cx, asker)', title)
         self.assertLess(title.index('cx.session:pane(asker)'), title.index('local deferred'))
         gate = CODE[CODE.index('local function focused'):CODE.index('local function report')]
         self.assertIn('cx.session:focused()', gate)
@@ -121,7 +121,7 @@ class TernPlugin(unittest.TestCase):
     def test_a_deferred_claim_goes_beside_the_asker_and_leaves_focus_where_it_is(self):
         # The person may have moved to another tab while the agent worked: the page joins the asking pane
         # (in its own tab), beside it, and focus stays where the person is.
-        self.assertIn('local how = place(cx, url, asker, not deferred)', CODE)
+        self.assertIn('local how = place(cx, url, asker, not deferred, deferred and sole)', CODE)
         place = CODE[CODE.index('local function place'):CODE.index('local function on_claim')]
         self.assertEqual(place.count('cx.layout:move('), 2)
         start = place.index('if lift then')
@@ -133,6 +133,24 @@ class TernPlugin(unittest.TestCase):
         self.assertLess(place.index('cx:open('), place.index('cx.layout:move(page, asker, "right"'))
         self.assertLess(place.index('page == asker'), start)  # never moves the asker onto itself
         self.assertIn('&defer=1', REQUEST_CODE)
+
+    def test_only_a_lone_candidate_gets_the_page_moved_into_its_tab(self):
+        # Version 3: the helper found exactly one candidate pane; a deferred page joins it in its own tab.
+        # Version 2: several candidates, the asker unknown; a deferred page stays beside the focused pane.
+        title = CODE[CODE.index('local function on_title'):]
+        self.assertIn('local deferred = version >= 2 and not focused(cx, asker)', title)
+        self.assertIn('local sole = version == 3', title)
+        self.assertIn('pcall(on_claim, res, fresh, port, rid, asker, deferred, sole)', title)
+        claim = CODE[CODE.index('local function on_claim'):CODE.index('local function on_title')]
+        self.assertIn('local function on_claim(res, cx, port, rid, asker, deferred, sole)', claim)
+        self.assertIn('local how = place(cx, url, asker, not deferred, deferred and sole)', claim)
+        place = CODE[CODE.index('local function place'):CODE.index('local function on_claim')]
+        start = place.index('if sole then')
+        gated = place[start:place.index('\n    end\n', start)]
+        self.assertIn('cx.layout:move(page, asker, "right", { focus = false })', gated)
+        self.assertEqual(place.count('"right"'), 1)  # the deferred move exists only under the sole gate
+        for gone in ('asked_by', 'note_asker', 'sole_asker'):  # the window counts nothing itself
+            self.assertNotIn(gone, CODE + REQUEST_CODE)
 
     def test_rate_clock_is_the_monotonic_tern_clock(self):
         self.assertIn('tern.now()', CODE)

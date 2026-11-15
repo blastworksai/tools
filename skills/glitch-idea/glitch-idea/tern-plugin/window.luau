@@ -24,9 +24,11 @@ local function report(port, rid, how)
     pcall(function() tern.fetch(url, { timeout_ms = 3000 }, function() end) end)
 end
 
--- Open the page beside the focused pane, then move it to the asking pane: above it (lift), or beside it with focus left
--- where it is (a deferred claim; the asker may sit in another tab). Uses only the fresh cx it is given.
-local function place(cx, url, asker, lift)
+-- Open the page beside the focused pane, then move it to the asking pane: above it (lift), or, for a deferred claim from
+-- the helper's only candidate (sole, title version 3), beside it with focus left where it is (it may sit in another tab).
+-- A deferred claim from one of several candidates (version 2, the asker unknown) stays beside the focused pane.
+-- Uses only the fresh cx it is given.
+local function place(cx, url, asker, lift, sole)
     local opened = pcall(function() cx:open(url, "beside", { focus = true }) end)
     if not opened then return "open_failed" end
     local okay, page = pcall(function() return cx.session:focused() end)
@@ -36,15 +38,17 @@ local function place(cx, url, asker, lift)
         if moved and done == true then return "above" end
         return "beside"
     end
-    pcall(function() return cx.layout:move(page, asker, "right", { focus = false }) end)
+    if sole then
+        pcall(function() return cx.layout:move(page, asker, "right", { focus = false }) end)
+    end
     return "beside"
 end
 
-local function on_claim(res, cx, port, rid, asker, deferred)
+local function on_claim(res, cx, port, rid, asker, deferred, sole)
     if type(res) ~= "table" or res.status ~= 200 then return end
     local url = request.parse_claim(res.body, tern.json.decode)
     if url == nil or not request.valid_url(url) or not request.same_port(url, port) then return end
-    local how = place(cx, url, asker, not deferred)
+    local how = place(cx, url, asker, not deferred, deferred and sole)
     report(port, rid, how)
 end
 
@@ -56,9 +60,11 @@ local function on_title(ev, cx)
     if type(asker) ~= "number" then return end
     local okay, known = pcall(function() return cx.session:pane(asker) end)
     if not okay or known == nil then return end
-    -- Version 2 from a pane that is not focused: a deferred claim, which the service grants only when no focused pane
-    -- claimed directly; it opens beside the asking pane, focus unmoved. It neither checks nor stamps the rate rule (the service caps it).
-    local deferred = version == 2 and not focused(cx, asker)
+    -- Versions 2 and 3 from a pane that is not focused: a deferred claim, which the service grants only when no focused
+    -- pane claimed directly. Version 3 (the only candidate) then joins the asking pane's tab; version 2 (one of several)
+    -- stays beside the focused pane. It neither checks nor stamps the rate rule (the service caps it).
+    local deferred = version >= 2 and not focused(cx, asker)
+    local sole = version == 3
     if not deferred then
         local now = now_ms()
         if now == nil or not request.rate_ok(last_asked[asker], now) then return end
@@ -66,7 +72,7 @@ local function on_title(ev, cx)
     end
     pcall(function()
         tern.fetch(request.claim_url(port, rid, deferred), { timeout_ms = 3000 }, function(res, fresh)
-            pcall(on_claim, res, fresh, port, rid, asker, deferred)
+            pcall(on_claim, res, fresh, port, rid, asker, deferred, sole)
         end)
     end)
 end

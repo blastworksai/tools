@@ -34,11 +34,12 @@ function M.valid_url(url)
     return hex32(string.sub(fragment, 8))
 end
 
--- Title grammar: glitch-idea:<version 1 or 2>:<port 1024..65535, no leading zero>:<rid, 32 lowercase hex>
--- Version 1: claim at once, place above the asker. Version 2: focus-gated (the asker may not be the pane that asked).
+-- Title grammar: glitch-idea:<version 1, 2 or 3>:<port 1024..65535, no leading zero>:<rid, 32 lowercase hex>
+-- Version 1: claim at once, place above the asker. Versions 2 and 3: focus-gated (the asker may not be the pane that
+-- asked); 3 means the helper found this pane as its only candidate, 2 that it wrote to several.
 function M.parse_title(text)
     if type(text) ~= "string" or #text > 100 then return nil end
-    local version, port, rid = string.match(text, "^glitch%-idea:([12]):([0-9]+):([0-9a-f]+)$")
+    local version, port, rid = string.match(text, "^glitch%-idea:([123]):([0-9]+):([0-9a-f]+)$")
     if not version or not hex32(rid) then return nil end
     local number = port_number(port)
     if not number or number < 1024 then return nil end

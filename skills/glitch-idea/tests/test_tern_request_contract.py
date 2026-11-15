@@ -70,7 +70,10 @@ TITLES = [
     ('glitch-idea:2:8845:' + H32, True),
     ('glitch-idea:2:1024:' + H32, True),
     ('glitch-idea:2:1023:' + H32, False),
-    ('glitch-idea:3:8845:' + H32, False),
+    ('glitch-idea:3:8845:' + H32, True),
+    ('glitch-idea:3:1024:' + H32, True),
+    ('glitch-idea:3:1023:' + H32, False),
+    ('glitch-idea:4:8845:' + H32, False),
     ('glitch-idea:0:8845:' + H32, False),
     ('glitch-idea:12:8845:' + H32, False),
     ('glitch-idea::8845:' + H32, False),
@@ -103,7 +106,7 @@ PORT_OF_URL = [
 
 def python_title(text):
     """The grammar as written in the design note: port 1024..65535, no leading zero, rid 32 lowercase hex."""
-    match = re.fullmatch(r'glitch-idea:([12]):([1-9][0-9]{0,4}):([0-9a-f]{32})', text)
+    match = re.fullmatch(r'glitch-idea:([123]):([1-9][0-9]{0,4}):([0-9a-f]{32})', text)
     if not match or '\n' in text:
         return None
     port = int(match.group(2))
@@ -145,8 +148,8 @@ class PythonWriter(unittest.TestCase):
                                write=lambda path, text: titles.append(text) or True, sleep=lambda s: None)
         return titles[0]
 
-    def test_versions_one_and_two_are_written_in_the_shared_grammar(self):
-        for version in (1, 2):
+    def test_versions_one_two_and_three_are_written_in_the_shared_grammar(self):
+        for version in (1, 2, 3):
             for port in (1024, 8845, 65535):
                 with self.subTest(version=version, port=port):
                     title = self.written(version, port)
@@ -154,7 +157,7 @@ class PythonWriter(unittest.TestCase):
                     self.assertIn((title, True), TITLES + [(title, True)])
 
     def test_no_other_version_is_ever_written(self):
-        for version in (0, 3, '1', None):
+        for version in (0, 4, '1', None):
             with self.subTest(version=version), self.assertRaises(ValueError):
                 self.written(version)
 
@@ -223,7 +226,7 @@ class LuauSourcePieces(unittest.TestCase):
     def test_title_table_through_the_luau_pieces(self):
         body = CODE[CODE.index('function M.parse_title'):CODE.index('function M.url_port')]
         pat = re.search(r'string\.match\(text, "([^"]*)"\)', body).group(1)
-        self.assertEqual(pat, '^glitch%-idea:([12]):([0-9]+):([0-9a-f]+)$')
+        self.assertEqual(pat, '^glitch%-idea:([123]):([0-9]+):([0-9a-f]+)$')
         floor = int(re.search(r'number < (\d+) then return nil', body).group(1))
         cap = int(re.search(r'#text > (\d+)', body).group(1))
         port_body = CODE[CODE.index('local function port_number'):CODE.index('function M.valid_url')]
