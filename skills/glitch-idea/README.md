@@ -58,6 +58,15 @@ Everything in them is demo content.
 | macOS | Not yet qualified. The POSIX code path is shared with Linux, but no verification rows exist yet. |
 | Windows (native) | Not yet qualified. Browser launch refuses to start on Windows (`privacy_unqualified`) until owner-private runtime directories are qualified there. The command forms below are shown so that the installer and the helper can be run, not as a claim that the browser flow works. |
 
+| Agent | State |
+| --- | --- |
+| Claude Code | Works best: the page opens above the asking pane. |
+| Codex | Works; keep the asking pane in focus until the page opens. With several Codex sessions of one account, a page asked from a pane you left opens beside the pane you are on. |
+| Grok, Muse, Kimi | The agents make it work, but by a non-standard path: Grok and Kimi make their own runtime folder when the default one is refused; Muse writes its own event loop. |
+| Antigravity CLI | Unproven: the agent did not find the installed skill. |
+
+Each agent was tried once on Linux, 15 Nov 2026.
+
 Where this document says "not yet qualified" it means exactly that: nothing has been observed, so nothing is claimed.
 
 ## Requirements
