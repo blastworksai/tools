@@ -34,14 +34,15 @@ function M.valid_url(url)
     return hex32(string.sub(fragment, 8))
 end
 
--- Title grammar: glitch-idea:1:<port 1024..65535, no leading zero>:<rid, 32 lowercase hex>
+-- Title grammar: glitch-idea:<version 1 or 2>:<port 1024..65535, no leading zero>:<rid, 32 lowercase hex>
+-- Version 1: claim at once, place above the asker. Version 2: focus-gated (the asker may not be the pane that asked).
 function M.parse_title(text)
     if type(text) ~= "string" or #text > 100 then return nil end
-    local port, rid = string.match(text, "^glitch%-idea:1:([0-9]+):([0-9a-f]+)$")
-    if not port or not hex32(rid) then return nil end
+    local version, port, rid = string.match(text, "^glitch%-idea:([12]):([0-9]+):([0-9a-f]+)$")
+    if not version or not hex32(rid) then return nil end
     local number = port_number(port)
     if not number or number < 1024 then return nil end
-    return number, rid
+    return number, rid, tonumber(version)
 end
 
 function M.url_port(url)
@@ -60,8 +61,10 @@ function M.rate_ok(last_ms, now_ms)
     return now_ms - last_ms >= RATE_MS
 end
 
-function M.claim_url(port, rid)
-    return "http://127.0.0.1:" .. tostring(port) .. "/api/v1/tern-claim?rid=" .. rid
+function M.claim_url(port, rid, deferred)
+    local url = "http://127.0.0.1:" .. tostring(port) .. "/api/v1/tern-claim?rid=" .. rid
+    if deferred == true then return url .. "&defer=1" end
+    return url
 end
 
 function M.result_url(port, rid, how)

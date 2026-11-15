@@ -112,15 +112,112 @@ def ancestor_named(name, pid=None, *, proc='/proc'):
     return False
 
 
-def default_is_tern(env=None, *, terminal=None, named=None):
-    """Only a default: a terminal was found AND (TERN_PANE is set or an ancestor is named tern). The plugin's claim is the proof."""
+def default_is_tern(env=None, *, terminal=None, named=None, agents=None):
+    """Only a default: a terminal was found AND (TERN_PANE is set or an ancestor is named tern); or, with none found,
+    the account's agent front end sits in a Tern pane (agent_terminals). The plugin's claim is the proof."""
     env = os.environ if env is None else env
     terminal = find_terminal() if terminal is None else terminal
     if not terminal:
-        return False
+        return bool(agent_terminals(env) if agents is None else agents)
     if env.get('TERN_PANE'):
         return True
     return bool(ancestor_named('tern') if named is None else named)
+
+
+# ---- agents whose commands do not run under the pane ---------------------------------------------------
+# Codex runs commands as children of the account's long-lived app-server daemon, which has no terminal, so the
+# ancestor walk finds nothing. Then the pane is found through the account's own front-end process that does sit on a
+# terminal. Closed table: marker variable the agent sets for its commands -> its front-end process names. A row is
+# added only after that agent is measured. Linux /proc only; elsewhere the lookup is empty.
+AGENT_FRONTS = {'CODEX_THREAD_ID': ('codex',)}
+MAX_AGENT_TERMINALS = 8  # the idea service's offer cap
+
+
+def _tty_path(tty_nr):
+    """The kernel's decode of stat's tty_nr; a Unix98 pseudo-terminal (majors 136 to 143) only, else None."""
+    if type(tty_nr) is not int or tty_nr <= 0:
+        return None
+    major = (tty_nr >> 8) & 0xfff
+    minor = (tty_nr & 0xff) | ((tty_nr >> 12) & 0xfff00)
+    if not 136 <= major <= 143:
+        return None
+    return '/dev/pts/%d' % ((major - 136) * 256 + minor)
+
+
+def _uid_of(proc, pid):
+    """The real uid from <proc>/<pid>/status. Raises on a vanished or unreadable process."""
+    with open(os.path.join(proc, str(pid), 'status'), 'rb') as stream:
+        for line in stream.read(8192).decode('ascii', 'replace').splitlines():
+            if line.startswith('Uid:'):
+                return int(line.split()[1])
+    raise ValueError('no_uid')
+
+
+def _agent_candidates(env=None, *, proc='/proc', uid=None, devcheck=None):
+    """(pid, path) for this account's agent front-end processes on a terminal it may write, for the first marker in env.
+    Deduplicated by path (lowest pid kept), sorted by pts number. A process that vanishes or cannot be read is skipped;
+    [] on no marker or when the scan as a whole fails. Never reads another account's process beyond stat and status."""
+    try:
+        env = os.environ if env is None else env
+        names = next((AGENT_FRONTS[key] for key in AGENT_FRONTS if env.get(key)), None)
+        if not names:
+            return []
+        uid = os.getuid() if uid is None else uid
+        devcheck = _writable_terminal(uid) if devcheck is None else devcheck
+        entries = os.listdir(proc)
+    except Exception:
+        return []
+    found = {}
+    for entry in entries:
+        try:
+            if not entry.isdigit():
+                continue
+            pid = int(entry)
+            with open(os.path.join(proc, entry, 'stat'), 'rb') as stream:
+                data = stream.read(4096).decode('ascii', 'replace')
+            name = data[data.index('(') + 1:data.rindex(')')]
+            if name not in names:
+                continue
+            path = _tty_path(int(data[data.rindex(')') + 1:].split()[4]))
+            if path is None or _uid_of(proc, pid) != uid or not devcheck(path):
+                continue
+            if path not in found or pid < found[path]:
+                found[path] = pid
+        except Exception:
+            continue
+    return sorted(((pid, path) for path, pid in found.items()), key=lambda record: int(record[1].rsplit('/', 1)[1]))
+
+
+def _in_tern(pid, proc='/proc'):
+    """The same test default_is_tern applies to the helper itself: TERN_PANE set in its environ, or an ancestor named tern.
+    Called only for this account's own processes."""
+    try:
+        with open(os.path.join(proc, str(pid), 'environ'), 'rb') as stream:
+            for item in stream.read(262144).split(b'\0'):
+                if item.startswith(b'TERN_PANE=') and len(item) > len(b'TERN_PANE='):
+                    return True
+    except Exception:
+        pass
+    return ancestor_named('tern', pid, proc=proc)
+
+
+def agent_terminals(env=None, *, proc='/proc', uid=None, devcheck=None):
+    """Terminal paths of the in-Tern candidates only, at most MAX_AGENT_TERMINALS. A candidate outside Tern is never written."""
+    try:
+        records = _agent_candidates(env, proc=proc, uid=uid, devcheck=devcheck)
+        return [path for pid, path in records if _in_tern(pid, proc)][:MAX_AGENT_TERMINALS]
+    except Exception:
+        return []
+
+
+def pane_terminals(env=None, *, pid=None, proc='/proc', uid=None, devcheck=None):
+    """(paths, title version). The ancestor road first, unchanged: ([path], 1). Else the account lookup: (paths, 2) for any
+    count from one, because a lone candidate may be another session's pane. Else ([], 1)."""
+    path = find_terminal(pid, proc=proc, uid=uid, devcheck=devcheck)
+    if path:
+        return [path], 1
+    paths = agent_terminals(env, proc=proc, uid=uid, devcheck=devcheck)
+    return (paths, 2) if paths else ([], 1)
 
 
 # ---- the request --------------------------------------------------------------------------------------
@@ -145,14 +242,22 @@ def write_title(path, text, *, opener=os.open, writer=os.write):
         return False
 
 
-def send_request(runtime, url, port, *, terminal, sleep=time.sleep, clock=time.monotonic, token=secrets.token_hex,
+TITLE_VERSIONS = (1, 2)  # 1: claim at once, place above the asker. 2: focus-gated (plugin 0.3.0).
+TRANSIENT = ('busy', 'runtime_busy')
+
+
+def send_request(runtime, url, port, *, terminal, version=1, sleep=time.sleep, clock=time.monotonic, token=secrets.token_hex,
                  write=write_title, claim_wait=4.0, result_wait=6.0, poll=0.25):
-    """Offer the link, write the request title, wait for the plugin. Returns (how, None) or (None, failure)."""
+    """Offer the link, write the request title to each terminal (one request id), wait for the plugin.
+    terminal is a path or a list of paths. Returns (how, None) or (None, failure)."""
     match = URL_SHAPE.fullmatch(url) if type(url) is str else None
     if match is None or type(port) is not int or match.group(1) != str(port):
         from idea_launch import LaunchError
         raise LaunchError('invalid_pair_url')
-    if terminal is None:
+    if type(version) is not int or version not in TITLE_VERSIONS:
+        raise ValueError('invalid_title_version')
+    terminals = [terminal] if isinstance(terminal, (str, os.PathLike)) else list(terminal or ())
+    if not terminals:
         return None, 'no_terminal'
     try:
         rid = token(16)
@@ -160,14 +265,18 @@ def send_request(runtime, url, port, *, terminal, sleep=time.sleep, clock=time.m
     except Exception:
         return None, 'offer_failed'
     try:
-        if not write(terminal, 'glitch-idea:1:%d:%s' % (port, rid)):
+        title = 'glitch-idea:%d:%d:%s' % (version, port, rid)
+        written = [bool(write(path, title)) for path in terminals]
+        if not any(written):
             return None, 'no_terminal'
         claim_deadline, claimed_at = clock() + claim_wait, None
         while True:
             try:
                 state = runtime.tern_state(rid)
-            except Exception:
-                return None, 'offer_failed'
+            except Exception as exc:
+                if getattr(exc, 'code', None) not in TRANSIENT:
+                    return None, 'offer_failed'
+                state = None  # the owner is live and busy: ask again at the next tick, within the same deadlines
             if state in ('above', 'beside'):
                 return state, None
             if state == 'open_failed':
@@ -182,10 +291,11 @@ def send_request(runtime, url, port, *, terminal, sleep=time.sleep, clock=time.m
                 return None, 'plugin_no_answer'
             sleep(poll)
     finally:
-        write(terminal, FIXED_TITLE)
+        for path in terminals:
+            write(path, FIXED_TITLE)
 
 
-def open_tern_session(store_path, runtime_root, config=None, *, terminal=None, sender=send_request, **options):
+def open_tern_session(store_path, runtime_root, config=None, *, terminal=None, version=1, sender=send_request, **options):
     """One session, one request, no retry. Success returns no link and no code; failure returns the live link as link mode does."""
     import idea_launch
     import idea_runtime
@@ -195,7 +305,8 @@ def open_tern_session(store_path, runtime_root, config=None, *, terminal=None, s
     origin = result['origin']
     link = origin.rstrip('/') + '/#pair=' + code
     try:
-        how, failure = sender(idea_runtime.Runtime(store_path, runtime_root), link, urlsplit(origin).port, terminal=terminal)
+        how, failure = sender(idea_runtime.Runtime(store_path, runtime_root), link, urlsplit(origin).port, terminal=terminal,
+                              version=version)
     except idea_launch.LaunchError:
         raise
     except Exception:

@@ -45,7 +45,9 @@ A probe plugin logged every event it heard.
 
 ## Request grammar
 
-Title text: `glitch-idea:1:<port>:<rid>`.
+Title text: `glitch-idea:<version>:<port>:<rid>`, version 1 or 2.
+Version 1 (the ancestor road): claim at once, place above the asking pane.
+Version 2 (the account lookup, SKILLS-160): focus-gated, see Focus rule.
 `<port>` is the idea service's port, 1024 to 65535, no leading zero.
 `<rid>` is 32 lowercase hex characters from a secure random source, new for every request.
 Anything else is ignored without an answer.
@@ -76,6 +78,7 @@ Known limit: any program whose output reaches a pane can print a well-formed tit
 The window then makes one fixed-path GET to a loopback port on its own machine and opens a page only when the answer is a valid pairing link for that same port.
 That is the reach of a printed link without the click.
 The window half takes at most one request per pane every 5 s, counted on Tern's monotonic clock.
+Only a direct claim stamps that limit; a deferred claim (Focus rule) neither checks nor stamps it, so one request written to several panes never locks the others out of their own next request.
 
 ## Claim rule and two windows
 
@@ -99,9 +102,46 @@ On every failure the helper returns the live link, as link mode does, and never 
 
 ## Default mode
 
-Pane mode is the default only when the helper finds a terminal among its ancestors and either `TERN_PANE` is set or an ancestor process is named `tern`.
+Pane mode is the default when the helper finds a terminal among its ancestors and either `TERN_PANE` is set or an ancestor process is named `tern`.
+With no terminal among its ancestors, it is also the default when the account lookup below finds at least one candidate in Tern.
 That test only picks a default; the plugin's claim is the proof.
 An explicit `browser_mode` or `--browser` always wins.
+
+## Focus rule
+
+A version 2 request may reach several panes at once, one request id for all of them.
+The pane that is focused claims it directly and the page goes above it, as in version 1.
+Every other pane that sees it claims with `defer=1`.
+The service holds a deferred claim for up to 1.5 s: a direct claim in that time wins and the deferred claimer gets 404; still pending after it, the first deferred claimer gets the link and the window opens it beside the focused pane with no move, reporting `beside`.
+At most 2 deferred claims wait at once across the service (it has 8 ordinary handler slots); a third answers 404 at once, so waits never starve the helper's state poll.
+The window's 3 s fetch timeout covers the 1.5 s wait.
+An unknown focus never counts as the asker: such a pane defers.
+Known risk: when focus moved while the agent worked, the page follows the focus, not the pane that asked.
+The "page beside" outcome lives in the service, not in a window timer, because no window timer was proven in the spike.
+
+## Agents whose commands do not run under the pane
+
+Measured 14 Nov 2026 on codexbwai (Codex 0.167.2): the TUI runs on the pane's terminal, but commands are children of the account's long-lived app-server daemon, which has no terminal.
+The ancestor walk therefore finds nothing, and before SKILLS-160 the helper answered `browser_mode_required`.
+Codex sets `CODEX_THREAD_ID` for its commands; nothing found ties that id to a TUI process.
+`/proc/<pid>/stat` is world-readable and its `tty_nr` names the process's controlling terminal.
+
+The ancestor road stays first and unchanged.
+Only when it finds nothing and an agent marker variable is present does the helper look up the account's own agent front ends.
+The marker table is closed: `CODEX_THREAD_ID` maps to the front-end process name `codex`; a new agent is one row, added after it is measured.
+A candidate is a process of that name whose real uid is this account's and whose `tty_nr` decodes to a Unix98 pseudo-terminal (majors 136 to 143) this account owns and may write.
+A candidate counts only when it is in Tern: `TERN_PANE` set in its own environ, or an ancestor named `tern`; a candidate outside Tern is never written to.
+Candidates are deduplicated by terminal, sorted, and capped at 8 (the service's offer cap).
+A process that vanishes or cannot be read mid-scan is skipped; the lookup is empty when `/proc` cannot be read at all.
+Another account's environ is never read.
+
+Every request found this way is title version 2, `glitch-idea:2:<port>:<rid>`, whatever the number of candidates, because a lone candidate may be another session's pane (the asker may be a headless `codex exec`).
+One request id goes to every candidate terminal, the helper waits once, then writes the fixed title back to each.
+Version 2 is focus-gated in the window plugin (0.3.0 and later): see Focus rule below.
+With plugin 0.2.0 a version 2 request is ignored and reads `plugin_no_answer`, so the helper falls back to the link as before.
+A transient `busy` from the helper's own service during the state poll is asked again within the same deadlines.
+
+Limits: same account only, the front-end name table, Linux `/proc` only (Windows and macOS hosts keep today's behaviour).
 
 ## Not tested
 
