@@ -72,6 +72,37 @@ function M.result_url(port, rid, how)
     return "http://127.0.0.1:" .. tostring(port) .. "/api/v1/tern-result?rid=" .. rid .. "&how=" .. how
 end
 
+local ASK_MS = 30000 -- an offer's life at the idea service
+local MAX_ASKS = 16
+
+-- Tally of the panes that raised one request id, so a deferred claim can tell a lone asker from a tie (two sessions
+-- of one account each get the same request). book is the caller's table; now is the monotonic ms clock or nil.
+-- Without a clock, or with the book full, nothing is recorded, which reads as a tie: the page stays beside focus.
+function M.note_asker(book, rid, pane, now)
+    if type(book) ~= "table" or type(now) ~= "number" then return end
+    local count = 0
+    for key, entry in pairs(book) do
+        if now - entry.at > ASK_MS or now < entry.at then book[key] = nil else count = count + 1 end
+    end
+    local entry = book[rid]
+    if entry == nil then
+        if count >= MAX_ASKS then return end
+        entry = { at = now, n = 0, panes = {} }
+        book[rid] = entry
+    end
+    if not entry.panes[pane] then
+        entry.panes[pane] = true
+        entry.n = entry.n + 1
+    end
+end
+
+-- True only when exactly one pane of this window raised rid.
+function M.sole_asker(book, rid)
+    if type(book) ~= "table" then return false end
+    local entry = book[rid]
+    return entry ~= nil and entry.n == 1
+end
+
 -- decode is injected (tern.json.decode drops members whose value is null).
 function M.parse_claim(body, decode)
     if type(body) ~= "string" or type(decode) ~= "function" then return nil end

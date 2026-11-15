@@ -20,7 +20,9 @@ The plugin acts only when Tern knows the pane that wrote the title, and takes at
 
 Some agents run their commands away from the pane, so the idea skill cannot always tell which of your panes asked; it then writes one version 2 request to each pane that could have.
 The pane you are focused on takes it and the page opens above that pane.
-When none of those panes is focused, the page opens beside one of them after a short wait, in that pane's own tab, and your focus stays where it is.
+When none of those panes is focused and only one pane got the request, the page opens beside it after a short wait, in that pane's own tab, and your focus stays where it is.
+When several panes got it (two sessions of one account, say) and none is focused, the asker cannot be known, so the page opens beside the pane you are focused on.
+The window counts only the panes it shows.
 If you switch to another of those panes while the agent is still working, the page goes above the one you are on.
 A version 2 request from a pane that is not focused does not count toward that pane's 5-second limit.
 

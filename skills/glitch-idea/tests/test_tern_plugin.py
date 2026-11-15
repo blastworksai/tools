@@ -24,7 +24,7 @@ DENY_LIST = ('odin', 'cmdr', 'claudekk', 'claudebwai', 'codexkk', 'blastworks', 
 class TernPlugin(unittest.TestCase):
     def test_manifest(self):
         meta = tomllib.loads((PLUGIN / 'plugin.toml').read_text(encoding='utf-8'))
-        self.assertEqual(meta, dict(schema=1, id='glitch-idea', name=meta['name'], version='0.3.1',
+        self.assertEqual(meta, dict(schema=1, id='glitch-idea', name=meta['name'], version='0.3.2',
                                     description=meta['description'], window='window.luau'))
         self.assertNotIn('host', meta)
         self.assertTrue(meta['name'] and meta['description'])
@@ -121,7 +121,7 @@ class TernPlugin(unittest.TestCase):
     def test_a_deferred_claim_goes_beside_the_asker_and_leaves_focus_where_it_is(self):
         # The person may have moved to another tab while the agent worked: the page joins the asking pane
         # (in its own tab), beside it, and focus stays where the person is.
-        self.assertIn('local how = place(cx, url, asker, not deferred)', CODE)
+        self.assertIn('local how = place(cx, url, asker, not deferred, sole)', CODE)
         place = CODE[CODE.index('local function place'):CODE.index('local function on_claim')]
         self.assertEqual(place.count('cx.layout:move('), 2)
         start = place.index('if lift then')
@@ -133,6 +133,33 @@ class TernPlugin(unittest.TestCase):
         self.assertLess(place.index('cx:open('), place.index('cx.layout:move(page, asker, "right"'))
         self.assertLess(place.index('page == asker'), start)  # never moves the asker onto itself
         self.assertIn('&defer=1', REQUEST_CODE)
+
+    def test_a_tie_stays_beside_the_focused_pane(self):
+        # Several panes raised one request (two sessions of one account) and none is focused: the asker cannot be
+        # known, so the page stays beside the focused pane. Only a lone asker gets the page moved into its own tab.
+        title = CODE[CODE.index('local function on_title'):]
+        self.assertIn('request.note_asker(asked_by, rid, asker, now_ms())', title)
+        self.assertLess(title.index('known == nil then return end'), title.index('request.note_asker'))
+        self.assertLess(title.index('request.note_asker'), title.index('local deferred'))
+        claim = CODE[CODE.index('local function on_claim'):CODE.index('local function on_title')]
+        self.assertIn('local sole = deferred and request.sole_asker(asked_by, rid)', claim)  # read at answer time
+        self.assertIn('local how = place(cx, url, asker, not deferred, sole)', claim)
+        place = CODE[CODE.index('local function place'):CODE.index('local function on_claim')]
+        start = place.index('if sole then')
+        gated = place[start:place.index('\n    end\n', start)]
+        self.assertIn('cx.layout:move(page, asker, "right", { focus = false })', gated)
+        self.assertEqual(place.count('"right"'), 1)  # the deferred move exists only under the sole gate
+        self.assertIn('local asked_by = {}', CODE)
+
+    def test_the_asker_tally_is_pure_bounded_and_defaults_to_a_tie(self):
+        note = REQUEST_CODE[REQUEST_CODE.index('function M.note_asker'):REQUEST_CODE.index('function M.sole_asker')]
+        self.assertIn('type(now) ~= "number" then return end', note)  # no clock: nothing recorded, reads as a tie
+        self.assertIn('now - entry.at > ASK_MS', note)
+        self.assertIn('count >= MAX_ASKS then return end', note)  # a full book records nothing new: a tie
+        self.assertIn('ASK_MS = 30000', REQUEST_CODE)
+        self.assertIn('MAX_ASKS = 16', REQUEST_CODE)
+        sole = REQUEST_CODE[REQUEST_CODE.index('function M.sole_asker'):]
+        self.assertIn('entry ~= nil and entry.n == 1', sole)
 
     def test_rate_clock_is_the_monotonic_tern_clock(self):
         self.assertIn('tern.now()', CODE)

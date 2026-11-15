@@ -112,7 +112,10 @@ An explicit `browser_mode` or `--browser` always wins.
 A version 2 request may reach several panes at once, one request id for all of them.
 The pane that is focused claims it directly and the page goes above it, as in version 1.
 Every other pane that sees it claims with `defer=1`.
-The service holds a deferred claim for up to 1.5 s: a direct claim in that time wins and the deferred claimer gets 404; still pending after it, the first deferred claimer gets the link, and the window opens it and moves it beside that claimer with `focus = false`, reporting `beside`: the page lands in the claimer's own tab and the person's focus stays where it is (window plugin 0.3.1; 0.3.0 left it beside the focused pane, which could be another tab).
+The service holds a deferred claim for up to 1.5 s: a direct claim in that time wins and the deferred claimer gets 404; still pending after it, the first deferred claimer gets the link, and the window opens it beside the focused pane, reporting `beside`.
+When that claimer was the only pane of the window that raised the request id, the window then moves the page beside the claimer with `focus = false`: the page lands in the claimer's own tab and the person's focus stays where it is (window plugin 0.3.1).
+When several panes raised it (two sessions of one account), the first deferred claimer is simply the first terminal written, not necessarily the asker, so the page stays beside the focused pane (0.3.2; 0.3.1 moved it beside that first claimer, which put it in the wrong tab, measured 15 Nov 2026).
+Nothing ties a Codex session to its front end: the front end holds no thread file and its log rows carry no thread id.
 At most 2 deferred claims wait at once across the service (it has 8 ordinary handler slots); a third answers 404 at once, so waits never starve the helper's state poll.
 The window's 3 s fetch timeout covers the 1.5 s wait.
 An unknown focus never counts as the asker: such a pane defers.
@@ -138,7 +141,7 @@ Another account's environ is never read.
 
 Every request found this way is title version 2, `glitch-idea:2:<port>:<rid>`, whatever the number of candidates, because a lone candidate may be another session's pane (the asker may be a headless `codex exec`).
 One request id goes to every candidate terminal, the helper waits once, then writes the fixed title back to each.
-Version 2 is focus-gated in the window plugin (0.3.0 and later; 0.3.1 places a deferred page beside the asker): see Focus rule below.
+Version 2 is focus-gated in the window plugin (0.3.0 and later; from 0.3.2 a deferred page joins the asker only when it is the lone pane that raised the request): see Focus rule below.
 With plugin 0.2.0 a version 2 request is ignored and reads `plugin_no_answer`, so the helper falls back to the link as before.
 A transient `busy` from the helper's own service during the state poll is asked again within the same deadlines.
 
