@@ -115,7 +115,8 @@ Every other pane that sees it claims with `defer=1`.
 The service holds a deferred claim for up to 1.5 s: a direct claim in that time wins and the deferred claimer gets 404; still pending after it, the first deferred claimer gets the link, and the window opens it beside the focused pane, reporting `beside`.
 For version 3 (the helper's only candidate) the window then moves the page beside the claimer with `focus = false`: the page lands in the claimer's own tab and the person's focus stays where it is.
 For version 2 (several candidates) the first deferred claimer is simply the first terminal written, not necessarily the asker, so the page stays beside the focused pane (window plugin 0.3.3; 0.3.1 moved every deferred page beside its claimer, which put it in the wrong tab with two Codex sessions of one account, measured 15 Nov 2026).
-The helper, not the window, decides the version, because only the helper knows how many terminals it wrote to; a window sees only the panes it shows.
+The helper, not the window, decides the version, because only the helper knows how many candidates it found; a window sees only the panes it shows.
+The version is fixed from the candidates found, before any write: when several were found and a write fails, the remaining panes still get version 2, because the pane whose write failed may be the asker; telling the other one it is the only candidate could put the page in the wrong tab.
 Nothing ties a Codex session to its front end: the front end holds no thread file and its log rows carry no thread id.
 At most 2 deferred claims wait at once across the service (it has 8 ordinary handler slots); a third answers 404 at once, so waits never starve the helper's state poll.
 The window's 3 s fetch timeout covers the 1.5 s wait.

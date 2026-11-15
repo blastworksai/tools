@@ -5,7 +5,7 @@ It opens the local idea page as a browser split above the pane that asked for it
 
 ## What it does
 
-- Listens for a pane title of the form `glitch-idea:<version>:<port>:<request id>`, version 1 or 2.
+- Listens for a pane title of the form `glitch-idea:<version>:<port>:<request id>`, version 1, 2 or 3.
 - Fetches the pairing link once from `http://127.0.0.1:<port>/` on your computer, using that request id.
 - Opens the link above the asking pane, then tells the idea service whether it went `above`, `beside` or `open_failed`.
 - The pairing link never travels in a title.
