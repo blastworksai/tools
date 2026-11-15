@@ -24,16 +24,19 @@ local function report(port, rid, how)
     pcall(function() tern.fetch(url, { timeout_ms = 3000 }, function() end) end)
 end
 
--- Open the page beside the focused pane, then (lift) move it above the asking pane. Uses only the fresh cx it is given.
+-- Open the page beside the focused pane, then move it to the asking pane: above it (lift), or beside it with focus left
+-- where it is (a deferred claim; the asker may sit in another tab). Uses only the fresh cx it is given.
 local function place(cx, url, asker, lift)
     local opened = pcall(function() cx:open(url, "beside", { focus = true }) end)
     if not opened then return "open_failed" end
-    if not lift then return "beside" end
     local okay, page = pcall(function() return cx.session:focused() end)
-    if okay and type(page) == "number" and page ~= asker then
+    if not okay or type(page) ~= "number" or page == asker then return "beside" end
+    if lift then
         local moved, done = pcall(function() return cx.layout:move(page, asker, "up") end)
         if moved and done == true then return "above" end
+        return "beside"
     end
+    pcall(function() return cx.layout:move(page, asker, "right", { focus = false }) end)
     return "beside"
 end
 
@@ -54,7 +57,7 @@ local function on_title(ev, cx)
     local okay, known = pcall(function() return cx.session:pane(asker) end)
     if not okay or known == nil then return end
     -- Version 2 from a pane that is not focused: a deferred claim, which the service grants only when no focused pane
-    -- claimed directly; it opens beside the focused pane. It neither checks nor stamps the rate rule (the service caps it).
+    -- claimed directly; it opens beside the asking pane, focus unmoved. It neither checks nor stamps the rate rule (the service caps it).
     local deferred = version == 2 and not focused(cx, asker)
     if not deferred then
         local now = now_ms()

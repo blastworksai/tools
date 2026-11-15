@@ -242,7 +242,7 @@ def write_title(path, text, *, opener=os.open, writer=os.write):
         return False
 
 
-TITLE_VERSIONS = (1, 2)  # 1: claim at once, place above the asker. 2: focus-gated (plugin 0.3.0).
+TITLE_VERSIONS = (1, 2)  # 1: claim at once, place above the asker. 2: focus-gated (plugin 0.3.0 and later).
 TRANSIENT = ('busy', 'runtime_busy')
 
 
