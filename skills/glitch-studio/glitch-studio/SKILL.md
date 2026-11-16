@@ -59,9 +59,11 @@ Run this first, every time.
 5. If file 07 says `Picked: pending`, STOP until the build and every fix task have run.
    Then update file 07 first.
    Then do the stage 7 resume steps.
-6. Otherwise continue at the first missing number.
-7. Never redo a finished stage, unless the user asks.
-8. Tell the user: "Resuming at stage N. Files 00 to N-1 exist."
+6. If file 08 or 09 says `Picked: pending`, STOP until its fix task has run.
+   Then review the repair commit as in stage 7 resume step 8, finish the checks in that file, and replace `Picked: pending`.
+7. Otherwise continue at the first missing number.
+8. Never redo a finished stage, unless the user asks.
+9. Tell the user: "Resuming at stage N. Files 00 to N-1 exist."
 
 The ten file paths, the fields each file holds and the ending lines are in [evidence.md](references/evidence.md).
 Each stage writes exactly one file.
@@ -233,8 +235,10 @@ This stage is never `none`.
    You do not fix product code yourself.
    Give the user the task text to paste after `/glitch-plan` in a fresh window.
    Then give the `/glitch-execute` line it prints.
+   Write file 08 with `Picked: pending` and the open fix task.
+   STOP until the fix task has run.
    Review the repair commit as in stage 7 resume step 8.
-   After that, prove the part again.
+   After that, prove the part again and replace `Picked: pending`.
 
 ## Stage 9 — Models inside the product
 
@@ -250,9 +254,11 @@ Read [runtime-models.md](references/runtime-models.md) and follow it.
 3. If a check fails, write a fix task for the owning lane.
    Give the user the task text to paste after `/glitch-plan` in a fresh window.
    Then give the `/glitch-execute` line it prints.
+   Write file 09 with `Picked: pending` and the open fix task.
+   STOP until the fix task has run.
    After the repair commit, review it as in stage 7 resume step 8.
    Rerun every failed stage 9 check.
-   Record the new result and evidence in file 09.
+   Record the new result and evidence in file 09, and replace `Picked: pending`.
    Then refresh the stage 8 proof for that part.
 
 ## Finish

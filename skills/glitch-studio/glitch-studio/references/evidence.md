@@ -16,8 +16,8 @@ They are the same in the neutral studio skill and in this one.
 | 5 | `studio/05-lanes.md` | per lane: name, part, folder scope, tier chosen; stops raised (`pending` until the build); a revision note if the stage 0 mapping changed; `Plan:` line (and the archived plan path after the build) |
 | 6 | `studio/06-model-tiers.md` | the final tier-to-model table (tier, model, family, reachable); a tier per part with one line why; the builder level the plan names (the level it actually names after the build); the tiers the lanes actually used (`pending` until the build); a revision note if the mapping changed, or `none`; the critic line (model and family, or `none reachable`); same-family review yes or no |
 | 7 | `studio/07-review-and-integrate.md` | per lane: review result, findings, critic model and family (or "same-family"), critic result, lane commit, test result after that commit; the commit order; any stop; the user's decision when a review was same-family; the review and test result of every repair commit, under its lane; `Picked: pending` until every fix task found at stage 7 has run |
-| 8 | `studio/08-proof.md` | per part: kind (visual or behaviour), proof file paths or command, sizes checked, judged against, result, what is wrong; never `Picked: none` |
-| 9 | `studio/09-runtime-models.md` | per runtime call: tier, grammar, builder, refusal rule, budget, scoring; one line per rule (four) with its audit result; one audit line each for least access, reply validation and fail-closed fallback, with evidence; any fix task; the rerun of each failed check with its new result and evidence; the refreshed stage 8 proof; or `Picked: none` with the reason |
+| 8 | `studio/08-proof.md` | per part: kind (visual or behaviour), proof file paths or command, sizes checked, judged against, result, what is wrong; `Picked: pending` while a fix task is open; never `Picked: none` |
+| 9 | `studio/09-runtime-models.md` | per runtime call: tier, grammar, builder, refusal rule, budget, scoring; one line per rule (four) with its audit result; one audit line each for least access, reply validation and fail-closed fallback, with evidence; any fix task; the rerun of each failed check with its new result and evidence; the refreshed stage 8 proof; `Picked: pending` while a fix task is open; or `Picked: none` with the reason |
 
 ## The ending
 
@@ -57,9 +57,11 @@ There are no lane merges.
    Replace the placeholder in all three when the plan exists, before stage 6.
 5. If file 07 says `Picked: pending`, STOP until the build and every fix task have run.
    Then update file 07 first, and do the stage 7 resume steps.
-6. Then continue at the first missing number.
-7. Never redo a finished stage, unless the user asks.
-8. Say which stage you resume at.
+6. If file 08 or 09 says `Picked: pending`, STOP until its fix task has run.
+   Then review the repair commit, finish the checks in that file, and replace `Picked: pending`.
+7. Then continue at the first missing number.
+8. Never redo a finished stage, unless the user asks.
+9. Say which stage you resume at.
 
 ## A worked example
 
