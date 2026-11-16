@@ -4,7 +4,7 @@ import {METHOD_LABELS, SELECTABLE_METHODS, RETIRED_METHODS, validMethod, convers
 
 const LINES = {
   'bounded-plan': 'Agree the scope and acceptance criteria now, then build it.',
-  'bmad': 'Fix a written brief, requirements and architecture first; then build story by story.',
+  'bmad': 'Fix a written brief, requirements and architecture first; then build story by story. Best for big builds (a project or an epic). Smaller work usually goes faster with Full Plan Up Front.',
   'appetite-led': 'Set how much you will invest; the scope flexes inside it.',
   'experiment-led': 'Start from one uncertainty and the evidence that settles it.',
 };
@@ -13,7 +13,7 @@ const METHODS = SELECTABLE_METHODS.map(key => [key, METHOD_LABELS[key], LINES[ke
 // Plain-language "Tell me more" text, paraphrased from references/methods.md.
 const MORE = {
   'bounded-plan': 'You fix a clear scope and its acceptance criteria now, and the next step is earned by verifying the bounded change. It fits a change you already understand. It can still contain an experiment inside another method.',
-  'bmad': 'You fix a written brief, requirements and architecture before any building, and the next step is earned by building each story and checking it against those documents. It fits larger work where several roles\' views must agree before code.',
+  'bmad': 'You fix a written brief, requirements and architecture before any building, and the next step is earned by building each story and checking it against those documents. It fits big builds (a project or an epic) where several roles\' views must agree before code; smaller work usually goes faster with Full Plan Up Front.',
   'appetite-led': 'You set an investment cap and the outcome boundaries, and the scope flexes inside that cap. The next step is earned by a completed bet or an explicit stop or reshape. It fits work where the scope can vary within the cap you choose. You give the cap in Exploration.',
   'experiment-led': 'You fix a question, the evidence that would settle it and a bounded experiment. The evidence decides whether to proceed, change course or stop. It fits work whose value or feasibility is uncertain. You give the question and evidence in Exploration.',
 };

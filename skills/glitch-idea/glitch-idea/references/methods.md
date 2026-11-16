@@ -13,12 +13,12 @@ A screen count, repository count or terse description does not determine scope. 
 
 ## Four development methods
 
-The operator chooses; the agent never selects or favours one. The id in parentheses is the helper's stored `method` value.
+The operator chooses; the agent never selects or favours one. The one exception is the BMAD size check in Exploration: when the agreed scope is a small change or a capability, the agent says once that BMAD is meant for big builds, and the operator's answer stands. The id in parentheses is the helper's stored `method` value.
 
 | Choice | Fixed now | Earns the next step | Good fit |
 |---|---|---|---|
 | Full Plan Up Front (`bounded-plan`) | Clear scope and acceptance criteria | Verification of the bounded change | An understood change |
-| BMAD (Roles and Stories) (`bmad`) | A written brief, requirements and architecture before any building | Each story is built and checked against those documents | Larger work where several roles' views must agree before code |
+| BMAD (Roles and Stories) (`bmad`) | A written brief, requirements and architecture before any building | Each story is built and checked against those documents | Big builds (a project or an epic) where several roles' views must agree before code; smaller work usually goes faster with Full Plan Up Front |
 | Fixed Budget, Build what Fits (`appetite-led`) | Operator's investment cap and outcome boundaries | Completed bet or explicit stop/reshape | Scope can flex inside the chosen cap |
 | Experiment First (`experiment-led`) | A question, evidence criterion and bounded experiment | Evidence supports proceeding, changing or stopping | Uncertain value or feasibility |
 
@@ -27,6 +27,7 @@ APIV (Align, Plan, Implement, Verify) is the loop all four methods run inside. V
 The stored value `adaptive-slices` (Vertical Slicing (Agile)) is retired: saved ideas that carry it still show it, and it can no longer be chosen.
 
 BMAD itself scales its documents to the size of the work: its brief is optional and one-session work goes straight to build. Choosing BMAD here means the full route, documents first.
+For smaller work (a small change or a capability), the APIV road through Full Plan Up Front into /glitch-plan usually fits better than BMAD.
 
 ### Inner methods for sketched items
 
