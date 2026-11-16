@@ -6,7 +6,7 @@ A lane is one fresh agent session working one spec.
 
 For each spec:
 
-0. Before the first lane, pick a tier for each lane from the mapping you made in stage 0. Use [model-tiers.md](model-tiers.md). You may revise the mapping; say so if you do. Write down the lane tiers; stage 6 records them.
+0. Before the first lane, pick a tier for each lane from the mapping you made in stage 0. Use [model-tiers.md](model-tiers.md). You may revise the mapping; if you do, note it in `studio/05-lanes.md`. Write down the lane tiers; stage 6 records them.
 1. Make a git worktree on its own branch, cut from the freeze commit recorded in stage 4 (the base commit when there are no contracts).
 2. Give the lane the spec path and tell it its folder scope.
 3. Tell the lane to read the domain skills and study notes the spec names.
@@ -49,6 +49,7 @@ The lane repeats this until the task list is done:
 ## Evidence file: `studio/05-lanes.md`
 
 One row per lane: lane name, spec, branch, worktree path, folder scope, task count, commit count, tier chosen, stops raised.
+Add a note if you revised the stage 0 mapping.
 End with the three lines.
 `Picked:` the lanes started, each by name.
 `Left out:` specs you did not start, and why.

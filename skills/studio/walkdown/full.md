@@ -1,7 +1,7 @@
-# studio-r4: full report
+# studio-r5: full report
 
-skills/studio | retrieved 2026-11-16 | sha256 32900af0f827a14d612ac74a51a40e4c4710482c28b973cc21dab10530b805e7
-Run 2026-11-16_32900af | Walkdown 0.3.1+blastworks.1
+skills/studio | retrieved 2026-11-16 | sha256 475142f722232a619f9f139757decc418c0a87fee81bb6adb7a7f0e3ad16094b
+Run 2026-11-16_475142f | Walkdown 0.3.1+blastworks.1
 Static examination only. Nothing executed. Every finding below is a location to look at; none is a verdict. Stage order; nothing is ranked.
 
 ## 1 What ships
@@ -10,7 +10,7 @@ Static examination only. Nothing executed. Every finding below is a location to 
 
 Validation: PASS (gate 26/26, negative 7/7; measured 2026-11-02, same code and fixtures)
 
-Pin: sha256 32900af0f827a14d612ac74a51a40e4c4710482c28b973cc21dab10530b805e7, 14 files, 47,094 bytes.
+Pin: sha256 475142f722232a619f9f139757decc418c0a87fee81bb6adb7a7f0e3ad16094b, 14 files, 47,257 bytes.
 
 Formats: md 12, (none) 2.
 
@@ -91,7 +91,7 @@ None.
 
 ## 3 What loads what
 
-2 entry points. 0 orphans. 58 dangling references (58 code; 1 of them into a folder the repository does not have). 8 dynamic loads: 0 files loaded only through one (named by nothing), 1 file reached only through a mention of a folder or wildcards. Graph incomplete by construction.
+2 entry points. 0 orphans. 60 dangling references (60 code; 1 of them into a folder the repository does not have). 8 dynamic loads: 0 files loaded only through one (named by nothing), 1 file reached only through a mention of a folder or wildcards. Graph incomplete by construction.
 
 Validation: PASS (gate 11/11, negative 7/7; measured 2026-11-02, same code and fixtures)
 
@@ -129,7 +129,7 @@ None.
 
 None.
 
-### Dangling references (57)
+### Dangling references (59)
 
 - README.md:43: `studio/00-frame.md` (code)
 - README.md:43: `studio/09-runtime-models.md` (code)
@@ -140,11 +140,12 @@ None.
 - prompts.md:75: `studio/03-parts-and-specs.md` (code)
 - prompts.md:87: `studio/04-contracts.md` (code)
 - prompts.md:92: `studio/00-frame.md` (code)
-- prompts.md:99: `studio/05-lanes.md` (code)
-- prompts.md:111: `studio/06-model-tiers.md` (code)
-- prompts.md:123: `studio/07-review-and-integrate.md` (code)
-- prompts.md:132: `studio/08-proof.md` (code)
-- prompts.md:139: `studio/09-runtime-models.md` (code)
+- prompts.md:94: `studio/05-lanes.md` (code)
+- prompts.md:100: `studio/05-lanes.md` (code)
+- prompts.md:113: `studio/06-model-tiers.md` (code)
+- prompts.md:125: `studio/07-review-and-integrate.md` (code)
+- prompts.md:134: `studio/08-proof.md` (code)
+- prompts.md:141: `studio/09-runtime-models.md` (code)
 - studio/SKILL.md:50: `studio/00-frame.md` (code)
 - studio/SKILL.md:59: `THIRD_PARTY_NOTICES.md` (code)
 - studio/SKILL.md:59: `studio/01-study-reference.md` (code)
@@ -172,6 +173,7 @@ None.
 - studio/references/evidence.md:29: `THIRD_PARTY_NOTICES.md` (code)
 - studio/references/evidence.md:71: `studio/02-domain-skills.md` (code)
 - studio/references/evidence.md:83: `studio/09-runtime-models.md` (code)
+- studio/references/lanes.md:9: `studio/05-lanes.md` (code)
 - studio/references/lanes.md:46: `studio/04-contracts.md` (code)
 - studio/references/lanes.md:49: `studio/05-lanes.md` (code)
 - studio/references/model-tiers.md:22: `studio/00-frame.md` (code)
@@ -215,7 +217,7 @@ None.
 
 ## 4 What the text asks for
 
-4a 0 · 4b 12 · 4c 2 · 4d 0 hits on 14 lines (9 read by a model, 5 human-facing); benign share not measured (stage 6 labels did not run). Hosts: 3, 0 not named in the docs. Confirm-first or prohibited actions in instruction text: 0, 0 with no confirmation step, 0 stated as prohibitions. Conditionals: 22 absence, 5 error, 3 harness. Definitions: 6, 1 conflict, 6 safety-word definitions. Long files with flagged lines: 0, 0 with some past the reader window. Sentences repeated across files: 11, 1 flagged. Lines that look like committed secrets: 0.
+4a 0 · 4b 12 · 4c 2 · 4d 0 hits on 14 lines (9 read by a model, 5 human-facing); benign share not measured (stage 6 labels did not run). Hosts: 3, 0 not named in the docs. Confirm-first or prohibited actions in instruction text: 0, 0 with no confirmation step, 0 stated as prohibitions. Conditionals: 22 absence, 5 error, 3 harness. Definitions: 6, 1 conflict, 6 safety-word definitions. Long files with flagged lines: 0, 0 with some past the reader window. Sentences repeated across files: 12, 1 flagged. Lines that look like committed secrets: 0.
 
 Validation: PASS (gate 153/153, negative 121/121, recall 43/43; measured 2026-11-02, same code and fixtures)
 
@@ -305,7 +307,7 @@ None.
 
 ### Tables
 
-Hosts: 3, 0 not named in the docs. Confirm-first or prohibited actions in instruction text: 0, 0 with no confirmation step, 0 stated as prohibitions. Conditionals: 22 absence, 5 error, 3 harness. Definitions: 6, 1 conflict, 6 safety-word definitions. Long files with flagged lines: 0, 0 with some past the reader window. Sentences repeated across files: 11, 1 flagged. Lines that look like committed secrets: 0.
+Hosts: 3, 0 not named in the docs. Confirm-first or prohibited actions in instruction text: 0, 0 with no confirmation step, 0 stated as prohibitions. Conditionals: 22 absence, 5 error, 3 harness. Definitions: 6, 1 conflict, 6 safety-word definitions. Long files with flagged lines: 0, 0 with some past the reader window. Sentences repeated across files: 12, 1 flagged. Lines that look like committed secrets: 0.
 
 ### Endpoints (hosts named anywhere; documented = named in the docs) (3)
 
@@ -324,10 +326,10 @@ None.
 - prompts.md:59: absence: if `If none exists` then `write a small skill before any product code: auth and token types, the endpoints the product uses, scopes, rate limits, payload examples, known traps.`
 - prompts.md:63: harness: if `If there is no outside platform` then `` write the file with `Picked: none`. ``
 - prompts.md:87: absence: if `after freeze" (empty if none` then `` Write `studio/04-contracts.md` with each contract's name, path, producer and readers, the freeze commit, and a section "Changes otherwise each change with its reason and the lanes told). ``
-- prompts.md:94: absence: if `when there are no contracts).` then `For each spec, make a git worktree on its own branch, cut from the freeze commit recorded in stage 4 (the base commit`
-- prompts.md:110: absence: if `If no second family is reachable` then `say the review will be same-family and ask me.`
-- prompts.md:139: absence: if `If the product calls no model at runtime` then `` write `studio/09-runtime-models.md` with `Picked: none` and the reason. ``
-- prompts.md:141: error: if `If any rule fails` then `send a fix task to the owning lane, then refresh the stage 8 proof for that part after the fix is merged.`
+- prompts.md:95: absence: if `when there are no contracts).` then `For each spec, make a git worktree on its own branch, cut from the freeze commit recorded in stage 4 (the base commit`
+- prompts.md:112: absence: if `If no second family is reachable` then `say the review will be same-family and ask me.`
+- prompts.md:141: absence: if `If the product calls no model at runtime` then `` write `studio/09-runtime-models.md` with `Picked: none` and the reason. ``
+- prompts.md:143: error: if `If any rule fails` then `send a fix task to the owning lane, then refresh the stage 8 proof for that part after the fix is merged.`
 - studio/SKILL.md:21: error: if `If a check did not run` then `say so in the file.`
 - studio/SKILL.md:28: absence: if `If it does not exist` then `begin at stage 0.`
 - studio/SKILL.md:111: absence: if `If none is reachable` then `write that the review is same-family.`
@@ -353,7 +355,7 @@ None.
 ### Definitions (6)
 
 - prompts.md:38: "what done" (explicit): `, the hard parts, the outside platforms, the visual and runtime-model notes, the tier-to-model mapping (tier, model, effort, reachable) and the git state.`
-- prompts.md:129: "done" (explicit): `demonstrated.`
+- prompts.md:131: "done" (explicit): `demonstrated.`
 - studio/SKILL.md:50: "done" (explicit): `, the hard parts, the outside platforms, the visual and runtime-model notes, the tier-to-model mapping, and the project's git state.`
 - studio/SKILL.md:118: "done" (explicit): `demonstrated.`
 - studio/references/evidence.md:28: "done" (explicit): `; the named hard parts; the named outside platforms or APIs; visual part yes or no; runtime model yes or no; tier-to-model mapping (tier, model, effort, reachable); git state |`
@@ -361,12 +363,12 @@ None.
 
 ### Terms defined more than one way (1)
 
-- "done": prompts.md:129; studio/SKILL.md:50; studio/SKILL.md:118; studio/references/evidence.md:28; studio/references/prove-it.md:3
+- "done": prompts.md:131; studio/SKILL.md:50; studio/SKILL.md:118; studio/references/evidence.md:28; studio/references/prove-it.md:3
 
 ### Safety words defined (6)
 
 - prompts.md:38: "what done"
-- prompts.md:129: "done"
+- prompts.md:131: "done"
 - studio/SKILL.md:50: "done"
 - studio/SKILL.md:118: "done"
 - studio/references/evidence.md:28: "done"
@@ -384,7 +386,7 @@ None.
 
 None.
 
-### Sentences repeated across files a model reads (11)
+### Sentences repeated across files a model reads (12)
 
 - prompts.md:9: in 2 files (2 times): `The method comes from the Chatdom.io build write-up (TwitchCon 2026 hackathon, 1st place): https://devpost.com/software/chatdom-io.`
 - prompts.md:19: in 2 files (2 times): `If it exists, read every file.`
@@ -395,6 +397,7 @@ None.
 - prompts.md:71: in 2 files (2 times): `One task is one check and one commit.`
 - prompts.md:83: in 2 files (2 times): `Add a small check that the contracts compile or validate.`
 - prompts.md:84: in 2 files (2 times): `Commit them before any lane starts.`
+- prompts.md:101: in 2 files (2 times): `Add a note if you revised the stage 0 mapping.`
 - studio/SKILL.md:33: in 2 files (2 times), flagged B.safety-exception: `Never redo a finished stage unless the user asks.`
 - studio/SKILL.md:112: in 2 files (2 times): `Merge lanes one at a time.`
 
@@ -469,20 +472,20 @@ Expected context: 32,000 tokens (a line for 200,000 beside it). Tokens are estim
 
 - Every session, once installed (descriptions, hooks): 51 tokens, under 1% of 32,000, under 1% of 200,000
 - When the largest skill runs: 1,654 tokens, 5% of 32,000, under 1% of 200,000
-- That skill and everything it names: 7,782 tokens, 24% of 32,000, 4% of 200,000
-- With its wildcard and folder loads: 8,120 tokens, 25% of 32,000, 4% of 200,000
+- That skill and everything it names: 7,800 tokens, 24% of 32,000, 4% of 200,000
+- With its wildcard and folder loads: 8,138 tokens, 25% of 32,000, 4% of 200,000
 - The largest is `studio/SKILL.md`, of 1 skill, agent, or command.
 
 Every skill, agent, or command, by tier (tokens):
 
-- studio/SKILL.md: runs 1,654, with what it names 7,782, with wildcard loads 8,120
+- studio/SKILL.md: runs 1,654, with what it names 7,800, with wildcard loads 8,138
 
-#### Loads into the AI: 11 files, 31.7 KB, 8,120 tokens
+#### Loads into the AI: 11 files, 31.8 KB, 8,138 tokens
 
 - `studio/SKILL.md`: skills, agents, and commands, 6.5 KB, 1,654 tokens
 - `studio/references/domain-skills.md`: named by a file the AI loads, 2.2 KB, 559 tokens, reached from `studio/SKILL.md`
 - `studio/references/evidence.md`: named by a file the AI loads, 4.2 KB, 1,063 tokens, reached from `studio/SKILL.md`
-- `studio/references/lanes.md`: named by a file the AI loads, 2.2 KB, 569 tokens, reached from `studio/SKILL.md`
+- `studio/references/lanes.md`: named by a file the AI loads, 2.3 KB, 587 tokens, reached from `studio/SKILL.md`
 - `studio/references/model-tiers.md`: named by a file the AI loads, 2.2 KB, 572 tokens, reached from `studio/SKILL.md`
 - `studio/references/prove-it.md`: named by a file the AI loads, 2.1 KB, 528 tokens, reached from `studio/SKILL.md`
 - `studio/references/review-and-integrate.md`: named by a file the AI loads, 2.3 KB, 582 tokens, reached from `studio/SKILL.md`
@@ -495,11 +498,11 @@ Every skill, agent, or command, by tier (tokens):
 
 None.
 
-#### Not used at run time: 3 files, 14.3 KB, 3,659 tokens
+#### Not used at run time: 3 files, 14.4 KB, 3,681 tokens
 
 - `LICENSE`: written for people, 1.3 KB, 338 tokens
 - `README.md`: written for people, 3.9 KB, 1,006 tokens
-- `prompts.md`: nothing points to it, 9.0 KB, 2,315 tokens
+- `prompts.md`: nothing points to it, 9.1 KB, 2,337 tokens
 
 ### Agent and command posture (0)
 
@@ -573,7 +576,7 @@ Questions a pattern cannot settle, and the answers of the backends named here. E
     - soft.label: skipped (no labeling backend)
 - prompts.md:38 [relational] Against the word's ordinary meaning, what does this definition change about how a model would act on instructions that use the word?
     - soft.read: skipped (no relational backend)
-- prompts.md:129 [relational] Against the word's ordinary meaning, what does this definition change about how a model would act on instructions that use the word?
+- prompts.md:131 [relational] Against the word's ordinary meaning, what does this definition change about how a model would act on instructions that use the word?
     - soft.read: skipped (no relational backend)
 - studio/SKILL.md:50 [relational] Against the word's ordinary meaning, what does this definition change about how a model would act on instructions that use the word?
     - soft.read: skipped (no relational backend)
@@ -583,7 +586,7 @@ Questions a pattern cannot settle, and the answers of the backends named here. E
     - soft.read: skipped (no relational backend)
 - studio/references/prove-it.md:3 [relational] Against the word's ordinary meaning, what does this definition change about how a model would act on instructions that use the word?
     - soft.read: skipped (no relational backend)
-- prompts.md:129 [relational] The same word is defined differently in these places. Which instructions elsewhere would read differently under each definition?
+- prompts.md:131 [relational] The same word is defined differently in these places. Which instructions elsewhere would read differently under each definition?
     - soft.read: skipped (no relational backend)
 - (repo) [relational] Describe, as capability and not intent, how these three capabilities could combine in this artifact, citing the evidence given.
     - soft.read: skipped (no relational backend)

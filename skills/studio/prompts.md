@@ -90,13 +90,15 @@ End the file with the three lines.
 ## Prompt 05 of 09 . lanes
 
 Before you start any lane, pick a tier for each lane from the mapping in `studio/00-frame.md`.
-You may revise the mapping; if you do, say so.
+You may revise the mapping.
+If you do, write a note that says so in `studio/05-lanes.md`.
 For each spec, make a git worktree on its own branch, cut from the freeze commit recorded in stage 4 (the base commit when there are no contracts).
 Start one fresh session per spec, at the lane's tier, and give it the spec path and its folder scope.
 Each lane follows this loop: take the next task, write its check, see it fail, make it pass, commit, repeat.
 A lane never edits outside its folder scope and never edits the contracts.
 A lane that needs a contract change stops and tells you.
 Write `studio/05-lanes.md` with a row per lane: lane, spec, branch, worktree, folder scope, task count, commits, tier chosen, stops raised.
+Add a note if you revised the stage 0 mapping.
 End the file with the three lines.
 
 ## Prompt 06 of 09 . model per job
