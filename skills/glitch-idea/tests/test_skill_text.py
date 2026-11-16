@@ -309,6 +309,19 @@ class AgentProtocolTextTests(unittest.TestCase):
             self.assertRegex(body, r"(?i)never re-run waits.{0,80}turn by turn.{0,120}every 25 seconds")
         self.assertRegex(flat(SKILL), r"(?i)empty waits never reset the idle clock, so a forgotten session still pauses after 600 seconds")
 
+    def test_events_loop_file_stays_private(self):
+        """SKILLS-168: the loop's output file goes where only this account can read it, never a shared temp folder."""
+        for text in (SKILL, COMMANDS):
+            body = flat(text)
+            self.assertRegex(body, r"(?i)the loop writes its file in a folder under this account's home that only this account can read.{0,20}mode 0700.{0,20}never a shared temp folder.{0,40}never the runtime folder")
+            self.assertNotIn('/tmp', text)
+
+    def test_runtime_home_fallback_is_documented(self):
+        """SKILLS-168: the third runtime road and its reason value, and agents never improvise a folder."""
+        commands = flat(COMMANDS)
+        self.assertRegex(commands, r"(?i)`\.glitch-idea` folder directly in that home.{0,40}created 0700.{0,160}never re-moded.{0,20}reason `home_state_not_private`")
+        self.assertRegex(flat(SKILL), r"(?i)reports `runtime_root_fallback`; use the folder it reports and never make a runtime folder of your own")
+
     def test_terminal_fills_reset_the_idle_clock(self):
         for text in (SKILL, COMMANDS):
             body = flat(text)

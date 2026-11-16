@@ -186,6 +186,8 @@ A single-account install, and every Windows install, is unchanged.
    `--shared` takes no `runtime_root`, because one folder would be every account's runtime.
    The install marker records `"shared": true`; `--dry-run` reports the same plan plus the registry, group and modes.
 4. **Link it** from each account's skills folder: `ln -s /shared/skills/glitch-idea ~/.codex/skills/glitch-idea`.
+   Each agent CLI reads its own folder: Claude Code reads `~/.claude/skills`, Codex reads `~/.codex/skills`.
+   The Kimi accounts tested so far carry links in `~/.claude/skills`, `~/.codex/skills` and `~/.agents/skills`; which one Kimi reads has not been isolated.
    Run as that account, the helper finds its own row by account name and uses those two ports exactly as if they were written in `config.json`.
 5. **Deploy a release** by rerunning the install command once, as the account that owns the shared folder; every account sees the new version through its link.
    A rerun also repairs modes, group or executable bits that have drifted, and reports `repaired` instead of `unchanged`.
