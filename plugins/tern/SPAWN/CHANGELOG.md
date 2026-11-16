@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.4
+
+- The **Start an agent** title is plain bold text instead of a Markdown heading, which some Tern builds (seen on Windows) drew as the raw "# Start an agent".
+
 ## 0.6.3
 
 - The status-bar prompt never re-grants a released question: a released token is recorded in its own file a stale settings write cannot undo, and a release written after the host stopped polling is still honoured (SKILLS-185).
