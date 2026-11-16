@@ -144,6 +144,52 @@ class RuntimeHomeFallbackTests(unittest.TestCase):
             root,marker=self.resolve()
         self.assertEqual(root,self.home_default);self.assertIsNone(marker)
 
+    def test_world_writable_home_gets_no_fallback(self):
+        self.loose_state();os.chmod(self.home,0o757)
+        root,marker=self.resolve()
+        self.assertEqual(root,self.home_default);self.assertIsNone(marker)
+        self.assertFalse(os.path.lexists(self.fallback))
+
+    def test_private_home_creates_no_folder_at_all(self):
+        self.resolve()
+        self.assertEqual(sorted(os.listdir(self.home)),[])
+
+    def test_missing_home_is_never_created(self):
+        os.rmdir(self.home)
+        root,marker=self.resolve()
+        self.assertEqual(root,self.home_default);self.assertIsNone(marker)
+        self.assertFalse(os.path.lexists(self.home))
+
+    def test_home_removed_mid_call_is_never_recreated(self):
+        """The leaf is created on the home's own descriptor, so a home that vanishes is not rebuilt."""
+        self.loose_state()
+        real_open_chain=idea_runtime._open_chain
+        def vanish(path,**kw):
+            descriptor=real_open_chain(path,**kw)
+            if Path(path)==self.home:
+                for sub in ('.local/state','.local'): os.rmdir(self.home/sub)
+                os.rmdir(self.home)
+            return descriptor
+        with patch.object(idea_runtime,'_open_chain',side_effect=vanish):
+            root,marker=self.resolve()
+        self.assertEqual(root,self.home_default);self.assertIsNone(marker)
+        self.assertFalse(os.path.lexists(self.home))
+
+    def test_swap_after_the_choice_is_refused_by_the_later_runtime_open(self):
+        """The boundary from the default choice to the service's own open of that root."""
+        self.loose_state()
+        root,marker=self.resolve()
+        self.assertEqual(root,self.fallback)
+        os.rmdir(self.fallback)
+        target=self.base/'attacker';target.mkdir();os.chmod(target,0o700)
+        os.symlink(target,self.fallback)
+        store=self.base/'ideas';store.mkdir();os.chmod(store,0o700)
+        runtime=idea_runtime.Runtime(str(store),str(root))
+        with self.assertRaises(idea_runtime.RuntimeError) as caught:
+            with runtime._directories(create=True): pass
+        self.assertEqual(caught.exception.code,'runtime_not_private')
+        self.assertEqual(os.listdir(target),[])
+
     def test_cold_start_twin_second_run_reuses_without_change(self):
         self.loose_state()
         first,marker1=self.resolve()

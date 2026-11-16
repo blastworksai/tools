@@ -310,6 +310,25 @@ def _xdg_runtime_root():
     return Path(xdg)/'glitch-idea'
 
 
+def _private_child(open_chain,home,name):
+    """Open (creating 0700 if absent) one owner-only folder inside the home, anchored on the home's own
+    descriptor: the home must already exist and pass the chain, and nothing but this leaf is ever created.
+    The leaf is opened no-follow and checked on its descriptor; an existing folder is never re-moded."""
+    from idea_runtime import _directory
+    flags=os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC
+    parent=open_chain(home,create=False,private_leaf=False)
+    try:
+        try: os.mkdir(name,0o700,dir_fd=parent)
+        except FileExistsError: pass
+        child=os.open(name,flags,dir_fd=parent)
+        try: _directory(child,private=True)
+        except Exception:
+            os.close(child); raise
+        return child
+    finally:
+        os.close(parent)
+
+
 def _default_runtime_root():
     """Home default first; when its chain is not private, the OS runtime dir; then an owner-only
     .glitch-idea folder directly in the private home. Returns (path, fallback or None)."""
@@ -329,9 +348,8 @@ def _default_runtime_root():
             return target,{'from':str(home_default),'to':str(target),'reason':'home_not_private'}
         # The descriptor chain creates the folder 0700 if absent and refuses a symlink, a file,
         # another owner's folder or a loose mode; an existing folder is checked, never re-moded.
-        if not home.is_dir(): return home_default,None  # only the leaf is ever created
         target=home/'.glitch-idea'
-        os.close(_open_chain(target,create=True,private_leaf=True))
+        os.close(_private_child(_open_chain,home,target.name))
         return target,{'from':str(home_default),'to':str(target),'reason':'home_state_not_private'}
     except Exception:
         return home_default,None
