@@ -69,7 +69,7 @@ The plugin id is `usage`. Then:
 1. Open **USAGE Setup** from the command palette. If USAGE has no private runtime yet, choose **Install private dependencies** and confirm. If Python is missing, use **Open official Python installer page**, or **Select existing Python interpreter** to point at a specific `python3` executable.
 2. In **USAGE Setup**, choose **Allow headless usage reads**. Refresh does nothing until you allow it. You can stop it again from the same menu.
 3. Choose **USAGE Refresh**, or press **Refresh** in the USAGE pane.
-4. Optional: choose which accounts show in the status bar (see [Status bar](#status-bar)). The first time a USAGE window starts, a shared prompt asks once whether to turn on Tern's status bar when it is off. USAGE never turns it on by itself, and respects a later hide.
+4. Optional: choose which accounts show in the status bar (see [Status bar](#status-bar)). The first time a USAGE window starts, a shared prompt asks once whether to add the **Plugin segments** widget to Tern's widget bar when it is not placed. USAGE never adds it by itself, and respects a later hide.
 
 On macOS and Windows, Setup instead shows **PLATFORM HOLD** and platform/setup diagnostics. USAGE account panes and the status summary do not present readings as current or healthy there. Tern's catalog **ready** means only that the package is cataloged as ready; it is not a platform-support claim or a successful provider read.
 

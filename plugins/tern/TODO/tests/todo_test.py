@@ -951,7 +951,7 @@ class WindowContract(unittest.TestCase):
 
     def test_manifest_keeps_version_and_icon(self):
         manifest = self.source('plugin.toml')
-        self.assertIn('version = "0.7.0"', manifest)
+        self.assertIn('version = "0.7.1"', manifest)
         self.assertIn('icon = "list-checks"', manifest)
 
 

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.1
+
+- The status-bar prompt follows Tern 0.9.22's widget bar: it offers to place the **Plugin segments** widget (preference `widgets`, id `status`) instead of reading the retired `status_bar` preference, which raised "Unknown preference" and marked the prompt as asked. Installs that hit that error are asked once more.
+
 ## 0.6.0
 
 - Move the ORCH+ launcher from the Files pane to a status-bar segment (flow icon) that opens Config, and remove the Files-pane button. Palette access is unchanged. ORCH+ asks once, through the shared status-bar prompt, whether to turn the status bar on when it is off. Clicking the launcher starts no controller, activation, admission, continuation or dispatch.

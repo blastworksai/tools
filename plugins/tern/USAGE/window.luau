@@ -215,13 +215,20 @@ local function diagnostics(cx: any?)
 	local request_generation = diagnostics_generation
 	local function show(fresh: any, remote: any?, err: any?)
 		if fresh == nil or request_generation ~= diagnostics_generation then return end
-		local hidden = fresh.settings:get("status_bar") ~= true
+		local placed = false -- the Plugin segments widget (id "status") in the widget bar; an unreadable setting counts as off
+		local read_ok, widgets = pcall(function() return fresh.settings:get("widgets") end)
+		if read_ok and type(widgets) == "table" then
+			for _, entry in widgets do
+				if type(entry) == "table" and entry.id == "status" then placed = true end
+			end
+		end
+		local hidden = not placed
 		local items = {}
 		for _, item in setup_module.diagnostic_items() do table.insert(items, item) end
 		table.insert(items, { label = "Companion: " .. phase, detail = if problem ~= nil then problem.message elseif setup_module.platform_hold() ~= nil then "Companion process state only; this is not platform qualification or healthy usage evidence." else "Original observation times retained; missing quotas are not zero." })
 		table.insert(items, { label = refresh:text(), detail = "The companion runs headless usage reads. No owner-pane input or synthetic turns." })
-		table.insert(items, { label = if hidden then "Status bar off" elseif prefs.enabled then "Usage statistics in status bar: on" else "Usage statistics in status bar: off",
-			detail = "Choose which accounts show in USAGE Configuration. USAGE never turns Tern's status bar on by itself; it asks once.", action = "status" })
+		table.insert(items, { label = if hidden then "Plugin segments off in the status bar" elseif prefs.enabled then "Usage statistics in status bar: on" else "Usage statistics in status bar: off",
+			detail = "Choose which accounts show in USAGE Configuration. USAGE never adds Plugin segments to the status bar by itself; it asks once.", action = "status" })
 		table.insert(items, { label = "Open USAGE Setup", detail = "Runtime, pairing, export and headless-read permission. Accounts come from SPAWN.", action = "setup" })
 		if refresh.progress ~= nil then
 			for _, failure in refresh.progress.failures or {} do

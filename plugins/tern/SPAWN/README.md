@@ -50,7 +50,7 @@ A linked development checkout (`tern plugin link`) is never updated by the plugi
 
 ## Use
 
-Open **SPAWN** from its status-bar segment (sparkle icon) or the command palette. There is no Files-pane button. The first time, SPAWN offers once to turn the status bar on if it is off. Either way it opens a real pane beside the active pane, not a floating menu. An unconfigured installation opens **Setup**; a configured one opens **Start an agent**. Opening either page starts nothing.
+Open **SPAWN** from its status-bar segment (sparkle icon) or the command palette. There is no Files-pane button. The first time, SPAWN offers once to add the **Plugin segments** widget to the status bar if it is not placed. Either way it opens a real pane beside the active pane, not a floating menu. An unconfigured installation opens **Setup**; a configured one opens **Start an agent**. Opening either page starts nothing.
 
 1. **Set up agents.** On **Setup**, use **Guided setup**, or **Add agent on current machine** for manual entry. The description identifies the execution host. The desktop and an attached remote host are different machines.
    Guided setup uses the working folder reported by that execution host. A desktop can display remote paths in its own format; SPAWN does not use that display path to launch the helper. If the host folder changes before startup, setup stops without starting a helper.

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.1
+
+- The status-bar prompt follows Tern 0.9.22's widget bar: it offers to place the **Plugin segments** widget (preference `widgets`, id `status`) instead of reading the retired `status_bar` preference, which raised "Unknown preference" and marked the prompt as asked. Installs that hit that error are asked once more.
+
 ## 0.6.0
 
 - Fix mailbox retirement after a `checkout` without a manifest `base_ref`: the `checkout-base` pin is now a recognised file in producer, withdrawn-tail and target retirement (POSIX and Windows), and is removed with the mailbox instead of blocking it and its reservation.

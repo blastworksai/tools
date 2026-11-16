@@ -58,8 +58,8 @@ local function fresh()
 	function cx:toast(_level, title, detail) live(); table.insert(state.toasts, { title, detail }) end
 	function cx:copy(value) live(); table.insert(state.clipboard, value) end
 	function cx:open(url) live(); state.opened = url end
-	function cx.settings:get() live(); return state.status_bar end
-	function cx.settings:set(_key, value) live(); state.status_bar = value; state.setting_writes += 1 end
+	function cx.settings:get() live(); return state.widgets end
+	function cx.settings:set(_key, value) live(); state.widgets = value; state.setting_writes += 1 end
 	function cx.hosts:list() live(); return state.hosts end
 	if state.remote ~= nil then
 		local remote = state.remote
@@ -100,7 +100,7 @@ local function fresh()
 	return cx
 end
 local function start(remote, local_host)
-	state = { rpc = {}, ui = {}, clipboard = {}, toasts = {}, kv = {}, context = 0, status_bar = false, setting_writes = 0, changed = 0, hosts = {},
+	state = { rpc = {}, ui = {}, clipboard = {}, toasts = {}, kv = {}, context = 0, widgets = nil, setting_writes = 0, changed = 0, hosts = {},
 		timers = {}, host_rpc = {}, local_host = local_host,
 		remote = if remote then { name = remote, panes = {}, events = {}, opened = 0, changes = 0 } else nil }
 	state.source = { source = { device_id = id },
@@ -187,10 +187,10 @@ for _, item in state.ui[1].options.items do
 	check(item.action ~= "summary" and not tostring(item.label):find("Show Summary", 1, true), "Setup no longer carries the old summary switch")
 end
 choose("status")
-check(state.status_opened == 1 and state.setting_writes == 0 and not state.status_bar and next(state.kv) == nil,
+check(state.status_opened == 1 and state.setting_writes == 0 and state.widgets == nil and next(state.kv) == nil,
 	"the status-bar row opens USAGE Configuration and writes neither the Tern setting nor kv")
 state.entry:open(fresh()); menu(); answer(nil)
-check(not state.status_bar and state.setting_writes == 0, "opening setup never turns the status bar on; the shared prompt owns that")
+check(state.widgets == nil and state.setting_writes == 0, "opening setup never turns the status bar on; the shared prompt owns that")
 check(setup.show_summary == nil and state.entry.show_summary == nil, "the old show-summary entry point is gone")
 start(); menu(); choose("metadata")
 local late = table.remove(state.ui, 1)

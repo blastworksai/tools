@@ -1,6 +1,6 @@
 -- Vendored from shared/plugin-status-v1 by sync.py; edit there, then run sync.py.
 --!strict
--- Shared "turn on the status bar?" prompt, asked at most once per plugin install.
+-- Shared "show plugin buttons in the status bar?" prompt, asked at most once per plugin install.
 --
 -- Window half:  require("./status/status_prompt").ensure(cx, "<plugin id>")  once, on the window's first start path
 --               (never inside a chrome formatter: tern.chrome.refresh() raises there).
@@ -16,8 +16,12 @@
 -- Fail closed: no host answer within WAIT_MS means no prompt (and no flag), so the next window start retries.
 local status_prompt = {}
 
-local FLAG = "status_prompt.v1"
-local REQUEST = "status_prompt.v1.request"
+-- v2: Tern 0.9.22 retired the `status_bar` preference for a widget bar (preference `widgets`; the Plugin segments
+-- widget is id "status"). Installs that asked under v1 hit "Unknown preference 'status_bar'" and were recorded as asked
+-- without ever seeing the question, so the flag, request and marker moved to v2 and those installs are asked once more.
+local FLAG = "status_prompt.v2"
+local REQUEST = "status_prompt.v2.request"
+local WIDGET_ID = "status"
 local POLL_MS = 250
 local WAIT_MS = 15000
 local FRESH_S = 30 -- a request older than this belongs to a window that is gone
@@ -31,7 +35,7 @@ local started = false
 -- as "already asked". It names the token it granted, so the one waiting winner window can still recover its grant
 -- when a stale kv write drops the flag before that window polls; every other window only sees "already asked".
 local function marker_path(): string
-	return tern.plugin.data .. "/status_prompt.v1.done"
+	return tern.plugin.data .. "/status_prompt.v2.done"
 end
 
 local function marker_set(): boolean
@@ -96,17 +100,35 @@ function status_prompt.host_serve()
 	tern.timer(0, step)
 end
 
+-- true = Plugin segments widget placed, false = absent, nil = the read failed (never guess; never ask on a failed read).
+local function widget_placed(cx: any): boolean?
+	local ok, list = pcall(function() return cx.settings:get("widgets") end)
+	if not ok or type(list) ~= "table" then return nil end
+	for _, entry in list do
+		if type(entry) == "table" and entry.id == WIDGET_ID then return true end
+	end
+	return false
+end
+
 local function ask(cx: any)
-	if cx.settings:get("status_bar") == true then return end
+	if widget_placed(cx) ~= false then return end
 	local items = {
-		{ label = "Yes, turn on the status bar", detail = "Recommended. The plugin buttons live in the status bar.", answer = true },
-		{ label = "No, keep it off", detail = "You can turn it on later in Settings.", answer = false },
+		{ label = "Yes, show plugin buttons", detail = "Recommended. Adds the Plugin segments widget to the status bar.", answer = true },
+		{ label = "No, leave it as it is", detail = "You can add Plugin segments in Settings later.", answer = false },
 	}
-	cx:pick({ items = items, placeholder = "Would you like to turn on the status bar?", action = "choose" }):next(function(item: any, _err: any, fresh: any)
+	cx:pick({ items = items, placeholder = "Would you like to show plugin buttons in the status bar?", action = "choose" }):next(function(item: any, _err: any, fresh: any)
 		-- Dismiss (nil) and an error leave everything as it was; the flag is already set, so it is never asked again.
 		if type(item) ~= "table" or item.answer ~= true then return end
 		local live = fresh or cx
-		live.settings:set("status_bar", true)
+		local ok, current = pcall(function() return live.settings:get("widgets") end)
+		if not ok or type(current) ~= "table" then return end
+		local list = {}
+		for _, entry in current do
+			if type(entry) == "table" and entry.id == WIDGET_ID then return end
+			table.insert(list, entry)
+		end
+		table.insert(list, { id = WIDGET_ID })
+		if not pcall(function() live.settings:set("widgets", list) end) then return end
 		tern.chrome.refresh()
 	end)
 end
@@ -115,6 +137,8 @@ function status_prompt.ensure(cx: any, plugin_id: string)
 	if started then return end
 	started = true
 	if asked() then return end
+	-- A failed read of the widget placement means no request, no flag and no question; the next start retries.
+	if widget_placed(cx) == nil then return end
 	local token = plugin_id .. ":" .. cx:window_key() .. ":" .. tostring(os.time()) .. ":" .. tostring(math.random(1, 2147483647))
 	local deadline = tern.now() + WAIT_MS
 	local function step(fresh: any?)

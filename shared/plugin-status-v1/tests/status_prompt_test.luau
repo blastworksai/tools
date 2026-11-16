@@ -23,7 +23,7 @@ local function world(preset)
 			end,
 			kv = {
 				get = function(key)
-					if key == "status_prompt.v1.request" and w.request_reads_nil[name] then return nil end
+					if key == "status_prompt.v2.request" and w.request_reads_nil[name] then return nil end
 					return w.kv[key]
 				end,
 				set = function(key, value) w.kv[key] = value end,
@@ -61,12 +61,18 @@ local function world(preset)
 		w.now = stop
 	end
 	w.cxs = {}
+	-- bar_on: true = Plugin segments widget placed, false = absent, "raise" = reading `widgets` raises.
 	function w.window(name, bar_on)
-		local settings_values = { status_bar = bar_on }
+		local widgets = { { id = "cwd" }, { id = "git" } }
+		if bar_on == true then table.insert(widgets, { id = "status" }) end
+		local settings_values = { widgets = widgets }
 		local cx
 		cx = {
 			settings = {
-				get = function(_self, key) return settings_values[key] end,
+				get = function(_self, key)
+					if bar_on == "raise" then error("runtime error: Unknown preference '" .. key .. "'") end
+					return settings_values[key]
+				end,
 				set = function(_self, key, value) settings_values[key] = value; return value end,
 			},
 			window_key = function() return name end,
@@ -98,16 +104,17 @@ do
 	w.load("w1").ensure(cx, "spawn")
 	w.run(2000)
 	check(#w.picks == 1, "fresh install asks exactly once")
-	check(w.picks[1].opts.placeholder == "Would you like to turn on the status bar?", "the question is the specified one")
+	check(w.picks[1].opts.placeholder == "Would you like to show plugin buttons in the status bar?", "the question is the specified one")
 	check(w.picks[1].opts.items[1].answer == true and w.picks[1].opts.items[1].label:find("^Yes") ~= nil, "Yes is first (recommended)")
 	check(w.picks[1].opts.items[2].answer == false, "No is second")
-	check(w.kv["status_prompt.v1"] ~= nil, "the flag is claimed before the answer")
-	check(cx.values.status_bar == false and w.refreshes == 0, "asking changes nothing by itself")
+	check(w.kv["status_prompt.v2"] ~= nil, "the flag is claimed before the answer")
+	check(#cx.values.widgets == 2 and w.refreshes == 0, "asking changes nothing by itself")
 	-- 4. Yes: sets the setting through the FRESH cx and refreshes once, from the callback.
 	local fresh = w.window("w1-fresh", false)
 	w.picks[1].callback(w.picks[1].opts.items[1], nil, fresh)
-	check(fresh.values.status_bar == true, "Yes sets status_bar true on the fresh cx")
-	check(cx.values.status_bar == false, "the stale cx is left alone")
+	check(#fresh.values.widgets == 3 and fresh.values.widgets[1].id == "cwd" and fresh.values.widgets[2].id == "git" and fresh.values.widgets[3].id == "status",
+		"Yes appends {id=status} to the fresh cx's list, keeping every entry and its order")
+	check(#cx.values.widgets == 2, "the stale cx is left alone")
 	check(w.refreshes == 1, "Yes refreshes the chrome exactly once")
 	-- 12. A second window of the same install after the claim never asks, though its bar is off.
 	local second = w.window("w2", false)
@@ -116,26 +123,26 @@ do
 	check(#w.picks == 1, "a later window of a claimed install does not ask")
 end
 
--- 2. Bar already on: no prompt, flag still set.
+-- 2. Widget already placed: no prompt, flag still set.
 do
 	local w = world()
 	serve_host(w)
 	w.load("w1").ensure(w.window("w1", true), "spawn")
 	w.run(2000)
-	check(#w.picks == 0, "bar on asks nothing")
-	check(w.kv["status_prompt.v1"] ~= nil, "bar on still sets the flag")
+	check(#w.picks == 0, "widget placed asks nothing")
+	check(w.kv["status_prompt.v2"] ~= nil, "widget placed still sets the flag (a later removal is respected)")
 	check(w.refreshes == 0, "bar on never refreshes")
 end
 
 -- 3. Retained install (flag set): no prompt, no request, no host timer.
 do
-	local w = world({ ["status_prompt.v1"] = { state = "granted", token = "old", at = 1 } })
+	local w = world({ ["status_prompt.v2"] = { state = "granted", token = "old", at = 1 } })
 	serve_host(w)
 	check(w.timer_count == 0, "a retained install starts no host timer")
 	w.load("w1").ensure(w.window("w1", false), "spawn")
 	w.run(2000)
 	check(#w.picks == 0, "retained install does not ask")
-	check(w.kv["status_prompt.v1.request"] == nil, "retained install writes no request")
+	check(w.kv["status_prompt.v2.request"] == nil, "retained install writes no request")
 	check(w.timer_count == 0, "retained install starts no timers at all")
 end
 
@@ -149,7 +156,7 @@ for _, outcome in { "no", "dismiss" } do
 	check(#w.picks == 1, outcome .. ": asked once")
 	local fresh = w.window("w1-fresh", false)
 	w.picks[1].callback(if outcome == "no" then w.picks[1].opts.items[2] else nil, nil, fresh)
-	check(fresh.values.status_bar == false and cx.values.status_bar == false, outcome .. ": status_bar untouched")
+	check(#fresh.values.widgets == 2 and #cx.values.widgets == 2, outcome .. ": widgets untouched")
 	check(w.refreshes == 0, outcome .. ": no refresh")
 	local again = w.window("w1b", false)
 	w.load("w1b").ensure(again, "spawn")
@@ -165,7 +172,7 @@ do
 	w.load("w1").ensure(cx, "spawn")
 	w.run(2000)
 	w.picks[1].callback(nil, "picker failed", cx)
-	check(cx.values.status_bar == false and w.refreshes == 0, "a picker error changes nothing")
+	check(#cx.values.widgets == 2 and w.refreshes == 0, "a picker error changes nothing")
 end
 
 -- 7. Two windows that both read "no request" before either writes: one prompt in total.
@@ -177,7 +184,7 @@ do
 	w.load("wa").ensure(a, "spawn")
 	w.load("wb").ensure(b, "spawn")
 	w.request_reads_nil.wb = nil
-	check(w.kv["status_prompt.v1.request"].token:find("wb", 1, true) ~= nil, "last write won the request slot (the lost-update case)")
+	check(w.kv["status_prompt.v2.request"].token:find("wb", 1, true) ~= nil, "last write won the request slot (the lost-update case)")
 	host.host_serve()
 	w.run(3000)
 	check(#w.picks == 1, "two racing windows produce one prompt")
@@ -205,7 +212,7 @@ do
 	w.load("w1").ensure(cx, "spawn")
 	w.run(20000)
 	check(#w.picks == 0, "no host means no prompt")
-	check(w.kv["status_prompt.v1"] == nil, "no host means no flag")
+	check(w.kv["status_prompt.v2"] == nil, "no host means no flag")
 	serve_host(w)
 	local later = w.window("w2", false)
 	w.load("w2").ensure(later, "spawn")
@@ -215,10 +222,10 @@ end
 
 -- 9. A stale request (its window is gone) is cleared, never granted.
 do
-	local w = world({ ["status_prompt.v1.request"] = { token = "ghost", at = 1 } })
+	local w = world({ ["status_prompt.v2.request"] = { token = "ghost", at = 1 } })
 	local host = w.load("host")
 	check(host.host_claim() == nil, "a stale request is not granted")
-	check(w.kv["status_prompt.v1.request"] == nil and w.kv["status_prompt.v1"] == nil, "a stale request is cleared, no flag")
+	check(w.kv["status_prompt.v2.request"] == nil and w.kv["status_prompt.v2"] == nil, "a stale request is cleared, no flag")
 	check(host.host_claim() == nil, "an empty slot grants nothing")
 end
 
@@ -240,11 +247,11 @@ do
 	serve_host(w)
 	w.load("w1").ensure(w.window("w1", true), "spawn")
 	w.run(500)
-	local flag = w.kv["status_prompt.v1"]
+	local flag = w.kv["status_prompt.v2"]
 	check(flag ~= nil, "flag granted")
-	w.kv["status_prompt.v1"] = nil
+	w.kv["status_prompt.v2"] = nil
 	w.run(1000)
-	check(w.kv["status_prompt.v1"] ~= nil and w.kv["status_prompt.v1"].token == flag.token, "host re-asserts a clobbered flag")
+	check(w.kv["status_prompt.v2"] ~= nil and w.kv["status_prompt.v2"].token == flag.token, "host re-asserts a clobbered flag")
 	w.run(20000)
 	check(#w.timers == 0, "the host stops polling after its grace period")
 end
@@ -257,12 +264,12 @@ do
 	w.load("w1").ensure(first, "spawn")
 	w.run(30000)
 	check(#w.picks == 1, "first window asked once")
-	w.kv["status_prompt.v1"] = nil
-	w.kv["status_prompt.v1.request"] = nil
+	w.kv["status_prompt.v2"] = nil
+	w.kv["status_prompt.v2.request"] = nil
 	w.load("host2").host_serve()
 	w.load("w2").ensure(w.window("w2", false), "spawn")
 	w.run(30000)
-	check(#w.picks == 1 and w.kv["status_prompt.v1"] == nil, "a lost kv flag plus a host restart does not ask again")
+	check(#w.picks == 1 and w.kv["status_prompt.v2"] == nil, "a lost kv flag plus a host restart does not ask again")
 end
 
 -- 14. The host grants and writes the marker, a stale kv write drops the flag AND the request before the winning
@@ -273,8 +280,8 @@ do
 	local winner = w.window("w1", false)
 	w.load("w1").ensure(winner, "spawn")
 	check(host.host_claim() ~= nil, "host grants the pending request")
-	w.kv["status_prompt.v1"] = nil
-	w.kv["status_prompt.v1.request"] = nil
+	w.kv["status_prompt.v2"] = nil
+	w.kv["status_prompt.v2.request"] = nil
 	w.run(500)
 	check(#w.picks == 1 and w.picks[1].window == "w1", "the winner still gets its prompt after a stale kv write")
 	w.run(5000)
@@ -295,6 +302,56 @@ do
 	one.run(2000)
 	two.run(2000)
 	check(#one.picks == 1 and #two.picks == 1, "each plugin install asks once on its own flag")
+end
+
+-- 15. Reading `widgets` raises: no prompt, no error, no request, no flag, no marker; a later healthy start asks once.
+do
+	local w = world()
+	serve_host(w)
+	w.load("w1").ensure(w.window("w1", "raise"), "spawn")
+	w.run(3000)
+	check(#w.picks == 0, "a failed settings read asks nothing")
+	check(w.kv["status_prompt.v2"] == nil and w.kv["status_prompt.v2.request"] == nil, "a failed settings read leaves no flag and no request")
+	check(next(w.files) == nil, "a failed settings read writes no marker")
+	w.load("w2").ensure(w.window("w2", false), "spawn")
+	w.run(3000)
+	check(#w.picks == 1, "the next healthy start asks once")
+end
+
+-- 16. A pick answered Yes whose fresh cx cannot read `widgets` changes nothing and does not raise.
+do
+	local w = world()
+	serve_host(w)
+	w.load("w1").ensure(w.window("w1", false), "spawn")
+	w.run(2000)
+	local broken = w.window("w1-broken", "raise")
+	w.picks[1].callback(w.picks[1].opts.items[1], nil, broken)
+	check(w.refreshes == 0, "a failed widgets read on Yes does not refresh")
+end
+
+-- 17. An install that asked under v1 (v1 flag + marker, never really asked) is asked once under v2.
+do
+	local w = world({ ["status_prompt.v1"] = { state = "granted", token = "old", at = 1 } })
+	w.files["/data/status_prompt.v1.done"] = "old\n"
+	serve_host(w)
+	check(w.timer_count > 0, "a v1-marked install starts the v2 host")
+	w.load("w1").ensure(w.window("w1", false), "spawn")
+	w.run(2000)
+	check(#w.picks == 1, "a v1-marked install is asked once under v2")
+	w.load("w2").ensure(w.window("w2", false), "spawn")
+	w.run(2000)
+	check(#w.picks == 1, "and never twice")
+end
+
+-- 18. Yes when the widget was placed meanwhile: not appended twice, no refresh.
+do
+	local w = world()
+	serve_host(w)
+	w.load("w1").ensure(w.window("w1", false), "spawn")
+	w.run(2000)
+	local fresh = w.window("w1-fresh", true)
+	w.picks[1].callback(w.picks[1].opts.items[1], nil, fresh)
+	check(#fresh.values.widgets == 3 and w.refreshes == 0, "an already placed widget is not appended twice")
 end
 
 return "PASS " .. checks .. " checks"
