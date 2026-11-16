@@ -1,0 +1,6 @@
+{
+  "name": "bw-code-review",
+  "kind": "local-skill",
+  "summary": "Review one GitHub pull request read-only: a plain-words summary, findings pinned to the changed lines, one verdict, one GitHub review, and an optional tracker hook.",
+  "way_in": "Ask for a BW code review of a pull request, for example \"review PR 42 on owner/name\"."
+}

@@ -19,6 +19,7 @@ Everything is MIT License, so fork away. Feedback is appreciated, and stars are 
 | [TERN PLUGIN DEVELOPMENT](skills/tern-plugin-development/README.md) | Create, test, debug, and package Tern plugins with isolated integration tests and pure Luau modules. |
 | [GLITCH STUDIO](skills/glitch-studio/README.md) | Build a product with one orchestrator and many checked lanes through `/glitch-idea`, `/glitch-plan` and `/glitch-execute`: study, domain skills, frozen contracts, review and proof. Method from the [Chatdom.io build write-up](https://devpost.com/software/chatdom-io). |
 | [STUDIO](skills/studio/README.md) | Build big things with one orchestrator and many small checked lanes: specs and frozen contracts first, one task per check and commit, every lane reviewed, every result demonstrated. Method from the [Chatdom.io build write-up](https://devpost.com/software/chatdom-io). |
+| [BW CODE REVIEW](skills/bw-code-review/README.md) | Review one GitHub pull request read-only: a plain-words summary, findings pinned to the changed lines, one verdict, one GitHub review and an optional tracker hook. Line notes and summary idea from [Ada AI](https://devpost.com/software/cyborg-coder). |
 
 ## PLUGINS
 
