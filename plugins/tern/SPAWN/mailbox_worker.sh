@@ -9,6 +9,8 @@ root=$1 handle=$2 owner=$3 mode=$4
 message=${5:-} poll=${6:-5} wait_seconds=${7:-30}
 report_floor=${8:-} reply_floor=${9:-} report_chain=${10:-}
 expected_binding_b64=${11:-}
+withdrawn_starts_b64=${12:-}
+[ -z "$withdrawn_starts_b64" ] || [ "$mode" = retire-authorized ] || exit 1
 fail() { printf '%s\n' "$1" >&2; exit 1; }
 full() { printf 'full\n%s\n%s\n%s\n' "$1" "$2" "$3" >&2; exit 1; }
 case "$handle" in ''|*[!A-Za-z0-9_-]*) fail binding_mismatch;; esac
@@ -23,14 +25,24 @@ safe_dir() {
 safe_file() { [ -f "$1" ] && [ ! -L "$1" ] || fail binding_mismatch; [ "$(wc -c < "$1")" -le "$2" ] || fail oversize; }
 script_dir=${0%/*}; safe_dir "$script_dir"
 validator=$script_dir/mailbox_json.awk; safe_file "$validator" 16384
-reply_validator=$script_dir/mailbox_reply.jq; safe_file "$reply_validator" 16384
+reply_validator=$script_dir/mailbox_reply.jq; safe_file "$reply_validator" 32768
 for tool in jq iconv base64 awk; do command -v "$tool" >/dev/null 2>&1 || fail unsupported_capability; done
 safe_dir "$root"; box=$root/$handle; safe_dir "$box"
 for lane in producer consumer staging reports replies acks watermarks; do safe_dir "$box/$lane"; done
 hash() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d ' ' -f 1; elif command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | cut -d ' ' -f 1; else fail unsupported_capability; fi; }
 b64() { base64 < "$1" | tr -d '\r\n'; }
 un64() { if printf Zg== | base64 -d >/dev/null 2>&1; then base64 -d; else base64 -D; fi; }
-strict() { safe_file "$1" "$2"; iconv -f UTF-8 -t UTF-8 "$1" >/dev/null || fail invalid_schema; awk -v journal="${3:-0}" -f "$validator" "$1" || fail invalid_schema; }
+strict() {
+ safe_file "$1" "$2"
+ # Darwin awk drops raw NULs, so reject them before the lexical parser.
+ [ "$(wc -c < "$1")" -eq "$(tr -d '\000' < "$1" | wc -c)" ] || fail invalid_schema
+ # Darwin iconv can fail on valid large UTF-8 when writing to /dev/null.
+ # Drain through a pipe and append its exit status as the final record; POSIX
+ # pipelines otherwise expose only the drain's status, not iconv's failure.
+ { if iconv -f UTF-8 -t UTF-8 "$1" 2>/dev/null; then printf '\n0\n'; else printf '\n1\n'; fi; } |
+  awk 'END { exit ($0 != "0") }' || fail invalid_schema
+ awk -v journal="${3:-0}" -f "$validator" "$1" || fail invalid_schema
+}
 strict "$box/provision.json" 2048
 [ "$(jq -r '.handle' "$box/provision.json")" = "$handle" ] || fail binding_mismatch
 binding=$(jq -c '.binding' "$box/provision.json")
@@ -177,6 +189,7 @@ publish_pending() {
  jq -r --argjson seq "$seq" '.pending[]|select(.seq==$seq)|.bytes' "$journal" | un64 > "$work/logical"
  expected=$(jq -r --argjson seq "$seq" '.pending[]|select(.seq==$seq)|.sha256' "$journal")
  [ "$(hash "$work/logical")" = "$expected" ] || fail journal_corrupt
+ if jq -e '.kind=="PROJECT_START_CLAIM"' "$work/logical" >/dev/null; then has_capability coordinator-control-v1; has_capability project-start-v1; fi
  event=$(jq -r --argjson seq "$seq" '.pending[]|select(.seq==$seq)|.event_id' "$journal")
  length=$(wc -c < "$work/logical"); count=$(( (length+2047)/2048 )); index=1
  while [ "$index" -le "$count" ]; do
@@ -291,6 +304,8 @@ consume() {
   [ "$(hash "$work/reply")" = "$expected" ] || fail journal_corrupt
   bind_check "$work/reply"
   jq -e -f "$reply_validator" "$work/reply" >/dev/null || fail journal_corrupt
+  if jq -e '.kind=="record_ruling"' "$work/reply" >/dev/null; then has_capability coordinator-control-v1; fi
+  if jq -e '.kind=="project_start"' "$work/reply" >/dev/null; then has_capability coordinator-control-v1; has_capability project-start-v1; fi
   ack_seq=$(jq -r --argjson seq "$retained" '.consumed[]|select(.reply_seq==$seq)|.ack_seq' "$journal")
   if [ "$ack_seq" = 0 ]; then ack_consumed "$retained"
   elif jq -e --argjson seq "$ack_seq" 'any(.pending[];.seq==$seq)' "$journal" >/dev/null; then publish_pending "$ack_seq"; fi
@@ -304,9 +319,12 @@ consume() {
  count=$(jq -r '.count' "$manifest"); index=1; : > "$work/reply"
  while [ "$index" -le "$count" ]; do
   chunk=$box/replies/$reply_seq/chunk-$index.json; strict "$chunk" 4096
-  jq -e --argjson manifest "$(cat "$manifest")" --argjson index "$index" '(keys|sort)==(["transport","version","type","mailbox_handle","direction","slot","message_id","message_sha256","index","count","data_b64"]|sort) and .type=="chunk" and .index==$index and (. as $chunk|all(["transport","version","mailbox_handle","direction","slot","message_id","message_sha256","count"][]; . as $key|$chunk[$key]==$manifest[$key])) and (.data_b64|test("^[A-Za-z0-9+/]*={0,2}$"))' "$chunk" >/dev/null || fail content_conflict
-  encoded=$(jq -r '.data_b64' "$chunk"); printf '%s' "$encoded" | un64 > "$work/slice"
+  jq -e --argjson manifest "$(cat "$manifest")" --argjson index "$index" '(keys|sort)==(["transport","version","type","mailbox_handle","direction","slot","message_id","message_sha256","index","count","data_b64"]|sort) and .type=="chunk" and .index==$index and (. as $chunk|all(["transport","version","mailbox_handle","direction","slot","message_id","message_sha256","count"][]; . as $key|$chunk[$key]==$manifest[$key]))' "$chunk" >/dev/null || fail content_conflict
+  jq -e '.data_b64|type=="string" and length>=4 and length<=2732 and length%4==0 and test("^[A-Za-z0-9+/]*={0,2}$")' "$chunk" >/dev/null || fail invalid_schema
+  encoded=$(jq -r '.data_b64' "$chunk"); printf '%s' "$encoded" | un64 > "$work/slice" 2>/dev/null || fail invalid_schema
   [ "$(b64 "$work/slice")" = "$encoded" ] || fail invalid_schema
+  slice_bytes=$(wc -c < "$work/slice")
+  [ "$slice_bytes" -ge 1 ] && [ "$slice_bytes" -le 2048 ] || fail invalid_schema
   expected=2048; [ "$index" -lt "$count" ] || expected=$(jq '.message_bytes-(.count-1)*2048' "$manifest")
   [ "$(wc -c < "$work/slice")" -eq "$expected" ] || fail incomplete
   cat "$work/slice" >> "$work/reply"; index=$((index+1))
@@ -317,6 +335,9 @@ consume() {
  jq -e -f "$reply_validator" "$work/reply" >/dev/null || fail invalid_schema
  # Grants authorize landing/deploy effects: only a release-manager record may receive them.
  if jq -e '.kind|IN("landing_grant","deploy_grant")' "$work/reply" >/dev/null; then has_capability release-manager-v1; fi
+ # A ruling is delivered to an already provisioned writer; receipt never writes the document.
+ if jq -e '.kind=="record_ruling"' "$work/reply" >/dev/null; then has_capability coordinator-control-v1; fi
+ if jq -e '.kind=="project_start"' "$work/reply" >/dev/null; then has_capability coordinator-control-v1; has_capability project-start-v1; fi
  retained_count=$(jq '.consumed|length' "$journal")
  [ "$retained_count" -lt 8 ] || full retained_executions "$retained_count" 8
  length=$(wc -c < "$work/reply")
@@ -340,7 +361,7 @@ if [ "$mode" = report ]; then report_input=$(dd bs=1 count=65537 2>/dev/null | b
 # Helper-only reports are computed from the code path, never from stdin, and
 # before either gate: a long check must not hold shared admission.
 hash_stdin() { if command -v sha256sum >/dev/null 2>&1; then sha256sum | cut -d ' ' -f 1; elif command -v shasum >/dev/null 2>&1; then shasum -a 256 | cut -d ' ' -f 1; else fail unsupported_capability; fi; }
-has_capability() { jq -e --arg name "$1" '(.capabilities // [])|type=="array" and index($name)!=null' "$box/provision.json" >/dev/null || fail capability_missing; }
+has_capability() { jq -e --arg name "$1" '(.capabilities // [])|type=="array" and index($name)!=null' "$box/provision.json" >/dev/null || fail unsupported_capability; }
 manifest_verify() {
  has_capability check-runner-v1
  bound=$(jq -r 'if has("manifest_sha256") then .manifest_sha256 else "" end' "$box/provision.json")
@@ -433,6 +454,131 @@ stdin_bytes() {
 if [ "$mode" = init ] && [ "$(stdin_bytes)" != 0 ]; then
  fail 'init takes no input; it only creates a new journal. Publish reports with mode report (stdin = one report object).'
 fi
+# This is authorization to discard exact physical bytes, never a consumer ACK.
+withdrawn_namespace() {
+ [ -n "$withdrawn_starts_b64" ] || return 0
+ namespace_unsettled=0
+ for entry in "$box/"* "$box/".[!.]* "$box/"..?*; do
+  [ ! -e "$entry" ] && [ ! -L "$entry" ] && continue
+  case "${entry##*/}" in reports|replies|acks|watermarks|producer|consumer|staging|capacity.lock) safe_dir "$entry";;
+   provision.json|manifest.json) safe_file "$entry" 4096;; *) fail binding_mismatch;; esac
+ done
+ for child in producer consumer staging; do
+  for entry in "$box/$child/"* "$box/$child/".[!.]* "$box/$child/"..?*; do
+   [ ! -e "$entry" ] && [ ! -L "$entry" ] && continue
+   case "$entry" in "$journal") safe_file "$entry" 1572864;; "$lock"|"$work") safe_dir "$entry";; *)
+    [ ! -L "$entry" ] || fail binding_mismatch
+    namespace_unsettled=1;; esac
+  done
+ done
+ for stream in reports replies acks watermarks; do
+  floor=$report_floor; [ "$stream" != replies ] || floor=$reply_floor
+  for entry in "$box/$stream/"* "$box/$stream/".[!.]* "$box/$stream/"..?*; do
+   [ ! -e "$entry" ] && [ ! -L "$entry" ] && continue
+   n=${entry##*/}; case "$stream" in acks|watermarks) n=${n%.json}; [ "${entry##*/}" = "$n.json" ] || fail binding_mismatch;; esac
+   case "$n" in ''|0*|*[!0-9]*) fail binding_mismatch;; esac
+   [ "${#n}" -le 16 ] && [ "$n" -le 9007199254740991 ] || fail binding_mismatch
+   case "$stream" in acks|watermarks) safe_file "$entry" 2048;; *)
+    safe_dir "$entry"
+    for part in "$entry/"* "$entry/".[!.]* "$entry/"..?*; do
+     [ ! -e "$part" ] && [ ! -L "$part" ] && continue
+     safe_file "$part" 4096
+     name=${part##*/}; case "$name" in manifest.json) ;; chunk-*.json)
+      idx=${name#chunk-}; idx=${idx%.json}; case "$idx" in ''|0*|*[!0-9]*) fail binding_mismatch;; esac
+      [ "${#idx}" -le 2 ] && [ "$idx" -le 32 ] || fail binding_mismatch;; *) fail binding_mismatch;; esac
+    done;; esac
+   case "$stream" in reports|acks) [ "$n" -le "$floor" ] || namespace_unsettled=1;; esac
+  done
+ done
+ [ "$namespace_unsettled" = 0 ] || { cleanup; printf 'producer_unsettled\n'; exit 0; }
+}
+validate_withdrawn() {
+ [ -n "$withdrawn_starts_b64" ] || return 0
+ [ "${#withdrawn_starts_b64}" -le 4096 ] || fail invalid_schema
+ printf '%s' "$withdrawn_starts_b64" | un64 > "$work/withdrawn" || fail invalid_schema
+ strict "$work/withdrawn" 3072
+ [ "$(b64 "$work/withdrawn")" = "$withdrawn_starts_b64" ] || fail invalid_schema
+ jq -e --argjson floor "$reply_floor" '
+  def integer: type=="number" and .>=1 and .<=9007199254740991 and .==floor;
+  type=="array" and length>=1 and length<=8 and
+  all(.[]; type=="object" and keys==["message_id","message_sha256","reply_seq"] and
+   (.reply_seq|integer) and (.message_id|type=="string" and test("\\A[A-Za-z0-9_-]{1,96}\\z")) and
+   (.message_sha256|type=="string" and test("\\A[0-9a-f]{64}\\z"))) and
+  ([.[].reply_seq]==[range($floor+1;$floor+1+length)])
+ ' "$work/withdrawn" >/dev/null || fail invalid_schema
+ has_capability coordinator-control-v1; has_capability project-start-v1
+ jq -e --arg handle "$handle" '
+  def id: type=="string" and test("\\A[A-Za-z0-9_-]{1,96}\\z");
+  .binding as $b | .handle==$handle and $b.mailbox_handle==$handle and
+  ($b|keys)==["enrolment_token","launch_request_id","logical_session_id","mailbox_handle","work_id","worker_generation","worker_id"] and
+  ([$b.logical_session_id,$b.worker_id,$b.launch_request_id,$b.work_id,$b.mailbox_handle]|all(.[];id)) and
+  ($b.worker_generation|type=="number" and .>=1 and .<=9007199254740991 and .==floor) and
+  ($b.enrolment_token|type=="string" and test("\\A[A-Za-z0-9_-]{16,128}\\z"))
+ ' "$box/provision.json" >/dev/null || fail binding_mismatch
+ jq -r '.[].reply_seq' "$work/withdrawn" > "$work/withdrawn-seqs"
+ # Include hidden entries; every above-floor slot must be expressly named.
+ for entry in "$box/replies/"* "$box/replies/".[!.]* "$box/replies/"..?*; do
+  [ ! -e "$entry" ] && [ ! -L "$entry" ] && continue
+  safe_dir "$entry"
+  n=${entry##*/}; case "$n" in ''|0*|*[!0-9]*) fail binding_mismatch;; esac
+  [ "${#n}" -le 16 ] && [ "$n" -le 9007199254740991 ] || fail binding_mismatch
+  [ "$n" -le "$reply_floor" ] || jq -e --argjson n "$n" 'any(.[];.reply_seq==$n)' "$work/withdrawn" >/dev/null || fail incomplete
+ done
+ while IFS= read -r reply_seq; do
+  slot_dir=$box/replies/$reply_seq; safe_dir "$slot_dir"
+  manifest=$slot_dir/manifest.json; strict "$manifest" 2048
+  jq -e --arg handle "$handle" --argjson seq "$reply_seq" --slurpfile withdrawn "$work/withdrawn" '
+   (keys|sort)==(["transport","version","type","mailbox_handle","direction","slot","message_id","message_sha256","message_bytes","count"]|sort) and
+   .transport=="report-files-v1" and .version==1 and .type=="manifest" and .direction=="reply" and .mailbox_handle==$handle and .slot==$seq and
+   (.message_bytes|type=="number" and .>=1 and .<=65536 and .==floor) and .count==(.message_bytes/2048|ceil) and
+   (. as $m|any($withdrawn[0][];.reply_seq==$seq and .message_id==$m.message_id and .message_sha256==$m.message_sha256))
+  ' "$manifest" >/dev/null || fail binding_mismatch
+  count=$(jq -r '.count' "$manifest"); seen=0
+  for part in "$slot_dir/"* "$slot_dir/".[!.]* "$slot_dir/"..?*; do
+   [ ! -e "$part" ] && [ ! -L "$part" ] && continue
+   safe_file "$part" 4096; name=${part##*/}
+   case "$name" in manifest.json) ;; chunk-*.json)
+    idx=${name#chunk-}; idx=${idx%.json}; case "$idx" in ''|0*|*[!0-9]*) fail binding_mismatch;; esac
+    [ "${#idx}" -le 2 ] && [ "$idx" -le "$count" ] || fail binding_mismatch;;
+    *) fail binding_mismatch;; esac
+   seen=$((seen+1))
+  done
+  [ "$seen" -eq "$((count+1))" ] || fail incomplete
+  index=1; : > "$work/reply"
+  while [ "$index" -le "$count" ]; do
+   chunk=$slot_dir/chunk-$index.json; strict "$chunk" 4096
+   jq -e --argjson manifest "$(cat "$manifest")" --argjson index "$index" '
+    (keys|sort)==(["transport","version","type","mailbox_handle","direction","slot","message_id","message_sha256","index","count","data_b64"]|sort) and
+    .type=="chunk" and .index==$index and (. as $chunk|all(["transport","version","mailbox_handle","direction","slot","message_id","message_sha256","count"][];. as $key|$chunk[$key]==$manifest[$key])) and
+    (.data_b64|type=="string" and length>=4 and length<=2732 and length%4==0 and test("^[A-Za-z0-9+/]*={0,2}$"))
+   ' "$chunk" >/dev/null || fail content_conflict
+   encoded=$(jq -r '.data_b64' "$chunk"); printf '%s' "$encoded" | un64 > "$work/slice" 2>/dev/null || fail invalid_schema
+   [ "$(b64 "$work/slice")" = "$encoded" ] || fail invalid_schema
+   expected=2048; [ "$index" -lt "$count" ] || expected=$(jq '.message_bytes-(.count-1)*2048' "$manifest")
+   [ "$(wc -c < "$work/slice")" -eq "$expected" ] || fail incomplete
+   cat "$work/slice" >> "$work/reply"; index=$((index+1))
+  done
+  [ "$(hash "$work/reply")" = "$(jq -r '.message_sha256' "$manifest")" ] || fail content_conflict
+  strict "$work/reply" 65536; bind_check "$work/reply"
+  jq -e --argjson seq "$reply_seq" --arg message "$(jq -r '.message_id' "$manifest")" '.kind=="project_start" and .reply_seq==$seq and .message_id==$message' "$work/reply" >/dev/null || fail binding_mismatch
+  jq -e -f "$reply_validator" "$work/reply" >/dev/null || fail invalid_schema
+ done < "$work/withdrawn-seqs"
+}
+authorize_retirement() {
+ jq -en --arg report "$report_floor" --arg reply "$reply_floor" --arg chain "$report_chain" '
+  def floor_arg: test("\\A(0|[1-9][0-9]*)\\z") and length<=16 and (tonumber<=9007199254740991);
+  ($report|floor_arg) and ($reply|floor_arg) and ($chain|test("\\A[0-9a-f]{64}\\z"))
+ ' >/dev/null || fail invalid_schema
+ [ -n "$expected_binding_b64" ] && [ "${#expected_binding_b64}" -le 2732 ] || fail invalid_schema
+ printf '%s' "$expected_binding_b64" | un64 > "$work/expected-binding" || fail invalid_schema
+ strict "$work/expected-binding" 2048
+ jq -e --argjson binding "$binding" --arg owner "$owner" '
+  def id: type=="string" and test("\\A[A-Za-z0-9_-]{1,96}\\z");
+  (keys|sort)==(["logical_session_id","worker_id","worker_generation","launch_request_id","work_id","enrolment_token","mailbox_handle"]|sort) and .==$binding and
+  ([.logical_session_id,.worker_id,.launch_request_id,.work_id,.mailbox_handle]|all(.[];id)) and
+  (.worker_generation|type=="number" and .>=1 and .<=9007199254740991 and .==floor) and .enrolment_token==$owner
+ ' "$work/expected-binding" >/dev/null || fail binding_mismatch
+}
 mkdir "$admission" 2>/dev/null || fail producer_locked
 admitted=1
 mkdir "$lock" 2>/dev/null || fail producer_locked
@@ -448,6 +594,19 @@ if [ "$mode" = init ]; then
  stage_journal "$next_journal"
  save ordinary; cleanup
  printf 'journal initialized; next: publish ACCEPTED with mode report\n' >&2; exit 0
+fi
+if [ "$mode" = retire-authorized ] && [ ! -e "$journal" ] && [ ! -L "$journal" ]; then
+ begin; authorize_retirement
+ [ "$report_floor:$reply_floor" = 0:0 ] || { cleanup; printf 'producer_unsettled\n'; exit 0; }
+ printf 'report-files-v1\n%s\n' "$handle" > "$work/hash"
+ [ "$(hash "$work/hash")" = "$report_chain" ] || { cleanup; printf 'producer_unsettled\n'; exit 0; }
+ # Include hidden entries; absence is never inferred from a missing journal alone.
+ for lane in reports replies acks watermarks; do
+  for entry in "$box/$lane/"* "$box/$lane/".[!.]* "$box/$lane/"..?*; do
+   if [ -e "$entry" ] || [ -L "$entry" ]; then cleanup; printf 'producer_unsettled\n'; exit 0; fi
+  done
+ done
+ cleanup; printf 'producer_absent\n'; exit 0
 fi
 strict "$journal" 1572864 1
 jq -e --arg owner "$owner" --argjson binding "$binding" '.version==1 and .owner==$owner and .binding==$binding and .next_seq==(.receipt_seq+(.pending|length)+1) and (.consumed|length)<=8 and all(.consumed[]; (.length|type)=="number" and .length>=1 and .length<=65536 and (.execution|IN("unclaimed","claimed","resolved","uncertain"))) and ([.consumed[].length]|add//0)<=524288' "$journal" >/dev/null || fail journal_corrupt
@@ -472,6 +631,7 @@ else
    printf '%s' "$report_input" | un64 > "$work/input"
    jq -e '.kind|IN("CHECK_RESULT","CHECKOUT")|not' "$work/input" >/dev/null 2>&1 || { strict "$work/input" 65536; fail helper_only_kind; }
    if jq -e '.kind=="DEPLOY_RESULT"' "$work/input" >/dev/null 2>&1; then has_capability release-manager-v1; fi
+   if jq -e '.kind=="PROJECT_START_CLAIM"' "$work/input" >/dev/null 2>&1; then has_capability coordinator-control-v1; has_capability project-start-v1; fi
    allocate "$work/input";;
   run-checks|checkout) printf '%s' "$report_input" | un64 > "$work/input"; allocate "$work/input";;
   replay)
@@ -492,17 +652,14 @@ else
    jq -e '(.pending|length)==0 and all(.consumed[]; .acknowledged and .execution=="resolved")' "$journal" >/dev/null || fail incomplete
    rm "$journal";;
   retire-authorized)
-   jq -en --arg report "$report_floor" --arg reply "$reply_floor" --arg chain "$report_chain" '
-    def floor_arg: test("\\A(0|[1-9][0-9]*)\\z") and length<=16 and (tonumber<=9007199254740991);
-    ($report|floor_arg) and ($reply|floor_arg) and ($chain|test("\\A[0-9a-f]{64}\\z"))
-   ' >/dev/null || fail invalid_schema
-   [ -n "$expected_binding_b64" ] && [ "${#expected_binding_b64}" -le 2732 ] || fail invalid_schema
-   printf '%s' "$expected_binding_b64" | un64 > "$work/expected-binding" || fail invalid_schema
-   strict "$work/expected-binding" 2048
-   jq -e --argjson binding "$binding" '
-    (keys|sort)==(["logical_session_id","worker_id","worker_generation","launch_request_id","work_id","enrolment_token","mailbox_handle"]|sort) and .==$binding
-   ' "$work/expected-binding" >/dev/null || fail binding_mismatch
+   authorize_retirement
    jq -e --arg owner "$owner" '.binding.enrolment_token==$owner' "$journal" >/dev/null || fail binding_mismatch
+   if [ -n "$withdrawn_starts_b64" ]; then
+    validate_withdrawn
+    withdrawn_namespace
+    receipt_seq=$(jq -r '.receipt_seq' "$journal")
+    if [ "$receipt_seq" -lt "$report_floor" ] && [ -e "$box/acks/$((receipt_seq+1)).json" ]; then receipts; fi
+   fi
    # An unsettled journal is refused before anything is removed: release the gates and report
    # the definite pre-effect outcome on stdout so SPAWN never records it as uncertain.
    unsettled=0

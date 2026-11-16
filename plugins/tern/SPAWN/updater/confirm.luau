@@ -1,11 +1,11 @@
 -- Vendored from shared/tern-updater by sync.py; edit there, then run sync.py.
 --!strict
--- Builds the update confirmation picker items and the remote install command.
+-- Builds the explicit local/remote update confirmation choices.
 
 local Confirm = {}
 
-Confirm.RELOAD = "Downloads from GitHub, then Tern reloads all its plugins"
-Confirm.ORCH = "Running ORCH+ controllers pause until you run ORCH+ Reload recovery guide"
+Confirm.RELOAD = "Installs the latest repository copy, not a pinned preview; Tern then reloads its plugins"
+Confirm.ORCH = "ORCH+ reconnects automatically after reload; unresolved ownership or interrupted operations remain paused for recovery"
 
 export type Remote = { id: number, name: string }
 
@@ -36,11 +36,5 @@ function Confirm.items(args: {
 	return items
 end
 
-function Confirm.remote_command(src: string): string
-	if string.find(src, "'", 1, true) then
-		error("source path contains a single quote: " .. src)
-	end
-	return "tern plugin install --force '" .. src .. "'"
-end
 
 return Confirm

@@ -63,9 +63,9 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
         return Authority(identity["device_id"],identity["group_id"],role="owner",local=True)
 
     async def test_every_owner_operation_requires_private_authority(self):
-        operations=("register_client","diagnostics","configure","pair_offer","pair_accept","unpair","shutdown",
+        operations=("register_client","unregister_client","diagnostics","configure","pair_offer","pair_accept","unpair","shutdown",
                     "display","setup_state","usage_refresh","usage_status","usage_preferences","usage_results","usage_publish",
-                    "capacity","binding_candidates")
+                    "capacity","binding_candidates","display_access")
         for operation in operations:
             with self.subTest(operation=operation):
                 status,body=await self.rpc(operation,headers={})
@@ -74,6 +74,24 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.companion.stop_event.is_set())
         self.assertEqual(self.companion.store.local_records(),[])
         self.assertEqual(self.companion.store.peers(),[])
+
+    async def test_display_consent_is_separate_from_capacity_and_sharing(self):
+        status, body = await self.rpc("display_access")
+        self.assertEqual(status, 403)
+        self.assertEqual(body["error"]["code"], "display_disabled")
+        status, _ = await self.rpc("configure", {"changes": {"display_enabled": True}})
+        self.assertEqual(status, 403)
+        self.assertFalse(self.companion.store.settings()["display_enabled"])
+        status, _ = await self.rpc("configure", {"changes": {"display_enabled": True}, "consent": {"display": True}})
+        self.assertEqual(status, 200)
+        settings = self.companion.store.settings()
+        self.assertTrue(settings["display_enabled"])
+        self.assertFalse(settings["capacity_enabled"])
+        self.assertFalse(settings["export_enabled"])
+        status, _ = await self.rpc("configure", {"changes": {"display_enabled": False}})
+        self.assertEqual(status, 200)
+        status, _ = await self.rpc("display_access")
+        self.assertEqual(status, 403)
 
     async def test_wrong_stale_cross_root_and_peer_tokens_fail_locally(self):
         old=self.companion.security.local_token
@@ -158,6 +176,44 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.rpc("register_client",{"client_id":"window:x","kind":"window","ttl_seconds":91}))[0],400)
         status,body=await self.rpc("register_client",{"client_id":"window:x","kind":"window"})
         self.assertEqual((status,body["duration_ms"]),(200,90_000))
+
+    async def test_unregister_retains_other_client_leases_and_saved_evidence(self):
+        saved=self.companion.store.local_publish("host",snapshot())
+        for client,kind in (("window:old","window"),("window:new","window"),("host:live","host")):
+            self.assertEqual((await self.rpc("register_client",{"client_id":client,"kind":kind}))[0],200)
+        self.assertEqual(await self.rpc("unregister_client",{"client_id":"window:old"}),
+                         (200,{"ok":True,"unregistered":True}))
+        self.assertEqual(await self.rpc("unregister_client",{"client_id":"window:old"}),
+                         (200,{"ok":True,"unregistered":False}))
+        self.assertFalse(self.companion.expire_idle_clients())
+        self.assertEqual(self.companion.store.local_records(),[saved])
+        self.assertEqual((await self.rpc("unregister_client",{}))[0],400)
+        self.assertEqual((await self.rpc("unregister_client",{"client_id":"host:live","all":True}))[0],400)
+        await self.rpc("unregister_client",{"client_id":"window:new"})
+        self.assertFalse(self.companion.expire_idle_clients())
+        await self.rpc("unregister_client",{"client_id":"host:live"})
+        self.assertTrue(self.companion.expire_idle_clients())
+        self.assertTrue(self.companion.stop_event.is_set())
+        self.assertEqual(self.companion.store.local_records(),[saved])
+
+    async def test_expiry_without_unload_waits_for_active_work_before_shutdown(self):
+        mono=[100.0]
+        self.companion.store.monotonic=lambda:mono[0]
+        await self.rpc("register_client",{"client_id":"window:gone","kind":"window","ttl_seconds":1})
+        mono[0]+=1
+        self.companion.active_requests=1
+        self.assertFalse(self.companion.expire_idle_clients())
+        self.companion.active_requests=0
+        release=asyncio.Event()
+        async def finish_read():
+            await release.wait()
+            self.companion.store.set_local_state("lifecycle_result",{"completed":True})
+        self.companion.refresh.job=asyncio.create_task(finish_read())
+        self.assertFalse(self.companion.expire_idle_clients())
+        release.set()
+        await self.companion.refresh.job
+        self.assertTrue(self.companion.expire_idle_clients())
+        self.assertEqual(self.companion.store.local_state("lifecycle_result"),{"completed":True})
 
     async def test_failed_local_tokens_never_lock_out_the_owner(self):
         for _ in range(32):

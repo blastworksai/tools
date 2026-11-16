@@ -68,6 +68,8 @@ MESSAGES = {
     "source_usage_unavailable": "The provider quota is unavailable.",
     "source_configuration_changed": "SPAWN changed during refresh; request a new reading.",
     "export_disabled": "Enable read-only capacity export in USAGE Setup.",
+    "source_roster_version": "This SPAWN source version is unsupported; update USAGE. Accounts were not changed.",
+    "display_disabled": "Enable Show usage in ORCH+ in USAGE Setup.",
     "export_revoked": "Capacity authorization changed; request a new snapshot after owner approval.",
     "evidence_changed": "Capacity evidence changed; assemble a new complete snapshot.",
     "incomplete": "Assemble every snapshot page before current validation.",

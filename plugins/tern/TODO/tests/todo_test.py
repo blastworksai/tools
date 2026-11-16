@@ -1,16 +1,32 @@
 """Interactive source/CLI/SSH boundaries. CodexBWAI, COMMANDER-993."""
+import contextlib
+import copy
+import ctypes
+import io
 import json
 import importlib.util
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 READER = ROOT/'bin/todo.py'
+sys.path.insert(0, str(READER.parent))
+import publication
+import process_identity
+
+
+def reader_module():
+    spec = importlib.util.spec_from_file_location('todo_reader_contract', READER)
+    reader = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(reader)
+    return reader
 
 
 def plan(plan_id='plan-123456abcdef', state='pending'):
@@ -18,6 +34,17 @@ def plan(plan_id='plan-123456abcdef', state='pending'):
             'current': 'cp1' if state in ('active', 'blocked') else None,
             'checkpoints': [{'id': 'cp1', 'text': 'Prove the outcome', 'state': state,
                              **({'reason': 'Waiting for owner approval'} if state == 'blocked' else {})}]}
+
+
+def bounded_non_ascii_plan():
+    checkpoints = []
+    for index in range(30):
+        stem = f'c{index}'
+        identifier = stem + 'x' * (40-len(stem))
+        checkpoints.append({'id': identifier, 'text': '\U0001f600'*240,
+                            'state': 'blocked', 'reason': '\U0001f600'*400})
+    return {'schema': 1, 'plan_id': 'plan-ffffffffffff', 'title': '\U0001f600'*160,
+            'current': checkpoints[0]['id'], 'checkpoints': checkpoints}
 
 
 def write_plan(path, value):
@@ -29,7 +56,7 @@ def write_plan(path, value):
 
 class SourceContract(unittest.TestCase):
     def setUp(self):
-        self.scratch = tempfile.TemporaryDirectory(prefix='interactive-plan-', dir='/var/tmp')
+        self.scratch = tempfile.TemporaryDirectory(prefix='interactive-plan-')
         self.addCleanup(self.scratch.cleanup)
         self.base = Path(self.scratch.name)
         self.path = self.base/'PLAN with spaces.md'
@@ -44,6 +71,25 @@ class SourceContract(unittest.TestCase):
         result = self.cli('source', '--plan', self.path)
         self.assertEqual((result.returncode, json.loads(result.stdout)['plan']), (0, plan()))
         self.assertEqual(self.path.read_bytes(), before)
+
+    def test_discovery_preserves_writable_installed_helper_membership(self):
+        installed = self.base/'installed helpers'
+        installed.mkdir()
+        before = {}
+        for name in ('todo.py', 'publication.py', 'process_identity.py'):
+            before[name] = (READER.parent/name).read_bytes()
+            (installed/name).write_bytes(before[name])
+        # Deliberately omit -B: the public entrypoint owns its read-only policy.
+        result = subprocess.run(
+            [sys.executable, '-I', str(installed/'todo.py'), 'discover',
+             '--parent-pid', str(os.getpid())],
+            capture_output=True, text=True, timeout=6,
+            env=dict(os.environ, TODO_PUBLICATION_ROOT=str(self.base/'publications')))
+        self.assertEqual((result.returncode, json.loads(result.stdout)),
+                         (0, {'ok': True, 'state': 'none'}))
+        after = {str(path.relative_to(installed)): path.read_bytes()
+                 for path in installed.rglob('*') if path.is_file()}
+        self.assertEqual(after, before)
 
     def test_crlf_plan_reads_without_changing_identity_or_source_bytes(self):
         before = self.path.read_bytes().replace(b'\r\n', b'\n').replace(b'\n', b'\r\n')
@@ -92,15 +138,16 @@ class SourceContract(unittest.TestCase):
         self.assertIn('UpdateHostKeys=no', argv)
         self.assertEqual(argv[-3:-1], ['--', 'reviewed-test'])
 
-    def test_ssh_disables_forwarding_and_connection_sharing_despite_config(self):
+    @unittest.skipUnless(shutil.which('ssh'), 'OpenSSH-specific: requires ssh -G')
+    def test_openssh_disables_forwarding_and_connection_sharing_despite_config(self):
         # Resolve the exact production argv against an adverse, synthetic config;
-        # ssh -G performs no connection and reads no personal SSH configuration.
+        # OpenSSH -G performs no connection and reads no personal SSH configuration.
         record, env = self.ssh_fixture()
         self.cli('source', '--plan', self.path, '--ssh', 'reviewed-test', env=env)
         config = self.base/'ssh.conf'
         config.write_text('Host reviewed-test\n HostName 192.0.2.1\n ForwardAgent yes\n ForwardX11 yes\n ControlMaster auto\n ControlPath /synthetic/shared-socket\n PermitLocalCommand yes\n GSSAPIDelegateCredentials yes\n')
         argv = json.loads(record.read_text())
-        result = subprocess.run(['/usr/bin/ssh', '-G', '-F', str(config), *argv],
+        result = subprocess.run([shutil.which('ssh'), '-G', '-F', str(config), *argv],
                                 capture_output=True, text=True, check=True, timeout=4)
         effective = dict(line.split(' ', 1) for line in result.stdout.splitlines() if ' ' in line)
         self.assertEqual((effective['forwardagent'], effective['forwardx11'], effective['permitlocalcommand'], effective['gssapidelegatecredentials']), ('no', 'no', 'no', 'no'))
@@ -128,7 +175,581 @@ class SourceContract(unittest.TestCase):
         result = self.cli('source', '--plan', self.path, '--ssh', 'reviewed-test', env=env)
         self.assertEqual((result.returncode, json.loads(result.stdout).get('plan')), (0, plan()))
 
+    def test_ssh_accepts_padded_valid_non_ascii_checkpoint_envelope(self):
+        reader = reader_module()
+        value = bounded_non_ascii_plan()
+        value['title'] = ' ' + value['title']
+        value['checkpoints'][0]['text'] += '\t' * 1024
+        value['checkpoints'][0]['reason'] = '\n' * 1024 + value['checkpoints'][0]['reason']
+        self.assertEqual(reader.validate(value), value)
+        write_plan(self.path, value)
+        self.assertLessEqual(self.path.stat().st_size, reader.LIMIT)
+        record, env = self.ssh_fixture()
+        result = self.cli('source', '--plan', self.path, '--ssh', 'reviewed-test', env=env)
+        self.assertEqual(result.returncode, 0, result.stdout+result.stderr)
+        self.assertEqual(json.loads(result.stdout)['plan'], value)
+        encoded = (reader._source_envelope(value)+'\n').encode('utf-8')
+        self.assertLessEqual(len(encoded), reader.SSH_RESPONSE_LIMIT)
+        self.assertGreater(len(encoded), 65536)
 
+    def test_ssh_rejects_one_byte_beyond_the_derived_protocol_ceiling(self):
+        reader = reader_module()
+        encoded = (reader._source_envelope(plan())+'\n').encode('utf-8')
+        stdout = encoded + b' ' * (reader.SSH_RESPONSE_LIMIT+1-len(encoded))
+        self.assertEqual(len(stdout), reader.SSH_RESPONSE_LIMIT+1)
+        completed = subprocess.CompletedProcess(['ssh'], 0, stdout=stdout, stderr=b'')
+        with patch.object(reader.subprocess, 'run', return_value=completed):
+            with self.assertRaisesRegex(ValueError, 'SSH source unavailable'):
+                reader.read_ssh('reviewed-test', self.path)
+
+
+class ProcessIdentityContract(unittest.TestCase):
+    def test_linux_disappearance_is_definitively_ended(self):
+        with patch('process_identity.sys.platform', 'linux'), \
+                patch('process_identity.Path.read_text', side_effect=FileNotFoundError(2, 'missing')):
+            with self.assertRaises(process_identity.ProcessEnded):
+                process_identity.process(424242)
+
+    @unittest.skipUnless(sys.platform.startswith('linux'), 'real procfs disappearance envelope')
+    def test_initial_process_ended_helper_envelope_is_terminal(self):
+        with tempfile.TemporaryDirectory(prefix='todo-ended-envelope-') as scratch:
+            env = dict(os.environ, TODO_PUBLICATION_ROOT=str(Path(scratch)/'metadata'))
+            result = subprocess.run([sys.executable, '-I', str(READER), 'discover',
+                                     '--parent-pid', '999999999'],
+                                    capture_output=True, text=True, timeout=6, env=env)
+        envelope = json.loads(result.stdout)
+        self.assertEqual(result.returncode, 1)
+        self.assertIs(envelope.get('ok'), False)
+        self.assertIs(envelope.get('terminal'), True)
+        self.assertIn('ended', envelope.get('error', ''))
+
+    def test_linux_permission_failure_remains_an_access_error(self):
+        with patch('process_identity.sys.platform', 'linux'), \
+                patch('process_identity.Path.read_text', side_effect=PermissionError(13, 'inspection denied')):
+            with self.assertRaises(PermissionError):
+                process_identity.process(424242)
+
+    def test_identity_validation_is_explicitly_tri_state(self):
+        saved = {'pid': 41, 'ppid': 40, 'owner': '17', 'birth': 'boot:1', 'name': 'agent'}
+        with patch('publication.process', return_value=dict(saved)):
+            self.assertEqual(publication._identity(saved), (publication.LIVE, saved))
+        with patch('publication.process', side_effect=PermissionError(13, 'denied')):
+            state, error = publication._identity(saved)
+            self.assertEqual(state, publication.UNKNOWN)
+            self.assertIsInstance(error, PermissionError)
+        with patch('publication.process', side_effect=process_identity.ProcessEnded('ended')):
+            self.assertEqual(publication._identity(saved), (publication.ENDED, None))
+
+    def test_real_identity_mismatches_are_definitive_not_unknown(self):
+        saved = {'pid': 41, 'ppid': 40, 'owner': '17', 'birth': 'boot:1', 'name': 'agent'}
+        replacements = {'pid': 42, 'ppid': 39, 'owner': '18', 'birth': 'boot:2'}
+        for key, replacement in replacements.items():
+            with self.subTest(key=key):
+                current = dict(saved, **{key: replacement})
+                with patch('publication.process', return_value=current):
+                    self.assertEqual(publication._identity(saved), (publication.ENDED, None))
+
+    def snapshot_result(self, first_error, next_error):
+        class Entry(ctypes.Structure):
+            _fields_ = [('size', ctypes.c_uint32), ('pid', ctypes.c_uint32),
+                        ('parent', ctypes.c_uint32)]
+        kernel = Mock()
+        kernel.CreateToolhelp32Snapshot.return_value = 91
+        last_error = [0]
+        def first(snapshot, pointer):
+            last_error[0] = first_error or 0
+            if first_error is not None: return 0
+            pointer._obj.pid = 1
+            pointer._obj.parent = 2
+            return 1
+        def next(snapshot, pointer):
+            last_error[0] = next_error or 0
+            return 0
+        kernel.Process32FirstW.side_effect = first
+        kernel.Process32NextW.side_effect = next
+        with patch('process_identity.ctypes.get_last_error', side_effect=lambda: last_error[0], create=True):
+            result = process_identity._windows_snapshot_parent(kernel, Entry, 42)
+        kernel.CloseHandle.assert_called_once_with(91)
+        return result
+
+    def test_windows_first_and_next_enumeration_errors_are_retained(self):
+        self.assertEqual(self.snapshot_result(5, None), (None, False, 5))
+        self.assertEqual(self.snapshot_result(None, 5), (None, False, 5))
+        self.assertEqual(self.snapshot_result(18, None), (None, True, None))
+
+    def test_windows_omitted_live_process_and_enumeration_failure_are_unknown(self):
+        errors = [(None, True, None, None), (None, False, 5, 87), (None, True, None, 5)]
+        for arguments in errors:
+            with self.subTest(arguments=arguments), patch('process_identity.ctypes.WinError', create=True,
+                                                          side_effect=lambda code: OSError(code, 'native access')):
+                with self.assertRaises(OSError) as caught:
+                    process_identity._windows_open_error(*arguments)
+                self.assertNotIsInstance(caught.exception, process_identity.ProcessEnded)
+
+    def test_windows_only_completed_disappearance_is_definitive(self):
+        with self.assertRaises(process_identity.ProcessEnded):
+            process_identity._windows_open_error(None, True, None, 87)
+
+    @unittest.skipUnless(os.name == 'nt', 'native Windows retained process handle')
+    def test_windows_retained_exited_process_is_terminal(self):
+        child = subprocess.Popen([sys.executable, '-I', '-S', '-B', '-c', 'pass'],
+                                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.DEVNULL)
+        try:
+            self.assertEqual(child.wait(timeout=5), 0)
+            # Popen still owns the process handle after wait returns.
+            with self.assertRaises(process_identity.ProcessEnded):
+                process_identity.process(child.pid)
+        finally:
+            if child.poll() is None:
+                child.kill()
+            child.wait(timeout=5)
+
+    @unittest.skipUnless(os.name == 'nt', 'native Windows live process handle')
+    def test_windows_live_handle_without_parent_stays_unknown(self):
+        self.assertEqual(process_identity.process(os.getpid())['pid'], os.getpid())
+        with patch('process_identity._windows_snapshot_parent',
+                   return_value=(None, True, None)):
+            with self.assertRaises(OSError) as caught:
+                process_identity.process(os.getpid())
+        self.assertNotIsInstance(caught.exception, process_identity.ProcessEnded)
+
+
+class WindowsReadContract(unittest.TestCase):
+    def kernel(self, payload=b'{"schema":1}', read_error=None):
+        kernel = Mock()
+        kernel.CreateFileW.return_value = 77
+        kernel.GetFileType.return_value = 1
+        from ctypes import wintypes as w
+        class Info(ctypes.Structure):
+            _fields_ = [('attributes', w.DWORD), ('created', w.FILETIME),
+                        ('accessed', w.FILETIME), ('written', w.FILETIME),
+                        ('volume', w.DWORD), ('size_high', w.DWORD), ('size_low', w.DWORD),
+                        ('links', w.DWORD), ('index_high', w.DWORD), ('index_low', w.DWORD)]
+        def information(handle, pointer):
+            ctypes.cast(pointer, ctypes.POINTER(Info)).contents.links = 1
+            return 1
+        kernel.GetFileInformationByHandle.side_effect = information
+        def read(handle, buffer, size, count, overlapped):
+            if read_error is not None: return 0
+            ctypes.memmove(buffer, payload, len(payload))
+            count._obj.value = len(payload)
+            return 1
+        kernel.ReadFile.side_effect = read
+        return kernel
+
+    def test_windows_reader_closes_handle_on_read_failure(self):
+        kernel = self.kernel(read_error=5)
+        with patch('publication.ctypes.WinDLL', return_value=kernel, create=True), \
+                patch('publication._windows_security'), \
+                patch('publication.ctypes.get_last_error', return_value=5, create=True), \
+                patch('publication.ctypes.WinError', create=True,
+                      side_effect=lambda code: OSError(code, 'read failed')):
+            with self.assertRaises(OSError):
+                publication._windows_read(Path('publication.json'), 'S-1-5-21-42')
+        kernel.CloseHandle.assert_called_once_with(77)
+
+    def test_windows_reader_rejects_open_handle_security_before_reading(self):
+        kernel = self.kernel()
+        with patch('publication.ctypes.WinDLL', return_value=kernel, create=True), \
+                patch('publication._windows_security', side_effect=ValueError('unsafe publication owner or permissions')) as security:
+            with self.assertRaisesRegex(ValueError, 'unsafe publication'):
+                publication._windows_read(Path('publication.json'), 'S-1-5-21-42')
+        security.assert_called_once_with(Path('publication.json'), 'S-1-5-21-42', handle=77)
+        kernel.ReadFile.assert_not_called()
+        kernel.CloseHandle.assert_called_once_with(77)
+
+    def test_handle_security_uses_existing_owner_and_dacl_policy(self):
+        identity = 'S-1-5-21-42'
+        cases = [
+            (identity, identity, 0, False, None),
+            ('S-1-5-18', 'S-1-5-32-544', 0, False, None),
+            ('S-1-5-21-99', identity, 0, False, 'unsafe publication'),
+            (identity, identity, 0, True, 'unsafe publication'),
+            (identity, 'S-1-5-21-99', 0, False, 'another account to write'),
+            (identity, identity, 5, False, 'unsupported publication'),
+        ]
+        for owner_sid, writer_sid, ace_kind, null_acl, error in cases:
+            with self.subTest(owner=owner_sid, writer=writer_sid, kind=ace_kind, null_acl=null_acl):
+                api, kernel = Mock(), Mock()
+                acl = ctypes.create_string_buffer(8)
+                ace = ctypes.create_string_buffer(16)
+                descriptor = ctypes.create_string_buffer(8)
+                ctypes.c_ushort.from_buffer(acl, 4).value = 1
+                ctypes.c_ubyte.from_buffer(ace).value = ace_kind
+                ctypes.c_uint32.from_buffer(ace, 4).value = 0x40000000
+                def security(handle, kind, requested, sid, group, dacl, sacl, sd):
+                    self.assertEqual((handle, kind, requested), (77, 1, 5))
+                    sid._obj.value = 1
+                    dacl._obj.value = None if null_acl else ctypes.addressof(acl)
+                    sd._obj.value = ctypes.addressof(descriptor)
+                    return 0
+                def sid_text(sid, text):
+                    text._obj.value = owner_sid if sid.value == 1 else writer_sid
+                    return 1
+                def get_ace(pointer, index, output):
+                    output._obj.value = ctypes.addressof(ace)
+                    return 1
+                api.GetSecurityInfo.side_effect = security
+                api.ConvertSidToStringSidW.side_effect = sid_text
+                api.GetAce.side_effect = get_ace
+                with patch('publication.ctypes.WinDLL', side_effect=lambda name, **kwargs: api if name == 'advapi32' else kernel, create=True):
+                    if error:
+                        with self.assertRaisesRegex(ValueError, error):
+                            publication._windows_security(Path('replaced.json'), identity, handle=77)
+                    else:
+                        publication._windows_security(Path('replaced.json'), identity, handle=77)
+                api.GetSecurityInfo.assert_called_once()
+                api.GetNamedSecurityInfoW.assert_not_called()
+                self.assertEqual(kernel.LocalFree.call_args.args[0].value, ctypes.addressof(descriptor))
+
+@unittest.skipUnless(os.name == 'nt', 'native Windows publication replacement')
+class WindowsPublicationReplacement(unittest.TestCase):
+    def setUp(self):
+        self.scratch = tempfile.TemporaryDirectory(prefix='todo-native-replace-')
+        self.addCleanup(self.scratch.cleanup)
+        self.folder = Path(self.scratch.name)
+        self.identity = publication.owner()
+        publication._windows_security(self.folder, self.identity, True)
+        self.target = self.folder/'publication.json'
+        self.source = self.folder/'.publish-next'
+        self.target.write_bytes(b'{"revision":1}\n')
+        self.source.write_bytes(b'{"revision":2}\n')
+        for path in (self.target, self.source):
+            publication._windows_security(path, self.identity, True)
+
+    @contextlib.contextmanager
+    def open_reader(self, share):
+        from ctypes import wintypes as w
+        kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+        kernel.CreateFileW.argtypes = [w.LPCWSTR, w.DWORD, w.DWORD, ctypes.c_void_p,
+                                      w.DWORD, w.DWORD, w.HANDLE]
+        kernel.CreateFileW.restype = w.HANDLE
+        kernel.CloseHandle.argtypes = [w.HANDLE]
+        kernel.CloseHandle.restype = w.BOOL
+        handle = kernel.CreateFileW(str(self.target), 0x80000000, share, None, 3, 0x80, None)
+        if handle == ctypes.c_void_p(-1).value:
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            yield handle
+        finally:
+            kernel.CloseHandle(handle)
+
+    def test_open_product_reader_keeps_old_bytes_while_new_readers_see_replacement(self):
+        opened, release = threading.Event(), threading.Event()
+        results, errors = [], []
+        security = publication._windows_security
+
+        def checked(path, identity, *args, **kwargs):
+            security(path, identity, *args, **kwargs)
+            if Path(path) == self.target and kwargs.get('handle') is not None:
+                opened.set()
+                if not release.wait(10):
+                    raise TimeoutError('publication reader was not released')
+
+        def read():
+            try:
+                results.append(publication._windows_read(self.target, self.identity))
+            except Exception as error:
+                errors.append(error)
+
+        with patch('publication._windows_security', side_effect=checked):
+            reader = threading.Thread(target=read)
+            reader.start()
+            try:
+                self.assertTrue(opened.wait(5), 'product reader did not open the publication')
+                publication._replace_publication(self.source, self.target, self.identity)
+            finally:
+                release.set()
+                reader.join(10)
+        self.assertFalse(reader.is_alive(), 'publication reader did not finish')
+        self.assertEqual(errors, [])
+        self.assertEqual(results, [b'{"revision":1}\n'])
+        self.assertEqual(publication._windows_read(self.target, self.identity), b'{"revision":2}\n')
+        self.assertFalse(self.source.exists())
+        # A leaked replacement/read handle would prevent this exclusive open.
+        with self.open_reader(0):
+            pass
+
+    def test_readonly_target_preserves_both_files(self):
+        from ctypes import wintypes as w
+        kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+        kernel.GetFileAttributesW.argtypes = [w.LPCWSTR]
+        kernel.GetFileAttributesW.restype = w.DWORD
+        kernel.SetFileAttributesW.argtypes = [w.LPCWSTR, w.DWORD]
+        kernel.SetFileAttributesW.restype = w.BOOL
+        attributes = kernel.GetFileAttributesW(str(self.target))
+        if attributes == 0xffffffff:
+            raise ctypes.WinError(ctypes.get_last_error())
+        if not kernel.SetFileAttributesW(str(self.target), attributes | 0x1):
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            with self.assertRaises(OSError):
+                publication._replace_publication(self.source, self.target, self.identity)
+            self.assertEqual(publication._windows_read(self.target, self.identity), b'{"revision":1}\n')
+            self.assertEqual(publication._windows_read(self.source, self.identity), b'{"revision":2}\n')
+        finally:
+            if not kernel.SetFileAttributesW(str(self.target), attributes):
+                raise ctypes.WinError(ctypes.get_last_error())
+
+
+
+@unittest.skipIf(os.name == 'nt', 'POSIX publication mode assertions')
+class PublicationContract(unittest.TestCase):
+    def setUp(self):
+        self.scratch = tempfile.TemporaryDirectory(prefix='todo-publication-')
+        self.addCleanup(self.scratch.cleanup)
+        self.base = Path(self.scratch.name)
+        self.root = self.base/'metadata'
+        self.identity = publication.owner()
+        self.agent_pid = 410001
+        self.native_pid = 410002
+        self.tern_pid = 410003
+        self.anchors = [
+            {'pid': self.agent_pid, 'ppid': self.native_pid, 'owner': self.identity,
+             'birth': 'fixture:agent', 'name': 'agent'},
+            {'pid': self.native_pid, 'ppid': self.tern_pid, 'owner': self.identity,
+             'birth': 'fixture:native', 'name': 'launcher'},
+            {'pid': self.tern_pid, 'ppid': 1, 'owner': self.identity,
+             'birth': 'fixture:tern', 'name': 'tern'},
+        ]
+        self.facts = {item['pid']: copy.deepcopy(item) for item in self.anchors}
+        self.facts[os.getpid()] = {'owner': self.identity}
+        environment = patch.dict(os.environ, {'TODO_PUBLICATION_ROOT': str(self.root)})
+        environment.start()
+        self.addCleanup(environment.stop)
+        session = patch('publication.session_process', return_value=copy.deepcopy(self.anchors))
+        session.start()
+        self.addCleanup(session.stop)
+        native = patch('publication.process', side_effect=self.lookup)
+        native.start()
+        self.addCleanup(native.stop)
+        self.plan = self.base/'canonical-plan.md'
+        self.plan.write_text('canonical bytes\n', encoding='utf-8')
+
+    def lookup(self, pid):
+        try:
+            return copy.deepcopy(self.facts[int(pid)])
+        except KeyError:
+            raise process_identity.ProcessEnded('process has ended') from None
+
+    def read_plan(self, path):
+        return {'plan_id': 'plan-123456abcdef'}
+
+    def publish(self):
+        return publication.publish(self.plan, self.read_plan, self.agent_pid)
+
+    def target(self):
+        return publication.directory(self.identity)/publication._key(self.anchors[-2])
+
+    def source(self):
+        found = publication.discover(self.native_pid)
+        self.assertEqual(found['state'], 'active')
+        return found['source']
+
+    def test_linux_agents_modes_apply_to_metadata_only(self):
+        with patch('publication.sys.platform', 'linux'):
+            self.publish()
+            folder = publication.directory(self.identity)
+            target = self.target()
+            lock = target.with_name(target.name+'.lock')
+            self.plan.chmod(0o644)
+            self.assertEqual(folder.stat().st_mode & 0o777, 0o751)
+            self.assertEqual(target.stat().st_mode & 0o777, 0o640)
+            self.assertEqual(lock.stat().st_mode & 0o777, 0o640)
+            self.assertEqual(self.plan.stat().st_mode & 0o777, 0o644)
+
+    def test_hardlinked_writer_lock_cannot_change_canonical_bytes_or_mode(self):
+        with patch('publication.sys.platform', 'linux'):
+            folder = publication.directory(self.identity, create=True)
+            target = folder/publication._key(self.anchors[-2])
+            lock = target.with_name(target.name+'.lock')
+            self.plan.chmod(0o644)
+            before = self.plan.read_bytes()
+            os.link(self.plan, lock)
+            with self.assertRaisesRegex(ValueError, 'invalid publication lock file'):
+                self.publish()
+            self.assertEqual(self.plan.read_bytes(), before)
+            self.assertEqual(self.plan.stat().st_mode & 0o777, 0o644)
+            self.assertFalse(target.exists())
+
+    def test_macos_modes_and_explicit_legacy_inventory_are_owner_only(self):
+        with patch('publication.sys.platform', 'darwin'):
+            self.publish()
+            folder = publication.directory(self.identity)
+            target = self.target()
+            lock = target.with_name(target.name+'.lock')
+            legacy = folder/'.publish-legacy'
+            legacy.write_text('old metadata', encoding='utf-8')
+            for path, mode in [(folder, 0o751), (target, 0o640), (lock, 0o640), (legacy, 0o640)]:
+                path.chmod(mode)
+            self.plan.chmod(0o644)
+            inventory = publication.migration_inventory(self.identity)
+            self.assertEqual({Path(item['path']) for item in inventory}, {folder, target, lock, legacy})
+            self.assertTrue(all(item['target_mode'] == (0o700 if Path(item['path']) == folder else 0o600)
+                                for item in inventory))
+            self.publish()
+            self.assertEqual(publication.migration_inventory(self.identity), [])
+            for path in [target, lock, legacy]:
+                self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(folder.stat().st_mode & 0o777, 0o700)
+            self.assertEqual(self.plan.read_bytes(), b'canonical bytes\n')
+            self.assertEqual(self.plan.stat().st_mode & 0o777, 0o644)
+
+    def test_process_access_failure_is_visible_and_nonterminal(self):
+        self.publish()
+        source = self.source()
+        def denied(pid):
+            if int(pid) == self.agent_pid:
+                raise PermissionError(13, 'inspection denied')
+            return self.lookup(pid)
+        with patch('publication.process', side_effect=denied):
+            with self.assertRaises(publication.PublicationUnavailable) as caught:
+                publication.read_binding(source, self.read_plan)
+        self.assertFalse(getattr(caught.exception, 'terminal', False))
+        self.assertIn('inspection denied', str(caught.exception))
+
+    def test_process_disappearance_and_real_mismatches_are_terminal(self):
+        for field in [None, 'pid', 'ppid', 'owner', 'birth']:
+            with self.subTest(field=field):
+                self.publish()
+                source = self.source()
+                saved = copy.deepcopy(self.facts[self.agent_pid])
+                try:
+                    if field is None:
+                        del self.facts[self.agent_pid]
+                    else:
+                        replacement = self.agent_pid+100 if field == 'pid' else (
+                            self.native_pid+100 if field == 'ppid' else 'changed')
+                        self.facts[self.agent_pid][field] = replacement
+                    with self.assertRaises(publication.PublicationEnded) as caught:
+                        publication.read_binding(source, self.read_plan)
+                    self.assertTrue(caught.exception.terminal)
+                finally:
+                    self.facts[self.agent_pid] = saved
+
+    def test_birth_and_owner_mismatch_helper_envelopes_are_terminal(self):
+        reader = reader_module()
+        for field in ['birth', 'owner']:
+            with self.subTest(field=field):
+                self.publish()
+                source = self.source()
+                saved = copy.deepcopy(self.facts[self.agent_pid])
+                try:
+                    self.facts[self.agent_pid][field] = 'definitively-changed'
+                    output = io.StringIO()
+                    with contextlib.redirect_stdout(output):
+                        status = reader.main(['published', '--binding', json.dumps(source)])
+                    envelope = json.loads(output.getvalue())
+                    self.assertEqual(status, 1)
+                    self.assertIs(envelope.get('ok'), False)
+                    self.assertIs(envelope.get('terminal'), True)
+                    self.assertIn('ended or changed', envelope.get('error', ''))
+                finally:
+                    self.facts[self.agent_pid] = saved
+
+    def test_record_disappearance_is_terminal(self):
+        self.publish()
+        source = self.source()
+        self.target().unlink()
+        with self.assertRaises(publication.PublicationEnded) as caught:
+            publication.read_binding(source, self.read_plan)
+        self.assertTrue(caught.exception.terminal)
+
+    def test_failed_cleanup_preserves_a_newer_record_revision(self):
+        self.publish()
+        target = self.target()
+        identity = self.identity
+        newer = publication._read(target, identity)
+        newer['published_ns'] += 1
+        original = publication._retract_observed
+        def replace_before_cleanup(path, owner, expected):
+            path.write_text(json.dumps(newer, ensure_ascii=True, separators=(',', ':')), encoding='utf-8')
+            return original(path, owner, expected)
+        with patch('publication._retract_observed', side_effect=replace_before_cleanup):
+            with self.assertRaises(FileNotFoundError):
+                publication.publish(self.base/'missing.md', self.read_plan, self.agent_pid)
+        self.assertEqual(publication._revision(publication._read(target, identity)),
+                         publication._revision(newer))
+
+    def test_precreated_directory_symlink_cannot_change_target_modes(self):
+        with patch('publication.sys.platform', 'linux'):
+            self.root.mkdir(mode=0o700)
+            victim = self.base/'symlink-target'
+            victim.mkdir(mode=0o755)
+            canonical = victim/'canonical-plan.md'
+            canonical.write_text('do not change\n', encoding='utf-8')
+            canonical.chmod(0o644)
+            link = self.root/(publication.PREFIX+self.identity)
+            link.symlink_to(victim, target_is_directory=True)
+            with self.assertRaises((OSError, ValueError)):
+                publication.directory(self.identity, create=True)
+            self.assertEqual(victim.stat().st_mode & 0o777, 0o755)
+            self.assertEqual(canonical.stat().st_mode & 0o777, 0o644)
+            self.assertEqual(canonical.read_bytes(), b'do not change\n')
+
+    def test_reader_open_replace_failure_preserves_previous_publication(self):
+        self.publish()
+        target = self.target()
+        previous = publication._read(target, self.identity)
+        with target.open('rb') as reader:
+            with patch('publication._replace_publication', side_effect=OSError(13, 'sharing violation')):
+                with self.assertRaises(OSError):
+                    self.publish()
+            self.assertEqual(publication._read(target, self.identity), previous)
+        self.assertTrue(reader.closed)
+        self.assertEqual(list(target.parent.glob('.publish-*')), [])
+
+    def test_cooperating_different_record_writer_survives_pruning(self):
+        agent_b = self.agent_pid+10
+        native_b = self.native_pid+10
+        anchors_b = copy.deepcopy(self.anchors)
+        anchors_b[0].update(pid=agent_b, ppid=native_b, birth='fixture:agent-b')
+        anchors_b[1].update(pid=native_b, birth='fixture:native-b')
+        self.facts.update({item['pid']: copy.deepcopy(item) for item in anchors_b})
+        def session(pid):
+            return copy.deepcopy(self.anchors if pid == self.agent_pid else anchors_b)
+        with patch('publication.session_process', side_effect=session):
+            self.publish()
+            publication.publish(self.plan, self.read_plan, agent_b)
+            target_b = publication.directory(self.identity)/publication._key(anchors_b[-2])
+            old_revision = publication._read(target_b, self.identity)['published_ns']
+            original_valid = publication._valid
+            original_lock = publication._writer_lock
+            waiting = threading.Event()
+            release = threading.Event()
+            failures = []
+            def valid(record, parent=None):
+                if record['anchors'] == anchors_b and record['published_ns'] == old_revision:
+                    return False
+                return original_valid(record, parent)
+            @contextlib.contextmanager
+            def interleaved_lock(target, identity):
+                if target == target_b and threading.current_thread().name == 'writer-a':
+                    waiting.set()
+                    if not release.wait(5): raise TimeoutError('writer interleaving')
+                with original_lock(target, identity):
+                    yield
+            def writer_a():
+                try:
+                    publication.publish(self.plan, self.read_plan, self.agent_pid)
+                except Exception as error:
+                    failures.append(error)
+            with patch('publication._valid', side_effect=valid), \
+                    patch('publication._writer_lock', side_effect=interleaved_lock):
+                thread = threading.Thread(target=writer_a, name='writer-a')
+                thread.start()
+                try:
+                    self.assertTrue(waiting.wait(5), 'writer A did not reach candidate B lock')
+                    publication.publish(self.plan, self.read_plan, agent_b)
+                finally:
+                    release.set()
+                    thread.join(6)
+            self.assertFalse(thread.is_alive())
+            self.assertEqual(failures, [])
+            current = publication._read(target_b, self.identity)
+            self.assertGreater(current['published_ns'], old_revision)
+            self.assertEqual(current['anchors'], anchors_b)
 
 
 class WorkflowEntryContract(unittest.TestCase):
@@ -138,16 +759,6 @@ class WorkflowEntryContract(unittest.TestCase):
         return subprocess.run([sys.executable, '-I', str(path)], input=json.dumps(value),
                               text=True, capture_output=True, timeout=3)
 
-    def test_execute_entry_delivers_adoption_for_slash_and_skill_invocations(self):
-        cases = [
-            {'hook_event_name': 'UserPromptSubmit', 'prompt': '/glitch-execute plans/active.md'},
-            {'hook_event_name': 'PreToolUse', 'tool_name': 'Skill',
-             'tool_input': {'skill': 'glitch-execute', 'args': 'plans/active.md'}},
-        ]
-        results = [self.hook(value) for value in cases]
-        messages = [json.loads(r.stdout)['hookSpecificOutput']['additionalContext'] for r in results]
-        self.assertTrue(all(r.returncode == 0 and 'BEFORE implementation/operations' in m
-                            and 'publish this plan' in m for r, m in zip(results, messages)))
 
     def test_unrelated_prompts_and_tools_never_adopt_or_block(self):
         cases = [

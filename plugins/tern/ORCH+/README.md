@@ -1,377 +1,244 @@
 # ORCH+ for Tern
 
-Run a team of AI agents from one controller in [Tern](https://docs.stencil.so/tern/): start a coordinator, hand out tasks or import a plan, watch health, have each change reviewed by a separate agent, roll tired agents over to fresh context and land their work one merge at a time. You decide what runs: each step needs your approval, or a session policy you set that approves chosen steps inside the plan's scope.
+Coordinate several projects, plans and agent conversations in [Tern](https://docs.stencil.so/tern/). Talk to the orchestrator about the work; use the adjacent **ORCHESTRATED WORK** panel to choose agents, attach conversations, start projects and answer decisions.
 
-ORCH+ adds orchestration on top of native Tern and [SPAWN](../SPAWN/README.md). Tern gives you panes, sessions and native agents. SPAWN holds your roster of configured agent accounts and launches them. ORCH+ uses that roster to run managed workers:
+**Provider-native orchestration is often the best choice.** Use an agent's own delegation tools when one provider and one conversation already meet your needs. ORCH+ is useful when you want a shared view of concurrent plans, different providers or accounts, existing conversations, review and landing decisions.
 
-- it assigns each worker an exact task;
-- it reads the worker's structured reports through a private mailbox;
-- it asks you whenever a decision is needed;
-- it records every effect so that a launch, stop or message happens at most once, even across reloads.
+[SPAWN](../SPAWN/README.md) owns agent configurations and launching. ORCH+ owns the organization and coordination of work. [USAGE](../USAGE/README.md) optionally supplies account usage and explicitly enabled capacity-routing evidence. Glitch integration is optional; ORCH+ does not require a Glitch installation for ordinary conversations and projects.
 
-Optionally, [USAGE](../USAGE/README.md) 2.1.0 or later supplies remaining-quota evidence, so new work goes to an account with capacity left and each worker's card shows how much of its account it used (see [Quota routing via USAGE](#quota-routing-via-usage)). Without USAGE, ORCH+ works fully and routing stays off.
+## Local first
 
-![The ORCH+ controller: managed dispatch, worker health, owner gates and the landing queue](assets/screenshots/controller.png)
+The default is **this machine, your current OS account**. Local setup needs no SSH connection, host chooser, sudo or extra service. Agent CLIs must already be installed and authenticated, with the permissions you intend to give them.
 
-## What it does
+For remote work, use Tern's existing connection to that host and open ORCH+ there. The same interface and pane-free connection are used; agents, saved configurations and mailboxes remain on the execution host. There is no separate ORCH+ SSH setup, parked transport pane, transport tab or background product daemon.
 
-- **One controller per logical session.** One ORCH+ view claims the controller for a logical session. Other views of the same session show the same facts read-only and can reveal the controller.
-- **Dispatch through SPAWN.** You pick a configured SPAWN record from a revision-pinned catalog and type the assignment, or start work from a plan file, a Tern board or an inbox folder. ORCH+ never sees commands, SSH settings or credentials and has no raw-command fallback.
-- **Roles.** Every worker has a role that ORCH+ sets: builder, reviewer, release manager, labeller or coordinator. Builders build; a separate reviewer judges each change; only the release manager merges and deploys.
-- **Structured reports, not screen scraping.** Workers report through a private report mailbox (READY, HEARTBEAT, ASK, CHECKPOINT, DONE and others). Check results and checkout facts come from SPAWN's helper, not from the worker's word. ORCH+ never reads transcripts or terminal output and never types into a pane.
-- **Owner gates.** Questions, proposals, quota fallbacks, shared checkouts, out-of-scope changes, loop caps and landing approvals become durable gates. You answer them, or a session policy you chose answers in-scope proposals for you, visibly tagged as such.
-- **Proof before landing.** A change lands only with a recorded proof: by default an approved review from a different provider family; with that switched off, passing helper-run checks plus an approved review.
-- **Loop caps.** Anything that would engage a model again (re-requests, rework, refreshes, retries) stops at a cap you set and asks you.
-- **Verified rollover.** A worker or coordinator close to its context limit hands over to a fresh successor through a checkpoint; no transcript is copied.
-- **Landing queue and deploys.** Merges are queued per project, repository and target branch, with one granted slot per target. The release manager merges under the repository's own rules, then deploys where those rules define a deploy.
-- **Reload recovery.** After a reload, ORCH+ guides you step by step back to a running controller. Uncertain effects are never replayed.
-- **Quota routing and usage deltas (optional).** Fresh USAGE evidence decides whether your chosen record still has quota left and which allowed alternative to use otherwise, and shows per-worker account usage.
+This is not cross-host federation: an orchestration coordinates work on one execution host. Standalone SPAWN SSH-command records remain separate from managed orchestration.
 
 ## Requirements
 
-- Tern 0.9.10 or later.
-- [SPAWN](../SPAWN/README.md) 0.4.0, installed on the same Tern host, with at least one record that declares the `report-files-v1` mailbox capability. A coordinator needs a record provisioned with `coordinator-control-v1`. Helper-run checks and checkout facts need `check-runner-v1` on builder records, and the release manager's record needs `release-manager-v1`.
-- Optional, for quota routing and usage deltas: [USAGE](../USAGE/README.md) 2.1.0 or later, with its read-only capacity export enabled and each SPAWN account bound in USAGE Setup (**Bind SPAWN accounts…**; OMP records through **Associate OMP records…**).
+- A compatible Tern installation and matching [SPAWN](../SPAWN/README.md) package. The updater checks the exact package requirements in [requires.json](requires.json).
+- Agent configurations that have completed SPAWN's managed setup for the work they will perform. An enabled account alone does not establish supported coordination or reporting capabilities.
+- A prepared native-agent or managed local-terminal configuration with `coordinator-control-v1` for the orchestrator pane. Native agents receive notifications; terminal agents use the provisioned helper's bounded wait/poll route. Agent labels alone do not establish this capability.
+- Optional: USAGE for display percentages. Quota-based routing additionally requires its capacity export and explicit account bindings.
+
+Native OMP launching currently requires a reviewed POSIX execution-host shell. Windows managed local-terminal setup requires a native `.exe` with the supported Windows argument contract; native OMP and cross-user managed setup on Windows are not supported. A Windows desktop connected to a POSIX Tern host uses that host's supported native route. See [SPAWN's platform requirements](../SPAWN/README.md) before choosing an execution host.
 
 ## Install
 
-Install SPAWN and ORCH+ on the Tern host that will run your agents. If you work from a desktop attached to a remote Tern host, also install both on the desktop so their window code (buttons, pickers, the Files button) loads there.
+Install SPAWN and ORCH+ on the host that will execute the work. For a desktop attached to a remote Tern host, install the matching packages on the desktop too, so their native window controls are available.
 
 ```sh
-tern plugin link /path/to/SPAWN
-tern plugin link "/path/to/ORCH+"
-tern plugin reload orchplus --json
+tern plugin install github.com/blastworksai/tools/plugins/tern/SPAWN
+tern plugin install github.com/blastworksai/tools/plugins/tern/ORCH+
 ```
 
-You can also use **Preferences › Plugins › Install…** and enter the ORCH+ directory, the one that contains `plugin.toml`. Tern reloads plugins whenever a linked directory changes, so edit a copy, not the linked directory, while agents are running.
+**Preferences › Plugins › Install…** accepts the same repository-subfolder sources. These commands install the default-branch packages, not an unpublished development candidate. A local package directory is also accepted. Use `tern plugin link` only for development: edits to linked files reload plugins.
 
-Installing or reloading ORCH+ starts nothing. After installation you have two entry points:
+Installing or reloading the plugin does not start agents or resume projects.
 
-- the **Open ORCH+ Config** button (`flow` icon) in the Files pane header, beside the SPAWN and WORK buttons. It opens the session's Config page;
-- the **ORCH+** command in the command palette. It opens the controller.
+## Get started
 
-![The ORCH+ button in the Files pane header, with its tooltip](assets/screenshots/files-button.png)
+1. Open **SPAWN** and complete agent setup. Installing SPAWN alone is not enough: ORCH+ checks the saved setup before it lets you create an orchestration.
+2. Open **ORCH+** from Tern's command palette. Use **Define Default Settings** to save your preferences, then **New orchestration…** to give the orchestration a recognizable name. Later, **Edit Default Settings** changes the defaults for new orchestrations only.
+3. Choose **Start orchestrator pane**, then an eligible agent. The compact picker loads available agents itself. Starting an agent may use model credits.
+4. Describe what you want in the orchestrator conversation. Add projects, plans or other conversations as needed. Importing a plan does not authorize its tasks to execute: use that project's **START** decision.
 
-Both entry points reveal an existing ORCH+ view in the current session rather than opening a second one. If ORCH+ cannot tell which view you mean, it shows a chooser.
+The agent list shows provider icon, provider name and account label, with usage when available. Missing usage is shown as unavailable, never as zero. A displayed percentage is informational; it is not permission to switch accounts or models.
 
-When you upgrade from 0.3.0, stored settings, workers and landing items are migrated when the store is restored. A landing grant that 0.3.0 had already sent to a builder is never re-sent: it shows a `legacy_grant_outstanding` hold that you settle with **Result lost — hold slot…** or **Reconcile observed outcome…**.
+If no agent is eligible, the interface explains the missing setup. It does not silently substitute a raw terminal command or grant capabilities based on an account's name.
 
-### Update
+## ORCHESTRATED WORK
 
-Run **ORCH+ Check for updates** from the command palette. When a newer version is on GitHub, **ORCH+ Update** installs it in place: it checks the release's requirements and asks first, and can also update connected remote hosts. Tern then reloads all its plugins, and your settings carry over. If ORCH+ is running a controller, run **ORCH+ Reload recovery guide** afterwards.
+The side panel is organized by project:
 
-A copy installed before the updater existed needs one manual update:
+- Each project, imported plan or WORK ON item is a top-level item.
+- Its agent conversations are children. A conversation row includes **provider · account — pane name**, using the pane's current name, including your renames.
+- **ACTIVE** means the project has live associated work or conversations. An idle but still-live conversation remains active.
+- **START** is the explicit action for an unstarted project. An active project can still contain newly added, held work; its project menu offers the corresponding START action.
 
-    tern plugin install --force github.com/blastworksai/tools/plugins/tern/ORCH+
+Adding or selecting a project does not restart its existing work. Completing a project retains its result under **Finished projects**. Reopening does not replay earlier tasks or launches. Live conversations and unsettled effects must be dealt with before a project can finish.
 
-A linked development checkout (`tern plugin link`) is never updated by the plugin; `git pull` it yourself.
+### Start an agent session
 
-## Use
+Choose **New Agent Session**, then an existing project or **New project…**, then an agent. The click starts that session through its saved SPAWN configuration. Describe and refine its task in the agent pane, not in a form asking you to enumerate files, checks and internal identifiers.
 
-All ORCH+ controls are native buttons, except the two reload recovery commands described in [Recover after a reload](#recover-after-a-reload), which you run from the command palette. Buttons that change something ask for confirmation, or open a picker or prompt, before they act. Once the controller has run its first command, a dispatch or assistance button runs only in the window that owns the controller; every other window showing the same controller ignores it. (Assistance on a controller restored after a host reload stays open to any window, so you can still inspect or stop its recorded owner.) A button from an outdated view is refused as stale and never replayed. If the host gets no confirmation from an ORCH+ window within 30 s, the press expires with a notice that it will not run later. A window may still have run it, so check the current state before pressing again.
+Code work still needs a concrete scope, appropriate checks and a repository/target before it can be reviewed and landed. The conversation and coordinator establish those details; hiding technical controls does not remove the checks.
 
-### Claim the controller
+### Attach a conversation
 
-1. Open ORCH+ from the palette.
-2. On a brand-new installation, choose **Initialize first-use authority…** and confirm that there are no earlier owners and no lost store. ORCH+ never replaces missing data silently.
-   First-use initialization is only for a truly fresh ORCH+ and SPAWN pair. If the ORCH+ store is lost, restore its backup, or reset SPAWN's plugin state together with ORCH+'s. Never re-initialize ORCH+ alone while SPAWN keeps its `dispatch-v1` state: ORCH+ request and logical session ids restart from the beginning, collide with fences SPAWN still retains, and SPAWN refuses the new requests with `content_conflict` ("Compacted request ID reused").
-3. Select your logical session. If this really is separate work, choose **Register a distinct logical session…** instead.
-4. Choose **Claim controller in this pane**. Only this view can now dispatch; every other view shows the same owner as occupied.
+Choose **Attach Existing Agent Session** and select the existing session. With Glitch integration enabled, ORCH+ can use available structured work context; otherwise, or when that context is not sufficient, choose an existing project or name a new one.
 
-Closing the controller pane does not release ownership. Reopen ORCH+, select the same session and use **Recheck**. To move ownership to a new pane, follow the recovery steps shown on the owner card. Each step asks you to confirm that the old owner and its executors have stopped.
+Attachment preserves the conversation and its context. It does not inject a task, change its permissions or automatically start imported work.
 
-### Config page
+You can then opt into managed coordination:
 
-Every ORCH+ view has a **Config** button, and the Files-header button opens Config directly. **Open ORCH+ controller** takes you back. Only the active controller can edit settings. Other views show them read-only, with the reason.
+- **Native OMP:** send enrollment to the exact idle conversation through its native message API. A busy conversation remains attached without being interrupted.
+- **Terminal agent:** copy the enrollment instructions once and paste them into that conversation yourself. Copying is not acceptance; ORCH+ waits for the actual matching reply.
 
-Checkboxes and −/+ buttons edit a draft. **Save session settings** commits only the fields you changed, and is refused if the saved settings changed in the meantime (another save, or pause/resume). **Enter value…** and **Enter time…** accept a single bounded value. Lists, records, paths, templates and role guidance save one entry at a time.
+Detaching a passive association leaves the conversation running. Moving a managed conversation to another project changes its association, not its existing task or context.
 
-![The ORCH+ Config page: rollover, task routing, scheduling, mailbox sweep and the pane orchestration list](assets/screenshots/config.png)
+### Add plans, boards and Glitch work
 
-| Card | Setting | Default | Range |
-| --- | --- | --- | --- |
-| Rollover | Automatic worker rollover | off | on/off |
-| | Roll over at x% of worker-reported context | 80 | 1–99 |
-| | Include the orchestrator (coordinator) in rollover | off | on/off |
-| Task routing | Use remaining quota and weekly reset in task routing | off | on/off |
-| | Keep in reserve (%) | 10 | 0–99 |
-| | Evidence max age | 15 min | 1–15 min |
-| | Allowed alternatives: initial dispatch / worker rollover / coordinator rollover | none | up to 24 records each |
-| | Allow a different provider / account / model, per kind | off | on/off each |
-| | Concurrent routed launches per session | 0 (no limit) | 0–32 |
-| Scheduling | Automatic progress-report requests | off | on/off |
-| | Poll interval | 5 s | 1–60 s |
-| | Heartbeat | 60 s | 5 s–1 h |
-| | Stale after | 3 min | heartbeat–24 h |
-| Mailbox sweep | Nightly orphan mailbox sweep | on | on/off |
-| | Sweep time | 03:00 | local 24-hour time |
-| Loops | Loop cap | 3 | 1–10 attempts per loop |
-| | Review rounds | 2 | 1–2 per piece of work |
-| | Stale-claim alert after | 30 min | 0 (off)–1440 min |
-| Review & proof | Enforce cross-family review | on | on/off |
-| | Family map | empty | up to 24 records |
-| | Reviewer records (tried in order) | none | up to 8 |
-| Release | Release manager record | none | one record |
-| Checkouts | Checkout roots | none | up to 8 absolute paths |
-| Autonomy | Approve in-scope proposals by policy: dispatch / report / review / landing | none | any subset |
-| Work sources | Glitch integration (offer `/glitch-plan` files) | on | on/off |
-| | Default work source | `/glitch-plan` file | plan file or Tern board |
-| | Board path; lane titles (queued, running, review, done) | none; Todo, Doing, Review, Done | absolute path; ≤64 characters each |
-| | Inbox folder | none | absolute path |
-| | Launch new board cards and inbox files automatically | off | on/off |
-| Routing | Routes (work class → record) | none | up to 16 |
-| | Labeller record | none | one record |
-| Role guidance | Builder, reviewer, release manager, labeller, coordinator | empty | ≤1024 characters each |
-| Templates | Template chain steps | none | up to 16 |
+Use the orchestration or project menu to **Add plan file…**, **Add board…**, or start from a saved template. Several plans and projects can coexist in one orchestration. Plans are shown together by logical checkpoints/features rather than arbitrary small pages.
 
-The whole saved policy is limited to 48 KiB ("Settings too large — shorten templates or guidance").
+**WORK ON** is available only when Glitch integration and its separate WORK ON switch are enabled. It requires [WORK](../WORK/README.md); ordinary ORCH+ use does not. WORK opens its native project and unarchived-plan picker and returns the selection to ORCH+. It does not start a second standalone agent.
 
-The **Pane orchestration list** shows every agent pane in the current session, ticked by default. Unticking a managed worker excludes it from automatic report requests and automatic rollover. Unticking never stops or retires anything. **Pause new work** / **Resume scheduling** holds or releases new work without blocking settlement.
+On first use, ORCH+ creates an **ORCH+ Board** using Tern's native board format. It shows checkpoints, tasks and their supported file changes, steps and validation checks. The fixed lanes are **Plans**, **Todo**, **Doing**, **Review** and **Done**. There is no lane-configuration step.
 
-Launch records, accounts, models and host settings stay in **SPAWN Config**. ORCH+ Config cannot set commands or credentials.
+The linked board follows source changes while the controlling window is attached, including while work is paused. A progress-note edit does not create work or rewrite cards. Source completion and work progress update the corresponding owned cards; unrelated cards and human edits are retained. Changed or ambiguous managed tasks remain held instead of restarting completed work.
 
-### Assign tasks and start a coordinator
+Use **Open plan** beside a plan title in ORCH+ to open its source on the execution host. The board's **Source plan** reference retains the link and synchronization information.
 
-1. In the controller, choose **Load configured SPAWN catalog**. You see the configured records with their capabilities, plus the reason any record is unavailable. Use **Next catalog page** when there are more.
-2. Choose **Assign explicit task to …** for an ordinary (builder) worker, or **Start selected coordinator …** for the session's coordinator, then type the assignment.
-3. SPAWN provisions the worker's report mailbox and launches the configured record in its configured directory and placement. The worker accepts the exact assignment and starts reporting.
+Plan checkpoints preserve their order. Independent tasks can run concurrently within the configured limits; sequential tasks wait for their prerequisites. Adding or synchronizing a plan does not authorize execution: use the project's **START** action unless you explicitly enabled automatic starts.
 
-Each worker's health card shows its role, declared family, native state, last report, context use (as reported by the worker), review and proof status, usage delta and pending gates. **Queue immutable progress request** asks a worker for a report now, and **Open exact relevant pane** reveals it. Workers follow [worker-brief.md](worker-brief.md); coordinators additionally follow [coordinator-brief.md](coordinator-brief.md).
+The board file belongs to the desktop window. On a remote Tern connection, it is not automatically on the execution host. ORCH+ confirms remote board access and retains unresolved writes rather than repeating them. External inbox polling is available only when the observing window runs on the execution host.
 
-A coordinator only proposes. Each proposal becomes a gate that you answer with **Answer exact question…**, unless your session policy answers it (see [Autonomy inside plan scope](#autonomy-inside-plan-scope)). A coordinator can never launch agents, review, merge code or change accounts itself.
+## Settings
 
-When work is done, **Finish ordinary worker…** stops the worker's exact pane and then retires its mailbox. A DONE report alone never stops anything. Reviewers and labellers finish automatically once their one answer is settled. A coordinator finishes through **Request graceful coordinator retirement** or its own release.
+Settings open in a real pane, with labeled fields and collapsible groups. Raw JSON, ownership details and manual recovery stay under **Advanced**.
 
-### Roles
+- **SAVE AS DEFAULT ORCHESTRATION SETTINGS** applies to future orchestrations. The first explicit save defines your defaults even if you leave every value unchanged.
+- **SAVE FOR THIS ORCHESTRATION INSTANCE ONLY** applies to the current orchestration. It does not change your defaults.
 
-ORCH+ sets each worker's role; a worker never chooses it.
+Absolute board/inbox paths and live pause/exclusion state are not copied into reusable defaults. A conflicting save keeps the draft and asks you to reload or review the changed settings; it does not overwrite newer configuration.
 
-- **Builder:** any task you assign or that comes from a plan, the board, the inbox or a template. It builds, runs its declared checks through SPAWN's helper, asks for review and requests landing. It never reviews its own work and never merges.
-- **Reviewer:** a fresh short-lived worker per review round, launched by ORCH+ on the first suitable record in **Reviewer records**. It answers one fixed question — does the change implement the task as specified, without changes outside its scope — with `approved` or `changes_required` and findings tied to file and line. No scores.
-- **Release manager:** the session's only merging actor, launched on **Release manager record** (which needs `release-manager-v1` and must differ from the builder's and the reviewer's records). It merges exactly the granted revision following the repository's own rules, then deploys where those rules define a deploy.
-- **Labeller:** a short-lived worker on **Labeller record** that picks a work class for intake without one (see [Work-class router](#work-class-router)).
-- **Coordinator:** proposes work, reports, reviews and landings; you or your policy decide.
+If a value blocks Save, its section opens and the field is marked in red with the required format or bounds. Correct the marked fields and save again; entered values remain in the draft. Alternative-agent lists are saved as sets, while reviewer preference order stays unchanged.
 
-**Role guidance** in Config is prepended to every assignment ORCH+ sends for that role — typed tasks, coordinator starts, attached panes, approved dispatch proposals, and the reviewer, release-manager, labeller, plan, board, inbox and template assignments. It is guidance, not enforcement. To actually restrict what an agent can do, restrict its tools in the CLI flags of its SPAWN record.
+Choose saved agents as preferences even before their orchestration helpers are prepared. ORCH+ checks the required launch capabilities when work starts; choosing an agent here does not claim it is ready or launch it.
 
-Reviewers, the release manager and the labeller run on the records you chose for them; they are never quota-routed. The **Release manager record** picker lists only records offering `release-manager-v1` that are not reviewer records, and the reviewer picker leaves out the configured release manager.
+**Close** discards unsaved edits without waiting for the source pane to recover. **Browse** opens a folder/file list inside the relevant field: board files use the computer running the Tern window; repository and inbox paths use the execution host. A blank **Board file location** uses ORCH+'s managed plugin-data location, not your Desktop folder.
 
-### Scope, checks and shared checkouts
+Fresh defaults allow four concurrent managed tasks, leave the quota-evidence-age override Off and enable automatic worker rollover. Existing explicitly saved preferences are preserved.
 
-Work can declare its files, scope (paths and outside systems) and checks. Plan tasks declare them from the plan; ORCH+ passes them to SPAWN as an authenticated manifest. On a record with `check-runner-v1` the builder runs SPAWN's helper:
-
-- `checkout` reports the worktree, branch, head and changed files straight from git;
-- `run-checks <check_id>` runs that declared check's exact command from the manifest (never a command the worker supplies) and reports its exit code on the current head.
-
-ORCH+ opens a gate when:
-
-- two same-session workers would share one checkout under a configured **checkout root** (`shared_checkout`; other sessions' workers are not visible);
-- declared files overlap another live worker's files (`file_overlap`);
-- a checkout changes files outside the declared scope (`scope`).
-
-ORCH+ cannot see the outside systems a task lists: workers and coordinators must ASK before touching any system not listed there.
-
-### Review and the proof rule
-
-When a builder reports REVIEW_READY, ORCH+ opens a review and launches a reviewer. With **Enforce cross-family review** on (the default), the reviewer must be on a record whose declared provider family differs from the builder's. `changes_required` sends the builder one `rework` reply with only the findings (and, with enforcement off, the checks that failed); the builder fixes those, publishes a new revision and asks for review again. **Review rounds** caps the rounds, then the owner decides. A new revision voids any earlier approval.
-
-Landing needs proof for the exact revision:
-
-| Enforce cross-family review | Proof |
+| Group | Settings |
 | --- | --- |
-| on | an approved review from a reviewer of a different declared family (helper checks are kept as evidence) |
-| off | every declared check passed through SPAWN's helper on that revision, and an approved review by a reviewer other than the builder (same family allowed) |
+| Glitch Integration | Enable Glitch and WORK ON separately. The WORK install/update action is needed only for WORK ON. |
+| General | Automatic working-folder tracking, automatic starts and board location. |
+| Agents and Routing | Preferred worker and orchestrator, verified USAGE quota routing, reserve, optional evidence-age limit, concurrent managed work and separate alternative-agent lists for new work and each rollover kind. |
+| Review and Completion | Required review, different declared provider family, allowed reviewers and the merge/release agent. |
+| Continuity | Automatic worker rollover, reported-context threshold and whether the orchestrator also rolls over. |
+| Advanced | In-scope automatic approvals, cleanup, report timing, loop/review/stale-claim limits, external inbox and custom templates. |
 
-Families come from the **Family map**, or else from the provider (Claude → anthropic, Codex → openai, Kimi → moonshot, Agy → google, Grok → xai, Muse → muse). OMP and unknown providers have no family until you map them.
+Commands, permissions, account labels, models and declared provider families belong to **SPAWN**, not ORCH+.
 
-### Loop caps and stale claims
+### Project code and merging
 
-Every loop that would re-engage a model or a worker — a rollover checkpoint request, a progress report request, an owner retry after backpressure, a landing refresh, a check rework, a review round, a deploy retry, a labeller retry, a template chain — stops at **Loop cap** with one `loop_cap` gate naming the loop. **Allow more** resets only that loop; **Keep it stopped** is final. Waits that cost no model call (quota re-evaluation, transport backoff, read-backs) stay time-bounded instead.
+Open a project, then **Settings → Code and merging**. ORCH+ discovers known project folders and reads the repository's locally known default branch. It does not assume that your current feature branch is the merge target, hardcode `main`, or contact the network to discover a default.
 
-An effect claimed for longer than **Stale-claim alert after** raises one `stale_claim` gate. ORCH+ never takes over a claim; the gate points you to the recovery guide.
+Choose the working folder and **Merge changes into** branch. A saved explicit target is retained when you reopen the form. **Advanced → Who handles merges?** chooses ORCH+ coordination or the repository's protected merge queue. This is a project setting, not a second global landing switch. Shared repository/target coordination still applies across local orchestrations.
 
-### Autonomy inside plan scope
+Text, writing and research projects do not need a repository or release manager.
 
-Approved proposals do something. Whether you approved them or your session policy did, ORCH+ carries each one out exactly once: `dispatch` queues the proposed record and prompt as new work that inherits only the parent's source and scope; `report` asks the worker for a report; `review` opens a review by a separate reviewer worker; `landing` approves the matching landing request.
+### Reports, cleanup and templates
 
-A proposal is **in scope** when its work:
+Report polling checks for agent updates; the default is five minutes. Optional automatic report requests have their own fifteen-minute interval and do not interrupt busy agents. Reports become stale after the separate thirty-minute threshold. Initial enrollment and coordinator-activation receipts use a separate polling cadence of at most two seconds for up to two minutes, then return to the configured interval. These reads never resend startup instructions or start project work.
 
-- came from an imported plan or the board (`source.kind` `plan` or `board`);
-- has declared `scope.paths`;
-- has no open `scope`, `file_overlap` or `shared_checkout` gate;
-- and, for `dispatch`, names a record that is current and eligible.
+Night Cleanup checks settled communication resources once a day at the chosen `hh:mm:ss` desktop-local time. It catches up when a window returns after sleep. It never deletes plans, code or conversations, stops working agents, or discards uncertain messages. The next ORCH+ panel interaction can show the day's remaining communication-file inventory. See [the backlog](documentation/backlog.md) for the planned way to show the summary when you return to the orchestrator conversation.
 
-In Config, **Autonomy** picks which in-scope kinds (`dispatch`, `report`, `review`, `landing`) the policy answers for you. None are picked by default. Choose `landing` with care: a policy approval of a landing is a real approval, and the work merges once the rest of the landing proof holds. Out-of-scope proposals always wait for you: the proposal gate itself says why the work is outside plan scope, and if you approve it, it is carried out just like an in-scope one.
+Under **Advanced → OPTIONAL: Templates**, ask your orchestrator to help set up custom work item templates. A template has an ID, title, prompt, output path, optional next template, optional task type and named custom fields. `{input}` supplies the invocation input; `{name}` uses a supplied custom-field value. Each template has its own defaults; only explicit invocation overrides carry to the next template. A task type is metadata, not an instruction to switch agents. Template chains still obey work-start, scope and loop limits.
 
-Every policy answer is recorded with its source, policy revision and rule, and shows on the gate as a policy answer, not yours. Policy never bypasses loop caps, check and review proof, capacity limits or pause, and never approves a landing while the session is paused.
-
-A proposal sent while the session is paused is refused (`session_paused`), and so is a proposal naming work without a retained CHECKPOINT of its project (`scope_mismatch`). ORCH+ answers its gate `reject` itself (shown as refused by ORCH+, not as your answer) and tells the coordinator once; the coordinator's reports keep flowing and it may propose again, even with the same proposal id. Pause answers nothing by policy; on resume, each still-pending in-scope proposal is evaluated once against the current Autonomy settings.
-
-### Work sources
-
-**Start work…** in the controller offers:
-
-- **From a /glitch-plan file.** The execution host reads and imports the plan. Checkpoints run in order: the next starts only when every task of the current one has landed or finished. Tasks marked INDEPENDENT start together, up to the concurrency limit; sequential tasks wait for earlier ones. Each task runs on the route for its class (or the `build` route) and carries the plan's files, scope and checks. Re-importing a changed plan supersedes the old import without restarting work that is already running. Turn **Glitch integration** off to hide this option.
-- **From a Tern board.** Cards in the board's queued lane become work; ORCH+ moves each card through the running, review and done lanes as its work progresses. A card tag `class-<route class>` (for example `class-build`, optionally `#`-prefixed) picks the route; other tags never route.
-- **From a template** (listed only when templates are saved). Pick a template and enter its `{input}`. Each Config → Templates row also has a **Start…** button.
-
-Each imported plan has a controller card, **Imported plan · <title>**, with the plan id, short revision, status and path, then each checkpoint (number, title, task count, flags) and each task (id, title, state, independent, worker, hold, flags), eight rows per page.
-
-An **inbox folder** works the same way for files: each new file becomes work (a `**CLASS**: <slug>` line picks the route), and the file is archived once its work launches. Intake is durable and deduplicated, so two windows never create the same work twice. With **Launch new board cards and inbox files automatically** off, each new item waits for your intake decision.
-
-**Templates** define chains of steps: each step's prompt takes one `{input}`, and the output file named in its DONE report becomes the next step's input. A chain stops after eight steps.
-
-### Work-class router
-
-**Routes** map a work class to a SPAWN record. Work that arrives without a class is labelled by a short-lived labeller worker, which picks one of your route classes; ORCH+ then routes the work in code. The model and effort are whatever that SPAWN record runs; ORCH+ never sets CLI flags. A class with no route opens a `label_unknown` gate (**Route it**, **Label again** or **Cancel**). With no labeller record, the intake waits as `label_pending`.
-
-### Worker rollover
-
-**Roll over worker…** on a worker's health card, or automatic rollover at the Config threshold, works in four steps:
-
-1. ORCH+ asks the worker for a CHECKPOINT that lists completed and remaining work and includes fresh check results.
-2. It starts a fresh successor from the same SPAWN record (or an allowed alternative when quota routing is on), with the checkpoint as its assignment and the same role, files, scope and checks.
-3. It waits until the successor accepts the exact handover and is observed running.
-4. Only then does it stop the predecessor.
-
-The predecessor keeps running until the successor is accepted. A failed step holds with a reason. You can cancel with **Cancel rollover…**, and nothing is retried blindly.
-
-### Coordinator rollover
-
-With **Include the orchestrator (coordinator) in rollover** on, or through **Roll over coordinator…**, the coordinator hands over in the same way. Two coordinators never run at the same time:
-
-1. The coordinator checkpoints and is retired.
-2. Its exact pane stops and its mailbox is retired.
-3. Only then is the successor started, carrying the handover.
-
-If the stop is uncertain, the handover waits for the owner recovery steps.
-
-If the successor fails to start or to accept the handover, no coordinator is active, because the predecessor is already retired. The hold says so and shows SPAWN's reason. To continue, stop the successor pane, then run fenced recovery on the successor's orchestrator owner card. That closes the rollover, and you can start a new coordinator from the retained checkpoint.
-
-### Landing queue
-
-A builder that wants to merge sends a landing request for an exact checkpointed commit and target branch. Each request opens a **landing approval** gate. Only the head of the target's queue can be granted, and only when:
-
-- the request is approved (by you, or by your landing auto-approval policy for in-scope work);
-- the proof rule holds for that exact revision (see [Review and the proof rule](#review-and-the-proof-rule));
-- a release manager is configured on a record that is neither the builder's nor the reviewer's;
-- the builder's latest checkpoint for that commit has fresh passing checks and no holds, and its checkout matches and is in scope;
-- the target head is the one the request expected.
-
-The builder never merges. ORCH+ sends the grant to the session's release manager, which performs the approved merge under the repository's own rules and reports the result. ORCH+ never runs git.
-
-If the target moved before the grant, the item is blocked as `target_moved`. If the release manager finds the target moved (`stale_target`), the slot is freed and the item stays in place needing refresh. Either way ORCH+ sends the builder exactly one `landing_refresh` notice with the expected and current heads; the builder rebuilds, gets a fresh review and sends a fresh request, which needs a new approval. Refresh cycles count against the loop cap.
-
-After a merge lands, ORCH+ sends the release manager one deploy grant for that revision. The release manager deploys where the repository's rules define a deploy, or reports that none applies. A deploy the rules mark as needing a decision (`held`), or a failed one, opens a `deploy_hold` gate: you allow it, retry it (a new attempt, capped by the loop cap) or stop it.
-
-Use **Move up**/**Move down** and **Cancel…** on ungranted items. While an item needs a refresh, its row reads "approval void — awaiting fresh review/request" instead of "owner approved". When a granted result is lost, use **Result lost — hold slot…** (or **Deploy result lost — hold…**) and later **Reconcile observed outcome…**. Nothing is re-granted automatically.
-
-### Adopt a hand-opened agent pane
-
-On the Config page, an idle, ticked agent pane that you opened yourself offers **Attach pane N as ORCH+ worker…** once a catalog is loaded. Pick a matching `native-agent` SPAWN record and type the assignment. You also confirm that you checked this exact pane. ORCH+ re-checks the pane just before acting. From then on it is an ordinary managed worker.
-
-Nothing is adopted automatically, and shell panes are never typed into. Coordinators cannot be adopted.
-
-### Recover after a reload
-
-After a plugin or host reload, the controller becomes uncertain and nothing new runs. In the window you are working in, run **ORCH+ Reload recovery guide** from the command palette. The same list appears in the controller as the **Reload recovery checklist**, and it walks you through:
-
-1. continuing the controller in this window, after you confirm the old executors stopped. You can also run **ORCH+ Continue controller in this window** from the palette directly;
-2. recovering the previous SPAWN owner in **SPAWN: Running agents**;
-3. **Continue after reload / reattach explicitly…** for each worker, with its recorded pane.
-
-Use the palette commands, not the **Continue controller after reload…** and **Guided reload recovery — next step…** buttons, after a reload. A button press does not tell ORCH+ which window it came from. When two windows show the same session (for example a desktop window attached to a remote host and a window on that host), a press could otherwise open the picker in the other window and make that window the controller's origin. The buttons therefore only work in the window that already owns the controller. A palette command always runs in the window you typed it in. If several controllers are open in the session, focus the one to recover first.
-
-ORCH+ reads uncertain effects back from SPAWN automatically, with read-only status reads only. **Read retained SPAWN outcome (never relaunch)** does the same read on demand.
-
-Work that was queued but had not launched yet moves to the continued window. Its launch then runs there, even when its mailbox provision finished only after you continued. A launch that had already started in the old window is never re-run; it stays uncertain until its outcome is read back.
-
-Some never-launched work cannot move: SPAWN already received its launch or provision (for example a launch whose window authorization expired and was rechecked), or it is an adoption whose ask was never sent. Continuation marks that request as never executed, and the worker shows **Cancel never-launched work…**. If SPAWN received the request, ORCH+ first reads SPAWN's retained status of it and cancels only when that request can never run: SPAWN has no record of it, rejected it, or reports that it was refused before any effect (an expired challenge counts). While SPAWN still holds a live challenge, wait 30 seconds and try again. Without a mailbox, cancelling removes the worker and frees its reservations at once. If its mailbox was already provisioned, cancelling retires that never-used mailbox through the exact retirement path and keeps the worker visible until SPAWN confirms retirement; the worker is then removed and its reservations, including a coordinator start's slot, are freed. If SPAWN refuses the retirement, cancel again to issue one fresh retirement; a pending or uncertain one is never repeated. Nothing is stopped or re-sent. Then queue the assignment again; it gets a new launch request.
 
 ### Quota routing via USAGE
 
-> **Needs USAGE 2.1.0 or later.** Quota routing reads USAGE's read-only `usage.capacity` block and needs an owner-confirmed binding between each SPAWN account and its USAGE reading (USAGE Setup: enable capacity export, **Bind SPAWN accounts…**, and **Associate OMP records…** for OMP records). With routing on and no bound evidence, ORCH+ holds the task and says why ("no allowed record has sufficient fresh quota"). It never guesses. Routing is off by default.
+The setting is **Use remaining quota and weekly reset in task routing**. It is off by default. Enable USAGE's read-only capacity export and explicitly bind the SPAWN account to its USAGE reading; OMP records need an explicit association with the underlying account.
 
-Turn on **Use remaining quota and weekly reset in task routing** and enable USAGE's read-only capacity export (ORCH+ opens USAGE's capacity block in the background **SPAWN bridges** tab and reuses it after reloads). For each new task or coordinator start — typed, from a plan, the board, the inbox, or an approved proposal — the record you chose launches unchanged as long as its fresh, identity-bound USAGE evidence shows more remaining quota than the reserve. Otherwise ORCH+ picks the allowed alternative with the earliest weekly reset, but only if its provider, account and model changes are permitted in Config. If no permitted alternative qualifies, ORCH+ opens a quota-fallback gate for you to decide.
+For each routed new task or coordinator start:
 
-Missing, stale or unbound evidence never counts as "plenty". An OMP record uses its account's quota only after you associate it with that account in USAGE Setup (**Associate OMP records…**); until then it is unbound. USAGE confirms the evidence again right before each launch. **Refresh quota evidence from USAGE** and **Re-check capacity now** fetch fresh evidence. Rollover successors use their own allowlists.
+1. Keep the selected agent when its fresh, identity-bound readings are strictly above the configured reserve in every bound quota window.
+2. Otherwise consider only the alternatives you allowed for that kind of launch, subject to the provider/account permissions you enabled.
+3. Among qualifying alternatives, prefer the earliest weekly reset. Revalidate the exact evidence immediately before launch.
+4. If none qualifies, hold the work and explain the decision needed. Missing, stale, revoked or unbound evidence never means unlimited capacity.
 
-**Usage deltas.** Each worker records its account's USAGE reading when it launches and when it reports DONE (refreshed at finish). Its health card shows the change per quota window, or why the two readings are not comparable (no bound reading, a different account, or a reset in between), and how many other workers shared that account during the run.
+Worker rollover and orchestrator rollover have separate alternative lists and provider/account permissions. The original agent stays preferred; its saved model and command are not rewritten. Reviewers and a separately selected release agent are not quota-routed.
 
-## Where ORCH+ runs
+The concurrent-work setting defaults to four routed work items in this orchestration, not four jobs per agent or a cap on every open session. Start conservatively: `max concurrent tasks = floor(RAM budget for tasks / peak RAM per task)`. Reserve memory for other applications and a safety margin, and measure representative work before raising the limit; CPU and disk pressure matter too. This setting does not reserve quota or account for unrelated sessions using the same account.
 
-ORCH+ orchestrates on the Tern host it runs on. The controller, the coordinator, the workers, their mailboxes and SPAWN's records all live on that one host:
+Optional display failures do not disable manual agent selection. Enabling quota routing is different: unavailable capacity evidence still holds routed work. Account usage deltas include other activity on the account; they are not exact per-worker billing.
 
-- **Local agents:** open ORCH+ in a local Tern window.
-- **Agents on a remote host:** attach a Tern window to that remote Tern host and open ORCH+ there. That host's ORCH+ and SPAWN run the work, and the desktop only displays it.
+### Review and landing
 
-ORCH+ never reaches across an SSH hop. SPAWN records that launch through SSH are not eligible for managed dispatch, although ordinary SPAWN SSH launches keep working. There is no federation between hosts and no automatic migration.
+A builder proposes a completed change. Every declared check must pass through SPAWN's helper at the exact submitted revision. When review is required, a different reviewer must approve that revision.
 
-## Safety guarantees and limits
+By default, the existing accepted worker performs the merge/release after the required proof and approvals. It must have the actual managed release capability; the default does not grant it. You can instead select a separate eligible release agent. Neither mode permits the reviewer to approve its own work or bypass repository protections.
 
-- **Exactly-once effects.** Every launch, mailbox operation, message, wake and stop is recorded with an exclusive claim before it runs. After a lost or ambiguous result, ORCH+ only reads status back. It never resends or relaunches.
-- **Fail closed.** Reloads, storage failures, capacity limits and missing panes keep ownership and work occupied until you verify and recover them explicitly. A timeout or missing pane never counts as "stopped".
-- **No transcripts.** ORCH+ never reads a pane's transcript or screen and never types into terminals. Workers communicate only through structured reports, and you communicate with them through immutable replies.
-- **No SSH hop.** See [Where ORCH+ runs](#where-orch-runs).
-- **Your decisions are explicit.** Approvals, attestations and recovery steps are buttons you press, or policy answers you configured, which are tagged as policy. ORCH+ labels operator attestations as such, and never invents approval or infers a merge from DONE or an idle pane.
+Different-family review uses the provider family saved in **SPAWN → Advanced agent settings**. Direct providers have known defaults; wrappers and OMP need the correct underlying provider declared. This is configuration, not proof of the model actually running or account isolation.
 
-Known limits:
+Each code project has a verified checkout, target ref and landing route:
 
-- **Same-user trust.** Tern's UI events do not authenticate a person: any process running as your OS user could press the same buttons. Helper-produced check results and checkout facts are produced by code, not by the worker's word, but they are not tamper-proof against a worker that edits the helper or its files; the same limit applies to all report intake.
-- **Families are declared, not verified.** ORCH+ cannot see which model a record actually runs. Cross-family review is only as good as your family map and provider settings. Model and profile selectors are shown as unverified, because SPAWN provides owner-entered text only.
-- **The board is desktop-only.** Tern's board API exists only in the desktop window, and neither boards nor folders send change events, so the board and inbox are polled. When the window is attached to a remote host, the board path is on the desktop and is used only after you confirm it once; the inbox folder is polled only when the window runs on the execution host.
-- **Usage deltas are account-level.** USAGE reports a remaining percentage per account window only, so a delta covers everything that used the account in that time, not one worker's exact use.
-- **Idle windows.** Tern does not wake an untouched window when one of its timers comes due. While an ORCH+ window drives an active controller with timed work, an idle-wake helper keeps one short `sleep 2` child (`ping` on Windows) running so the window keeps observing and dispatching; the Health card shows **Idle-wake helper active: …** or **Idle-wake helper unavailable: …**. Inbox or board polling this window performs counts as timed work, so a controller with only an intake inbox or board configured keeps the helper running (Health: **Idle-wake helper active: polling the intake inbox** / **the board** / **the intake inbox and board**). A remote host's inbox, or an unconfirmed remote board, does not. A window without an active ORCH+ controller (for example one showing only SPAWN) gets no helper and can still stall until it is used, as can a controller awaiting continuation.
-- Effects are driven by an attached ORCH+ window. With no window attached, nothing new starts, and the nightly sweep catches up on the next attach.
-- A confirmed native pane stop does not prove that every remote child process exited.
-- Landing, reviewers, the release manager and the labeller do not use quota routing. Reserves cannot be set per quota window.
-- Durability is that of Tern's plugin key-value store. One Tern host process per data directory is assumed.
+- **ORCH+ coordinates this target:** one granted slot per shared repository/target across local orchestrations.
+- **Use the repository's protected merge queue:** the repository owns serialization; ORCH+ still requires its normal approval and proof.
 
-The full protocol is documented in [REFERENCE.md](REFERENCE.md): storage limits, roles, proof, mailbox and sweep rules, dispatch and recovery details, and the rollover, landing and deploy state machines.
+Changed target heads, conflicting checkout use, overlapping files, failed checks and uncertain merge outcomes remain decisions—not reasons to rerun an issued operation. Turning review off never turns declared checks off. A new revision invalidates earlier check/review proof.
+
+### Worker and coordinator rollover
+
+Automatic rollover uses the runtime's actual context measurements. Its default threshold is 55% of the headroom left after the first turn:
+
+```text
+context now >= first-turn context + 0.55 * (context window - first-turn context)
+```
+
+You can replace that calculation with one numeric percentage. Existing explicit percentage settings stay explicit; they are not silently converted. Billed tokens, output totals and guessed window sizes are not measurements. Missing, stale or inconsistent measurements show **unknown** and do not trigger automatic rollover.
+
+Workers wait for the next completed checkpoint after reaching the threshold. Orchestrators do not wait for a project checkpoint. Both still require settled, idle controls and the normal handover checks; reaching the threshold is not permission to interrupt an issued operation.
+
+A successor starts with its own context baseline, not the predecessor's counts. The successor accepts the exact handover before an ordinary predecessor can stop. Coordinator rollover is stricter: the predecessor must retire and its exact stop must be observed before the successor starts. Failed or uncertain steps stay held rather than launching more successors.
+
+Agents are also instructed to suggest a fresh session immediately when context appears poisoned, naming the symptom and labelling suspicion as suspicion. Otherwise, workers check at checkpoint ends and orchestrators check at the threshold. Finishing a task alone is not a reason to suggest a new session.
+
+These rules work when the agent reports genuine runtime measurements; ORCH+ does not invent them to enable automatic rollover.
+
+## Update and reconnect
+
+Use **ORCH+ Check for updates**, then the offered update action. The updater checks the actual downloaded package and requirements, requests approval, and retains the outcome. A preview is not proof that a particular commit was installed. Connected remote hosts use the existing Tern connection.
+
+Compatible reloads and updates reconnect ORCH+ to SPAWN automatically when the exact retained controller and agent identities can be verified. Work, pause state, pending decisions and original requests are preserved. No normal **Update/reconnect** button or manual mailbox-startup step is required.
+
+While an agent starts, its row shows progress rather than a success message. Once the pane is known, the row opens it. An interrupted start is checked against its retained outcome without launching another copy. Missing identity or an unresolved issued effect remains a visible hold with a safe action under **Advanced**.
+
+Automatic reconnection does not erase ownership, attest that an old executor stopped, resume paused work or replay an uncertain launch.
+
+After a coordinator really launched but failed before acceptance or activation, **Advanced → Remove failed startup…** can request removal only after that coordinator owner has completed fenced recovery, with no consumption, unresolved operation or restoration. SPAWN first checks the exact original pane through its genuine authorized native window and proves the producer journal unused before retiring the original mailbox and launch reservation. Unknown ORCH+ lifecycle evidence does not mean exit: only SPAWN's fresh exact exit/absence witness permits helper effects. Across a continued window epoch, an existing target is refused as potentially restored; only genuine original-pane absence is accepted. A refused or uncertain retirement stays visible; no stop, acceptance or release is invented, and the original mailbox account/target is not moved. Only confirmed retirement removes the old worker and frees that same record for preparation. This action does not START project work.
+
+Focused regressions: `dispatch/rollover_coordinator_successor_rejected` covers recovered failed-startup retirement and refusal fences; `dispatch/quota_coordinator_rollover` covers a policy-authorized coordinator account switch with distinct successor transport/owner/handover, the predecessor retained and project START still off.
+
+Coordinator rollover fixes the selected successor record in its prepared immutable provisioning draft before retiring the predecessor. This target binding grants neither a successor owner nor an execution slot: both wait for the predecessor's exact stop and mailbox retirement. The quota alternative permissions remain unchanged.
+
+
+If an update outcome is uncertain, use **ORCH+ Resolve update outcome** rather than repeating the installation. An old installation without the updater needs one manual update:
+
+```sh
+tern plugin install --force github.com/blastworksai/tools/plugins/tern/ORCH+
+```
+
+Linked development checkouts are not updated by the plugin. Do not delete plugin state to clear a warning or reinitialize only one side of an existing ORCH+/SPAWN pair: retained work and delivery identities must remain consistent.
+
+## Boundaries and limits
+
+- **Managed effects are recorded before execution.** Lost or ambiguous results are read back, not blindly resent. This prevents replay; it is not proof that an uncertain operation succeeded.
+- **No terminal scraping or automatic enrollment paste.** Coordination uses structured reports and native APIs. A pane title is a display name, not identity or authorization.
+- **Roles are not a sandbox.** Agents retain their configured OS, provider and tool permissions. Same-user processes can affect each other's files; helper results are not tamper-proof against that same user.
+- **Repository rules still apply.** ORCH+ coordinates known work but does not discover every unrelated process, install branch protection or lock repositories across separate hosts/data directories.
+- **Unknown is not stopped.** A missing pane, timeout or idle conversation does not establish termination. Confirmed pane closure does not prove that every remote child process exited.
+- **An attached window drives new effects.** With no attached controlling window, nothing new starts. Background observation uses the existing bounded wake mechanism; it is not a persistent ORCH+ service. A missed nightly mailbox sweep catches up on attachment.
+- **Stored work is retained.** Pause stops new work, not settlement. UI grouping or hiding Advanced does not discard pending evidence, reports, decisions or uncertain effects.
+
+See [REFERENCE.md](REFERENCE.md) for protocol limits, ownership and recovery, structured reports, capacity rules and the review/landing state machines. Managed agents follow [worker-brief.md](worker-brief.md); orchestrators additionally follow [coordinator-brief.md](coordinator-brief.md).
+
+## Documentation
+
+Technical documentation, walkthroughs and architecture are in [documentation/README.md](documentation/README.md). Planned future work is in [documentation/backlog.md](documentation/backlog.md). Optional behaviour that exists only in source is not claimed as qualified on every provider or platform.
 
 ## Verification
 
-The tests run inside Tern's Lua runtime against a disposable data directory, together with a disposable SPAWN package. The entrypoint `tests/run.luau` takes the plugin directory and one or more `group[/section]` selections:
+Native regression suites run in Tern's Lua runtime with disposable plugin data. The entrypoint accepts a group or named section:
 
 ```lua
 local root = "/path/to/ORCH+"
 return assert(loadstring(tern.fs.read(root .. "/tests/run.luau")))(root, "dispatch/rejected_read")
 ```
 
-| Group | Covers |
-| --- | --- |
-| `state` | authority registry, admission, persistence and capacity reserves |
-| `transport` | report-files-v1 codecs, closed reply schemas, landing proof and signer rules, hashing |
-| `authority` | host block: duplicate views, stale buttons, store changes, restore |
-| `dispatch` | dispatch reducer: claims, results, quota routing, rollover, retirement, sweep, Config policy and loop caps |
-| `reports` | report intake, context usage, checkout gates, check proof, landing queue and refresh notices, 0.3.0 landing upgrade |
-| `gates` | owner gates, answers and cancellation, stale claims, policy answers |
-| `health` | window scheduler, health, reload recovery, bridge panes, Config views, work picker, inbox, usage row, template start, role pickers, landing row, imported plans, idle-wake helper, gate refusals, Finish refusals (`template_start`, `role_pickers`, `landing_row`, `plans_view`, `idle_wake`, `gate_refusal`, `finish_refusal`) |
-| `workflow` | plan import, reviews and rounds, proof rule, release manager, deploys, landing grid, autonomy, work sources, router, usage deltas |
-
-Run each group in its own callback; long sections can also run one at a time (the `gates` group is run per section). SPAWN has its own suites. See its [README](../SPAWN/README.md#tests). [REFERENCE.md](REFERENCE.md#test-sections) lists the named sections.
-
-## Files
-
-- `plugin.toml`: package manifest and the `orchestrator` block
-- `window.luau`: palette commands (open, continue controller, recovery guide), Files button, button routing, scheduling, SPAWN and USAGE bridges, board and inbox polling
-- `host.luau`: controller and Config block, and the only writer of ORCH+ state
-- `views.luau`: controller and Config rendering
-- `state.luau`: ownership registry and persistence rules
-- `dispatch.luau`: dispatch, report, gate, review, rollover, landing, deploy, work-source and sweep reducer
-- `transport.luau`: report-files-v1 codecs and the landing proof rule
-- `quota.luau`: USAGE capacity normalization, routing rule and usage deltas
-- `plan_import.luau`: `/glitch-plan` file parser
-- `worker-brief.md`, `coordinator-brief.md`: contracts for managed agents
-- `REFERENCE.md`: full protocol reference
-- `CHANGELOG.md`: release notes
-- `requires.json`: minimum Tern and SPAWN versions checked by **ORCH+ Update**
-- `updater/`: vendored self-updater (from `shared/tern-updater`; do not edit here)
-- `mockups/`: conceptual SVG mockups
-- `assets/screenshots/`: the screenshots in this README
-- `tests/`: native regression suites
-
-API references: [host lifecycle and block views](https://docs.stencil.so/tern/reference/api-host.html), [native UI nodes and actions](https://docs.stencil.so/tern/reference/ui.html), [window APIs](https://docs.stencil.so/tern/reference/api-window.html).
+State-machine tests do not replace the native walkthrough. The shared `report-files-v1/tests/native_smoke.py` harness exercises actual controls and disposable conversations, records screenshots and retained outcomes, and checks that ordinary Tern remains untouched. Provider-backed scenarios require explicit consent and report their scope separately from deterministic terminal fixtures. See the [shared protocol verification guide](../../../shared/report-files-v1/README.md).
 
 ## License
 

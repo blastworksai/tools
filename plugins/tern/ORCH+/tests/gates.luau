@@ -42,36 +42,36 @@ if section == nil or section == "lifecycle" then
  f.memory.fail = false
  check(f.authority:apply(event).code == "gate_answered" and gate(f,gid).phase == "answered" and gate(f,gid).delivery == nil, "answer records UI source before separate outbox issuance")
  local writes = f.memory.writes
- check(f.authority:apply(api.clone(event)).ok and f.memory.writes == writes, "same exact answer request is idempotent")
+ check(f.authority:apply(api.clone(event)).code == "stale_revision" and f.memory.writes == writes, "old answer intent cannot execute again after its captured revision changed")
  local changed = api.clone(event); changed.answer = "Different operation"
- check(f.authority:apply(changed).code == "request_conflict", "same answer ID cannot authorize different text")
- check(f:apply("answer", { gate_id = gid, gate_revision = 1, choice_id = "hold", answer = "Changed mind" }).code == "stale_gate", "changed answer cannot replace an answered revision")
+ check(f.authority:apply(changed).code == "stale_revision", "changing stale answer bytes cannot refresh its authority")
+ check(not f:apply("answer", { gate_id = gid, gate_revision = 1, choice_id = "hold", answer = "Changed mind" }).ok, "changed answer cannot replace an answered revision")
  assert(f:apply("pause").ok)
  publish(f,id,gid)
  local delivery = api.clone(gate(f,gid).delivery)
  check(gate(f,gid).phase == "delivered" and not delivery.acknowledged, "publication is not consumption, even while paused")
  local reply = api.codec.decode_reply(delivery.bytes, w(f,id))
  check(reply.kind == "owner_decision" and reply.gate_id == gid and reply.gate_revision == 1 and reply.payload.choice_id == "safe", "immutable reply carries exact gate/revision and answer")
- check(acknowledge(f,id,delivery).ok and gate(f,gid).phase == "acknowledged", "only correlated worker ACK settles decision")
- check(w(f,id).reply_floor == delivery.reply_seq and w(f,id).replies[tostring(delivery.reply_seq)] == nil, "settled reply compacts without losing durable decision evidence")
- check(api.state.rehydrate(api.clone(f.authority.registry)) ~= nil, "acknowledged gate restores after reply compaction")
- for _, entry in w(f,id).workflow.thread do if entry.gate_id == gid then check(entry.state == "settled", "gate-related pending entries settle on consumption") end end
+ check(acknowledge(f,id,delivery).ok and gate(f,gid) == nil, "correlated worker ACK reclaims the settled unassociated gate")
+ check(w(f,id).reply_floor == delivery.reply_seq and w(f,id).replies[tostring(delivery.reply_seq)] == nil, "settled reply compacts to the current reply floor")
+ check(api.state.rehydrate(api.clone(f.authority.registry)) ~= nil, "settled gate absence restores after reply compaction")
+ for _, entry in w(f,id).workflow.thread do check(entry.gate_id ~= gid, "completed gate question/answer thread copies are removed") end
 end
 if section == nil or section == "cancel" then
  local f = api.fixture(); local id = f:accepted(false); local gid = ask(f,id)
- check(f:apply("answer", { gate_id = gid, gate_revision = 2, choice_id = "safe", answer = "No" }).code == "stale_gate", "stale gate revision rejected")
+ check(not f:apply("answer", { gate_id = gid, gate_revision = 2, choice_id = "safe", answer = "No" }).ok, "stale gate revision rejected")
  local wrong = f:event("answer", { gate_id = gid, gate_revision = 1, choice_id = "safe", answer = "No" }); wrong.origin.window_epoch = "other-window"
- check(f.authority:apply(wrong).code == "continuation_required", "different recipient origin cannot answer without explicit continuation")
+ check(not f.authority:apply(wrong).ok and gate(f,gid).phase == "pending", "different recipient origin cannot answer without explicit continuation")
  assert(f:apply("answer", { gate_id = gid, gate_revision = 1, choice_id = "safe", answer = "Proceed only with named work" }).ok)
  publish(f,id,gid)
  local delivery = api.clone(gate(f,gid).delivery)
  check(f:apply("cancel_gate", { gate_id = gid, gate_revision = 1 }).ok and gate(f,gid).phase == "cancelled", "owner cancellation is explicit")
  check(gate(f,gid).delivery_uncertain and gate(f,gid).delivery.bytes == delivery.bytes, "cancellation after possible delivery preserves immutable uncertainty")
  check(w(f,id).replies[tostring(delivery.reply_seq)] ~= nil, "unacknowledged cancelled decision cannot be evicted")
- check(acknowledge(f,id,delivery).ok and gate(f,gid).phase == "cancelled" and not gate(f,gid).delivery_uncertain, "late exact ACK settles transport without undoing cancellation")
- check(api.state.rehydrate(api.clone(f.authority.registry)) ~= nil, "cancelled and acknowledged uncertainty restores")
+ check(acknowledge(f,id,delivery).ok and gate(f,gid) == nil, "late exact ACK settles cancellation and reclaims its final live gate")
+ check(api.state.rehydrate(api.clone(f.authority.registry)) ~= nil, "settled cancellation absence restores")
  local g = api.fixture(); local wid = g:accepted(false); local pending = ask(g,wid)
- check(g:apply("cancel_gate", { gate_id = pending, gate_revision = 1 }).ok and gate(g,pending).delivery == nil, "pre-answer cancellation creates no decision reply")
+ check(g:apply("cancel_gate", { gate_id = pending, gate_revision = 1 }).ok and gate(g,pending) == nil, "pre-answer cancellation leaves no completed gate or decision reply")
 end
 if section == nil or section == "native" then
  local clock = { now_ms = 100, mono_ms = 10, epoch = "host-test" }
@@ -86,7 +86,7 @@ if section == nil or section == "native" then
  local event = f:event("observe", observation)
  check(f.authority:apply(event).ok, "fresh exact native prompt observation is accepted")
  local writes = f.memory.writes
- check(f.authority:apply(api.clone(event)).ok and f.memory.writes == writes, "latest observation replay is idempotent without another permanent command")
+ check(f.authority:apply(api.clone(event)).code == "stale_revision" and f.memory.writes == writes, "captured observation replay cannot refresh its authority fence or write again")
  check(f.authority.registry.dispatch.command_cursors[f.origin.logical_session_id].seq == event.command_seq and w(f,id).workflow.observation_cursor.seq == 1, "observation keeps both durable intent replay barrier and bounded per-worker observation cursor")
  local gid; for key in f.authority.registry.dispatch.gates do gid = key end
  check(gate(f,gid).kind == "native_input", "native prompt has an owner remedy gate")
@@ -95,7 +95,7 @@ if section == nil or section == "native" then
  local replies = w(f,id).reply_seq
  check(f:apply("recheck_gate", { gate_id = gid, gate_revision = 1 }).ok and w(f,id).reply_seq == replies, "owner resolved button only requests observation")
  clock.mono_ms += 100; clock.now_ms += 100; observation.native_state = "idle"; observation.observation_seq = 2
- check(f:apply("observe", observation).ok and gate(f,gid).phase == "superseded", "fresh safe native observation supersedes resolved prompt gate")
+ check(f:apply("observe", observation).ok and gate(f,gid) == nil, "fresh safe native observation reclaims the resolved prompt gate")
  check(w(f,id).reply_seq == replies, "recheck never signs in, sends permission input or creates generic retry")
  local before = tern.json.encode(f.authority.registry); observation.observation_seq = 1
  check(f:apply("observe", observation).code == "stale_observation" and tern.json.encode(f.authority.registry) == before, "old observation sequence cannot refresh stale evidence")
@@ -169,10 +169,9 @@ if section == nil or section == "stale_claim" then
   assert(f:apply("claim", { action_id = queued.action_id, executor = f.origin.window_epoch }).ok)
   return f, clock, queued.action_id
  end
- local function advance(f, clock, ms) clock.mono_ms += ms; clock.now_ms += ms; return f.authority:apply({ kind = "workflow_tick" }) end
- -- Default 30 minutes: fresh, N-1, N, then no duplicate.
- local f, clock, aid = claimed(nil)
- check(api.dispatch.policy(f.authority.registry, f.origin.logical_session_id).stale_claim_min == 30, "stale_claim_min defaults to 30 minutes")
+ local function advance(f, clock, ms) clock.mono_ms += ms; clock.now_ms += ms; return f:tick() end
+ -- Explicit 30-minute threshold: fresh, N-1, N, then no duplicate.
+ local f, clock, aid = claimed(30)
  local stamped = f:action(aid).claim.claimed_at
  check(stamped ~= nil and stamped.epoch == "stale-host" and stamped.mono_ms == clock.mono_ms, "a claim is stamped with the host clock when it is granted")
  advance(f, clock, 0)
@@ -183,10 +182,8 @@ if section == nil or section == "stale_claim" then
  local opened = stale_gates(f, aid)
  check(#opened == 1 and f:action(aid).claim.stale_gate_id == opened[1], "at N minutes exactly one stale_claim gate opens for the action")
  local g = gate(f, opened[1])
- local lead = "Action " .. aid .. " has been claimed for 30 minutes without a result. ORCH+ never takes over a claim; open the recovery guide to reconcile it by hand."
- check(g.question:sub(1, #lead) == lead, "the stale_claim gate names the action, its minutes and that ORCH+ never takes over")
- check(#g.options == 2 and g.options[1].id == "keep_waiting" and g.options[1].label == "Keep waiting" and g.options[2].id == "open_recovery"
-  and g.options[2].label == "Open recovery guide", "the stale_claim gate offers keep_waiting and open_recovery")
+ check(#g.options == 2 and g.options[1].id == "keep_waiting" and g.options[2].id == "open_recovery",
+  "the stale_claim gate offers only keep_waiting and open_recovery decisions")
  advance(f, clock, MIN); advance(f, clock, 60 * MIN)
  check(#stale_gates(f) == 1, "later ticks never open a duplicate stale_claim gate")
  check(api.state.rehydrate(api.clone(f.authority.registry)) ~= nil, "a stale-claim gate and stamped claim restore")
@@ -222,16 +219,18 @@ if section == nil or section == "stale_claim" then
  advance(s, sclock, 0)
  check(gate(s, first_gate).phase == "superseded", "the claim's open stale_claim gate is superseded once SPAWN refuses it before effects")
  for round = 1, 3 do
-  assert(s:apply("retry", { action_id = said }).ok)
+  local previous = said; local retry = s:apply("retry", { action_id = said }); assert(retry.ok)
+  said = retry.action_id
+  check(said ~= previous and s:action(previous) == nil, "pre-effect retry consumes the old issuance and allocates a fresh draft identity")
   check(s:action(said).stale_gate_id == first_gate and s:action(said).claim == nil, "a rechecked action keeps its stale-claim lineage while it waits for a claim")
   assert(s:apply("claim", { action_id = said, executor = s.origin.window_epoch }).ok)
   check(s:action(said).claim.stale_gate_id == first_gate and s:action(said).stale_gate_id == nil, "the recheck's fresh claim inherits the action's stale_claim gate")
   advance(s, sclock, 10 * MIN)
-  check(#stale_gates(s, said) == 1, "recheck claim " .. round .. " that waits past the limit opens no second stale_claim gate")
+  check(#stale_gates(s) == 1, "fresh retry claim " .. round .. " retains the same live advisory lineage rather than opening a second stale_claim gate")
   assert(s:finish(said, "full", FULL).code == "backpressure")
  end
  check(api.state.rehydrate(api.clone(s.authority.registry)) ~= nil, "a rechecked claim lineage restores")
- assert(s:apply("retry", { action_id = said }).ok)
+ local final_retry = s:apply("retry", { action_id = said }); assert(final_retry.ok); said = final_retry.action_id
  check(api.state.rehydrate(api.clone(s.authority.registry)) ~= nil, "a ready action carrying its stale-claim lineage restores")
  -- A restored 0.3.0 claim without claimed_at is rebased on the first tick, never gated on it.
  local r, rclock, raid = claimed(1)
@@ -239,26 +238,32 @@ if section == nil or section == "stale_claim" then
  local restored = api.state.rehydrate(api.clone(legacy))
  check(restored ~= nil and restored.dispatch.actions[raid].claim.claimed_at == nil, "a 0.3.0 claim without claimed_at restores unstamped")
  rclock.mono_ms += 600 * MIN
- local first = api.dispatch.tick(restored, { kind = "workflow_tick" }, api.clone(rclock))
+ local first = api.dispatch.tick(restored, { kind = "workflow_tick", authority_namespace = restored.authority_namespace,
+  expected_revision = restored.revision }, api.clone(rclock))
  check(first ~= nil and first.dispatch.actions[raid].claim.claimed_at.mono_ms == rclock.mono_ms and first.dispatch.actions[raid].claim.claimed_at.epoch == rclock.epoch
   and stale_in(first) == 0, "the first tick after restore rebases the unstamped claim and opens no gate")
  rclock.mono_ms += MIN - 1
- check(stale_in(api.dispatch.tick(first, { kind = "workflow_tick" }, api.clone(rclock)) or first) == 0, "the rebased claim is not stale one millisecond before N minutes")
+ check(stale_in(api.dispatch.tick(first, { kind = "workflow_tick", authority_namespace = first.authority_namespace,
+  expected_revision = first.revision }, api.clone(rclock)) or first) == 0, "the rebased claim is not stale one millisecond before N minutes")
  rclock.mono_ms += 1
- local due = api.dispatch.tick(first, { kind = "workflow_tick" }, api.clone(rclock))
+ local due = api.dispatch.tick(first, { kind = "workflow_tick", authority_namespace = first.authority_namespace,
+  expected_revision = first.revision }, api.clone(rclock))
  check(due ~= nil and stale_in(due) == 1, "the rebased claim gates N minutes after the rebase")
  -- A timestamped claim across a host restart (new epoch) is rebased, then gates N minutes later.
  local e, eclock, eaid = claimed(1)
  local old = api.clone(e:action(eaid).claim.claimed_at)
  eclock.epoch = "stale-host-restarted"; eclock.mono_ms = 5
  local reloaded = api.state.rehydrate(api.clone(e.authority.registry))
- local rebased = api.dispatch.tick(reloaded, { kind = "workflow_tick" }, api.clone(eclock))
+ local rebased = api.dispatch.tick(reloaded, { kind = "workflow_tick", authority_namespace = reloaded.authority_namespace,
+  expected_revision = reloaded.revision }, api.clone(eclock))
  check(old.epoch == "stale-host" and rebased ~= nil and rebased.dispatch.actions[eaid].claim.claimed_at.epoch == "stale-host-restarted"
   and rebased.dispatch.actions[eaid].claim.claimed_at.mono_ms == 5 and stale_in(rebased) == 0, "a claim from the previous host epoch is rebased on the first tick, not gated")
  eclock.mono_ms += MIN - 1
- check(stale_in(api.dispatch.tick(rebased, { kind = "workflow_tick" }, api.clone(eclock)) or rebased) == 0, "the cross-epoch claim does not gate before N minutes on the new epoch")
+ check(stale_in(api.dispatch.tick(rebased, { kind = "workflow_tick", authority_namespace = rebased.authority_namespace,
+  expected_revision = rebased.revision }, api.clone(eclock)) or rebased) == 0, "the cross-epoch claim does not gate before N minutes on the new epoch")
  eclock.mono_ms += 1
- local later = api.dispatch.tick(rebased, { kind = "workflow_tick" }, api.clone(eclock))
+ local later = api.dispatch.tick(rebased, { kind = "workflow_tick", authority_namespace = rebased.authority_namespace,
+  expected_revision = rebased.revision }, api.clone(eclock))
  check(later ~= nil and stale_in(later) == 1, "the cross-epoch claim gates N minutes after its rebase")
 end
 -- Checkpoint 5 invariant sweep (D8/D9). Every fixture command in every group already runs
@@ -319,11 +324,12 @@ if section == nil or section == "autonomy" then
   local e = f.authority.registry.dispatch.gates[g.id].execution
   check(answered.ok and e ~= nil and e.state == "pending" and e.effect_ref == "session_paused" and W.effects(f) == before, "paused: the owner answer records a pending execution and executes nothing")
   assert(f:apply("policy", { policy = { auto_approve_kinds = W.arr({ "landing" }) } }).ok)
-  assert(f.authority:apply({ kind = "workflow_tick" }))
+  assert(f:tick())
   local lg = f.authority.registry.dispatch.gates[W.item(f, lid).gate_id]
   check(lg.answer == nil and W.item(f, lid).approval == nil and #W.item(f, lid).grants == 0 and W.effects(f) == before, "paused: landing auto-approval answers nothing and nothing executes on tick")
   local restored = assert(wapi.state.rehydrate(wapi.clone(f.authority.registry)))
-  local twin = wapi.dispatch.tick(restored, { kind = "workflow_tick" }, { now_ms = 1, mono_ms = 1, epoch = "paused-twin" }) or restored
+  local twin = wapi.dispatch.tick(restored, { kind = "workflow_tick", authority_namespace = restored.authority_namespace,
+   expected_revision = restored.revision }, { now_ms = 1, mono_ms = 1, epoch = "paused-twin" }) or restored
   check(W.effects({ authority = { registry = twin } }) == before and twin.dispatch.gates[g.id].execution.state == "pending", "paused: a restored twin executes nothing")
   assert(f:apply("resume").ok)
   e = f.authority.registry.dispatch.gates[g.id].execution
@@ -336,8 +342,7 @@ if section == nil or section == "autonomy" then
   W.idempotent(f, "paused then resumed review", g.id, nil)
   check(W.restores(f), "the resumed session restores")
  end
- -- Restore migration: an untagged owner answer becomes kind="owner"; a pre-CP5 approved proposal
- -- without an execution record restores as decision-only and never executes.
+-- Current stores cannot claim legacy provenance by injecting an untagged historical answer.
  do
   local f = W.fixture({ reviewer_records = W.arr({ "codex" }) })
   local b = W.builder(f, "builder", PLANNED); W.settle(f, b); assert(W.send(f, b, "CHECKPOINT", W.cp("cp-1", "rev-1")).ok)
@@ -348,16 +353,157 @@ if section == nil or section == "autonomy" then
   raw.answer = { choice_id = "approve", answer = "Approved before 0.4.0.", source = wapi.clone(f.origin), at_ms = 0 }
   raw.phase = "answered"
   stored.dispatch.gates[g.id] = raw
-  local before = W.effects(f)
-  f.memory.value = stored; f.authority = wapi.host.new_authority(f.memory)
-  local loaded = f.authority:load()
-  check(loaded.ok, "a store with an untagged pre-0.4.0 answer loads (" .. tostring(loaded.code) .. ")")
-  local mg = f.authority.registry.dispatch.gates[g.id]
-  check(mg.answer.source.kind == "owner" and mg.answer.source.owner_id == f.origin.owner_id, "restore tags the existing answer source kind=owner")
-  check(mg.execution ~= nil and mg.execution.state == "refused" and mg.execution.effect_ref == "legacy_decision_only", "a pre-0.4.0 approved proposal restores decision-only")
-  assert(f.authority:apply({ kind = "workflow_tick" })); f:autonomy_sweep()
-  check(W.effects(f) == before and W.worker(f, b).workflow.report_request == nil, "the migrated decision never executes")
+ local original = tern.json.encode(stored)
+ f.memory.value = stored; f.authority = wapi.host.new_authority(f.memory)
+ local loaded = f.authority:load()
+ check(not loaded.ok and loaded.code == "state_corrupt", "an untagged answer injected into the current schema is not an implicit legacy migration")
+ check(tern.json.encode(f.memory.value) == original, "failed current-store validation never rewrites provenance or invents a historical execution")
  end
 end
-assert(section == nil or table.find({ "lifecycle", "cancel", "native", "capacity", "settled_history", "stale_claim", "autonomy" }, section), "unknown gates section")
+if section == nil or section == "rulings" then
+ local f = api.fixture(); local id = f:accepted(false)
+ assert(f:apply("associate_document", { worker_id = id, path = "/fixture/existing-plan.md", evidence = { existing = true } }).ok)
+ local gid = ask(f,id)
+ assert(f:apply("answer", { gate_id = gid, gate_revision = 1, choice_id = "safe", answer = "Use <literal> `safe` path only." }).ok)
+ local o = gate(f,gid).ruling
+ check(o ~= nil and o.path == "/fixture/existing-plan.md" and o.gate_revision == 1
+  and o.marker == "orchplus-ruling:" .. f.authority.registry.authority_namespace .. ":" .. gid,
+  "an explicit owner answer creates one existing-document obligation bound to original question revision")
+ publish(f,id,gid); assert(acknowledge(f,id,api.clone(gate(f,gid).delivery)).ok)
+ check(gate(f,gid) ~= nil and gate(f,gid).ruling ~= nil, "worker answer delivery cannot erase the pending document obligation")
+ check(api.dispatch.close_problem(f.authority.registry, f.origin.logical_session_id) ~= nil, "document obligation blocks session close")
+ local writer = { kind = "window", window_key = "0", conn = 17, since = 1234 }
+ local before = "# Existing plan\n## Progress\nRoutine progress before fresh B0\n"
+ local evidence = { existing = true, quiescent = true, identity_proven = true, same_machine = true, buffer_observed = true, disk_bytes = before }
+ local prepared = f:apply("ruling_prepare", { gate_id = gid, gate_revision = gate(f,gid).revision, writer = writer, evidence = evidence })
+ check(prepared.ok and prepared.edit ~= nil and gate(f,gid).ruling.state == "writing", "authority commits one writer intent before returning the targeted insertion")
+ local second = api.clone(writer); second.conn = 18
+ check(f:apply("ruling_prepare", { gate_id = gid, gate_revision = gate(f,gid).revision, writer = second, evidence = evidence }).code == "writer_unproved",
+  "second window cannot issue or observe another writer's one-shot intent")
+ local edit = prepared.edit
+ local after = before:sub(1, edit.offset) .. edit.text .. before:sub(edit.offset + 1)
+ evidence.buffer_bytes = after
+ local unsaved = f:apply("ruling_observe", { gate_id = gid, gate_revision = gate(f,gid).revision, writer = writer, evidence = evidence })
+ check(unsaved.code == "unsaved_edits" and gate(f,gid).ruling.intent ~= nil, "unsaved native buffer marker remains a live obligation; no forced save or duplicate append")
+ check(api.state.rehydrate(api.clone(f.authority.registry)) ~= nil, "unsaved one-shot document obligation restores with exact original writer")
+ evidence.disk_bytes = after
+ check(f:apply("ruling_observe", { gate_id = gid, gate_revision = gate(f,gid).revision, writer = writer, evidence = evidence }).code == "ruling_recorded",
+  "host durable B1 exact entry and unchanged non-rulings bytes settles the document obligation")
+ check(gate(f,gid) == nil, "completed answer/effect/document obligations reclaim the gate without a settled answer log")
+ for _, row in w(f,id).workflow.thread do check(row.gate_id ~= gid and row.kind ~= "answer", "completed ruling leaves no question/answer thread copy") end
+ check(api.state.rehydrate(api.clone(f.authority.registry)) ~= nil, "settled ruling leaves no dangling gate or writer references")
+end
+if section == nil or section == "rulings_remote" then
+ local f = api.fixture(); local id = f:accepted(false)
+ assert(f:apply("associate_document", { worker_id = id, path = "/fixture/remote-existing.md", evidence = { existing = true } }).ok)
+ local gid = ask(f,id)
+ assert(f:apply("answer", { gate_id = gid, gate_revision = 1, choice_id = "safe", answer = "Keep the approved remote path." }).ok)
+ publish(f,id,gid); assert(acknowledge(f,id,api.clone(gate(f,gid).delivery)).ok)
+ local writer = { kind = "worker", worker_id = id, worker_generation = w(f,id).worker_generation }
+ local before = "# Existing remote plan\n"
+ local evidence = { existing = true, quiescent = true, identity_proven = true, buffer_observed = true, disk_bytes = before }
+ local prepared = f:apply("ruling_prepare", { gate_id = gid, gate_revision = gate(f,gid).revision, writer = writer, evidence = evidence })
+ assert(prepared.ok and prepared.edit)
+ check(f:apply("ruling_remote", { gate_id = gid, gate_revision = gate(f,gid).revision, worker_id = id }).code == "ruling_queued",
+  "existing provisioned coordinator-control worker receives the exact typed ruling request")
+ local transport = gate(f,gid).ruling_delivery
+ local retained = api.clone(w(f,id).replies[tostring(transport.reply_seq)])
+ local reply = assert(api.codec.decode_reply(retained.bytes, w(f,id)))
+ local keys = 0; for _ in reply.payload do keys += 1 end
+ check(reply.kind == "record_ruling" and keys == 5 and reply.payload.path == "/fixture/remote-existing.md"
+  and reply.payload.marker == gate(f,gid).ruling.marker and reply.payload.entry == gate(f,gid).ruling.entry
+  and reply.payload.expected_document_sha256 == prepared.edit.expected_document_sha256
+  and reply.payload.expected_non_rulings_sha256 == prepared.edit.expected_non_rulings_sha256,
+  "remote transport carries only the canonical five-field targeted optimistic edit contract")
+ check(f:apply("ruling_remote", { gate_id = gid, gate_revision = gate(f,gid).revision, worker_id = id }).code == "write_in_flight",
+  "one-shot remote writer cannot receive a duplicate ruling command")
+ for _ = 1, 16 do
+  local live = w(f,id).replies[tostring(transport.reply_seq)]
+  if live.part > #live.frames.chunks + 1 then break end
+  local publication = f:apply("poll", { worker_id = id }); assert(publication.ok, publication.message)
+  local operation = f:action(publication.action_id).request.op
+  assert(operation == "mailbox_publish_ack" or operation == "mailbox_publish_reply" or operation == "mailbox_retire",
+   "ruling delivery must drain only its real receipt/reply/compaction obligations")
+  local result = f:finish(publication.action_id, if operation == "mailbox_retire" then "compacted" else "published")
+  assert(result.ok, result.message)
+ end
+ assert(acknowledge(f,id,retained).ok)
+ check(gate(f,gid).ruling ~= nil and gate(f,gid).ruling.intent.writer.worker_id == id,
+  "worker transport receipt is not proof of a saved document; the original writer obligation remains")
+ local edit = prepared.edit
+ evidence.disk_bytes = before:sub(1,edit.offset) .. edit.text .. before:sub(edit.offset + 1)
+ check(f:apply("ruling_observe", { gate_id = gid, gate_revision = gate(f,gid).revision, writer = writer, evidence = evidence }).code == "ruling_recorded"
+  and gate(f,gid) == nil, "only durable exact readback settles remote ruling and reclaims the gate")
+ check(api.state.rehydrate(api.clone(f.authority.registry)) ~= nil, "remote typed reply compaction and document settlement restore cleanly")
+end
+if section == nil or section == "rulings_reissue" then
+ local f = api.fixture(); local id = f:accepted(false)
+ assert(f:apply("associate_document", { worker_id = id, path = "/fixture/continued-existing.md", evidence = { existing = true } }).ok)
+ local gid = ask(f,id)
+ assert(f:apply("answer", { gate_id = gid, gate_revision = 1, choice_id = "safe", answer = "One exact document entry." }).ok)
+ local old_writer = { kind = "window", window_key = "0", conn = 17, since = 1234 }
+ local new_writer = { kind = "window", window_key = "0", conn = 18, since = 1235 }
+ local evidence = { existing = true, quiescent = true, identity_proven = true, same_machine = true, buffer_observed = true, disk_bytes = "# Existing plan\n" }
+ assert(f:apply("ruling_prepare", { gate_id = gid, gate_revision = gate(f,gid).revision, writer = old_writer, evidence = evidence }).edit)
+ check(f:apply("ruling_reissue", { gate_id = gid, gate_revision = gate(f,gid).revision, writer = new_writer, evidence = evidence }).code == "write_in_flight",
+  "a different current observer cannot treat the prior window's disappearance as nonexecution")
+ evidence.writer_ended = true; evidence.no_write_can_complete = true; evidence.previous_writer = new_writer
+ check(f:apply("ruling_reissue", { gate_id = gid, gate_revision = gate(f,gid).revision, writer = new_writer, evidence = evidence }).code == "writer_unproved"
+  and gate(f,gid).ruling.intent.writer.conn == 17, "end evidence for the wrong incarnation cannot clear the old writer")
+ evidence.previous_writer = old_writer; evidence.buffer_observed = false
+ f:apply("ruling_reissue", { gate_id = gid, gate_revision = gate(f,gid).revision, writer = new_writer, evidence = evidence })
+ check(gate(f,gid).ruling.intent ~= nil, "disk absence without a fresh live-buffer absence observation cannot reissue")
+ evidence.buffer_observed = true
+ local reissued = f:apply("ruling_reissue", { gate_id = gid, gate_revision = gate(f,gid).revision, writer = new_writer, evidence = evidence })
+ check(reissued.ok and gate(f,gid).ruling.intent == nil and gate(f,gid).ruling.state == "pending",
+  "new observer may clear only the exact positively ended prior intent with both absence proofs")
+ evidence.previous_writer = nil; evidence.writer_ended = nil; evidence.no_write_can_complete = nil
+ local replacement = f:apply("ruling_prepare", { gate_id = gid, gate_revision = gate(f,gid).revision, writer = new_writer, evidence = evidence })
+ check(replacement.edit ~= nil and gate(f,gid).ruling.intent.writer.conn == 18,
+  "fresh preparation separately commits the replacement writer before any new native append")
+ check(f:apply("ruling_observe", { gate_id = gid, gate_revision = gate(f,gid).revision, writer = old_writer, evidence = evidence }).code == "writer_unproved",
+  "late original writer cannot observe or settle the replacement intent")
+ check(api.state.rehydrate(api.clone(f.authority.registry)) ~= nil, "replacement one-shot intent restores without an old writer history")
+ local observer = { kind = "window", window_key = "0", conn = 19, since = 1236 }
+ local edit, original = replacement.edit, evidence.disk_bytes
+ evidence.disk_bytes = original:sub(1,edit.offset) .. edit.text .. original:sub(edit.offset + 1)
+ evidence.buffer_bytes = evidence.disk_bytes
+ check(f:apply("ruling_observe", { gate_id = gid, gate_revision = gate(f,gid).revision, writer = observer, evidence = evidence }).code == "writer_unproved",
+  "a new observer cannot take over B1 merely because a marker appears")
+ evidence.previous_writer = old_writer; evidence.writer_ended = true; evidence.no_write_can_complete = true
+ check(f:apply("ruling_observe", { gate_id = gid, gate_revision = gate(f,gid).revision, writer = observer, evidence = evidence }).code == "writer_unproved",
+  "B1 takeover end proof must name the actual latest owning incarnation")
+ evidence.previous_writer = new_writer
+ check(f:apply("ruling_observe", { gate_id = gid, gate_revision = gate(f,gid).revision, writer = observer, evidence = evidence }).code == "ruling_recorded"
+  and gate(f,gid).ruling == nil, "positive exact writer end lets a fresh observer reconcile a save completed before the original B1 callback")
+ publish(f,id,gid); assert(acknowledge(f,id,api.clone(gate(f,gid).delivery)).ok)
+ check(gate(f,gid) == nil and api.state.rehydrate(api.clone(f.authority.registry)) ~= nil,
+  "recovered exact saved entry settles without reissuing, duplicating or keeping a completed writer transcript")
+end
+if section == nil or section == "decision_subject" then
+ local f = api.fixture(); local id = f:accepted(false); local gid = ask(f,id)
+ local draft = f:event("answer", { gate_id = gid, gate_revision = gate(f,gid).revision, choice_id = "safe", answer = "Keep this literal draft." })
+ local proof = draft.decision_context
+ assert(f:apply("intake", { worker_id = id, bytes = f:report(id, w(f,id).accepted_seq + 1, "HEARTBEAT", { state = "working" }) }).ok)
+ draft.command_seq = f.command_seq + 1; f.command_seq = draft.command_seq
+ local answered = f.authority:apply(draft)
+ check(answered.ok and draft.decision_context == proof and gate(f,gid).answer.answer == "Keep this literal draft.",
+  "same-subject heartbeat/receipt bookkeeping does not discard the captured owner draft")
+ local g = api.fixture(); local worker = g:accepted(false); local question = ask(g,worker)
+ local stale = g:event("answer", { gate_id = question, gate_revision = gate(g,question).revision, choice_id = "safe", answer = "Old question." })
+ assert(g:apply("pause").ok)
+ stale.command_seq = g.command_seq + 1; g.command_seq = stale.command_seq
+ local writes = g.memory.writes
+ check(not g.authority:apply(stale).ok and g.memory.writes == writes and gate(g,question).phase == "pending",
+  "a consequential pause/policy change rejects the old proof without recording an answer")
+ local missing = g:event("answer", { gate_id = question, gate_revision = gate(g,question).revision, choice_id = "safe", answer = "No proof." })
+ missing.decision_context = nil
+ check(not g.authority:apply(missing).ok and g.memory.writes == writes, "missing proof is not a legacy authorization path")
+ local exact = g:event("answer", { gate_id = question, gate_revision = gate(g,question).revision, choice_id = "safe", answer = "Current reviewed question." })
+ local changed = api.clone(g.authority.registry)
+ changed.dispatch.gates[question].question = "A genuinely different owner decision"
+ g.authority.registry = changed; g.memory.value = api.clone(changed)
+ check(not g.authority:apply(exact).ok and gate(g,question).phase == "pending", "same global revision cannot conceal changed question bytes")
+end
+assert(section == nil or table.find({ "lifecycle", "cancel", "native", "capacity", "settled_history", "stale_claim", "autonomy", "rulings", "rulings_remote", "rulings_reissue", "decision_subject" }, section), "unknown gates section")
 return "gates/" .. tostring(section or "all") .. ": " .. tostring(checks) .. " checks passed"

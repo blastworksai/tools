@@ -20,6 +20,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import sysconfig
 import tempfile
 import time
 from urllib.parse import quote
@@ -37,9 +38,9 @@ LOCK_SECONDS = 360
 _HEX = re.compile(r"[0-9a-f]{64}\Z")
 _TOKEN = re.compile(r"[A-Za-z0-9_-]{43,128}\Z")
 _ENDPOINT = re.compile(r"http://127\.0\.0\.1:([1-9][0-9]{0,4})\Z")
-_OPERATIONS = frozenset({"display", "register_client", "diagnostics", "setup_state", "configure",
+_OPERATIONS = frozenset({"display", "register_client", "unregister_client", "diagnostics", "setup_state", "configure",
                          "unpair", "pair_offer", "pair_accept", "usage_refresh", "usage_status",
-                         "usage_preferences", "usage_results", "usage_publish", "capacity",
+                         "usage_preferences", "usage_results", "usage_publish", "capacity", "display_access",
                          "binding_candidates"})
 _BACKUP = re.compile(r"upgrade-[0-9a-f]{32}\.sqlite3\Z")
 
@@ -244,9 +245,9 @@ def _python(environment: Path) -> Path:
 
 
 def _interpreter() -> dict:
-    # Format shared with pre-2.0 builds so their installed environments keep matching.
     return {"implementation": sys.implementation.name, "version": list(sys.version_info[:3]),
-            "platform": sys.platform, "cache_tag": sys.implementation.cache_tag}
+            "platform": sys.platform, "sysconfig_platform": sysconfig.get_platform(),
+            "cache_tag": sys.implementation.cache_tag}
 
 
 def _environment_name(stamp: dict) -> str:
@@ -260,8 +261,9 @@ def _environment(root: Path, name: str, stamp: dict) -> Path:
     check_private(directory.parent)
     check_private(directory)
     marker = _json_file(directory / "environment.json")
-    if (marker.get("lock_digest") != stamp["lock_digest"] or not isinstance(marker.get("interpreter"), dict)
-            or name != stamp["lock_digest"] + "-" + hashlib.sha256(encode(marker["interpreter"])).hexdigest()[:16]
+    interpreter = _interpreter()
+    if (marker.get("lock_digest") != stamp["lock_digest"] or marker.get("interpreter") != interpreter
+            or name != stamp["lock_digest"] + "-" + hashlib.sha256(encode(interpreter)).hexdigest()[:16]
             or not _python(directory).is_file()):
         raise RuntimeFailure("setup_required", "environment_invalid")
     _stamp(marker.get("installed_with"))

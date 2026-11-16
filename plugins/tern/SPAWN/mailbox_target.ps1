@@ -1,5 +1,5 @@
 # Fixed report-files-v1 filesystem primitive. No runtime public paths or code.
-param([string]$Root,[string]$Handle,[string]$Mode,[string]$Selected,[string]$Operation,[string]$Identity,[long]$ReportFloor,[long]$ReplyFloor,[string]$ProducerHelper)
+param([string]$Root,[string]$Handle,[string]$Mode,[string]$Selected,[string]$Operation,[string]$Identity,[long]$ReportFloor,[long]$ReplyFloor,[string]$ProducerHelper,[string]$WithdrawnStarts)
 $ErrorActionPreference='Stop'
 $script:capacityHeld=$false
 $script:tempOwned=$false
@@ -121,7 +121,224 @@ function ManifestReconciled {
  # manifest.json commits before provision.json, so a provisioned box always has it.
  if (-not $present -or -not (Exact (ReadBounded $path) $script:manifestBytes)) { Finish 'content_conflict' }
 }
+$utf8=New-Object Text.UTF8Encoding($false,$true)
+function Fail([string]$Code) { Finish $Code }
+function Hash([byte[]]$Bytes) { return (Sha $Bytes) }
+# Recursive RFC8259 reader. Unlike ConvertFrom-Json it preserves duplicate-key,
+# null, trailing-content and container-kind evidence before any journal effect.
+function Space {
+ while ($script:cursor -lt $script:jsonText.Length -and " `t`r`n".Contains([string]$script:jsonText[$script:cursor])) { $script:cursor++ }
+}
+function JsonString {
+ if ($script:cursor -ge $script:jsonText.Length -or $script:jsonText[$script:cursor] -ne '"') { Fail 'invalid_schema' }
+ $script:cursor++; $builder=New-Object Text.StringBuilder
+ while ($script:cursor -lt $script:jsonText.Length) {
+  $c=$script:jsonText[$script:cursor]; $script:cursor++
+  if ($c -eq '"') { $text=$builder.ToString(); if ($utf8.GetByteCount($text) -gt $script:stringLimit) { Fail 'oversize' }; return $text }
+  if ([int]$c -lt 32) { Fail 'invalid_schema' }
+  if ($c -eq '\') {
+   if ($script:cursor -ge $script:jsonText.Length) { Fail 'invalid_schema' }
+   $escape=$script:jsonText[$script:cursor]; $script:cursor++
+   switch -CaseSensitive ($escape) {
+    '"' { $c='"' }
+    '\' { $c='\' }
+    '/' { $c='/' }
+    'b' { $c=[char]8 }
+    'f' { $c=[char]12 }
+    'n' { $c="`n" }
+    'r' { $c="`r" }
+    't' { $c="`t" }
+    'u' {
+     if ($script:cursor+4 -gt $script:jsonText.Length) { Fail 'invalid_schema' }
+     $hex=$script:jsonText.Substring($script:cursor,4); if ($hex -notmatch '^[0-9a-fA-F]{4}$') { Fail 'invalid_schema' }
+     $code=[Convert]::ToInt32($hex,16); $script:cursor+=4
+     if ($code -ge 0xD800 -and $code -le 0xDBFF) {
+      if ($script:cursor+6 -gt $script:jsonText.Length -or $script:jsonText.Substring($script:cursor,2) -cne '\u') { Fail 'invalid_schema' }
+      $hex=$script:jsonText.Substring($script:cursor+2,4); if ($hex -notmatch '^[0-9a-fA-F]{4}$') { Fail 'invalid_schema' }
+      $low=[Convert]::ToInt32($hex,16); if ($low -lt 0xDC00 -or $low -gt 0xDFFF) { Fail 'invalid_schema' }
+      $script:cursor+=6; $c=[char]::ConvertFromUtf32(65536+($code-0xD800)*1024+$low-0xDC00)
+     } elseif ($code -ge 0xDC00 -and $code -le 0xDFFF) { Fail 'invalid_schema' }
+     else { $c=[char]$code }
+    }
+    default { Fail 'invalid_schema' }
+   }
+  }
+  $null=$builder.Append($c)
+ }
+ Fail 'invalid_schema'
+}
+function JsonValue([int]$Depth) {
+ $script:values++; if ($Depth -gt 12 -or $script:values -gt 16384) { Fail 'oversize' }
+ Space; if ($script:cursor -ge $script:jsonText.Length) { Fail 'invalid_schema' }
+ $c=$script:jsonText[$script:cursor]
+ if ($c -eq '"') { return (JsonString) }
+ if ($c -eq '{' -or $c -eq '[') {
+  $object=$c -eq '{'; $closer=']'; if ($object) { $closer='}' }
+  $map=[Collections.Hashtable]::new([StringComparer]::Ordinal); $list=@(); $count=0
+  $script:cursor++; Space
+  if ($script:cursor -lt $script:jsonText.Length -and $script:jsonText[$script:cursor] -eq $closer) { $script:cursor++; if ($object) { return $map }; return ,$list }
+  while ($true) {
+   # Arrays admit 512 entries (CHECKOUT changed_files), matching mailbox_json.awk.
+   $count++; $maximum=512; if ($object) { $maximum=64 }; if ($count -gt $maximum) { Fail 'oversize' }
+   Space
+   if ($object) {
+    $key=JsonString; if ($utf8.GetByteCount($key) -gt 64 -or $map.ContainsKey($key)) { Fail 'invalid_schema' }
+    Space; if ($script:cursor -ge $script:jsonText.Length -or $script:jsonText[$script:cursor] -ne ':') { Fail 'invalid_schema' }; $script:cursor++
+    $map[$key]=JsonValue ($Depth+1)
+   } else { $list+=,(JsonValue ($Depth+1)) }
+   Space; if ($script:cursor -ge $script:jsonText.Length) { Fail 'invalid_schema' }
+   if ($script:jsonText[$script:cursor] -eq $closer) { $script:cursor++; if ($object) { return $map }; return ,$list }
+   if ($script:jsonText[$script:cursor] -ne ',') { Fail 'invalid_schema' }; $script:cursor++
+  }
+ }
+ $tail=$script:jsonText.Substring($script:cursor)
+ if ($tail.StartsWith('true')) { $script:cursor+=4; return $true }
+ if ($tail.StartsWith('false')) { $script:cursor+=5; return $false }
+ $match=[regex]::Match($tail,'^-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?')
+ if (-not $match.Success) { Fail 'invalid_schema' }
+ [long]$whole=0
+ if ($match.Value -match '^-?[0-9]+$' -and [long]::TryParse($match.Value,[ref]$whole)) { $script:cursor+=$match.Length; return $whole }
+ $number=[double]::Parse($match.Value,[Globalization.CultureInfo]::InvariantCulture)
+ if ([double]::IsNaN($number) -or [double]::IsInfinity($number)) { Fail 'invalid_schema' }
+ $script:cursor+=$match.Length; return $number
+}
+function Decode([byte[]]$Bytes,[int]$Limit=65536) {
+ if ($Bytes.Length -eq 0 -or $Bytes.Length -gt $Limit) { Fail 'oversize' }
+ $script:jsonText=$utf8.GetString($Bytes); $script:cursor=0; $script:values=0; $script:stringLimit=32768
+ if ($Limit -gt 65536) { $script:stringLimit=2097152 }
+ $value=JsonValue 1; Space
+ if ($script:cursor -ne $script:jsonText.Length -or ($Limit -le 65536 -and $script:values -gt 2048)) { Fail 'invalid_schema' }
+ return ,$value
+}
+function DirectorySafe([string]$Path) {
+ $item=Get-Item -LiteralPath $Path -Force
+ while ($null -ne $item) { if ($item -isnot [IO.DirectoryInfo] -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) { Fail 'binding_mismatch' }; $item=$item.Parent }
+}
+function ReadFile([string]$Path,[int]$Limit) {
+ DirectorySafe ([IO.Path]::GetDirectoryName($Path))
+ $item=Get-Item -LiteralPath $Path -Force
+ if ($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -or $item.Length -gt $Limit) { Fail 'binding_mismatch' }
+ $stream=[IO.File]::Open($Path,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
+ try {
+  $bytes=New-Object byte[] ($Limit+1); $length=0
+  while ($length -lt $bytes.Length) { $n=$stream.Read($bytes,$length,$bytes.Length-$length); if ($n -eq 0) { break }; $length+=$n }
+  if ($length -gt $Limit) { Fail 'oversize' }; $result=New-Object byte[] $length; [Array]::Copy($bytes,$result,$length); return ,$result
+ } finally { $stream.Dispose() }
+}
+function Fields($Value,[string[]]$Required) {
+ if ($Value -isnot [hashtable] -or $Value.Count -ne $Required.Length) { Fail 'invalid_schema' }
+ foreach ($key in $Required) { if (-not $Value.ContainsKey($key)) { Fail 'invalid_schema' } }
+}
+function ObjectFields($Value,[string[]]$Required,[string[]]$Optional=@()) {
+ if ($Value -isnot [hashtable]) { Fail 'invalid_schema' }
+ foreach ($key in $Required) { if (-not $Value.ContainsKey($key)) { Fail 'invalid_schema' } }
+ foreach ($key in $Value.Keys) { if ($key -cnotin $Required -and $key -cnotin $Optional) { Fail 'invalid_schema' } }
+}
+function ValueType($Value,[string]$Type) {
+ $valid=$false
+ switch -CaseSensitive ($Type) {
+  'id' { $valid=$Value -is [string] -and $Value -cmatch '^[A-Za-z0-9_-]{1,96}\z' }
+  'token' { $valid=$Value -is [string] -and $Value -cmatch '^[A-Za-z0-9_-]{16,128}\z' }
+  'digest' { $valid=$Value -is [string] -and $Value -cmatch '^[0-9a-f]{64}\z' }
+  'revision' { $valid=$Value -is [string] -and $Value -cmatch '^([0-9a-f]{40}|[0-9a-f]{64})\z' }
+  'class' { $valid=$Value -is [string] -and $Value -cmatch '^[a-z][a-z0-9-]{0,31}\z' }
+  'family' { $valid=$Value -is [string] -and $Value -cmatch '^[a-z][a-z0-9-]{0,23}\z' }
+  'exit' { $valid=($Value -is [long] -or $Value -is [int] -or $Value -is [double]) -and $Value -ge -2147483648 -and $Value -le 4294967295 -and $Value%1 -eq 0 }
+  'path' { $valid=$Value -is [string] -and $utf8.GetByteCount($Value) -ge 1 -and $utf8.GetByteCount($Value) -le 4096 -and -not $Value.Contains([string][char]0) }
+  'absolute' { $valid=$Value -is [string] -and $utf8.GetByteCount($Value) -ge 1 -and $utf8.GetByteCount($Value) -le 4096 -and -not $Value.Contains([string][char]0) -and $Value -cmatch '^(/|[A-Za-z]:[/\\]|\\\\)' }
+  'relative' { $valid=$Value -is [string] -and $utf8.GetByteCount($Value) -ge 1 -and $utf8.GetByteCount($Value) -le 256 -and $Value -cnotmatch '[\x00\\]|^/|^[A-Za-z]:|(^|/)\.\.(/|\z)' }
+  'branch' { $valid=$Value -is [string] -and $utf8.GetByteCount($Value) -ge 1 -and $utf8.GetByteCount($Value) -le 256 }
+  'scope' { $valid=$Value -is [string] -and $utf8.GetByteCount($Value) -ge 1 -and $utf8.GetByteCount($Value) -le 256 }
+  'finding' { $valid=$Value -is [string] -and $utf8.GetByteCount($Value) -ge 1 -and $utf8.GetByteCount($Value) -le 400 }
+  'positive' { $valid=($Value -is [long] -or $Value -is [int] -or $Value -is [double]) -and $Value -ge 1 -and $Value -le 9007199254740991 -and $Value%1 -eq 0 }
+  'nonnegative' { $valid=($Value -is [long] -or $Value -is [int] -or $Value -is [double]) -and $Value -ge 0 -and $Value -le 9007199254740991 -and $Value%1 -eq 0 }
+  'percent' { $valid=($Value -is [long] -or $Value -is [int] -or $Value -is [double]) -and $Value -ge 0 -and $Value -le 100 -and $Value%1 -eq 0 }
+  'short' { $valid=$Value -is [string] -and $utf8.GetByteCount($Value) -ge 1 -and $utf8.GetByteCount($Value) -le 1024 }
+  'long' { $valid=$Value -is [string] -and $utf8.GetByteCount($Value) -ge 1 -and $utf8.GetByteCount($Value) -le 32768 }
+  default { Fail 'invalid_schema' }
+ }
+ if (-not $valid) { Fail 'invalid_schema' }
+}
+function ProjectStart($p) {
+ ObjectFields $p @('owner_id','owner_generation','activation_token','orch_project_id','project_revision','decision_context')
+ ValueType $p.owner_id 'id'; ValueType $p.owner_generation 'positive'; ValueType $p.activation_token 'digest'
+ ValueType $p.orch_project_id 'id'; ValueType $p.project_revision 'positive'; ValueType $p.decision_context 'digest'
+}
+# Read-only authorization: never consumes a reply, advances a cursor, or emits ACK.
+function WithdrawnTail([long]$Floor) {
+ if ($WithdrawnStarts.Length -eq 0) { return }
+ if ($WithdrawnStarts.Length -gt 5464 -or $WithdrawnStarts -cnotmatch '^[A-Za-z0-9+/]*={0,2}\z') { Fail 'invalid_schema' }
+ $encoded=[Convert]::FromBase64String($WithdrawnStarts)
+ if ([Convert]::ToBase64String($encoded) -cne $WithdrawnStarts) { Fail 'invalid_schema' }
+ $entries=Decode $encoded 4096
+ if ($entries -isnot [array] -or $entries.Count -lt 1 -or $entries.Count -gt 8) { Fail 'invalid_schema' }
+ if ($descriptor.capabilities -isnot [array] -or $descriptor.capabilities.Count -lt 1 -or $descriptor.capabilities.Count -gt 8 -or 'coordinator-control-v1' -cnotin $descriptor.capabilities -or 'project-start-v1' -cnotin $descriptor.capabilities) { Fail 'unsupported_capability' }
+ $capSeen=[Collections.Hashtable]::new([StringComparer]::Ordinal)
+ foreach ($cap in $descriptor.capabilities) {
+  if ($cap -isnot [string] -or $cap -cnotin @('report-files-v1','native-ask-v1','worker-poll-v1','argv-v1','coordinator-control-v1','check-runner-v1','release-manager-v1','project-start-v1') -or $capSeen.ContainsKey($cap)) { Fail 'invalid_schema' }
+  $capSeen[$cap]=$true
+ }
+ $expected=@{}; $previous=$Floor
+ foreach ($entry in $entries) {
+  Fields $entry @('reply_seq','message_id','message_sha256')
+  ValueType $entry.reply_seq 'positive'; ValueType $entry.message_id 'id'; ValueType $entry.message_sha256 'digest'
+  if ($entry.reply_seq -ne $previous+1) { Fail 'incomplete' }; $previous=$entry.reply_seq
+  $expected[[string]$entry.reply_seq]=$entry
+ }
+ $seen=0; $directory=Join-Path $box 'replies'; DirectorySafe $directory
+ foreach ($path in [IO.Directory]::EnumerateFileSystemEntries($directory)) {
+  $leaf=[IO.Path]::GetFileName($path)
+  if ($leaf -cnotmatch '^[1-9][0-9]{0,15}\z') { Fail 'binding_mismatch' }
+  DirectorySafe $path
+  if ([long]$leaf -le $Floor) {
+   foreach ($file in [IO.Directory]::EnumerateFileSystemEntries($path)) {
+    $name=[IO.Path]::GetFileName($file)
+    if ($name -cnotmatch '^(manifest|chunk-([1-9]|[12][0-9]|3[0-2]))\.json\z') { Fail 'binding_mismatch' }
+    $null=ReadFile $file 4096
+   }
+   continue
+  }
+  if (-not $expected.ContainsKey($leaf)) { Fail 'incomplete' }
+  $entry=$expected[$leaf]; $seen++
+  $manifest=Decode (ReadFile (Join-Path $path 'manifest.json') 2048) 2048
+  Fields $manifest @('transport','version','type','mailbox_handle','direction','slot','message_id','message_sha256','message_bytes','count')
+  foreach ($key in @('version','slot','message_bytes','count')) { ValueType $manifest[$key] 'positive' }
+  ValueType $manifest.message_id 'id'; ValueType $manifest.message_sha256 'digest'
+  if ($manifest.transport -cne 'report-files-v1' -or $manifest.version -ne 1 -or $manifest.type -cne 'manifest' -or $manifest.direction -cne 'reply' -or $manifest.mailbox_handle -cne $Handle -or $manifest.slot -ne $entry.reply_seq -or $manifest.message_id -cne $entry.message_id -or $manifest.message_sha256 -cne $entry.message_sha256 -or $manifest.message_bytes -gt 65536 -or $manifest.count -ne [Math]::Ceiling($manifest.message_bytes/2048.0)) { Fail 'binding_mismatch' }
+  $files=@([IO.Directory]::EnumerateFileSystemEntries($path))
+  if ($files.Count -ne $manifest.count+1) { Fail 'incomplete' }
+  foreach ($file in $files) {
+   $name=[IO.Path]::GetFileName($file)
+   if ($name -ceq 'manifest.json') { continue }
+   if ($name -cnotmatch '^chunk-([1-9]|[12][0-9]|3[0-2])\.json\z' -or [int]$Matches[1] -gt $manifest.count) { Fail 'binding_mismatch' }
+  }
+  $memory=New-Object IO.MemoryStream
+  try {
+   for ($i=1;$i -le $manifest.count;$i++) {
+    $chunk=Decode (ReadFile (Join-Path $path ('chunk-'+$i+'.json')) 4096) 4096
+    Fields $chunk @('transport','version','type','mailbox_handle','direction','slot','message_id','message_sha256','index','count','data_b64')
+    foreach ($key in @('version','slot','index','count')) { ValueType $chunk[$key] 'positive' }
+    foreach ($key in @('transport','version','mailbox_handle','direction','slot','message_id','message_sha256','count')) { if ($chunk[$key] -cne $manifest[$key]) { Fail 'content_conflict' } }
+    if ($chunk.type -cne 'chunk' -or $chunk.index -ne $i -or $chunk.data_b64 -isnot [string] -or $chunk.data_b64.Length -eq 0 -or $chunk.data_b64.Length -gt 2732 -or $chunk.data_b64 -cnotmatch '^[A-Za-z0-9+/]*={0,2}\z') { Fail 'invalid_schema' }
+    $part=[Convert]::FromBase64String($chunk.data_b64)
+    if ([Convert]::ToBase64String($part) -cne $chunk.data_b64 -or $part.Length -ne [Math]::Min(2048,$manifest.message_bytes-($i-1)*2048)) { Fail 'incomplete' }
+    $memory.Write($part,0,$part.Length)
+   }
+   $bytes=$memory.ToArray()
+  } finally { $memory.Dispose() }
+  if ($bytes.Length -ne $manifest.message_bytes -or (Hash $bytes) -cne $entry.message_sha256) { Fail 'content_conflict' }
+  $reply=Decode $bytes
+  Fields $reply @('version','logical_session_id','worker_id','worker_generation','launch_request_id','work_id','message_id','reply_seq','action_id','action_revision','kind','payload')
+  foreach ($key in @('version','worker_generation','reply_seq','action_revision')) { ValueType $reply[$key] 'positive' }
+  foreach ($key in @('logical_session_id','worker_id','launch_request_id','work_id','message_id','action_id')) { ValueType $reply[$key] 'id' }
+  foreach ($key in @('logical_session_id','worker_id','worker_generation','launch_request_id','work_id')) { if ($reply[$key] -cne $binding[$key]) { Fail 'binding_mismatch' } }
+  if ($reply.version -ne 1 -or $reply.kind -cne 'project_start' -or $reply.reply_seq -ne $entry.reply_seq -or $reply.message_id -cne $entry.message_id) { Fail 'binding_mismatch' }
+  ProjectStart $reply.payload
+ }
+ if ($seen -ne $entries.Count) { Fail 'incomplete' }
+}
 try {
+ if ($WithdrawnStarts.Length -gt 0 -and $Mode -cnotin @('retire','reconcile_retire')) { Finish 'binding_mismatch' }
  if ($Handle -notmatch '^[A-Za-z0-9_-]{1,96}$' -or $Operation -notmatch '^[A-Za-z0-9_-]{1,96}$' -or $Root -notmatch '^[A-Za-z]:[\\/]' -or $Root.Contains('..')) { Finish 'binding_mismatch' }
  if ([Security.Principal.WindowsIdentity]::GetCurrent().Name -cne $Identity) { Finish 'binding_mismatch' }
  SafeDirectory $Root
@@ -147,6 +364,36 @@ try {
   foreach ($name in @('reports','replies','acks','watermarks','producer','consumer','staging')) { $null=New-Item -ItemType Directory -Path (Join-Path $box $name) }
  } elseif (-not (Test-Path -LiteralPath $box)) { if ($Mode -eq 'reconcile_retire') { Finish 'retired' }; Finish 'missing' }
  SafeDirectory $box
+ # Read-only observation: do not acquire admission or alter a mailbox.
+ if ($Mode -eq 'inventory') {
+  if ($Selected -notmatch '^[0-9]{1,12}$') { Finish 'binding_mismatch' }
+  [long]$staleMs=[long]$Selected
+  if ($staleMs -lt 1 -or $staleMs -gt 315360000000) { Finish 'binding_mismatch' }
+  [long]$observed=[DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+  [long]$cutoff=$observed-$staleMs
+  $files=0; $stale=0; $directories=0
+  $pending=New-Object 'System.Collections.Generic.Queue[string]'
+  $pending.Enqueue($box)
+  while ($pending.Count -gt 0) {
+   $directory=$pending.Dequeue()
+   SafeDirectory $directory
+   foreach ($path in [IO.Directory]::EnumerateFileSystemEntries($directory)) {
+    $item=Get-Item -LiteralPath $path -Force
+    if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { Finish 'binding_mismatch' }
+    if ($item.PSIsContainer) {
+     $directories++
+     if ($directories -gt 1024) { Finish 'storage_error' }
+     $relative=$item.FullName.Substring($box.Length).TrimStart('\','/')
+     if (($relative -split '[\\/]').Count -gt 3) { Finish 'binding_mismatch' }
+     $pending.Enqueue($path)
+    } elseif ($item -is [IO.FileInfo]) {
+     $files++; if ($files -gt 1000000) { Finish 'storage_error' }
+     if (([DateTimeOffset]$item.LastWriteTimeUtc).ToUnixTimeMilliseconds() -le $cutoff) { $stale++ }
+    } else { Finish 'binding_mismatch' }
+   }
+  }
+  Finish ('{"observed_at_ms":'+$observed+',"open_files":'+$files+',"stale_files":'+$stale+'}')
+ }
  TakeCapacity
  $fixed=$Selected -eq 'provision.json' -or $Selected -match '^(reports|replies)/[1-9][0-9]{0,15}/(manifest|chunk-([1-9]|[12][0-9]|3[0-2]))\.json$' -or $Selected -match '^(acks|watermarks)/[1-9][0-9]{0,15}\.json$'
  if (-not $fixed -and -not ($Mode -eq 'read' -and $Selected -eq 'watermarks') -and -not ($Mode -in @('compact','retire','reconcile_compact','reconcile_retire') -and $Selected -eq '-')) { Finish 'binding_mismatch' }
@@ -187,12 +434,54 @@ try {
   $cleanupLanes=@('reports','replies','acks')
   if ($Mode -eq 'retire') { $cleanupLanes+=@('producer','consumer','staging','watermarks') }
   foreach ($name in $cleanupLanes) { SafeDirectory (Join-Path $box $name) }
+  if ($Mode -eq 'retire' -and $WithdrawnStarts.Length -gt 0) {
+   $descriptor=Decode (ReadFile (Join-Path $box 'provision.json') 2048) 2048
+   $binding=$descriptor.binding
+   $keys=@('logical_session_id','worker_id','worker_generation','launch_request_id','work_id','enrolment_token','mailbox_handle')
+   Fields $binding $keys
+   foreach ($key in $keys) {
+    $type='id'; if ($key -ceq 'worker_generation') { $type='positive' } elseif ($key -ceq 'enrolment_token') { $type='token' }
+    ValueType $binding[$key] $type
+   }
+   if ($descriptor.handle -cne $Handle -or $binding.mailbox_handle -cne $Handle -or $ReportFloor -lt 0 -or $ReplyFloor -lt 0 -or $ReportFloor -gt 9007199254740991 -or $ReplyFloor -gt 9007199254740991) { Finish 'binding_mismatch' }
+   WithdrawnTail $ReplyFloor
+   # Full destructive preflight, including settled prefix and residual lanes. No
+   # prefix bytes may disappear when any tail or local-execution evidence fails.
+   foreach ($name in @('producer','consumer','staging')) {
+    if (@([IO.Directory]::EnumerateFileSystemEntries((Join-Path $box $name))).Count -ne 0) { Finish 'incomplete' }
+   }
+   foreach ($name in @('reports','replies','acks','watermarks')) {
+    $floor=$ReportFloor; if ($name -ceq 'replies') { $floor=$ReplyFloor }
+    foreach ($path in [IO.Directory]::EnumerateFileSystemEntries((Join-Path $box $name))) {
+     $leaf=[IO.Path]::GetFileName($path)
+     if ($name -cin @('acks','watermarks')) {
+      if ($leaf -cnotmatch '^[1-9][0-9]{0,15}\.json\z') { Finish 'binding_mismatch' }
+      $null=Regular $path
+      if ($name -ceq 'acks' -and [long][IO.Path]::GetFileNameWithoutExtension($path) -gt $floor) { Finish 'incomplete' }
+     } else {
+      if ($leaf -cnotmatch '^[1-9][0-9]{0,15}\z') { Finish 'binding_mismatch' }
+      if ($name -ceq 'reports' -and [long]$leaf -gt $floor) { Finish 'incomplete' }
+      SafeDirectory $path
+      foreach ($part in [IO.Directory]::EnumerateFileSystemEntries($path)) {
+       $item=Regular $part
+       if ($item.Name -cnotmatch '^(manifest|chunk-([1-9]|[12][0-9]|3[0-2]))\.json\z') { Finish 'binding_mismatch' }
+      }
+     }
+    }
+   }
+   foreach ($path in [IO.Directory]::EnumerateFileSystemEntries($box)) {
+    $leaf=[IO.Path]::GetFileName($path)
+    if ($leaf -cin @('reports','replies','acks','watermarks','producer','consumer','staging','capacity.lock')) { SafeDirectory $path }
+    elseif ($leaf -cin @('provision.json','manifest.json')) { $null=Regular $path }
+    else { Finish 'binding_mismatch' }
+   }
+  }
   foreach ($name in @('reports','replies','acks')) {
    $floor=$ReportFloor; if ($name -eq 'replies') { $floor=$ReplyFloor }
    foreach ($path in [IO.Directory]::EnumerateFileSystemEntries((Join-Path $box $name))) {
     $leaf=[IO.Path]::GetFileName($path); if ($name -eq 'acks') { $leaf=[IO.Path]::GetFileNameWithoutExtension($path) }
     if ($leaf -notmatch '^[1-9][0-9]{0,15}$') { Finish 'binding_mismatch' }
-    if ([long]$leaf -gt $floor) { if ($Mode -eq 'retire') { Finish 'incomplete' }; continue }
+    if ([long]$leaf -gt $floor -and -not ($Mode -ceq 'retire' -and $name -ceq 'replies' -and $WithdrawnStarts.Length -gt 0)) { if ($Mode -eq 'retire') { Finish 'incomplete' }; continue }
     if ($name -eq 'acks') { $null=Regular $path; [IO.File]::Delete($path) }
     else {
      SafeDirectory $path

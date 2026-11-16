@@ -12,7 +12,8 @@ local function load(name)
 	modules[name] = module
 	return module
 end
-local transport = load("transport")
+local transport = load("wire/codec")
+local rules = load("workflow_rules")
 local checks = 0
 local function check(condition, message)
 	assert(condition, message)
@@ -99,7 +100,6 @@ for _, fixture in fixtures do
 	check(decoded ~= nil and err == nil and decoded.kind == fixture[1], "closed report schema " .. fixture[1])
 end
 -- Checkpoint 2 (Contracts C/F): helper-only and role report kinds, with their capability gates.
--- Pinned names; ORCH+ transport.luau gains them in Task 2D, so these fail until 2D lands.
 local all_capabilities = { "report-files-v1", "native-ask-v1", "worker-poll-v1", "argv-v1", "coordinator-control-v1", "check-runner-v1", "release-manager-v1" }
 local granted = clone(binding); granted.capabilities = all_capabilities
 local check_runner = clone(binding); check_runner.capabilities = { "report-files-v1", "check-runner-v1" }
@@ -283,7 +283,7 @@ end
 -- Landing proof (Contract H) replaces worker-attested checkpoint evidence.
 local source = string.rep("a", 40)
 local function proof_input(change)
-	local input = { enforce_cross_family = true, source_revision = source, builder_worker_id = "builder", builder_family = "anthropic",
+	local input = { require_code_review = true, require_other_family = true, source_revision = source, builder_worker_id = "builder", builder_family = "anthropic",
 		checks = list({ { check_id = "t1-c1", argv = list({ "true" }) } }),
 		check_results = { ["t1-c1"] = { check_id = "t1-c1", exit_code = 0, head = source, output_sha256 = zero_hash } },
 		review = { review_id = "review_1", reviewer_worker_id = "reviewer", reviewer_family = "openai", reviewer_role = "reviewer", artifact_revision = source, outcome = "approved" } }
@@ -295,11 +295,11 @@ local function review(change)
 	for key, child in change do value[key] = child end
 	return value
 end
-local proof = transport.verify_landing_proof(proof_input())
+local proof = rules.verify_landing_proof(proof_input())
 check(proof and proof.mode == "cross_family_review" and proof.artifact_revision == source and proof.review_id == "review_1", "approved cross-family review proves landing")
-proof = transport.verify_landing_proof(proof_input({ check_results = { ["t1-c1"] = { check_id = "t1-c1", exit_code = 1, head = source, output_sha256 = zero_hash } } }))
-check(proof and proof.mode == "cross_family_review", "failed attested check is evidence only under cross-family review")
-proof = transport.verify_landing_proof(proof_input({ enforce_cross_family = false, review = review({ reviewer_family = "anthropic" }) }))
+proof, diagnostic = rules.verify_landing_proof(proof_input({ check_results = { ["t1-c1"] = { check_id = "t1-c1", exit_code = 1, head = source, output_sha256 = zero_hash } } }))
+check(proof == nil and diagnostic.code == "check_failed", "approved cross-family review never overrides a failed helper check")
+proof = rules.verify_landing_proof(proof_input({ require_other_family = false, review = review({ reviewer_family = "anthropic" }) }))
 check(proof and proof.mode == "helper_checks" and proof.check_refs[1] == "t1-c1:" .. zero_hash, "passing helper checks plus same-family review prove landing")
 for _, case in {
 	{ { review = false }, "review_required", "no review" },
@@ -308,17 +308,40 @@ for _, case in {
 	{ { review = review({ reviewer_worker_id = "builder" }) }, "reviewer_is_builder", "builder reviewed itself" },
 	{ { review = review({ reviewer_family = "anthropic" }) }, "family_same", "same family under cross-family" },
 	{ { review = review({ reviewer_family = false }) }, "family_unknown", "unknown reviewer family" },
-	{ { enforce_cross_family = false, checks = false }, "checks_undeclared", "no declared checks" },
-	{ { enforce_cross_family = false, check_results = {} }, "check_missing", "declared check never ran" },
-	{ { enforce_cross_family = false, check_results = { ["t1-c1"] = { check_id = "t1-c1", exit_code = 1, head = source, output_sha256 = zero_hash } } }, "check_failed", "failed check" },
-	{ { enforce_cross_family = false, check_results = { ["t1-c1"] = { check_id = "t1-c1", exit_code = 0, head = string.rep("b", 40), output_sha256 = zero_hash } } }, "check_stale", "check of another head" },
-	{ { enforce_cross_family = false, review = false }, "review_required", "passing checks still need a review" },
+	{ { check_results = {} }, "check_missing", "declared check never ran" },
+	{ { check_results = { ["t1-c1"] = { check_id = "t1-c1", exit_code = 1, head = source, output_sha256 = zero_hash } } }, "check_failed", "failed check" },
+	{ { check_results = { ["t1-c1"] = { check_id = "t1-c1", exit_code = 0, head = string.rep("b", 40), output_sha256 = zero_hash } } }, "check_stale", "check of another head" },
 } do
 	local input = proof_input()
 	for key, child in case[1] do input[key] = if child == false then nil else child end
 	if input.review and input.review.reviewer_family == false then input.review.reviewer_family = nil end
-	local value, problem = transport.verify_landing_proof(input)
+	local value, problem = rules.verify_landing_proof(input)
 	check(value == nil and problem ~= nil and problem.code == case[2], "landing proof blocks: " .. case[3] .. " (" .. tostring(problem and problem.code) .. ")")
+end
+-- Every policy mode independently requires every declared check, never reviewer substitution.
+for _, mode in { { true, true, "cross_family_review" }, { true, false, "helper_checks" }, { false, false, "review_disabled" } } do
+	for _, state in { "empty", "passed", "failed", "missing", "stale" } do
+		for _, reviewer in { "absent", "same", "other" } do
+			local input = proof_input({ require_code_review = mode[1], require_other_family = mode[2] })
+			if reviewer == "absent" then input.review = nil
+			elseif reviewer == "same" then input.review.reviewer_family = input.builder_family end
+			if state == "empty" then input.checks = list(); input.check_results = {}
+			elseif state == "missing" then input.check_results = {}
+			elseif state == "failed" then input.check_results["t1-c1"].exit_code = 1
+			elseif state == "stale" then input.check_results["t1-c1"].head = string.rep("b", 40) end
+			local value, problem = rules.verify_landing_proof(input)
+			local checks_ok = state == "empty" or state == "passed"
+			local review_ok = not mode[1] or (reviewer ~= "absent" and (not mode[2] or reviewer == "other"))
+			local label = mode[3] .. "/" .. state .. "/" .. reviewer
+			check((value ~= nil) == (checks_ok and review_ok), label .. ": independent check and review predicates")
+			if value then
+				check(value.mode == mode[3] and #value.check_refs == (if state == "empty" then 0 else 1), label .. ": exact proof and check references")
+				check((value.review_id == nil) == (not mode[1]), label .. ": no invented review identity")
+			elseif not checks_ok then
+				check(problem.code == ({ failed = "check_failed", missing = "check_missing", stale = "check_stale" })[state], label .. ": checks block regardless of review")
+			end
+		end
+	end
 end
 
 local function reply(kind, payload)
@@ -334,6 +357,9 @@ for _, fixture in {
 		target_ref = "main", target_revision = "base", source_ref = "work/branch", source_revision = "abc",
 		builder_work_id = "work_1", review_id = "review_1", reviewer_family = "openai",
 		proof = { mode = "cross_family_review", artifact_revision = "abc", review_id = "review_1", check_refs = list() } } },
+	{ "landing_grant", { landing_id = "landing_1", grant_id = "grant_1", project_id = "project_1", checkpoint_id = "cp_1", repo_ref = "repo/ref",
+		target_ref = "main", target_revision = "base", source_ref = "work/branch", source_revision = "abc", builder_work_id = "work_1",
+		proof = { mode = "review_disabled", artifact_revision = "abc", check_refs = list() } } },
 	{ "review_request", { review_id = "review_1", round = 1, question_id = "implements_task_v1", builder_work_id = "work_1", task_ref = "task/ref",
 		plan_ref = "plan/ref", plan_revision = "3", source_ref = "work/branch", artifact_revision = "abc", scope_paths = list({ "a.luau" }), findings_prev = list() } },
 	{ "rework", { review_id = "review_1", round = 2, artifact_revision = "abc", failed_checks = list({ { check_id = "t1-c2", exit_code = 1 } }),
@@ -356,12 +382,53 @@ for _, fixture in {
 	local bad = clone(candidate); bad.payload.unexpected = true
 	check(transport.decode_reply(encode(bad), granted) == nil, "closed reply payload " .. candidate.kind)
 end
+do
+	local ruling = reply("record_ruling", { path = "/existing/plan.md", marker = "orchplus-ruling:authority_1:gate_1",
+		entry = "> orchplus-ruling:authority_1:gate_1\n> Decision: use &lt;literal&gt; &#96;text&#96;",
+		expected_document_sha256 = hash("fresh B0"), expected_non_rulings_sha256 = hash("fresh executable B0") })
+	ruling.gate_id, ruling.gate_revision = "gate_1", 3
+	check(transport.decode_reply(encode(ruling), granted) ~= nil, "canonical ruling reply binds exact gate, existing absolute path, escaped entry and both B0 hashes")
+	for _, unprovisioned in { binding, check_runner, release_manager } do
+		check(transport.decode_reply(encode(ruling), unprovisioned) == nil, "ruling delivery never infers coordinator-control capability")
+	end
+	for _, mutate in {
+		function(v) v.gate_id = "other_gate" end,
+		function(v) v.gate_revision = nil end,
+		function(v) v.payload.path = "relative/plan.md" end,
+		function(v) v.payload.marker = "gate_1" end,
+		function(v) v.payload.entry = "> raw <tag>" end,
+		function(v) v.payload.entry = "> raw `code`" end,
+		function(v) v.payload.entry = "> first\nunquoted second" end,
+		function(v) v.payload.entry ..= "\n" end,
+		function(v) v.payload.expected_document_sha256 = string.rep("A", 64) end,
+		function(v) v.payload.expected_non_rulings_sha256 = nil end,
+		function(v) v.payload.create = true end,
+	} do
+		local bad = clone(ruling); mutate(bad)
+		check(transport.decode_reply(encode(bad), granted) == nil, "ruling payload cannot weaken gate/capability/path/escaped-byte contract")
+	end
+end
+do
+	local grant = reply("landing_grant", { landing_id = "landing_1", grant_id = "grant_1", project_id = "project_1", checkpoint_id = "cp_1", repo_ref = "repo/ref",
+		target_ref = "main", target_revision = "base", source_ref = "work/branch", source_revision = "abc", builder_work_id = "work_1",
+		proof = { mode = "review_disabled", artifact_revision = "abc", check_refs = list({ "unit:" .. zero_hash }) } })
+	check(transport.decode_reply(encode(grant), release_manager) ~= nil, "review-disabled grant retains real check references")
+	for _, field in { "review_id", "reviewer_family", "proof_review_id" } do
+		local bad = clone(grant)
+		if field == "proof_review_id" then bad.payload.proof.review_id = "invented" else bad.payload[field] = "invented" end
+		check(transport.decode_reply(encode(bad), release_manager) == nil, "review-disabled grant forbids invented " .. field)
+	end
+	for _, mode in { "helper_checks", "cross_family_review" } do
+		local bad = clone(grant); bad.payload.proof.mode = mode
+		check(transport.decode_reply(encode(bad), release_manager) == nil, "reviewed " .. mode .. " still requires review identity")
+	end
+end
 local review_reply = reply("review_request", { review_id = "review_1", round = 1, question_id = "score_v1", builder_work_id = "work_1", task_ref = "task/ref",
 	source_ref = "work/branch", artifact_revision = "abc", scope_paths = list(), findings_prev = list() })
 check(transport.decode_reply(encode(review_reply), granted) == nil, "review_request carries only the fixed judge question")
 local legacy_grant = reply("landing_grant", { landing_id = "landing_1", grant_id = "grant_1", project_id = "project_1", checkpoint_id = "cp_1", repo_ref = "repo/ref",
 	target_ref = "main", target_revision = "base", source_ref = "work/branch", source_revision = "abc" })
-check(transport.decode_reply(encode(legacy_grant), granted) == nil, "landing_grant requires builder, review and proof fields")
+check(transport.decode_reply(encode(legacy_grant), granted) == nil, "landing_grant requires builder and explicit proof fields")
 local reply_value = reply("owner_decision", { choice_id = "choice_1", answer = "Proceed" })
 value, diagnostic = transport.decode_reply(encode(reply_value), binding)
 rejected(value, diagnostic, "invalid_schema", "owner reply requires explicit gate revision")
@@ -565,20 +632,66 @@ do
 		return { kind = "CHECKPOINT", payload = { checkpoint_id = "cp", task_ref = "task", project_id = "project", worktree_ref = "tree", artifact_revision = "rev-2",
 			completed = { "done" }, remaining = { "next" }, holds = {}, checks = checks, request_id = "rollover-request" } }
 	end
-	local verified = transport.verify_checkpoint(checkpoint({ { check_id = "unit", artifact_revision = "rev-2", outcome = "passed", evidence_ref = "unit" } }), "rollover-request")
+	local verified = rules.verify_checkpoint(checkpoint({ { check_id = "unit", artifact_revision = "rev-2", outcome = "passed", evidence_ref = "unit" } }), "rollover-request")
 	check(verified ~= nil and verified.attestation == "worker-attested" and verified.artifact_revision == "rev-2", "fresh passed outcome verifies as worker-attested")
-	local value, diagnostic = transport.verify_checkpoint(checkpoint({ { check_id = "unit", artifact_revision = "rev-2", outcome = "passed", evidence_ref = "unit" },
+	local value, diagnostic = rules.verify_checkpoint(checkpoint({ { check_id = "unit", artifact_revision = "rev-2", outcome = "passed", evidence_ref = "unit" },
 		{ check_id = "project-artifact", artifact_revision = "rev-2", outcome = "failed", evidence_ref = "artifact" } }), "rollover-request")
 	rejected(value, diagnostic, "verification_failed", "a failed required check blocks rollover even beside passed checks")
-	value, diagnostic = transport.verify_checkpoint(checkpoint({ { check_id = "unit", artifact_revision = "rev-1", outcome = "passed", evidence_ref = "unit" } }), "rollover-request")
+	value, diagnostic = rules.verify_checkpoint(checkpoint({ { check_id = "unit", artifact_revision = "rev-1", outcome = "passed", evidence_ref = "unit" } }), "rollover-request")
 	rejected(value, diagnostic, "verification_stale", "check for another artifact revision blocks rollover")
-	value, diagnostic = transport.verify_checkpoint(checkpoint({ { check_id = "unit", artifact_revision = "rev-2", outcome = "not_run", evidence_ref = "unit" } }), "rollover-request")
+	value, diagnostic = rules.verify_checkpoint(checkpoint({ { check_id = "unit", artifact_revision = "rev-2", outcome = "not_run", evidence_ref = "unit" } }), "rollover-request")
 	rejected(value, diagnostic, "verification_missing", "not_run is absent evidence")
-	value, diagnostic = transport.verify_checkpoint(checkpoint({}), "rollover-request")
+	value, diagnostic = rules.verify_checkpoint(checkpoint({}), "rollover-request")
 	rejected(value, diagnostic, "verification_missing", "summary without verification outcomes blocks")
-	value, diagnostic = transport.verify_checkpoint(checkpoint({ { check_id = "unit", artifact_revision = "rev-2", outcome = "passed", evidence_ref = "unit" } }), "other-request")
+	value, diagnostic = rules.verify_checkpoint(checkpoint({ { check_id = "unit", artifact_revision = "rev-2", outcome = "passed", evidence_ref = "unit" } }), "other-request")
 	rejected(value, diagnostic, "checkpoint_stale", "checkpoint answering another request cannot hand over")
-	value, diagnostic = transport.verify_checkpoint({ kind = "HEARTBEAT", payload = { state = "idle" } }, "rollover-request")
+	value, diagnostic = rules.verify_checkpoint({ kind = "HEARTBEAT", payload = { state = "idle" } }, "rollover-request")
 	rejected(value, diagnostic, "checkpoint_missing", "non-checkpoint report cannot hand over")
+end
+-- Incremental state is a JSON-safe prefix, not a replay journal of encoded chunks.
+do
+	local a = assert(transport.assembly_start(split_frame.manifest, hash(split_frame.manifest), binding))
+	local pristine = encode(a)
+	local future, problem = transport.assembly_push(a, split_frame.chunks[2], hash(split_frame.chunks[2]), binding)
+	rejected(future, problem, "incomplete", "future incremental chunk cannot skip the contiguous prefix")
+	check(encode(a) == pristine, "out-of-order refusal leaves incremental state unchanged")
+	local pending = assert(transport.assembly_push(a, split_frame.chunks[1], hash(split_frame.chunks[1]), binding))
+	check(not pending.complete and a.next_index == 2 and a.bytes == 2048 and a.slices[1] == first_chunk.data_b64,
+		"pending push persists one base64 slice and advances the next index")
+	a = clone(a)
+	local saved = encode(a)
+	local duplicate = assert(transport.assembly_push(a, split_frame.chunks[1], hash(split_frame.chunks[1]), binding))
+	check(duplicate.code == "already_received" and encode(a) == saved, "duplicate after JSON restart neither copies nor advances the prefix")
+	value, diagnostic = transport.assembly_push(a, reencoded, hash(reencoded), binding)
+	rejected(value, diagnostic, "content_conflict", "incremental duplicate preserves exact encoded-chunk identity")
+	check(encode(a) == saved, "changed duplicate leaves prefix unchanged")
+	value, diagnostic = transport.assembly_push(a, split_frame.chunks[2], zero_hash, binding)
+	rejected(value, diagnostic, "content_conflict", "incremental push verifies the supplied chunk digest")
+	check(encode(a) == saved, "digest failure leaves prefix unchanged")
+	value, diagnostic = transport.assembly_push(a, split_frame.chunks[2], hash(split_frame.chunks[2]), switched_binding)
+	rejected(value, diagnostic, "binding_mismatch", "incremental continuation cannot change generation")
+	check(encode(a) == saved, "binding failure leaves prefix unchanged")
+	for index = 2, #split_frame.chunks do
+		local before = encode(a)
+		complete = assert(transport.assembly_push(a, split_frame.chunks[index], hash(split_frame.chunks[index]), binding))
+		if index == #split_frame.chunks then check(encode(a) == before, "successful final push does not mutate the retained prefix") end
+		a = clone(a)
+	end
+	check(complete.complete and complete.bytes == split_bytes and complete.sha256 == hash(split_bytes),
+		"JSON restart at every boundary preserves a UTF-8 character split across raw slices")
+	local max_state = assert(transport.assembly_start(maximum.manifest, hash(maximum.manifest), binding))
+	for _, chunk in maximum.chunks do complete = assert(transport.assembly_push(max_state, chunk, hash(chunk), binding)) end
+	check(complete.complete and complete.bytes == maximum_bytes and max_state.next_index == 32 and max_state.bytes == 31 * 2048,
+		"incremental maximum message completes without retaining the final slice")
+	local invalid_bytes = encode(report("HEARTBEAT", { state = "not-a-valid-worker-state" }))
+	local manifest, chunk = runtime.json.decode(framed.manifest), runtime.json.decode(framed.chunks[1])
+	manifest.message_bytes = #invalid_bytes; manifest.message_sha256 = hash(invalid_bytes); manifest.count = 1
+	chunk.message_sha256 = manifest.message_sha256; chunk.data_b64 = runtime.base64.encode(invalid_bytes); chunk.count = 1
+	local mb, cb = encode(manifest), encode(chunk)
+	local invalid_state = assert(transport.assembly_start(mb, hash(mb), binding))
+	local before = encode(invalid_state)
+	value, diagnostic = transport.assembly_push(invalid_state, cb, hash(cb), binding)
+	check(value == nil and diagnostic.completed_bytes == invalid_bytes and diagnostic.completed_sha256 == hash(invalid_bytes)
+		and encode(invalid_state) == before, "invalid completed schema retains exact digest-verified evidence and leaves prefix unchanged")
 end
 return "PASS " .. tostring(checks) .. " report transport checks"

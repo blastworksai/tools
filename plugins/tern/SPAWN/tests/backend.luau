@@ -40,10 +40,6 @@ same(Backend.windows_argument("a\\"), '"a\\\\"', "CRT trailing backslash doubles
 same(Backend.windows_argument('a\\"b'), '"a\\\\\\"b"', "CRT backslashes before quotes double plus one")
 same(Backend.utf16le("A雪😀"), string.char(65, 0, 234, 150, 61, 216, 0, 222), "UTF16LE includes surrogate pairs, not UTF8 bytes")
 check(Backend.utf16le(string.char(255)) == nil, "UTF16 rejects malformed UTF8")
-same(Backend.base64(""), "", "Base64 empty")
-same(Backend.base64("f"), "Zg==", "Base64 one byte")
-same(Backend.base64("fo"), "Zm8=", "Base64 two bytes")
-same(Backend.base64("foo"), "Zm9v", "Base64 three bytes")
 local args = { "", task, "ending\\", "--resume", "literal" }
 local command = assert(Backend.serialize("/a worker", args, "/work's", "linux", "sh"))
 local expected = "cd -- " .. Backend.posix_quote("/work's") .. " && " .. Backend.posix_quote("/a worker")
@@ -146,7 +142,7 @@ check(Resolution.select_user(user_resolution, "posix"), "shared resolver selects
 same(user_resolution.executable, "sudo", "unwrapped local identity uses sudo")
 same(table.concat(user_resolution.arguments, "|"), "-u|worker-account|-H|--|worker", "shared sudo wrapper keeps exact identity and command")
 same(Executor.render(user_record, "/bin/bash", "linux"), "SPAWN_PROVIDER=custom sudo -u worker-account -H -- worker", "ordinary host uses the shared exact user wrapper")
-same(assert(Backend.build(user_record, host, options())).command, "'sudo' '-u' 'worker-account' '-H' '--' 'worker' " .. Backend.posix_quote(task), "managed backend uses the same exact user wrapper")
+same(assert(Backend.build(user_record, host, options())).command, "'sudo' '-n' '-u' 'worker-account' '-H' '--' 'worker' " .. Backend.posix_quote(task), "managed backend never asks interactively for cross-user credentials")
 for _, selector in ipairs({ { "-u", "worker-account" }, { "--user", "worker-account" }, { "-uworker-account" }, { "--user=worker-account" } }) do
 	local argv = table.clone(selector)
 	for _, value in ipairs({ "-H", "--", "worker", "-u", "provider-option" }) do table.insert(argv, value) end
@@ -159,6 +155,7 @@ for _, selector in ipairs({ { "-u", "worker-account" }, { "--user", "worker-acco
 	end
 	check(Executor.render(wrapped, "/bin/bash", "linux") ~= nil, "ordinary matching sudo stays launchable")
 	check(Backend.build(wrapped, host, options()) ~= nil, "managed matching sudo stays launchable")
+	check(assert(Backend.build(wrapped,host,options())).command:find("'/usr/bin/sudo' '-n'",1,true)~=nil,"managed configured sudo also requires noninteractive execution")
 	same(#wrapped.arguments, #argv, "ordinary rendering leaves configured sudo argv unchanged")
 	same(#wrapped.fresh_arguments, #argv, "managed insertion leaves configured sudo argv unchanged")
 end
@@ -290,4 +287,284 @@ check(assert(Config.validate_record(record())).argv_contract == nil, "normalizer
 local absent = assert(Config.validate_record(record()))
 check(absent.mailbox == nil and absent.fresh_executable == nil and absent.fresh_native_default == nil, "missing capability declarations stay absent")
 check(not Backend.eligibility(saved).runtime_verified, "configured facts are never runtime proof")
+-- Pure wizard preparation boundaries; no provisioning/provider process runs here.
+local Setup,Prereq=load("managed_setup"),load("prereq")
+local setupDraft=Setup.from_record(saved)
+same(setupDraft.id,saved.id,"adoption keeps the stable record ID")
+same(setupDraft.task_argument_index,tostring(saved.task_argument_index),"adoption keeps the actual task argv insertion slot")
+same(setupDraft.source_record.profile,saved.profile,"adoption retains selectors in its review draft")
+check(setupDraft.source_record~=saved,"adoption draft cannot mutate the authoritative record")
+local rejectedSetup=nil
+setupDraft.id="different"
+Setup.prepare(setupDraft,host,function(value,probe,why) rejectedSetup={value=value,probe=probe,why=why} end)
+check(rejectedSetup and rejectedSetup.value==nil and rejectedSetup.probe==nil and rejectedSetup.why:find("immutable",1,true),"adoption cannot rename an existing stable ID before resource creation")
+setupDraft.id=saved.id;setupDraft.task_argument_index="0";rejectedSetup=nil
+Setup.prepare(setupDraft,host,function(value,probe,why) rejectedSetup={value=value,probe=probe,why=why} end)
+check(rejectedSetup and rejectedSetup.value==nil and rejectedSetup.why:find("position",1,true),"invalid task insertion refuses before effects")
+same(table.concat(Prereq.as_user({"id","-un"},"selected"),"|"),"sudo|-n|-u|selected|-H|--|id|-un","prerequisites execute noninteractive chosen-account checks with that account's home")
+local sameUser={"id","-un"}
+check(Prereq.as_user(sameUser,nil)==sameUser,"same-user prerequisites do not add SSH or sudo")
+do
+ local native=assert(Setup.from_native("sudo -n -u selected -H -- '/tools/native worker Ω' --profile 'work account'","/work"))
+ same(native.user,"selected","native adoption reads the OS account only from the explicit command selector")
+ same(native.executable,"/tools/native worker Ω","native adoption preserves the exact literal executable, including spaces")
+ same(native.arguments,Config.render_arguments({"--profile","work account"}),"native adoption preserves configured native selectors without provider allowlists")
+ check(Setup.from_native("sudo -u one -u two -- worker","/work")==nil,"ambiguous native OS identities refuse")
+ check(Setup.from_native("sudo -E -u selected -- worker","/work")==nil,"unreviewed native identity environment options refuse adoption")
+ check(Setup.from_native("ssh remote worker","/work")==nil,"discovery cannot invent a cross-host managed route")
+ same(assert(Setup.from_native("custom-native --account work","/work")).user,"","provider account arguments and labels never become POSIX users")
+ for _,arguments in ipairs({"--restore existing-session","--resume=existing-session","--continue","resume existing-session","--session-id existing-session","--session-dir /existing/session"}) do
+  local restored,why=Setup.from_native("sudo -n -u selected -H -- omp "..arguments,"/work")
+  check(restored==nil and why:find("Fresh native route required",1,true),"active native continuation cannot be adopted as fresh: "..arguments)
+ end
+ local fresh=assert(Setup.from_native("omp --model selected/model --permission-mode normal","/work"))
+ same(fresh.arguments,Config.render_arguments({"--model","selected/model","--permission-mode","normal"}),"genuinely fresh native defaults retain exact model and permissions flags")
+ local configured=assert(Config.validate_record(record({provider="Configured native label",backend="native-agent",command="/tools/native",fresh_executable="/tools/native",fresh_arguments={}})))
+ check(configured.provider=="Configured native label" and configured.backend=="native-agent","an explicit configured native route is not rejected by a display-provider allowlist")
+ local lifecycle=load("launch_state")
+ check(lifecycle.reserve(lifecycle.new(),configured,"host/session","observer","managed")~=nil,"configured native identity is not replaced by an OMP label during reservation")
+end
+local Adapter=load("mailbox_adapter")
+check(Adapter.absolute_path("/work/a..b/helpers",false),"a literal basename containing two dots is not traversal")
+check(Adapter.absolute_path("C:\\work\\a..b\\helpers",true),"Windows literal two-dot basename is accepted")
+for _,path in ipairs({"/work/../helpers","/work/..","/work/./helpers","/work/.","/work//helpers"}) do
+ check(not Adapter.absolute_path(path,false),"POSIX traversal/repeated separators reject: "..path)
+end
+for _,path in ipairs({"C:\\work\\..\\helpers","C:\\work\\..","C:\\work\\.\\helpers","C:\\work\\."}) do
+ check(not Adapter.absolute_path(path,true),"Windows traversal segments reject: "..path)
+end
+-- Planning is offline; the required native boundary is separately consented.
+local routeRecord=assert(Config.validate_record(saved))
+routeRecord.backend="native-agent";routeRecord.provider="OMP";routeRecord.cwd="/fixture/repository"
+routeRecord.fresh_executable="omp";routeRecord.fresh_arguments={"--model","selected/model","--profile","selected-profile"}
+routeRecord.mailbox.permitted_root="/fixture/mail";routeRecord.mailbox.worker_identity="selected"
+routeRecord.mailbox.helper_path="/fixture/bundle/mailbox_target.sh"
+local routeProbe={provision_handle="setup-fixture",record_sha256=string.rep("a",64)}
+local diagnostic=assert(Setup.route(routeRecord,routeProbe,host,7,"","route-native-fixture"))
+same(diagnostic.window,"","normal empty native window key is retained, never invented")
+same(diagnostic.config_revision,7,"native diagnostic captures exact config revision")
+same(diagnostic.expected_arguments[2],"selected/model","diagnostic keeps explicitly selected model")
+same(diagnostic.expected_arguments[4],"selected-profile","diagnostic keeps explicitly selected profile")
+same(#diagnostic.expected_arguments,#routeRecord.fresh_arguments+2,"only owned diagnostic session storage is added; no tool/rule/model/time flags are injected")
+for index,word in ipairs(routeRecord.fresh_arguments) do same(diagnostic.expected_arguments[index],word,"every selected CLI argument is preserved verbatim") end
+local secondDiagnostic=assert(Setup.route(routeRecord,routeProbe,host,7,"","another-consent"))
+check(diagnostic.expected_arguments[#diagnostic.expected_arguments]~=secondDiagnostic.expected_arguments[#secondDiagnostic.expected_arguments],"separate consents never share diagnostic session storage")
+same(routeRecord.fresh_arguments[#routeRecord.fresh_arguments],"selected-profile","diagnostic controls never rewrite saved argv")
+check(diagnostic.prompt:find(diagnostic.nonce,1,true)~=nil and diagnostic.prompt~=secondDiagnostic.prompt,"startup sentinel distinguishes separate consents")
+local Native=load("native_cli")
+local oldObserve=Native.observe_process
+local observedArgs={"bun","/fixture/omp.js"}
+for _,word in ipairs(diagnostic.expected_arguments) do table.insert(observedArgs,word) end
+table.insert(observedArgs,"--native-transport-fixture")
+Native.observe_process=function(window,session,pane,callback)
+ same(window,"","process readback retains originating empty window identity")
+ callback({status=0,timed_out=false,stdout=runtime.json.encode({pane=pane,child={argv=observedArgs,pid=123,cwd=diagnostic.cwd}})},nil)
+end
+local proof,proofError
+Setup.observe_route(diagnostic,4,9,function(value,why)proof=value;proofError=why end)
+check(proof~=nil and proofError==nil,"actual argv observation allows native transport suffix without dropping selected arguments")
+observedArgs[3]="--wrong-selected-flags"
+Setup.observe_route(diagnostic,4,9,function(value,why)proof=value;proofError=why end)
+check(proof==nil and proofError~=nil,"wrong actual child argv cannot manufacture native-route success")
+local oldChild,oldIdentity=Prereq.native_child,Native.process_identity
+local rootEpoch,childEpoch="boot:123:1","boot:456:1"
+Native.process_identity=function(pid) return if pid==123 then rootEpoch elseif pid==456 then childEpoch else nil end
+Native.observe_process=function(_,_,pane,callback)
+ callback({status=0,timed_out=false,stdout=runtime.json.encode({pane=pane,child={pid=123,argv={"sudo"}}})},nil)
+end
+local childArgs={"bun","/fixture/omp.js"}
+for _,word in ipairs(diagnostic.expected_arguments) do table.insert(childArgs,word) end
+local child={pid=456,cwd=diagnostic.cwd,argv=childArgs,worker_identity="selected",process_identity=childEpoch}
+Prereq.native_child=function(_,_,_,_,callback)callback(child,nil)end
+diagnostic.user="selected"
+Setup.observe_route(diagnostic,4,9,function(value,why)proof=value;proofError=why end)
+check(proof~=nil and proofError==nil,"an inaccessible sudo wrapper is verified through its actual selected-account agent descendant")
+child.worker_identity="another"
+Setup.observe_route(diagnostic,4,9,function(value,why)proof=value;proofError=why end)
+check(proof==nil and proofError~=nil,"a descendant from another OS account cannot establish native-route proof")
+child.worker_identity="selected";child.cwd="/another"
+Setup.observe_route(diagnostic,4,9,function(value,why)proof=value;proofError=why end)
+check(proof==nil and proofError~=nil,"account-aware observation does not weaken the actual working-folder check")
+child.cwd=diagnostic.cwd;childEpoch="boot:456:2"
+Setup.observe_route(diagnostic,4,9,function(value,why)proof=value;proofError=why end)
+check(proof==nil and proofError~=nil,"reused child PIDs cannot retain the previous native diagnostic proof")
+childEpoch=child.process_identity
+Prereq.native_child=function(_,_,_,_,callback)rootEpoch="boot:123:2";callback(child,nil)end
+Setup.observe_route(diagnostic,4,9,function(value,why)proof=value;proofError=why end)
+check(proof==nil and proofError~=nil,"a changed native wrapper epoch invalidates the descendant observation")
+Prereq.native_child,Native.process_identity=oldChild,oldIdentity
+diagnostic.user=nil
+Native.observe_process=oldObserve
+routeRecord.backend="local-terminal";routeRecord.user="selected"
+local terminalDiagnostic=assert(Setup.route(routeRecord,routeProbe,host,7,"window","route-terminal-fixture"))
+check(terminalDiagnostic.command:find("setup_route.sh",1,true)~=nil and terminalDiagnostic.command:find("'-n'",1,true)~=nil,"offline terminal diagnostic uses packaged helper and noninteractive selected identity")
+check(terminalDiagnostic.prompt==nil and terminalDiagnostic.expected:find("\nselected\n",1,true)~=nil,"terminal readback binds literal bytes and actual worker identity, not a fabricated provider task")
+local originalRead=Prereq.run
+local fixtureBytes,fixtureError="SPAWN_ROUTE_PENDING",nil
+Prereq.run=function(_,_,callback)callback(fixtureBytes,fixtureError)end
+local terminalProof,terminalError,terminalPending
+local function observeTerminal()
+ Setup.observe_route(terminalDiagnostic,4,9,function(value,why,pending)terminalProof=value;terminalError=why;terminalPending=pending end)
+end
+observeTerminal()
+check(terminalProof==nil and terminalPending==true,"missing terminal publication is typed pending, not failure")
+fixtureBytes=terminalDiagnostic.expected:sub(1,17);observeTerminal()
+check(terminalProof==nil and terminalPending==true,"partially written matching terminal observation remains pending")
+fixtureBytes="";observeTerminal()
+check(terminalProof==nil and terminalPending==true,"new empty terminal observation remains pending while its producer writes")
+fixtureBytes=terminalDiagnostic.expected;observeTerminal()
+check(terminalProof~=nil and terminalPending~=true and terminalError==nil,"complete exact terminal publication succeeds after pending reads")
+fixtureBytes="foreign observation";observeTerminal()
+check(terminalProof==nil and terminalPending~=true and terminalError~=nil,"wrong complete terminal evidence is a failure, not a retryable publication")
+fixtureBytes=nil;fixtureError="Permission denied";observeTerminal()
+check(terminalProof==nil and terminalPending~=true and terminalError=="Permission denied","permanent read failures are not hidden by pending retries")
+Prereq.run=originalRead
+do
+ -- Exercise the Windows wrappers without processes/filesystem writes. In
+ -- particular, a UTF16 converter's second return is not Base64 options.
+ local encodedScripts,processCalls,prepared=0,0,nil
+ local pendingUtf16=nil
+ local wrappedBackend=table.clone(Backend)
+ wrappedBackend.utf16le=function(script)
+  local bytes,why=Backend.utf16le(script)
+  pendingUtf16=bytes
+  return bytes,why
+ end
+ local fake={
+  runtime={os="windows"},plugin={data="C:/fixture/data",dir="C:/fixture/plugin"},
+  json=runtime.json,now=function()return 1000 end,
+  timer=function(_,callback)callback()end,
+  fs={read=function(path)return "fixture helper bytes: "..path end},
+  base64={encode=function(bytes,...)
+   check(select("#",...)==0,"Base64 receives only bytes, not UTF16's error return as options")
+   if pendingUtf16 then
+    same(bytes,pendingUtf16,"EncodedCommand receives the exact UTF16LE bytes")
+    pendingUtf16=nil;encodedScripts+=1
+   end
+   return runtime.base64.encode(bytes)
+  end},
+ }
+ local function captured(argv)
+  processCalls+=1
+  same(table.concat(argv,"|",1,5),"powershell.exe|-NoLogo|-NoProfile|-NonInteractive|-EncodedCommand","Windows script argv prefix is unchanged")
+  check(#argv==6 and #runtime.base64.decode(argv[6])>0,"Windows script remains one standard padded Base64 argument")
+ end
+ local fixturePrereq={
+  identity=function(_,done)done("fixture-user",nil)end,
+  account=function(user,_,_,done)done({identity=user,home="/fixture/selected-home",executable="/fixture/selected-home/.local/bin/native"},nil)end,
+  run=function(argv,stdin,done)
+   if #argv==2 and argv[1]=="C:/fixture/worker.exe" and argv[2]=="--help" then
+    done("Usage: fixture [options]\n  --help  Show help",nil)
+    return
+   end
+   if fake.runtime.os=="windows" then captured(argv) end
+   done(stdin or "",nil)
+  end,
+  as_user=Prereq.as_user,
+  probe=function(canonical,_,done)prepared=canonical;done({passed=true})end,
+ }
+ local dependencies={["./config"]=Config,["./wire/codec"]=load("wire/codec"),["./backend"]=wrappedBackend,["./prereq"]=fixturePrereq,["./mailbox_adapter"]=Adapter,["./native_cli"]=Native,["./terminal_identity"]=load("terminal_identity")}
+ local function isolated(name)
+  local chunk=assert(loadstring(runtime.fs.read(root.."/"..name..".luau"),name))
+  setfenv(chunk,setmetatable({tern=fake,require=function(dependency)return assert(dependencies[dependency])end},{__index=environment}))
+  return chunk()
+ end
+ local setup=isolated("managed_setup")
+ local draft=setup.defaults()
+ draft.cwd="C:/fixture/repository";draft.executable="C:/fixture/worker.exe"
+ local function prepare()
+  local result,problem
+  setup.prepare(draft,{host_os=fake.runtime.os,host_shell=if fake.runtime.os=="windows" then "powershell.exe" else "sh"},function(value,_,why)result=value;problem=why end)
+  return result,problem
+ end
+ for _,excluded in ipairs({{backend="native-agent",user=""},{backend="local-terminal",user="other"},{backend="ssh-command",user=""}}) do
+  draft.backend=excluded.backend;draft.user=excluded.user
+  local result,problem=prepare()
+  check(result==nil and type(problem)=="string" and processCalls==0,"Windows native OMP, cross-user and managed SSH exclusions precede all setup effects")
+ end
+ draft.backend="local-terminal";draft.user=""
+ check(prepare()~=nil and prepared.backend=="local-terminal" and encodedScripts==11,"Windows local setup encodes both directory wrappers and all nine helper publications")
+ local windowsRoute={backend="local-terminal",host_os="windows",output="C:/fixture/Ω.observation",expected="exact observation\n"}
+ fixturePrereq.run=function(argv,_,done)captured(argv);done(windowsRoute.expected,nil)end
+ local observed
+ setup.observe_route(windowsRoute,4,9,function(value,why)observed=value;check(why==nil,"Windows route exact readback is accepted")end)
+ check(observed~=nil and encodedScripts==12,"Windows route observation uses the same single-value Base64 boundary")
+ fake.process={run=function(argv,_,done)
+  captured(argv)
+  done({status=1,timed_out=false,stdout="",stderr="fixture refusal"})
+ end}
+ local prerequisite=isolated("prereq")
+ local probe
+ prerequisite.probe(prepared,{host_os="windows",host_shell="powershell.exe",bundle_digest=string.rep("a",64),provision_handle="fixture-probe"},function(value)probe=value end)
+ check(encodedScripts==13 and probe and not probe.passed,"Windows prerequisite encoding retains process failure as failed evidence")
+ fake.runtime.os="linux"
+ fake.plugin.data="/fixture/data";fake.plugin.dir="/fixture/plugin"
+ draft=setup.defaults()
+ draft.cwd="/fixture/repository";draft.root="/fixture/mail"
+ fixturePrereq.run=function(_,stdin,done)done(stdin or "",nil)end
+ check(prepare()~=nil and prepared.backend=="native-agent","non-Windows native setup remains a valid branch after Windows exclusions")
+ prepared.provider_family="anthropic"
+ draft=setup.from_record(prepared)
+ draft.provider_family="openai"
+ local changedFamily=prepare()
+ check(changedFamily and changedFamily.provider_family=="openai" and draft.source_record.provider_family=="anthropic","managed preparation honors the edited underlying provider without mutating or silently restoring the old declaration")
+ draft=setup.defaults("/fixture/repository");draft.user="selected"
+ local selected=prepare()
+ check(selected and selected.user=="selected" and selected.mailbox.worker_identity=="selected","explicit existing-account preparation never falls back to the host identity")
+ check(selected.mailbox.permitted_root=="/fixture/selected-home/.local/share/tern-spawn/managed" and selected.mailbox.helper_path:find(selected.mailbox.permitted_root.."/helper-bundles/",1,true)==1,"selected account receives stable home-local mailbox/helper paths, not another user's plugin data")
+ check(draft.root=="/fixture/data/managed" and draft.executable=="omp","preparation cannot mutate the reviewed draft while resolving the selected executable/root")
+ local launch=assert(Backend.build(selected,{host_os="linux",host_shell="sh"},{fresh=true,prompt="explicit consent diagnostic",cwd=selected.cwd,placement="tab"}))
+ same(launch.command,"'sudo' '-n' '-u' 'selected' '-H' '--' '/fixture/selected-home/.local/bin/native'","native projection uses exactly the observed executable under the selected account, not the current-user PATH")
+ check(launch.cwd=="/fixture/repository" and launch.prompt=="explicit consent diagnostic","selected-account native startup retains exact cwd and separate prompt channel")
+ local diagnostic=assert(setup.route(selected,{record_sha256=string.rep("a",64)},{host_os="linux",host_shell="sh"},9,"","selected-diagnostic"))
+ check(diagnostic.user=="selected" and diagnostic.worker_identity=="selected" and diagnostic.command:find("'/fixture/selected-home/.local/share/tern-spawn/managed/selected-diagnostic-native'",1,true),"consented native diagnostic binds its exact selected account and owned session directory for existing cleanup machinery")
+ local mismatched=table.clone(selected);mismatched.mailbox=table.clone(selected.mailbox);mismatched.mailbox.worker_identity="host-account"
+ check(Backend.build(mismatched,{host_os="linux",host_shell="sh"},{fresh=true,prompt="held assignment",cwd=selected.cwd,placement="tab"})==nil,"a prepared connection for another account cannot launch under an explicit OS user")
+ local wrapped=table.clone(mismatched);wrapped.user=nil;wrapped.command="sudo";wrapped.arguments={"-n","-u","selected","-H","--",selected.fresh_executable};wrapped.fresh_executable="sudo";wrapped.fresh_arguments=table.clone(wrapped.arguments)
+ local refused,identityError=Backend.build(wrapped,{host_os="linux",host_shell="sh"},{fresh=true,prompt="held assignment",cwd=selected.cwd,placement="tab"})
+ check(refused==nil and type(identityError)=="string","legacy embedded sudo cannot bypass prepared-identity validation when its user field is absent")
+ wrapped.mailbox=table.clone(selected.mailbox)
+ check(Backend.build(wrapped,{host_os="linux",host_shell="sh"},{fresh=true,prompt="held assignment",cwd=selected.cwd,placement="tab"})~=nil,"matching embedded sudo and mailbox identities remain launchable")
+ local effects=0
+ local accountChecks=0
+ fixturePrereq.account=function(_,_,_,done)accountChecks+=1;done(nil,"fixture account check reached")end
+ fixturePrereq.identity=function(_,done)accountChecks+=1;done(nil,"fixture identity check reached")end
+ fixturePrereq.run=function(_,_,done)effects+=1;done("",nil)end
+ for _,arguments in ipairs({"--restore existing-session","--resume=existing-session","--continue","resume existing-session","--session-id existing-session","--session-dir /existing/session"}) do
+  draft.arguments=arguments
+  local refused,problem=prepare()
+  check(refused==nil and problem:find("Fresh native route required",1,true) and accountChecks==0 and effects==0,"continuation draft refuses before selected-account probes or resource effects: "..arguments)
+ end
+ draft.arguments=""
+ local restored=table.clone(selected);restored.fresh_arguments={"--restore","existing-session"}
+ local refusedRoute,routeProblem=setup.route(restored,{record_sha256=string.rep("a",64)},{host_os="linux",host_shell="sh"},9,"","selected-diagnostic")
+ check(refusedRoute==nil and routeProblem:find("Fresh native route required",1,true) and effects==0,"adding a diagnostic session directory cannot make a restore contract fresh or authorize a launch")
+ fixturePrereq.run=function(_,_,done)effects+=1;done("",nil)end
+ fixturePrereq.account=function(_,_,_,done)done(nil,"Selected-account prerequisite failed: sudo authorization denied")end
+ local denied,denial=prepare()
+ check(denied==nil and denial:find("authorization denied",1,true) and effects==0,"unavailable selected access refuses before all helper/directory effects")
+end
+do
+ local calls,mode={},'accepted'
+ local fake=setmetatable({runtime={os="linux"},process={run=function(argv,_,done)
+  table.insert(calls,argv)
+  if argv[1]=="getent" then done({status=0,stdout="selected:x:1001:1001:Existing:/home/selected:/bin/sh\n",stderr=""})
+  elseif mode=="denied" then done({status=1,stdout="",stderr="sudo: a password is required"})
+  else done({status=0,stdout=(if mode=="wrong-identity" then "other" else "selected").."\n/home/selected\n/home/selected/.local/bin/native\n",stderr=""}) end
+ end}},{__index=runtime})
+ local chunk=assert(loadstring(runtime.fs.read(root.."/prereq.luau"),"prereq_selected_account"))
+ setfenv(chunk,setmetatable({tern=fake,require=load},{__index=environment}))
+ local prerequisite=chunk()
+ for _,case in ipairs({"accepted","denied","wrong-identity"}) do
+  mode=case;calls={}
+  local observed,problem
+  prerequisite.account("selected","native","/work",function(account,why)observed=account;problem=why end)
+  check(#calls==2 and table.concat(calls[2],"|",1,6)=="sudo|-n|-u|selected|-H|--","existing-account observations use only the explicit authorized noninteractive identity")
+  if case=="accepted" then check(observed and observed.home=="/home/selected" and observed.executable=="/home/selected/.local/bin/native" and problem==nil,"account preparation exposes actual home/executable observation, not login/readiness")
+  else check(observed==nil and problem:find("Selected-account prerequisite failed",1,true),"denial/identity mismatch cannot become a current-user fallback") end
+ end
+ calls={}
+ prerequisite.account("-invalid","native","/work",function(account,why)check(account==nil and why~=nil,"invalid OS user refuses")end)
+ check(#calls==0,"invalid OS user cannot reach a process")
+end
 return string.format("PASS %d SPAWN backend checks", checks)

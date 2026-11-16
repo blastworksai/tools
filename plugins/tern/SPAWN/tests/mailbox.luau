@@ -44,7 +44,7 @@ local function load(name)
  setfenv(chunk,setmetatable({require=load,tern=fake},{__index=environment}))
  modules[name]=chunk(); return modules[name]
 end
-local M,C=load('mailbox'),load('codec')
+local M,C=load('mailbox'),load('wire/codec')
 local Capabilities=load('mailbox_capabilities')
 local checks=0
 local function check(value,message) assert(value,message); checks+=1 end
@@ -56,7 +56,11 @@ local binding={logical_session_id='session',worker_id='worker',worker_generation
 local record={id='record',backend='local-terminal',mailbox={permitted_root='/private/mailboxes',helper_path='/private/tools/mailbox_target.sh',producer_helper_path='/private/tools/mailbox_worker.sh',worker_identity='worker',verified=true,evidence_ref='fixture-only',wake='worker-poll-v1',producer={read=true,write=true,hash=true,journal=true,poll=true},capabilities={'report-files-v1','worker-poll-v1','argv-v1'}}}
 local context={operation_id='operation',handle='handle',host_os='linux',host_shell='sh'}
 local function request(op)
- local r=clone(binding); r.schema=1; r.origin='orchplus'; r.request_id='request'; r.action_id='action'; r.op=op
+ local r=clone(binding); r.schema=2; r.origin='orchplus'; r.request_id='request'; r.action_id='action'; r.op=op
+ r.authority_namespace='orch-authority';r.admission_seq=1;r.request_serial=2;r.next_request_serial=5;r.settled_before=1
+ r.consumed=runtime.json.array();table.insert(r.consumed,3);table.insert(r.consumed,4)
+ r.origin_binding={logical_session_id=binding.logical_session_id,owner_id='owner',owner_generation=1,host_pane_id='12',alias_nonce='alias',window_key='',window_epoch='epoch',native_session_id='4',window_host_id='7'}
+ r.controller_pane='44';r.controller_generation=1
  if op=='mailbox_provision' then r.record_id='record'; r.record_revision=1; r.capability='report-files-v1'
  else r.handle='handle'; r.expected_generation=1 end
  return r
@@ -122,6 +126,10 @@ local nativeOp,nativeIntent=M.prepare(empty,provision,native,context)
 check(nativeOp and nativeIntent,'native ask provisioning accepts matching backend capabilities')
 local nativeRegistry,nativeResponse=M.settle(nativeIntent,nativeOp,{status='provisioned'})
 check(M.validate(nativeRegistry) and #nativeResponse.payload.capabilities==2,'native provisioning retains only configured native capabilities')
+for _,status in ipairs({'compacted','retired'}) do
+ local invalid=clone(nativeRegistry);invalid.generations.handle.writes.provision.result.status=status
+ check(M.validate(invalid)==nil,'provision operation cannot claim a '..status..' settlement')
+end
 local mismatch=clone(native);table.insert(mismatch.mailbox.capabilities,'argv-v1')
 ineligible(mismatch,'native backend cannot advertise terminal argv input')
 mismatch=clone(record);mismatch.mailbox.wake='native-ask-v1';mismatch.mailbox.capabilities={'report-files-v1','native-ask-v1','argv-v1'}
@@ -136,9 +144,86 @@ local op,intent,problem=M.prepare(empty,provision,record,context)
 check(op and intent and not problem,'provision creates intent')
 check(next(empty.generations)==nil,'prepare does not mutate source')
 check(#calls==0,'prepare performs no IO')
+do
+ local target={logical_session_id=binding.logical_session_id,worker_id=binding.worker_id,worker_generation=binding.worker_generation,launch_request_id=binding.launch_request_id,work_id=binding.work_id,enrolment_sha256=C.sha256(binding.enrolment_token)}
+ local before=runtime.json.encode(intent);local io=#calls
+ local observed,why,pending=M.allocation_generation(intent,target)
+ check(observed==nil and pending==true,'an issued pending helper cannot become settled allocation evidence')
+ local rejected=assert(M.settle(intent,op,{status='rejected',error={code='binding_mismatch'}}))
+ rejected=runtime.json.decode(runtime.json.encode(rejected))
+ observed=M.allocation_generation(rejected,target)
+ check(M.validate(rejected) and observed and observed.phase=='retained' and observed.provision.handle=='handle' and observed.provision.identity.worker=='worker' and M.provisioned_capabilities(rejected,'handle')==nil,'settled rejected provision retains its original allocation without becoming managed-ready')
+ check(observed.request.request_id==provision.request_id and observed.request.request_serial==provision.request_serial,'consumed-action lookup reads exact original request identifiers from the journal without inventing an outcome')
+ local cleanup=request('mailbox_retire');cleanup.mode='retire';cleanup.settlement_revision=1;cleanup.report_floor=0;cleanup.reply_floor=0
+ cleanup.report_chain_sha256=C.sha256('report-files-v1\nhandle\n');cleanup.grant_id='rejected-provision-retirement'
+ check(select(3,M.prepare(rejected,cleanup,nil,context)).error.code=='binding_mismatch','rejected provision cleanup still requires complete retirement authority')
+ local authorized=clone(context);authorized.settlement=clone(cleanup);authorized.settlement.settled=true
+ local cleanupOp,cleanupIntent=M.prepare(rejected,cleanup,nil,authorized)
+ check(cleanupOp and cleanupOp.mode=='retire' and M.validate(cleanupIntent),'exact settled rejected allocation enters the existing guarded retirement operation')
+ local wrong=clone(cleanup);wrong.enrolment_token=string.rep('x',16)
+ check(select(3,M.prepare(rejected,wrong,nil,authorized)).error.code=='binding_mismatch','recovered allocation retirement requires the exact enrolment token')
+ local compact=clone(cleanup);compact.mode='compact'
+ check(select(3,M.prepare(rejected,compact,nil,authorized)).error.code=='unsupported_capability','rejected provision cannot compact or become a usable mailbox')
+ check(select(3,M.prepare(intent,cleanup,nil,authorized)).error.code=='unsupported_capability','pending provision cannot authorize cleanup from missing success')
+ check(select(3,M.prepare(M.recover(intent),cleanup,nil,authorized)).error.code=='unsupported_capability','uncertain provision remains held rather than inferring cleanup authority')
+ for _,field in ipairs({'logical_session_id','worker_id','worker_generation','launch_request_id','work_id','enrolment_sha256'}) do
+  local changed=clone(target)
+  changed[field]=if field=='enrolment_sha256' then string.rep('0',64) elseif type(changed[field])=='number' then changed[field]+1 else changed[field]..'-foreign'
+  check(M.allocation_generation(rejected,changed)==nil,'allocation selector refuses changed full generation identity: '..field)
+ end
+ local missing=clone(rejected);missing.generations.handle.writes.provision=nil
+ check(M.validate(missing) and M.allocation_generation(missing,target)==nil,'incomplete provision journal remains unknown')
+ local otherContext=clone(context);otherContext.handle='other-handle';otherContext.operation_id='other-operation'
+ local _,other=M.prepare(empty,provision,record,otherContext)
+ local ambiguous=clone(rejected);ambiguous.generations['other-handle']=other.generations['other-handle']
+ check(M.validate(ambiguous) and M.allocation_generation(ambiguous,target)==nil,'two individually valid matching generations cannot select an arbitrary allocation')
+ local retired=clone(rejected);local generation=retired.generations.handle
+ generation.status='retired';generation.target=nil;generation.writes={};generation.active=nil
+ observed=M.allocation_generation(retired,target)
+ check(M.validate(retired) and observed and observed.phase=='retired' and observed.request==nil,'retired record requires separate exact retirement proof rather than pretending the original provisioning request survived')
+ observed,why=M.allocation_generation(empty,target)
+ check(observed==nil and why=='missing','a missing generation alone never emits allocation-none evidence')
+ check(runtime.json.encode(intent)==before and #calls==io,'allocation observation performs no preparation, target IO, launch or journal mutation')
+end
 check(M.get(intent,'handle').phase=='intent','handle remains intent before callback persistence')
 check(M.location(intent,'handle')==nil,'incomplete provisioning cannot launch')
 check(M.validate(intent)~=nil,'active intent validates')
+check(intent.generations.handle.writes.provision.request.admission_seq==1 and intent.generations.handle.writes.provision.request.consumed[2]==4,'canonical v2 admission and higher consumed holes survive persistence')
+for _,change in ipairs({
+ function(r)r.request_serial=r.next_request_serial end,
+ function(r)r.consumed={4,3} end,
+ function(r)r.authority_revision=1 end,
+ function(r)r.extra='not-canonical' end,
+}) do
+ local bad=clone(provision);change(bad)
+ check(select(3,M.prepare(empty,bad,record,context)).error.code=='invalid_schema','mailbox delegates v2 closed identity validation')
+end
+local oldRequest=clone(provision);oldRequest.schema=1
+check(select(3,M.prepare(empty,oldRequest,record,context)).error.code=='unsupported_protocol','old immutable requests remain inspection-only')
+do
+ local coordinator=clone(record);table.insert(coordinator.mailbox.capabilities,'coordinator-control-v1')
+ local issued,current=M.prepare(empty,provision,coordinator,context)
+ check(issued and current,'coordinator-only capability provisions without check-runner permission')
+ local explicit=runtime.json.decode(issued.bytes)
+ check(table.find(explicit.capabilities,'coordinator-control-v1')~=nil,'new descriptor explicitly persists coordinator-control')
+ check(M.provisioned_capabilities(current,'handle')==nil,'unsettled provision is not capability permission')
+ current=assert(M.settle(current,issued,{status='provisioned'}))
+ local proven=assert(M.provisioned_capabilities(current,'handle'))
+ check(table.find(proven,'coordinator-control-v1')~=nil,'capability evidence comes from exact descriptor')
+ local legacy=clone(current);local w=legacy.generations.handle.writes.provision
+ w.request.schema=1
+ for _,key in ipairs({'authority_namespace','admission_seq','request_serial','next_request_serial','settled_before','consumed'}) do w.request[key]=nil end
+ explicit.capabilities=nil;w.bytes=runtime.json.encode(explicit)
+ check(M.validate(legacy)~=nil,'settled old provision remains inspectable without capability backfill')
+ check(M.provisioned_capabilities(legacy,'handle')==nil,'old descriptor without proof never inherits coordinator-control from stored config facts')
+ check(runtime.json.decode(w.bytes).capabilities==nil,'capability inspection never rewrites old bytes')
+ local pendingLegacy=clone(legacy);pendingLegacy.generations.handle.status='intent';pendingLegacy.generations.handle.writes.provision.status='uncertain'
+ pendingLegacy.generations.handle.writes.provision.result={status='uncertain'}
+ check(M.validate(pendingLegacy)~=nil and M.provisioned_capabilities(pendingLegacy,'handle')==nil,'old pending immutable write stays visible and cannot grant permissions')
+ local changed=clone(current);local descriptor=runtime.json.decode(changed.generations.handle.writes.provision.bytes);descriptor.capabilities=nil
+ changed.generations.handle.writes.provision.bytes=runtime.json.encode(descriptor)
+ check(M.validate(changed)==nil,'new v2 descriptor cannot omit explicit actual capabilities')
+end
 local reg,response=M.settle(intent,op,{status='provisioned'})
 check(reg and response.status=='provisioned','provision settlement')
 check(response.payload.handle=='handle' and response.payload.root==nil,'public result only opaque handle')
@@ -231,7 +316,7 @@ do
  local manifestBytes='{"base_ref":"main","checks":[{"argv":["make","test"],"check_id":"t1-c1"}],"files":["src/a.luau"],"scope":{"paths":["src"],"systems":["spawn"]}}'
  local plain=runtime.json.decode(op.bytes)
  check(intent.generations.handle.binding_digest==digestOf(intent.generations.handle) and intent.generations.handle.manifest_sha256==nil,'a provision without a manifest keeps the 0.3.0 binding digest')
- check(op.manifest==nil and plain.manifest_sha256==nil and plain.capabilities==nil,'an ordinary provision.json carries no manifest digest or capability list')
+ check(op.manifest==nil and plain.manifest_sha256==nil and table.concat(plain.capabilities,',')==table.concat(record.mailbox.capabilities,','),'every new provision.json carries actual capabilities without inventing a manifest')
  local before=#calls
  local plainOutcome;M.execute(clone(op),function(value)plainOutcome=value end)
  check(plainOutcome.status=='provisioned' and #calls==before+1 and calls[#calls].options.stdin==runtime.base64.encode(op.bytes)..'\n','a provision without a manifest sends the target helper one Base64 line')
@@ -241,7 +326,7 @@ do
  local g=mIntent.generations.handle
  check(g.manifest_sha256==C.sha256(manifestBytes) and g.binding_digest==digestOf(g,C.sha256(manifestBytes)) and g.binding_digest~=intent.generations.handle.binding_digest,'the manifest digest joins the binding after the handover part')
  local written=runtime.json.decode(mOp.bytes)
- check(written.manifest_sha256==g.manifest_sha256 and written.binding_digest==g.binding_digest and written.capabilities==nil and #mOp.bytes<=2048,'provision.json names the exact manifest digest within its 2048-byte bound')
+ check(written.manifest_sha256==g.manifest_sha256 and written.binding_digest==g.binding_digest and table.concat(written.capabilities,',')==table.concat(record.mailbox.capabilities,',') and #mOp.bytes<=2048,'provision.json names exact manifest and capability facts within its bound')
  check(mOp.manifest==manifestBytes,'the exact manifest bytes travel with the provision operation')
  before=#calls
  local outcome;M.execute(mOp,function(value)outcome=value end)
@@ -414,6 +499,13 @@ local compactOp,compactClaim=M.prepare(withAck,grant,nil,granted)
 check(compactOp~=nil,'trusted exact prefix grant admitted')
 local compacted=M.settle(compactClaim,compactOp,{status='compacted'})
 check(compacted.generations.handle.report_floor==1 and compacted.generations.handle.writes['acks/1.json']==nil,'prefix compacts receipt metadata not fences')
+check(M.validate(compacted)~=nil,'compaction remains a valid operation alongside settled provisioning')
+do
+ local invalid=clone(compacted);invalid.generations.handle.writes[compactOp.key].result.status='retired'
+ check(M.validate(invalid)==nil,'compact mode cannot claim a retired settlement')
+ invalid=clone(compacted);invalid.generations.handle.writes[compactOp.key].result=clone(nativeRegistry.generations.handle.writes.provision.result)
+ check(M.validate(invalid)==nil,'retirement operation cannot claim a provisioned settlement')
+end
 check(select(3,M.prepare(compacted,ackRequest,nil,context)).status=='already_compacted','old ACK cannot recreate deleted prefix')
 check(select(3,M.prepare(compacted,read,nil,context)).status=='compacted','old report read classified compacted')
 local retirement=clone(grant); retirement.mode='retire'; retirement.grant_id='retire'
@@ -422,10 +514,85 @@ check(select(3,M.prepare(compacted,retirement,nil,retirementContext)).error.code
 retirementContext.settlement.settled=true
 local retireOp,retireClaim=M.prepare(compacted,retirement,nil,retirementContext)
 local retired=M.settle(retireClaim,retireOp,{status='retired'})
-check(retired.generations.handle.status=='retired' and retired.generations.handle.target==nil,'retirement leaves small tombstone')
+check(retired.generations.handle.status=='retired' and retired.generations.handle.target==nil,'helper retirement retains delivery obligation until ACK')
 check(select(3,M.prepare(retired,read,nil,context)).error.code=='generation_retired','retired generation never reused')
-check(M.validate(retired)~=nil,'tombstones survive persisted validation')
-check(table.concat(M.get(retired,'handle').capabilities,',')==table.concat(record.mailbox.capabilities,','),'retired identity preserves original capability contract')
+check(M.validate(retired)~=nil,'unacknowledged retirement survives persisted validation')
+check(table.concat(M.get(retired,'handle').capabilities,',')==table.concat(record.mailbox.capabilities,','),'unacknowledged retirement preserves original capability contract')
+check(M.reclaim_retired(reg,'handle')==nil,'ACK reclamation refuses a live generation')
+local reclaimed=assert(M.reclaim_retired(retired,'handle'))
+check(next(reclaimed.generations)==nil and M.validate(reclaimed)~=nil,'explicit delivery ACK removes retired generation completely')
+check(retired.generations.handle~=nil,'ACK reclamation is a pure candidate transition')
+check(next(M.recover(retired).generations)~=nil,'reload cannot infer a missing delivery ACK')
+do
+ local capable=clone(record)
+ table.insert(capable.mailbox.capabilities,'coordinator-control-v1');table.insert(capable.mailbox.capabilities,'project-start-v1')
+ local provisionOp,provisionClaim=M.prepare(M.empty(),provision,capable,context)
+ local startRegistry=assert(M.settle(provisionClaim,provisionOp,{status='provisioned'}))
+ local recipient=clone(binding);recipient.mailbox_handle='handle';recipient.capabilities=clone(capable.mailbox.capabilities)
+ local function published_reply(registry,kind,seq)
+  local raw={version=1,message_id='withdraw-message-'..seq,reply_seq=seq,action_id='withdraw-action-'..seq,action_revision=1,kind=kind,
+   payload=if kind=='project_start' then {owner_id='coordinator',owner_generation=1,activation_token=string.rep('a',64),orch_project_id='project',project_revision=1,decision_context=string.rep('b',64)}
+    else {request_id='progress',requested_kind='HEARTBEAT',reason='unrelated control must not be withdrawn'}}
+  for _,key in ipairs({'logical_session_id','worker_id','worker_generation','launch_request_id','work_id'}) do raw[key]=binding[key] end
+  local framed=assert(C.frame(runtime.json.encode(raw),'reply',recipient))
+  local objects={}
+  for index,bytes in ipairs(framed.chunks) do table.insert(objects,{part='chunk',index=index,bytes=bytes}) end
+  table.insert(objects,{part='manifest',bytes=framed.manifest})
+  for _,object in ipairs(objects) do
+   local r=request('mailbox_publish_reply');r.message_id=raw.message_id;r.reply_seq=seq;r.action_revision=1;r.reply_sha256=framed.message_sha256
+   r.part=object.part;r.index=object.index;r.object_b64=runtime.base64.encode(object.bytes);r.object_sha256=C.sha256(object.bytes)
+   local operation,candidate=M.prepare(registry,r,nil,context);assert(operation)
+   registry=assert(M.settle(candidate,operation,{status='published'}))
+  end
+  return registry,{reply_seq=seq,message_id=raw.message_id,message_sha256=framed.message_sha256}
+ end
+ local first;startRegistry,first=published_reply(startRegistry,'project_start',1)
+ local withdrawal=request('mailbox_retire');withdrawal.mode='retire';withdrawal.settlement_revision=1
+ withdrawal.report_floor=0;withdrawal.reply_floor=0;withdrawal.report_chain_sha256=C.sha256('report-files-v1\nhandle\n');withdrawal.grant_id='withdraw-start'
+ withdrawal.withdrawn_starts={first}
+ local authorization=clone(context);authorization.settlement=clone(withdrawal);authorization.settlement.settled=true
+ local operation,candidate=M.prepare(startRegistry,withdrawal,nil,authorization)
+ check(operation and candidate and M.validate(candidate),'exact published unread START tail admits an immutable retirement proof')
+ check(candidate.generations.handle.report_floor==0 and candidate.generations.handle.reply_floor==0,
+  'withdrawal never advances the actual report or reply floors')
+ local recovered=M.recover(candidate)
+ local reconciliation=M.prepare(recovered,withdrawal,nil,authorization)
+ check(reconciliation and reconciliation.reconcile and runtime.json.encode(reconciliation.request.withdrawn_starts)==runtime.json.encode(withdrawal.withdrawn_starts),
+  'uncertain retirement reconciles the exact same withdrawal list without replacing a grant')
+ local changed=clone(authorization);changed.settlement.withdrawn_starts[1].message_id='other'
+ check(select(3,M.prepare(startRegistry,withdrawal,nil,changed)).error.code=='binding_mismatch',
+  'settlement authority compares withdrawal records deeply, not only scalar floors')
+ for _,capability in ipairs({'coordinator-control-v1','project-start-v1'}) do
+  local unsupported=clone(startRegistry);table.remove(unsupported.generations.handle.capabilities,table.find(unsupported.generations.handle.capabilities,capability))
+  check(select(3,M.prepare(unsupported,withdrawal,nil,authorization)).error.code=='unsupported_capability',
+   'withdrawn START requires its actually provisioned '..capability)
+ end
+ for _,mutate in ipairs({
+  function(r)r.mode='compact'end,
+  function(r)r.withdrawn_starts={}end,
+  function(r)r.withdrawn_starts[1].unexpected=true end,
+  function(r)r.withdrawn_starts[1].message_sha256=string.rep('A',64)end,
+  function(r)r.withdrawn_starts[1].reply_seq=0 end,
+  function(r)table.insert(r.withdrawn_starts,clone(r.withdrawn_starts[1]))end,
+ }) do
+  local invalid=clone(withdrawal);mutate(invalid)
+  check(select(3,M.prepare(startRegistry,invalid,nil,authorization)).error.code=='invalid_schema',
+   'withdrawal schema remains closed, retire-only, bounded and strictly sorted above the actual floor')
+ end
+ local unpublished=clone(startRegistry);unpublished.generations.handle.writes['replies/1/manifest.json'].result.status='incomplete'
+ check(select(3,M.prepare(unpublished,withdrawal,nil,authorization)).error.code=='binding_mismatch',
+  'unconfirmed START publication cannot authorize destructive withdrawal')
+ local missing=clone(startRegistry);missing.generations.handle.writes['replies/1/chunk-1.json']=nil
+ check(select(3,M.prepare(missing,withdrawal,nil,authorization)).error.code=='binding_mismatch',
+  'retained complete exact chunks are required before physical withdrawal')
+ local unrelated,second=published_reply(startRegistry,'report_request',2)
+ check(select(3,M.prepare(unrelated,withdrawal,nil,authorization)).error.code=='binding_mismatch',
+  'an unrelated above-floor reply cannot hide behind a listed START')
+ local invalid=clone(withdrawal);table.insert(invalid.withdrawn_starts,second)
+ local grant=clone(authorization);grant.settlement=clone(invalid);grant.settlement.settled=true
+ check(select(3,M.prepare(unrelated,invalid,nil,grant)).error.code=='binding_mismatch',
+  'even an exact published non-START message cannot be withdrawn')
+end
 for _,publication in ipairs({
  {request=ackRequest,operation=ackOp,claim=ackClaim,other=publish},
  {request=publish,operation=manifestOp,claim=manifestClaim,other=ackRequest},
@@ -466,9 +633,8 @@ check(C.decode_page(runtime.json.encode(page.payload),discovery.selector)~=nil,'
 watermark.through_seq=2; files['watermarks/1.json']=runtime.json.encode(watermark)
 M.execute(discoveryOp,function(value) page=value end)
 check(page.error.code=='binding_mismatch','discovered filename and watermark contents must agree')
--- Coordinator rollover successor: dispatch binds every report read to the
--- issued launch contract (assignment, handover pair, capabilities). The exact ACCEPTED reads
--- back; one mistyped handover-token digit is refused with its precise codec diagnostic.
+-- Reads validate only the requested wire object. Assignment/handover proof is
+-- checked by the report owner after it has assembled the complete message.
 do
  local issued=clone(readOp.binding)
  issued.assignment_sha256=string.rep('9',64); issued.handover_id='handover-540'
@@ -478,17 +644,22 @@ do
   for _,k in ipairs({'logical_session_id','worker_id','worker_generation','launch_request_id','work_id','enrolment_token'}) do report[k]=binding[k] end
   local written=clone(issued); written.handover_token=token
   local framed=assert(C.frame(runtime.json.encode(report),'report',written))
-  files['reports/1/manifest.json']=framed.manifest; files['reports/1/chunk-1.json']=framed.chunks[1]
+  files['reports/1/manifest.json']=framed.manifest; files['reports/1/chunk-1.json']=nil
   local successor=clone(readOp); successor.binding=clone(issued)
+  local before=#calls
   local outcome; M.execute(successor,function(value) outcome=value end)
+  check(#calls==before+1,'manifest read never traverses chunks')
   files['reports/1/manifest.json']=nil; files['reports/1/chunk-1.json']=nil
-  return outcome
+  return outcome,framed
  end
  local exact=acceptance(issued.handover_token)
- check(exact.status=='read' and exact.payload.selector.part=='manifest','coordinator successor ACCEPTED with the issued handover pair reads back')
- local typo=acceptance(string.rep('29f79cde',7)..'b585166a')
- check(typo.status=='rejected' and typo.error.code=='binding_mismatch' and typo.error.message=='Acceptance differs from the issued assignment or handover.',
-  'a mistyped successor handover token is refused with its exact diagnostic, not a bare code: '..runtime.json.encode(typo))
+ check(exact.status=='read' and exact.payload.selector.part=='manifest','a validated manifest is returned even before any chunks exist')
+ local typo,framed=acceptance(string.rep('29f79cde',7)..'b585166a')
+ check(typo.status=='read','manifest delivery does not claim logical handover validation')
+ local pool=C.new_reassembler()
+ assert(C.begin_assembly(pool,framed.manifest,issued,C.sha256(framed.manifest)))
+ local value,diagnostic=C.push_chunk(pool,framed.chunks[1],issued,C.sha256(framed.chunks[1]))
+ check(value==nil and diagnostic.code=='binding_mismatch','assembly owner rejects the mistyped handover token')
 end
 -- Deadlines measure awake progress between watchdog ticks, not wall time across a suspension.
 local function watchdog(ms) clock+=ms; timers[#timers].fn() end
@@ -613,7 +784,7 @@ do
  ordinary.payload.capabilities[4]='coordinator-control-v1'
  check(C.decode_report(runtime.json.encode(ordinary),allCapabilities)==nil,'REGISTER rejects duplicate control capability')
  ordinary.payload.capabilities={'report-files-v1','check-runner-v1'}
- check(select(2,C.decode_report(runtime.json.encode(ordinary),expected)).code=='binding_mismatch','REGISTER cannot claim an unprovisioned check-runner-v1')
+ check(select(2,C.decode_report(runtime.json.encode(ordinary),expected)).code=='binding_mismatch','REGISTER cannot grant a capability outside its provisioned binding')
  local legacy=clone(expected);legacy.capabilities=nil
  ordinary.payload.capabilities={'report-files-v1'}
  check(C.decode_report(runtime.json.encode(ordinary),legacy)~=nil,'ordinary legacy registration remains usable without control capability')
@@ -667,8 +838,8 @@ check(C.decode_report(runtime.json.encode(ordinary),legacy)~=nil,'READY without 
   builder_work_id='builder-work',review_id='review',reviewer_family='openai',proof={mode='cross_family_review',artifact_revision='rev',review_id='review',check_refs=runtime.json.array()}}
  local releaseManager=clone(legacy);releaseManager.capabilities={'report-files-v1','release-manager-v1'}
  check(C.decode_reply(runtime.json.encode(landingReply),releaseManager)~=nil,'landing_grant names the exact landing, target head, source, builder, review and proof')
- check(select(2,C.decode_reply(runtime.json.encode(landingReply),legacy)).code=='binding_mismatch','landing_grant requires provisioned release-manager-v1')
- check(select(2,C.decode_reply(runtime.json.encode(landingReply),expected)).code=='binding_mismatch','coordinator control does not imply release-manager-v1')
+ check(select(2,C.decode_reply(runtime.json.encode(landingReply),legacy)).code=='unsupported_capability','landing_grant requires provisioned release-manager-v1')
+ check(select(2,C.decode_reply(runtime.json.encode(landingReply),expected)).code=='unsupported_capability','coordinator control does not imply release-manager-v1')
  landingReply.payload.proof.mode='worker-attested'
  check(C.decode_reply(runtime.json.encode(landingReply),releaseManager)==nil,'landing_grant proof mode is a closed enum')
  landingReply.payload.proof.mode='helper_checks';landingReply.payload.proof.check_refs={'check-1'}
@@ -691,10 +862,10 @@ check(C.decode_report(runtime.json.encode(ordinary),legacy)~=nil,'READY without 
   for _,capabilities in ipairs({false,{}, {'report-files-v1'}}) do
    local unprovisioned=clone(expected);unprovisioned.capabilities=capabilities
    local result,diagnostic=decode(fixture.bytes,unprovisioned)
-   check(result==nil and diagnostic.code=='binding_mismatch','coordinator control requires explicitly provisioned capability')
+   check(result==nil and diagnostic.code=='unsupported_capability','coordinator control requires explicitly provisioned capability')
   end
   local result,diagnostic=decode(fixture.bytes,legacy)
-  check(result==nil and diagnostic.code=='binding_mismatch','legacy binding cannot silently acquire coordinator control')
+  check(result==nil and diagnostic.code=='unsupported_capability','legacy binding cannot silently acquire coordinator control')
   local envelope=assert(decode(fixture.bytes,expected))
   check(envelope.payload.activation_token==ownerToken and envelope.payload.owner_id=='owner' and envelope.payload.owner_generation==1,'typed coordinator identity retained')
   local frame=assert(C.frame(fixture.bytes,fixture.direction,expected))
@@ -840,7 +1011,7 @@ do
  local checkResult={check_id='t1-c1',argv_sha256=string.rep('b',64),exit_code=0,output_sha256=string.rep('c',64),head=head,ran_at_ms=1730000000000}
  local function checkReport(p) return report('CHECK_RESULT',p) end
  roundtrip(checkReport(checkResult),full,'CHECK_RESULT')
- refused(checkReport(checkResult),plain,'CHECK_RESULT requires provisioned check-runner-v1','binding_mismatch')
+ refused(checkReport(checkResult),plain,'CHECK_RESULT requires provisioned check-runner-v1','unsupported_capability')
  refused(report('CHECK_RESULT',checkResult,true),full,'CHECK_RESULT carries no action correlation')
  closed(checkReport,checkResult,full,'CHECK_RESULT')
  for _,code in ipairs({1,255,-1,-2147483648,4294967295}) do
@@ -866,7 +1037,7 @@ do
   changed_files={'src/a.luau','src/b.luau'},changed_overflow=false,changed_total=2,dirty=true}
  local function checkoutReport(p) return report('CHECKOUT',p) end
  roundtrip(checkoutReport(checkout),full,'CHECKOUT')
- refused(checkoutReport(checkout),plain,'CHECKOUT requires provisioned check-runner-v1','binding_mismatch')
+ refused(checkoutReport(checkout),plain,'CHECKOUT requires provisioned check-runner-v1','unsupported_capability')
  refused(report('CHECKOUT',checkout,true),full,'CHECKOUT carries no action correlation')
  closed(checkoutReport,checkout,full,'CHECKOUT',{base=true})
  local noBase=clone(checkout);noBase.base=nil
@@ -908,7 +1079,7 @@ do
  local deploy={deploy_id='deploy',attempt_id='attempt-1',landing_id='landing',outcome='deployed',revision=head,evidence={'ci/run/1'}}
  local function deployReport(p) return report('DEPLOY_RESULT',p,true) end
  roundtrip(deployReport(deploy),full,'DEPLOY_RESULT')
- refused(deployReport(deploy),plain,'DEPLOY_RESULT requires provisioned release-manager-v1','binding_mismatch')
+ refused(deployReport(deploy),plain,'DEPLOY_RESULT requires provisioned release-manager-v1','unsupported_capability')
  refused(report('DEPLOY_RESULT',deploy),full,'DEPLOY_RESULT requires its deploy_grant correlation')
  closed(deployReport,deploy,full,'DEPLOY_RESULT',{reason=true})
  for _,outcome in ipairs({'held','not_applicable','failed'}) do
@@ -979,7 +1150,7 @@ do
  local grant={deploy_id='deploy',attempt_id='attempt-1',landing_id='landing',revision=head,target_ref='production'}
  local function deployGrant(p) return reply('deploy_grant',p) end
  roundtrip(deployGrant(grant),full,'deploy_grant')
- refused(deployGrant(grant),plain,'deploy_grant requires provisioned release-manager-v1','binding_mismatch')
+ refused(deployGrant(grant),plain,'deploy_grant requires provisioned release-manager-v1','unsupported_capability')
  closed(deployGrant,grant,full,'deploy_grant')
  -- label_request: the labeller's closed class choice.
  local labelRequest={work_ref='work',classes={'bugfix','docs'},text='Fix the parser.'}
@@ -1031,6 +1202,12 @@ do
   for _,capability in ipairs(g.capabilities)do add(capability)end
   for _,key in ipairs({'root','helper','producer_helper','worker_identity','os','shell','kind','backend','host','user','key_path','host_os','host_shell'})do add(g.target[key])end
   g.binding_digest=C.sha256(table.concat(parts,''))
+  -- These descriptors predate managed protocol2. Preserve their actual immutable
+  -- request schema rather than pairing old bytes with a newly issued v2 request.
+  for _,stored in pairs(g.writes) do
+   stored.request.schema=1
+   for _,field in ipairs({'authority_namespace','admission_seq','request_serial','next_request_serial','settled_before','consumed'}) do stored.request[field]=nil end
+  end
   local write=g.writes.provision
   write.bytes=runtime.json.encode({version=1,handle='handle',binding_digest=g.binding_digest,binding=g.binding})
   if write.result and write.result.payload then write.result.payload.binding_digest=g.binding_digest end
@@ -1040,6 +1217,7 @@ do
  local saved=legacy(reg);local savedBytes=runtime.json.encode(saved)
  check(M.get(saved,'handle').backend=='ssh-command','launch inspection exposes retained SSH mailbox backend')
  check(select(3,M.prepare(saved,provision,sshRecord,context)).status=='provisioned','completed legacy provision returns its exact retained result')
+ check(M.provisioned_capabilities(saved,'handle')==nil and runtime.json.encode(saved)==savedBytes,'observing completed historical provision neither invents capability proof nor rewrites its descriptor')
  for _,mutation in ipairs({{ackRequest,context},{publish,context},{grant,granted},{retirement,retirementContext}})do
   local operation,nextRegistry,refusal=M.prepare(saved,mutation[1],nil,mutation[2])
   check(not operation and not nextRegistry and refusal.error.code=='unsupported_capability' and refusal.error.message:find('original build before cutover',1,true)~=nil,'legacy SSH generation holds new writes with actionable settlement guidance')
@@ -1055,25 +1233,16 @@ do
  response_override='missing\n'
  M.execute(inspection,function(value)result=value end)
  check(result.status=='missing' and calls[#calls].argv[1]=='ssh','retained SSH generation permits bounded read-only inspection')
- local unknown=legacy(ambiguous)
- local oldUnknown=runtime.json.encode(unknown)
- local reconciliation,claimed=M.prepare(unknown,ackRequest,nil,context)
- check(reconciliation and reconciliation.reconcile and runtime.json.encode(unknown)==oldUnknown,'unknown legacy ACK prepares readback without changing its retained effect')
- M.execute(reconciliation,function(value)result=value end)
- check(result.status=='uncertain','missing legacy ACK readback never permits a write retry')
- local stillUnknown=M.settle(claimed,reconciliation,result)
- check(stillUnknown.generations.handle.writes['acks/1.json'].status=='uncertain' and stillUnknown.generations.handle.target.backend=='ssh-command','missing readback preserves unknown occupancy and original target')
- response_override='already_published\n'
- M.execute(reconciliation,function(value)result=value end)
- check(result.status=='already_published','exact retained legacy ACK may reconcile proven publication without replay')
- local settled=M.settle(claimed,reconciliation,result)
- check(select(3,M.prepare(settled,ackRequest,nil,context)).status=='already_published','reconciled legacy ACK preserves its exact completed status')
- local pendingLegacy=legacy(recovered)
- local provisionReadback=M.prepare(pendingLegacy,provision,sshRecord,context)
- check(provisionReadback and provisionReadback.reconcile,'legacy uncertain provisioning can only read back its original intent')
- response_override='missing\n'
- M.execute(provisionReadback,function(value)result=value end)
- check(result.status=='uncertain','missing legacy provision readback never starts or replaces its generation')
+ for _,historical in ipairs({{source=ambiguous,request=ackRequest,record=nil},{source=recovered,request=provision,record=sshRecord}}) do
+  local unknown=legacy(historical.source)
+  local oldUnknown=runtime.json.encode(unknown)
+  before=#calls;local timerCount=#timers
+  local reconciliation,claimed,refusal=M.prepare(unknown,historical.request,historical.record,context)
+  check(not reconciliation and not claimed and refusal.error.code=='migration_blocked','immutable old unknown ACK/provision blocks new-protocol execution instead of being reissued')
+  check(refusal.error.message:find('original build before cutover',1,true)~=nil,'blocked old effect names its original-build settlement prerequisite')
+  check(runtime.json.encode(unknown)==oldUnknown and M.validate(unknown)~=nil,'blocked old effect retains exact request, descriptor, result and target authority')
+  check(#calls==before and #timers==timerCount,'old pending migration refusal starts no subprocess or timer')
+ end
  response_override=nil
 end
 return 'mailbox checks: '..checks

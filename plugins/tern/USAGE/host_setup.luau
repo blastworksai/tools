@@ -16,7 +16,7 @@ local ACTIONS: { [string]: { [string]: boolean } } = {
 	dissociate = { operation = true, scope_id = true, id = true },
 }
 local CONSENT: { [string]: string } = { bind = "binding", associate = "association" }
-local SETTINGS: { [string]: string } = { metadata_enabled = "metadata", capacity_enabled = "capacity" }
+local SETTINGS: { [string]: string } = { metadata_enabled = "metadata", capacity_enabled = "capacity", display_enabled = "display" }
 -- Operations that change this host's companion; reads never notify the host display.
 local CHANGES: { [string]: boolean } = { ensure = true, configure = true }
 
@@ -98,7 +98,8 @@ local function reduce(op: string, value: any): any?
 			or type(settings.role) ~= "string" or type(settings.metadata_enabled) ~= "boolean"
 			or type(settings.capacity_enabled) ~= "boolean" then return nil end
 		return { source = { device_id = source.device_id }, settings = { role = settings.role,
-			metadata_enabled = settings.metadata_enabled, capacity_enabled = settings.capacity_enabled } }
+			metadata_enabled = settings.metadata_enabled, capacity_enabled = settings.capacity_enabled,
+			display_enabled = settings.display_enabled == true } }
 	elseif op == "binding_candidates" then
 		if type(value.accounts) ~= "table" or type(value.consumers) ~= "table" then return nil end
 		return { accounts = value.accounts, consumers = value.consumers }
@@ -155,9 +156,10 @@ end
 
 function host_setup.view(state: any): any
 	local node = tern.ui.text(host_setup.PREFIX .. tern.json.encode(state.response))
-	node.p = node.p or {}
-	node.p.key = host_setup.NODE
-	node.p.role = host_setup.NODE
+	local props: { [string]: any } = node.p or {}
+	props.key = host_setup.NODE
+	props.role = host_setup.NODE
+	node.p = props
 	return tern.ui.node("col", { role = "usage-host-setup", gap = "xs" }, {
 		tern.ui.text(tern.ui.span("Host Setup: USAGE Setup in a window attached to this machine configures this machine's companion, after you confirm each change there.", "muted")),
 		node,

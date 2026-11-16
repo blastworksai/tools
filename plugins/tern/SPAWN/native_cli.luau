@@ -1,6 +1,7 @@
 -- Native observation/readiness only. No provider launch, PATH mutation or pane input.
 -- Fresh spawn metadata routes execution probes; initial inventory discovers this
 -- VM's actual executable rather than borrowing an inherited pane or a PATH binary.
+local Discovery = require("./updater/discovery")
 local Native = {}
 local executable = nil
 local MAX_ID = 9007199254740991
@@ -11,9 +12,7 @@ end
 local function opaque(value, max, empty)
 	return type(value) == "string" and #value <= max and (empty or #value > 0) and not value:find("%c")
 end
-local function absolute(value)
-	return opaque(value, 4096, false) and (value:sub(1, 1) == "/" or value:match("^%a:[/\\]") ~= nil or value:sub(1, 2) == "\\\\")
-end
+local absolute = Discovery.absolute
 local function window_key(value)
 	return opaque(value, 256, true)
 end
@@ -75,15 +74,7 @@ local function initial_socket()
 	return if absolute(value) then value else nil
 end
 local function discovery_argv()
-	if tern.runtime.os == "linux" then return { "/bin/sh", "-c", '/usr/bin/readlink /proc/$PPID/exe' }, nil end
-	if tern.runtime.os == "macos" then return { "/bin/sh", "-c", '/bin/ps -p "$PPID" -o comm=' }, nil end
-	if tern.runtime.os == "windows" then
-		local system = tern.getenv("SystemRoot") or tern.getenv("WINDIR")
-		if not absolute(system) then return nil, "The host's absolute Windows system directory is unavailable" end
-		return { system .. "\\System32\\WindowsPowerShell\\v1.0\\powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
-			"$ErrorActionPreference='Stop'; $self=Get-CimInstance Win32_Process -Filter ('ProcessId='+$PID); $parent=Get-CimInstance Win32_Process -Filter ('ProcessId='+$self.ParentProcessId); [Console]::WriteLine($parent.ExecutablePath)" }, nil
-	end
-	return nil, "Native executable discovery is not verified on this host"
+	return Discovery.argv(tern.runtime.os, tern.getenv("SystemRoot") or tern.getenv("WINDIR"))
 end
 
 local function execute(window, options, arguments, callback)
@@ -122,8 +113,8 @@ local function execute(window, options, arguments, callback)
 	tern.process.run(argv, { timeout_ms = remaining() }, function(result, fresh)
 		if result.timed_out or tern.now() > deadline then finish(nil, "Native executable discovery exceeded its deadline", fresh); return end
 		if result.status ~= 0 then finish(nil, "Could not locate the running Tern executable: status " .. tostring(result.status) .. " · " .. result.stderr:sub(1, 2048), fresh); return end
-		local path = result.stdout:gsub("\r?\n$", "")
-		if not absolute(path) then finish(nil, "Native executable discovery did not return one absolute path", fresh); return end
+		local path, path_error = Discovery.path(result.stdout)
+		if path == nil then finish(nil, path_error, fresh); return end
 		executable = path
 		local ok, err = pcall(run, path)
 		if not ok then finish(nil, "Could not start native operation: " .. tostring(err), fresh) end
@@ -141,6 +132,11 @@ end
 function Native.process(route, session, pane, options, callback)
 	local opts = { route = route, timeout_ms = if options then options.timeout_ms else 5000 }
 	execute(route.window, opts, { "process", target(route, session, pane), "--json" }, callback)
+end
+-- Read-only inspection in this host daemon; callers verify native window/session membership first.
+function Native.observe_process(window, session, pane, callback)
+	if not window_key(window) or not integer(session) or not integer(pane) then error("Invalid native diagnostic identity") end
+	execute(window, { timeout_ms = 5000 }, { "process", string.format("%.0f/%.0f", session, pane), "--json" }, callback)
 end
 function Native.wait_prompt(route, session, pane, options, callback)
 	local timeout = if options and options.timeout_ms then options.timeout_ms else 10000

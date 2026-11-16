@@ -20,6 +20,20 @@ local function command_words(command: string, shell: string): ({string}?, string
 	end
 	return Config.parse_arguments(command)
 end
+-- Setup has no ordinary record or argv reinterpretation. Native agents:start
+-- consumes the effective Tern command verbatim and owns prompt delivery.
+function Resolution.setup_default(command: any, cwd: any, host_os: any): (any?, string?)
+	if not nonblank(command) then return nil, "Set a default agent in Tern settings, then try setup again." end
+	if not text(command,32000) or not text(cwd,8192) or not nonblank(cwd) or cwd:find("%c")
+		or not (cwd:sub(1,1)=="/" or cwd:match("^%a:[/\\]") or cwd:sub(1,2)=="\\\\") then
+		return nil, "Guided setup needs the exact default command and an absolute execution-host working directory"
+	end
+	-- This selects the explicitly named helper interpreter, not the shell or
+	-- provider behind the user-trusted command. ComSpec is not PowerShell proof.
+	local shell=if host_os=="windows" then "powershell" elseif host_os=="linux" or host_os=="macos" then "posix" else nil
+	if shell==nil then return nil, "The execution host platform has no supported explicit setup submission helper" end
+	return {command=command,cwd=cwd,shell=shell},nil
+end
 function Resolution.fresh_available(record: any): boolean
 	if record.fresh_native_default == true then
 		return record.backend == "native-agent" and string.lower(record.provider) == "omp" and record.model == nil and record.profile == nil
@@ -46,7 +60,7 @@ function Resolution.resolve(source: any, mode: string, shell: string): (any?, st
 	return { record = record, executable = executable, arguments = argv }, nil
 end
 local SUDO_FLAGS = { ["-H"] = true, ["-n"] = true, ["-E"] = true, ["-i"] = true, ["-s"] = true, ["-S"] = true, ["-k"] = true, ["-K"] = true, ["-b"] = true, ["-P"] = true }
-function Resolution.select_user(resolved: any, shell: string): (boolean, string?)
+function Resolution.select_user(resolved: any, shell: string, noninteractive: boolean?): (boolean, string?)
 	local record, executable, argv = resolved.record, resolved.executable, resolved.arguments
 	if record.backend == "ssh-command" or not nonblank(record.user) then return true, nil end
 	if shell ~= "posix" then return false, "Windows OS-user launch is unsupported; no current-user fallback" end
@@ -71,8 +85,10 @@ function Resolution.select_user(resolved: any, shell: string): (boolean, string?
 		if selected ~= record.user or argv[index] == nil or argv[index] == "" or argv[index]:find("=", 1, true) then
 			return false, "Configured sudo does not explicitly select the configured OS user"
 		end
+		if noninteractive then table.insert(argv,1,"-n") end
 	else
 		local wrapped = { "-u", record.user, "-H", "--", executable }
+		if noninteractive then table.insert(wrapped,1,"-n") end
 		for _, argument in ipairs(argv) do table.insert(wrapped, argument) end
 		resolved.executable, resolved.arguments = "sudo", wrapped
 	end

@@ -40,6 +40,9 @@ rejects("configure", { changes = { role = "hub" } }, "role changes are never con
 rejects("configure", { changes = { metadata_enabled = true } }, "enabling headless reads needs its own consent")
 rejects("configure", { changes = { metadata_enabled = true, capacity_enabled = true }, consent = { metadata = true, capacity = true } }, "one setting per confirmed change")
 rejects("configure", { changes = { capacity_enabled = true }, consent = { metadata = true } }, "consent must name the setting it changes")
+rejects("configure", { changes = { display_enabled = true }, consent = { capacity = true } }, "display export needs separate consent")
+check(module.decode(runtime.json.encode(request("configure", { changes = { display_enabled = true }, consent = { display = true } }))) ~= nil,
+	"display opt-in is available on the actual host settings boundary")
 rejects("configure", { binding_action = { operation = "bind", scope_id = "s", id = "a", definition_revision = "r", canonical_id = "c" } }, "a binding needs binding consent")
 rejects("configure", { binding_action = { operation = "bind", scope_id = "s", id = "a", definition_revision = "r", canonical_id = "c", extra = "x" }, consent = { binding = true } }, "binding actions have no hidden fields")
 rejects("configure", { binding_action = { operation = "revoke", scope_id = "s", id = "a" }, changes = { capacity_enabled = true }, consent = { capacity = true } }, "a binding action changes nothing else")
@@ -106,4 +109,8 @@ local view = runtime.json.encode(module.view(state))
 check(view:find(module.NODE, 1, true) ~= nil and view:find("USAGE_SETUP v1", 1, true) ~= nil, "keyed versioned response rendered")
 local parsed = module.parse(module.PREFIX .. runtime.json.encode(state.response))
 check(parsed ~= nil and parsed.request_id == "bad-one" and module.parse("USAGE_CAPACITY v1\n{}") == nil, "windows parse only this protocol's responses")
+send(request("configure", { changes = { display_enabled = true }, consent = { display = true } }))
+local displayChange = reply("configure", { settings = { display_enabled = true } })
+check(state.response.ok and displayChange.payload.changes.display_enabled and displayChange.payload.consent.display,
+	"confirmed display preference reaches the companion rather than a window-only setting")
 return "PASS " .. checks .. " host setup checks"

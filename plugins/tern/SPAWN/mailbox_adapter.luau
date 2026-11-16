@@ -1,7 +1,7 @@
 -- Fixed helper protocol. Helpers are reviewed package assets installed explicitly
 -- on the target; public requests cannot choose helper, root, shell or SSH options.
 local Backend = require('./backend')
-local Codec = require('./codec')
+local Codec = require('./wire/codec')
 local Capabilities = require('./mailbox_capabilities')
 local M = {}
 local active = {}
@@ -9,9 +9,11 @@ local running = 0
 local assembly_reserved = 0
 -- Codec diagnostics keep their bounded message so the owner sees why bytes were refused.
 local function rejected(code,message) return {status='rejected',error={code=code,message=message}} end
-local function absolute(path,windows)
+function M.absolute_path(path,windows)
  if type(path)~='string' or #path==0 or #path>4096 or path:find('[%z\r\n]') then return false end
- if path:find('..',1,true) then return false end
+ local components=if windows then path:gsub('\\','/') else path
+ if components:find('//',1,true) then return false end
+ for component in components:gmatch('[^/]+') do if component=='.' or component=='..' then return false end end
  return if windows then path:match('^[A-Za-z]:[\\/]')~=nil else path:sub(1,1)=='/'
 end
 function M.validate_target(t)
@@ -19,7 +21,7 @@ function M.validate_target(t)
  local fields={root=true,helper=true,producer_helper=true,worker_identity=true,os=true,shell=true,kind=true,backend=true,host=true,user=true,key_path=true,host_os=true,host_shell=true}
  for key in pairs(t) do if not fields[key] then return false end end
  if t.backend~='native-agent' and t.backend~='local-terminal' and t.backend~='ssh-command' then return false end
- if not absolute(t.root,t.os=='windows') or not absolute(t.helper,t.os=='windows') or not absolute(t.producer_helper,t.os=='windows') or Backend.shell_kind(t.os,t.shell)~=t.kind or (t.kind~='posix' and t.kind~='powershell') or not Backend.shell_kind(t.host_os,t.host_shell) then return false end
+ if not M.absolute_path(t.root,t.os=='windows') or not M.absolute_path(t.helper,t.os=='windows') or not M.absolute_path(t.producer_helper,t.os=='windows') or Backend.shell_kind(t.os,t.shell)~=t.kind or (t.kind~='posix' and t.kind~='powershell') or not Backend.shell_kind(t.host_os,t.host_shell) then return false end
  if type(t.worker_identity)~='string' or #t.worker_identity==0 or #t.worker_identity>256 or t.worker_identity:find('[%z\r\n]') then return false end
  for _,key in ipairs({'host','user','key_path'}) do if t[key]~=nil and (type(t[key])~='string' or #t[key]>4096 or t[key]:find('[%z\r\n]')) then return false end end
  if t.backend=='ssh-command' then
@@ -34,7 +36,7 @@ function M.target(record,context)
  local os=context.host_os
  local shell=context.host_shell
  local kind=Backend.shell_kind(os,shell)
- if not kind or not absolute(cfg.permitted_root,os=='windows') or not absolute(cfg.helper_path,os=='windows') or type(cfg.worker_identity)~='string' or cfg.worker_identity=='' or #cfg.worker_identity>256 or cfg.worker_identity:find('[%z\r\n]') then return nil,'unsupported_capability' end
+ if not kind or not M.absolute_path(cfg.permitted_root,os=='windows') or not M.absolute_path(cfg.helper_path,os=='windows') or type(cfg.worker_identity)~='string' or cfg.worker_identity=='' or #cfg.worker_identity>256 or cfg.worker_identity:find('[%z\r\n]') then return nil,'unsupported_capability' end
  if os=='windows' and record.user and record.user~='' then return nil,'unsupported_capability' end
  local target={root=cfg.permitted_root,helper=cfg.helper_path,producer_helper=cfg.producer_helper_path,worker_identity=cfg.worker_identity,os=os,shell=shell,kind=kind,backend=record.backend,host=record.host,user=record.user,key_path=record.key_path,host_os=context.host_os,host_shell=context.host_shell}
  if not M.validate_target(target) then return nil,'unsupported_capability' end
@@ -57,6 +59,11 @@ local function process_argv(op,mode,path)
   values={t.root,op.handle,mode,path or '-',op.id,t.worker_identity,string.format('%.0f',op.report_floor or 0),string.format('%.0f',op.reply_floor or 0),t.producer_helper}
   names={'Root','Handle','Mode','Selected','Operation','Identity','ReportFloor','ReplyFloor','ProducerHelper'}
  end
+ if op.request and op.request.withdrawn_starts~=nil then
+  if op.mode~='retire' then return nil,'invalid_schema' end
+  table.insert(values,tern.base64.encode(tern.json.encode(op.request.withdrawn_starts)))
+  table.insert(names,'WithdrawnStarts')
+ end
  local args={helper}
  if t.kind=='powershell' then
   args={'-NoLogo','-NoProfile','-NonInteractive','-File',helper}
@@ -64,6 +71,7 @@ local function process_argv(op,mode,path)
   for index,value in ipairs(values) do table.insert(args,'-'..names[index]..':');table.insert(args,value) end
  elseif producer then
   args={helper,t.root,op.handle,op.binding.enrolment_token,'retire-authorized','','5','30',values[5],values[6],values[7],values[8]}
+  if values[9] then table.insert(args,values[9]) end
  else
   for _,value in ipairs(values) do table.insert(args,value) end
  end
@@ -85,6 +93,33 @@ local function process_argv(op,mode,path)
  local total=0; for _,v in ipairs(argv) do total+=#v+1 end
  if total>(if t.os=='windows' then 7000 else 32768) then return nil,'oversize' end
  return argv,nil
+end
+-- Read-only inventory uses only a retained validated same-user target, never a
+-- caller-selected path or SSH/sudo route. No locks, cleanup or launch effects.
+function M.inventory_capacity() return math.max(0,4-running) end
+function M.inventory(target,handle,stale_ms,callback,budget_ms)
+ if not M.validate_target(target) or target.backend=='ssh-command' or target.user and target.user~='' or type(handle)~='string' or #handle>96 or not handle:match('^[A-Za-z0-9_-]+$') or type(stale_ms)~='number' or stale_ms%1~=0 or stale_ms<1 or stale_ms>315360000000 then callback(nil,'Inventory requires an owned same-user retained mailbox target');return end
+ budget_ms=budget_ms or 15000
+ if type(budget_ms)~='number' or budget_ms%1~=0 or budget_ms<1 or budget_ms>15000 then callback(nil,'Inventory deadline is invalid');return end
+ if running>=4 then callback(nil,'Mailbox executor is busy; inventory was not started');return end
+ local argv,why=process_argv({target=target,handle=handle,id='inventory'},'inventory',string.format('%.0f',stale_ms))
+ if not argv then callback(nil,why or 'Inventory helper arguments are unavailable');return end
+ running+=1
+ local finished=false
+ local function done(value,problem)
+  if finished then return end
+  finished=true;running-=1;callback(value,problem)
+ end
+ local ok,problem=pcall(tern.process.run,argv,{stdin='',timeout_ms=budget_ms},function(result)
+  if result.timed_out or result.status~=0 or type(result.stdout)~='string' or #result.stdout>4096 then done(nil,'Mailbox inventory helper failed or exceeded its bound');return end
+  local value=Codec.strict_decode(result.stdout,4096)
+  local function integer(v,maximum) return type(v)=='number' and v%1==0 and v>=0 and v<=maximum end
+  if type(value)~='table' then done(nil,'Mailbox inventory is not a bounded object');return end
+  for key in pairs(value) do if key~='observed_at_ms' and key~='open_files' and key~='stale_files' then done(nil,'Mailbox inventory has an unsupported field');return end end
+  if not integer(value.observed_at_ms,9007199254740991) or not integer(value.open_files,1000000) or not integer(value.stale_files,value.open_files) then done(nil,'Mailbox inventory counters are invalid');return end
+  done(value,nil)
+ end)
+ if not ok then done(nil,'Could not start read-only mailbox inventory: '..tostring(problem):sub(1,512)) end
 end
 -- One overall deadline, including up to 32 chunk reads before a manifest. The
 -- target helper never emits more than one bounded object; stderr is not exposed.
@@ -175,7 +210,8 @@ function M.execute(op,callback)
      -- The reviewed helper prints producer_unsettled (exit 0) only from its journal-settlement
      -- check, before it removes anything; it is the first child, so no target effect ran either.
      if status=='producer_retired' and payload=='' then receive({status=status})
-     elseif status=='producer_unsettled' and payload=='' then done(rejected('producer_unsettled','The stopped producer journal is not settled at the authorized floors (pending reports, unacknowledged or unresolved control messages); nothing was retired'))
+     elseif status=='producer_absent' and payload=='' and op.cancel_enrolment==true and op.report_floor==0 and op.reply_floor==0 and op.request.report_chain_sha256==Codec.sha256('report-files-v1\n'..op.handle..'\n') then receive({status=status})
+     elseif status=='producer_unsettled' and payload=='' then done(rejected('producer_unsettled','The producer journal is not settled at the authorized floors (pending reports, unacknowledged or unresolved control messages); nothing was retired'))
      else done({status='uncertain'}) end
      return
     end
@@ -227,8 +263,7 @@ function M.execute(op,callback)
    elseif selected.stream=='report' or selected.stream=='reply' then
     if object.mailbox_handle~=op.handle then done(rejected('binding_mismatch')); return end
    end
-   local function returned() done({status='read',payload=tern.json.decode(page)}) end
-   if object.type=='manifest' then verify_manifest(result.bytes,object,returned) else returned() end
+   done({status='read',payload=tern.json.decode(page)})
   end)
  elseif op.mode=='publish' then
   local function publish()
@@ -247,11 +282,11 @@ function M.execute(op,callback)
    if op.reconcile and result.status=='missing' then done({status='uncertain'}) else done(result) end
   end)
  elseif op.mode=='retire' and op.retire_producer==true and not op.reconcile then
-  -- This private flag is derived by dispatch from committed exact native stop,
-  -- never from public request fields. One operation/deadline spans both children.
+  -- Dispatch derives this flag from exact native stop or zero-floor pending-enrol
+  -- cancellation, never public fields. One operation/deadline spans both children.
   retirement_started=true
   invoke('retire_producer','-',nil,function(result)
-   if result.status~='producer_retired' then done({status='uncertain'});return end
+   if result.status~='producer_retired' and result.status~='producer_absent' then done({status='uncertain'});return end
    invoke('retire','-',nil,function(retired) done(retired) end)
   end)
  else

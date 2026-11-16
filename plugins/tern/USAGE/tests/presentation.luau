@@ -2,11 +2,12 @@
 local root = ...
 assert(type(root) == "string", "pass the plugin directory")
 local modules, environment = {}, getfenv()
+local module_runtime = tern
 local function load(name)
 	name = name:gsub("^%./", "")
 	if modules[name] ~= nil then return modules[name] end
 	local chunk = assert(loadstring(tern.fs.read(root .. "/" .. name .. ".luau"), name))
-	setfenv(chunk, setmetatable({ require = load }, { __index = environment }))
+	setfenv(chunk, setmetatable({ require = load, tern = module_runtime }, { __index = environment }))
 	modules[name] = chunk()
 	return modules[name]
 end
@@ -185,7 +186,9 @@ local interval = 0
 local status_value = { state = "idle", completed = 0, total = 5 }
 local collector_health = nil
 local display_error = nil
+local releases, collector_stops = 0, 0
 modules.companion = {
+	unload = function() releases += 1 end,
 	request = function(operation, payload, done)
 		table.insert(log, operation)
 		if operation == "usage_refresh" then
@@ -208,20 +211,28 @@ modules.companion = {
 }
 modules.source_collect = {
 	start = function(callback) source_changed = callback end,
-	stop = function() end,
+	stop = function() collector_stops += 1 end,
 	flush = function() flushes += 1 end,
 	state = function() return collector_health end,
 }
--- The capacity block has its own suite (tests/capacity.luau); here only its host installation matters.
-local capacity_installs = 0
-modules.capacity = { install = function() capacity_installs += 1 end }
+-- Capacity, carrier and updater behavior have separate qualification; this fixture owns presentation.
+modules.capacity = { install = function() end }
+modules["updater/host"] = { register = function() end }
+modules["channel/channel"] = { open = function() return nil, { code = "fixture_carrier_unavailable" } end }
+local host_events = { spawn = true, command_started = true, command_finished = true,
+	cwd = true, title = true, pane_exited = true, unload = true }
 local runtime = {
 	ui = tern.ui, json = tern.json,
+	runtime = { os = "linux" },
+	plugin = { data = "/fixture/usage" },
 	pane = { list = function() return live end },
 	kv = { get = function() error("host must not read a duplicate layout/interval registry") end,
 		set = function() writes += 1; error("host must not replace companion preferences") end },
 	block = { define = function(id, value) defs[id] = value end },
-	on = function(name, callback) events[name] = callback end,
+	on = function(name, callback)
+		assert(host_events[name], "unknown host event " .. name)
+		events[name] = callback
+	end,
 	timer = function(delay, callback)
 		local timer = { delay = delay, callback = callback, active = true }
 		function timer:cancel() self.active = false end
@@ -234,11 +245,14 @@ local function context(pane)
 		toast = function() error("account detail must never be a toast") end }
 end
 local cx, detail_cx, config_cx = context(21), context(22), context(23)
+module_runtime = runtime
+local lifecycle = assert(loadstring(tern.fs.read(root .. "/companion.luau"), "companion lifecycle"))
+setfenv(lifecycle, setmetatable({ tern = runtime }, { __index = environment }))
+modules.companion.on_unload = lifecycle().on_unload
 local chunk = assert(loadstring(tern.fs.read(root .. "/host.luau"), "host"))
 setfenv(chunk, setmetatable({ tern = runtime, require = load }, { __index = environment }))
 chunk()
 local def, detail_def, config_def = defs.accounts, defs.account, defs.config
-check(capacity_installs == 1, "the host installs the read-only capacity block once")
 local state = def.init(cx, {}, nil)
 local function has_span(value, text, tone)
 	if type(value) ~= "table" then return false end
@@ -403,4 +417,12 @@ events.pane_exited({ pane = 23 })
 publish({ source })
 check(renders == before, "closed blocks receive no late source completion renders")
 check(#active(1000) == 0 and #active(15000) == 0, "with no USAGE block open the host neither polls nor ticks")
+live = { { pane = 21 } }
+def.init(cx, {}, nil)
+local logged = #log
+events.unload(cx)
+source_changed()
+check(releases == 1 and collector_stops == 1 and #log == logged,
+	"host unload releases its client, stops collection and rejects late source-driven requests")
+check(#active(1000) == 0 and #active(15000) == 0, "host unload cancels its render and polling timers")
 return "PASS presentation: " .. checks .. " checks"

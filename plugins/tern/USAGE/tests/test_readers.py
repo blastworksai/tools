@@ -1,5 +1,7 @@
 """Provider protocol projection without live logins or model turns."""
+import hashlib
 import json
+import logging
 from pathlib import Path
 import os
 import sys
@@ -10,9 +12,88 @@ from unittest.mock import patch
 
 import provider_metadata as helper
 from usage_service import readers
+from usage_service.process_supervisor import BoundedError, Result, TIMEOUT, UNAVAILABLE
 from usage_service.protocol import ServiceError, validate_snapshot
 
 AT = 1800000000123
+
+
+class RpcSession:
+    def __init__(self, account, quota, events):
+        self.account = account
+        self.quota = quota
+        self.events = events
+        self.pending = None
+        self.stdin_closed = False
+        self.close_result = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.close()
+
+    def write(self, data):
+        message = json.loads(data)
+        method = message["method"]
+        refresh = message.get("params", {}).get("refreshToken")
+        self.events.append(("write", method, refresh))
+        if "id" not in message:
+            return
+        if method == "initialize":
+            response = {"jsonrpc": "2.0", "id": message["id"], "result": {}}
+        elif method == "account/read":
+            response = {"jsonrpc": "2.0", "id": message["id"], "result": self.account}
+        elif self.quota is None:
+            response = {"jsonrpc": "2.0", "id": message["id"], "error": {"code": -1}}
+        else:
+            response = {"jsonrpc": "2.0", "id": message["id"], "result": self.quota}
+        self.pending = (method, refresh, response)
+
+    def readline(self, limit=65536):
+        if self.pending is None:
+            raise AssertionError("read without a response-producing write")
+        method, refresh, response = self.pending
+        self.pending = None
+        self.events.append(("read", method, refresh))
+        return json.dumps(response).encode() + b"\n"
+
+    def close_stdin(self):
+        self.stdin_closed = True
+
+    def close(self):
+        if self.close_result is None:
+            self.close_result = Result(0)
+        return self.close_result
+
+
+class StdoutSession:
+    def __init__(self, lines=(), error=None):
+        self.lines = list(lines)
+        self.error = error
+        self.close_result = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.close()
+
+    def readline(self, limit=65536):
+        if self.error is not None:
+            raise self.error
+        return self.lines.pop(0) if self.lines else b""
+
+    def write(self, data):
+        raise AssertionError("Kimi stdin must stay unused")
+
+    def close_stdin(self):
+        pass
+
+    def close(self):
+        if self.close_result is None:
+            self.close_result = Result(None)
+        return self.close_result
 
 
 class ParsingTests(unittest.TestCase):
@@ -158,6 +239,11 @@ class ParsingTests(unittest.TestCase):
 
 
 class ProtocolTests(unittest.TestCase):
+    def setUp(self):
+        platform = patch.object(readers.sys, "platform", "linux")
+        platform.start()
+        self.addCleanup(platform.stop)
+
     def test_raw_provider_failure_never_crosses_helper_boundary(self):
         with patch.object(helper, "source_identity", return_value={"source_uid": "1000"}), \
              patch.object(helper, "current_home", return_value=Path("/source")), \
@@ -288,7 +374,7 @@ class ProtocolTests(unittest.TestCase):
                     readers.http_json("http://127.0.0.1:1/api/v1/oauth/usage", {})
                 self.assertEqual(kimi.exception.args[0], "local_login_unavailable")
 
-    def test_rpc_initialization_notification_id_matching_and_reaping(self):
+    def test_rpc_initialization_notification_id_matching_and_interactive_session(self):
         script = """
 import json, sys
 step = 0
@@ -313,31 +399,62 @@ for line in sys.stdin:
     step += 1
 """
         with tempfile.TemporaryDirectory() as home:
-            processes = []
-            popen = readers.subprocess.Popen
-            def start(*args, **kwargs):
-                process = popen(*args, **kwargs)
-                processes.append(process)
-                return process
-            with patch.object(readers.subprocess, "Popen", side_effect=start):
+            bounded = readers.interactive_bounded
+            with patch.object(readers, "interactive_bounded", side_effect=bounded) as run:
                 replies = readers.rpc([sys.executable, "-c", script], {"HOME": home, "PATH": os.defpath}, {},
                     [("account/read", {"refreshToken": False}), ("account/rateLimits/read", {})], initialized=True)
             self.assertEqual(replies, [{"step": 2}, {"step": 3}])
-            self.assertIsNotNone(processes[0].poll())
+            self.assertEqual(run.call_args.args[2], home)
 
-    def test_rpc_timeout_reaps_owned_process(self):
+    def test_rpc_writes_follow_their_corresponding_responses(self):
+        events = []
+        session = RpcSession({"step": 2}, {"step": 3}, events)
+        with patch.object(readers, "interactive_bounded", return_value=session):
+            replies = readers.rpc(["codex"], {"HOME": "/source"}, {},
+                [("account/read", {"refreshToken": False}), ("account/rateLimits/read", {})], initialized=True)
+        self.assertEqual(replies, [{"step": 2}, {"step": 3}])
+        self.assertEqual(events, [
+            ("write", "initialize", None), ("read", "initialize", None),
+            ("write", "initialized", None),
+            ("write", "account/read", False), ("read", "account/read", False),
+            ("write", "account/rateLimits/read", None), ("read", "account/rateLimits/read", None),
+        ])
+        self.assertTrue(session.stdin_closed)
+        self.assertIsNotNone(session.close_result)
+
+    def test_codex_renewal_response_precedes_quota_write(self):
+        quota = {"rateLimits": {"primary": {"usedPercent": 25}}}
+        signed_out = {"account": None, "requiresOpenaiAuth": True}
+        signed_in = {"account": {"type": "chatgpt", "email": "a@example.test"}}
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            (home / ".codex").mkdir()
+            (home / ".codex" / "auth.json").write_text("{}")
+            first_events, second_events = [], []
+            sessions = [RpcSession(signed_out, None, first_events),
+                        RpcSession(signed_in, quota, second_events)]
+            with patch.object(readers, "interactive_bounded", side_effect=sessions) as run:
+                _, usage = readers.collect("openai", home, {"HOME": directory}, None)
+        self.assertEqual(run.call_count, 2)
+        self.assertEqual(usage["windows"][0]["used"], 25)
+        self.assertEqual(second_events, [
+            ("write", "initialize", None), ("read", "initialize", None),
+            ("write", "initialized", None),
+            ("write", "account/read", True), ("read", "account/read", True),
+            ("write", "account/rateLimits/read", None), ("read", "account/rateLimits/read", None),
+        ])
+        self.assertEqual(sum(event[0] == "write" and event[1] == "account/read" and event[2] is True
+                             for event in first_events + second_events), 1)
+
+    def test_rpc_timeout_uses_bounded_process_category(self):
         with tempfile.TemporaryDirectory() as home:
-            processes = []
-            popen = readers.subprocess.Popen
-            def start(*args, **kwargs):
-                process = popen(*args, **kwargs)
-                processes.append(process)
-                return process
-            with patch.object(readers.subprocess, "Popen", side_effect=start), self.assertRaises(readers.Unavailable) as caught:
+            bounded = readers.interactive_bounded
+            with patch.object(readers, "interactive_bounded", side_effect=bounded) as run, \
+                 self.assertRaises(readers.Unavailable) as caught:
                 readers.rpc([sys.executable, "-c", "import time; time.sleep(30)"],
                            {"HOME": home, "PATH": os.defpath}, {}, [], timeout=.05)
             self.assertEqual(caught.exception.code, "source_timeout")
-            self.assertIsNotNone(processes[0].poll())
+            run.assert_called_once()
 
     def test_codex_signed_out_api_key_and_vendor_errors_are_distinct(self):
         quota = {"rateLimits": {"primary": {"usedPercent": 25}}}
@@ -490,6 +607,227 @@ for line in sys.stdin:
             metadata, value = readers.collect("muse", Path("/source"), {"USAGE_SOURCE_KIND": "muse"}, None)
         self.assertIsNone(metadata)
         self.assertEqual(value, quota)
+
+
+class KeychainTests(unittest.TestCase):
+    def setUp(self):
+        platform = patch.object(readers.sys, "platform", "darwin")
+        account = patch.object(readers, "_keychain_account", return_value="fixture-user")
+        platform.start()
+        account.start()
+        self.addCleanup(platform.stop)
+        self.addCleanup(account.stop)
+        self.metadata = {"principal": "a@example.test", "principal_kind": "email", "label": "a@example.test"}
+
+    def handle(self, home, env, security, *, metadata=None):
+        command_options = {"side_effect": security} if callable(security) else {"return_value": security}
+        with patch.object(helper, "source_identity", return_value={"source_uid": "1000"}), \
+             patch.object(helper, "current_home", return_value=home), \
+             patch.object(helper, "profile_environment", return_value=env), \
+             patch.object(readers, "run_bounded", **command_options) as command, \
+             patch("metadata_providers.collect", side_effect=metadata) if metadata is not None else \
+                 patch("metadata_providers.collect", return_value=self.metadata), \
+             patch.object(readers, "http_json", return_value={"five_hour": {"utilization": 3}}) as request:
+            result = readers.handle({"request": {"version": 1, "provider": "claude", "kind": "claude"},
+                                    "selectors": {}})
+        return result, command, request
+
+    def test_keychain_token_renewed_by_auth_status_is_the_one_sent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            document = {"claudeAiOauth": {"accessToken": "STALE", "expiresAt": 1}}
+
+            def renew(*args):
+                nonlocal document
+                document = {"claudeAiOauth": {"accessToken": "FRESH",
+                                "refreshToken": "REFRESH", "expiresAt": int(time.time() * 1000) + 3600000}}
+                return self.metadata
+
+            def security(*args):
+                return Result(0, json.dumps(document).encode())
+
+            result, command, request = self.handle(home, {"HOME": directory}, security, metadata=renew)
+        self.assertNotIn("error", result)
+        self.assertEqual(request.call_args.args[1]["Authorization"], "Bearer FRESH")
+        argv = command.call_args.args[0]
+        self.assertEqual(argv, ["/usr/bin/security", "find-generic-password", "-a", "fixture-user",
+                                "-s", "Claude Code-credentials", "-w"])
+        self.assertNotIn("FRESH", repr(argv))
+        self.assertNotIn("REFRESH", json.dumps(result))
+
+    def test_expired_keychain_token_is_not_sent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            security = Result(0, json.dumps({"claudeAiOauth": {
+                "accessToken": "EXPIRED", "expiresAt": 1}}).encode())
+            result, _, request = self.handle(Path(directory), {"HOME": directory}, security)
+        self.assertEqual(result["error"], "web_login_expired")
+        request.assert_not_called()
+        self.assertNotIn("EXPIRED", json.dumps(result))
+
+    def test_custom_config_directory_selects_scoped_item_then_file_fallback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            root = home / "selected"
+            root.mkdir()
+            (root / ".credentials.json").write_text(json.dumps({"claudeAiOauth": {
+                "accessToken": "FILE_TOKEN", "expiresAt": int(time.time() * 1000) + 3600000}}))
+            security = Result(44, b"", b"missing fixture", UNAVAILABLE)
+            result, command, request = self.handle(home, {"HOME": directory, "CLAUDE_CONFIG_DIR": str(root)}, security)
+        expected = "Claude Code-credentials-" + hashlib.sha256(str(root).encode()).hexdigest()[:8]
+        self.assertNotIn("error", result)
+        self.assertEqual(command.call_args.args[0][5], expected)
+        self.assertEqual(request.call_args.args[1]["Authorization"], "Bearer FILE_TOKEN")
+        self.assertNotIn("FILE_TOKEN", repr(command.call_args.args[0]))
+        self.assertNotIn("FILE_TOKEN", json.dumps(result))
+
+    def test_locked_unavailable_and_timed_out_keychain_never_falls_back_or_unlocks(self):
+        cases = ((Result(45, b"", b"locked fixture", UNAVAILABLE), "local_login_unavailable"),
+                 (Result(None, b"", b"denied fixture", UNAVAILABLE), "local_login_unavailable"),
+                 (Result(None, error=TIMEOUT), "source_timeout"))
+        for security, code in cases:
+            with self.subTest(code=code, status=security.status), tempfile.TemporaryDirectory() as directory:
+                home = Path(directory)
+                (home / ".claude").mkdir()
+                (home / ".claude" / ".credentials.json").write_text(json.dumps({"claudeAiOauth": {
+                    "accessToken": "MUST_NOT_BE_READ", "expiresAt": int(time.time() * 1000) + 3600000}}))
+                with patch.object(helper.SourceIO, "read_json", side_effect=AssertionError("fallback called")) as fallback:
+                    result, command, request = self.handle(home, {"HOME": directory}, security)
+                self.assertEqual(result["error"], code)
+                fallback.assert_not_called()
+                request.assert_not_called()
+                argv = command.call_args.args[0]
+                self.assertNotIn("unlock-keychain", argv)
+                self.assertNotIn("MUST_NOT_BE_READ", repr(argv))
+                self.assertNotIn("MUST_NOT_BE_READ", json.dumps(result))
+
+    def test_missing_keychain_item_and_file_is_missing_login(self):
+        with tempfile.TemporaryDirectory() as directory:
+            security = Result(44, b"", b"missing fixture", UNAVAILABLE)
+            result, _, request = self.handle(Path(directory), {"HOME": directory}, security)
+        self.assertEqual(result["error"], "local_login_unavailable")
+        request.assert_not_called()
+
+    def test_malformed_keychain_json_preserves_existing_failure_codes(self):
+        for raw, code in ((b"{SECRET", "source_usage_unavailable"), (b"[]", "unparsed")):
+            with self.subTest(code=code), tempfile.TemporaryDirectory() as directory:
+                result, command, request = self.handle(Path(directory), {"HOME": directory}, Result(0, raw))
+                self.assertEqual(result["error"], code)
+                request.assert_not_called()
+                self.assertNotIn("SECRET", json.dumps(result))
+                self.assertNotIn("SECRET", repr(command.call_args.args[0]))
+
+    def test_tokens_are_absent_from_logs_rpc_snapshot_and_diagnostic_argv(self):
+        records = []
+
+        class Capture(logging.Handler):
+            def emit(self, record):
+                records.append(record.getMessage())
+
+        handler = Capture(level=logging.DEBUG)
+        logger = logging.getLogger()
+        logger.addHandler(handler)
+        old_level = logger.level
+        logger.setLevel(logging.DEBUG)
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                home = Path(directory)
+                security = Result(0, json.dumps({"claudeAiOauth": {
+                    "accessToken": "ACCESS_SECRET", "refreshToken": "REFRESH_SECRET",
+                    "expiresAt": int(time.time() * 1000) + 3600000}}).encode(), b"diagnostic ACCESS_SECRET")
+                result, command, _ = self.handle(home, {"HOME": directory}, security)
+            snapshot = validate_snapshot({"version": 3, "publisher": "source", "as_of_ms": AT,
+                "readings": [{"id": "r", "provider": "claude", "provider_label": "Claude",
+                              "source_label": "Source", "usage_source": "headless",
+                              "windows": result["usage"]["windows"]}]})
+            outputs = {"rpc": json.dumps(result), "snapshot": json.dumps(snapshot),
+                       "argv": repr(command.call_args.args[0]), "logs": "\n".join(records)}
+            for name, output in outputs.items():
+                with self.subTest(output=name):
+                    self.assertNotIn("ACCESS_SECRET", output)
+                    self.assertNotIn("REFRESH_SECRET", output)
+        finally:
+            logger.removeHandler(handler)
+            logger.setLevel(old_level)
+
+
+class BoundedReaderTests(unittest.TestCase):
+    def test_antigravity_projects_remaining_quota_as_used(self):
+        raw = b"Gemini Models\tWeekly Limit Remaining\t100%\t\n"
+        env = {"HOME": "/source", "USAGE_SOURCE_KIND": "agy"}
+        with patch.object(readers, "run_bounded", return_value=Result(0, raw)), \
+             patch("metadata_providers.collect", return_value={}):
+            _, usage = readers.collect("antigravity", Path("/source"), env, None)
+        self.assertEqual(usage["windows"][0]["used"], 0)
+
+    def test_kimi_uses_only_own_child_url_and_token(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            root = home / ".kimi-code"
+            root.mkdir()
+            (root / "server.token").write_text("STALE_SECRET")
+            env = {"HOME": directory}
+            io = helper.SourceIO(home, env)
+            sessions = []
+            requests = []
+
+            def interactive(argv, *args):
+                base = "http://127.0.0.1:" + argv[-1]
+                session = StdoutSession([b"starting\n", (base + "/#token=OWN_CHILD_SECRET\n").encode()])
+                sessions.append(session)
+                return session
+
+            def request(url, headers, **kwargs):
+                requests.append((url, headers))
+                if url.endswith("/shutdown"):
+                    return {}
+                if url.endswith("/userinfo"):
+                    return {"data": {"userId": "fixture"}}
+                return {"data": {"quota": {"usages": {"limit5h": {"usedRatio": 0}}}}}
+
+            with patch.object(readers, "interactive_bounded", side_effect=interactive) as run, \
+                 patch.object(helper.SourceIO, "_read", side_effect=AssertionError("stale token file read")) as stale, \
+                 patch.object(readers, "http_json", side_effect=request):
+                account, quota = readers.kimi(env, io)
+        base = "http://127.0.0.1:" + run.call_args.args[0][-1]
+        self.assertEqual(account["data"]["userId"], "fixture")
+        self.assertEqual(quota["data"]["quota"]["usages"]["limit5h"]["usedRatio"], 0)
+        stale.assert_not_called()
+        self.assertEqual([url for url, _ in requests], [
+            base + "/api/v1/oauth/userinfo", base + "/api/v1/oauth/usage", base + "/api/v1/shutdown"])
+        self.assertTrue(all(headers["Authorization"] == "Bearer OWN_CHILD_SECRET" for _, headers in requests))
+        self.assertNotIn("OWN_CHILD_SECRET", repr(run.call_args))
+        self.assertNotIn("STALE_SECRET", repr(run.call_args))
+        self.assertNotIn("OWN_CHILD_SECRET", json.dumps([account, quota]))
+        self.assertIsNotNone(sessions[0].close_result)
+
+    def test_kimi_rejects_unrelated_url_and_never_reads_stale_token(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            root = home / ".kimi-code"
+            root.mkdir()
+            (root / "server.token").write_text("STALE_SECRET")
+            env = {"HOME": directory}
+            io = helper.SourceIO(home, env)
+            session = StdoutSession([b"http://127.0.0.1:1/#token=STALE_SECRET\n"])
+            with patch.object(readers, "interactive_bounded", return_value=session), \
+                 patch.object(helper.SourceIO, "_read", side_effect=AssertionError("stale token file read")) as stale, \
+                 patch.object(readers, "http_json") as request, \
+                 self.assertRaises(readers.Unavailable) as caught:
+                readers.kimi(env, io)
+        self.assertEqual(caught.exception.code, "source_usage_unavailable")
+        stale.assert_not_called()
+        request.assert_not_called()
+        self.assertIsNotNone(session.close_result)
+
+    def test_kimi_readiness_timeout_preserves_bounded_error_and_closes(self):
+        session = StdoutSession(error=BoundedError(TIMEOUT))
+        with patch.object(readers, "interactive_bounded", return_value=session), \
+             patch.object(readers, "http_json") as request, \
+             self.assertRaises(readers.Unavailable) as caught:
+            readers.kimi({"HOME": "/source"}, None)
+        self.assertEqual(caught.exception.code, "source_timeout")
+        request.assert_not_called()
+        self.assertIsNotNone(session.close_result)
 
 
 if __name__ == "__main__":

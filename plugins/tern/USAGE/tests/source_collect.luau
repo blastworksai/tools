@@ -9,6 +9,9 @@ function fake_companion.ensure(done) done({ ok = true }, nil) end
 function fake_companion.request(operation, payload, done)
 	table.insert(calls, { operation = operation, payload = payload, done = done })
 end
+function fake_companion.renew(done)
+	fake_companion.request("register_client", { ttl_seconds = 90 }, done)
+end
 local runtime = setmetatable({ now = function() return clock end, timer = function(_, callback)
 	local timer = { callback = callback, cancel = function(self) self.cancelled = true end }
 	table.insert(timers, timer)

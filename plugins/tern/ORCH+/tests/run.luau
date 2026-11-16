@@ -2,10 +2,10 @@
 local root, selection = ...
 assert(type(root) == "string" and root ~= "", "pass the plugin directory")
 assert(type(selection) == "string" and selection ~= "", "pass bounded group/section selections; run the remaining groups in separate callbacks")
-local allowed = { state = true, transport = true, authority = true, dispatch = true, reports = true, gates = true, health = true, workflow = true }
+local allowed = { state = true, transport = true, authority = true, dispatch = true, reports = true, gates = true, health = true, workflow = true, source_adapter = true, source_ui = true, picker_ui = true, conversation_ui = true, channel = true, setup_ui = true, form_ui = true, readiness_ui = true, rulings = true, reclamation = true }
 local groups, seen = {}, {}
 for selector in string.gmatch(selection, "[^,]+") do
-	local name, section = string.match(selector, "^([a-z_]+)/([a-z_]+)$")
+	local name, section = string.match(selector, "^([a-z0-9_]+)/([a-z0-9_]+)$")
 	name = name or selector
 	assert(allowed[name] == true, "unknown test group: " .. selector)
 	assert(not seen[selector], "duplicate test selection: " .. selector)

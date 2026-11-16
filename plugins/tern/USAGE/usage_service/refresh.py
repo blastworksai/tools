@@ -261,7 +261,14 @@ class Refresh:
         arguments = list(definition.get("arguments", []))
         if command:
             try:
-                words = shlex.split(command) if any(char.isspace() for char in command) else [command]
+                if os.name == "nt":
+                    # The record has no combined/structured discriminator. On
+                    # Windows only an executable-only command is unambiguous.
+                    if any(char.isspace() for char in command):
+                        raise ValueError("Combined Windows commands are ambiguous")
+                    words = [command]
+                else:
+                    words = shlex.split(command) if any(char.isspace() for char in command) else [command]
                 if words and words[0].rsplit("/", 1)[-1] == "sudo":
                     index, user = 1, None
                     while index < len(words):

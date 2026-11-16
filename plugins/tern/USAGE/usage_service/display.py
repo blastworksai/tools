@@ -17,6 +17,34 @@ from .sync import _Assembly
 PART_BYTES = 48 * 1024
 PAGE_BYTES = 256 * 1024
 
+def display_access(store, authority, payload, configuration):
+    """Read permission and current joins only; never collect or publish usage."""
+    if not authority.local:
+        raise ServiceError("forbidden", 403)
+    if not isinstance(payload, dict) or payload:
+        raise ServiceError("invalid_request")
+    if not store.settings()["display_enabled"]:
+        raise ServiceError("display_disabled", 403)
+    _, source, roster, _ = configuration()
+    scopes = []
+    for scope in roster["scopes"]:
+        join = scope.get("spawn_join")
+        if join is None:
+            raise ServiceError("source_roster_invalid", 409)
+        scopes.append({
+            "id": scope["id"], "revision": scope["revision"], "spawn_join": join,
+            "accounts": [{key: entry[key] for key in
+                          ("id", "provider", "provider_label", "account_label", "definition_revision", "profile_binding")
+                          if key in entry} for entry in scope["accounts"]],
+            "consumers": [{key: entry[key] for key in
+                           ("id", "label", "definition_revision", "account_ids") if key in entry}
+                          for entry in scope["consumers"]],
+        })
+    # Bindings, revocations and OMP mappings are included, not merely roster semantics.
+    revision = hashlib.sha256(encode({"authorization": store.authorization_revision(authority),
+                                     "source_id": source["device_id"], "scopes": scopes})).hexdigest()
+    return {"revision": revision, "source_id": source["device_id"], "scopes": scopes}
+
 
 class _CachedAssembly(_Assembly):
     """Display caches imported by pre-2.0 builds (Store._cached_snapshots)."""

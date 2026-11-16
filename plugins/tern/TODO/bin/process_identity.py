@@ -5,10 +5,16 @@ proc_bsdinfo ABI, and Windows Toolhelp/GetProcessTimes/token APIs.
 No third-party module or OS header implementation is bundled.
 """
 import ctypes
+import errno
 import os
 from pathlib import Path
 import struct
 import sys
+
+
+class ProcessEnded(ValueError):
+    """The requested PID no longer names the same live process."""
+    terminal = True
 
 
 def process(pid):
@@ -17,12 +23,19 @@ def process(pid):
         raise ValueError('invalid process id')
     if sys.platform.startswith('linux'):
         folder = Path('/proc') / str(pid)
-        text = (folder/'stat').read_text()
+        try:
+            text = (folder/'stat').read_text()
+        except FileNotFoundError:
+            raise ProcessEnded('process has ended') from None
         rest = text[text.rfind(')')+2:].split()
         if rest[0] == 'Z':
-            raise ValueError('process has ended')
+            raise ProcessEnded('process has ended')
+        try:
+            uid = folder.stat().st_uid
+        except FileNotFoundError:
+            raise ProcessEnded('process has ended') from None
         boot = Path('/proc/sys/kernel/random/boot_id').read_text().strip()
-        return {'pid': pid, 'ppid': int(rest[1]), 'owner': str(folder.stat().st_uid),
+        return {'pid': pid, 'ppid': int(rest[1]), 'owner': str(uid),
                 'birth': 'linux:'+boot+':'+rest[19], 'name': text[text.find('(')+1:text.rfind(')')]}
     if sys.platform == 'darwin':
         # Public libproc ABI: fixed-size process facts, not copied OS implementation.
@@ -32,10 +45,13 @@ def process(pid):
         lib.proc_pidinfo.restype = ctypes.c_int
         buffer = ctypes.create_string_buffer(136)
         if lib.proc_pidinfo(pid, 3, 0, buffer, len(buffer)) != len(buffer):
-            raise OSError('cannot read native process identity')
+            error = ctypes.get_errno()
+            if error == errno.ESRCH:
+                raise ProcessEnded('process has ended')
+            raise OSError(error or errno.EIO, 'cannot read native process identity')
         fields = struct.unpack_from('=12I', buffer.raw)
         if fields[3] != pid or fields[1] == 5:
-            raise ValueError('process has ended')
+            raise ProcessEnded('process has ended or changed')
         sec, usec = struct.unpack_from('=QQ', buffer.raw, 120)
         return {'pid': pid, 'ppid': fields[4], 'owner': str(fields[5]),
                 'birth': 'darwin:'+str(sec)+':'+str(usec),
@@ -43,6 +59,48 @@ def process(pid):
     if os.name == 'nt':
         return _windows_process(pid)
     raise ValueError('native process identity is unsupported on this OS')
+
+
+def _windows_snapshot_parent(kernel, entry_type, pid):
+    kernel.CreateToolhelp32Snapshot.argtypes = [ctypes.c_uint32, ctypes.c_uint32]
+    kernel.CreateToolhelp32Snapshot.restype = ctypes.c_void_p
+    kernel.Process32FirstW.argtypes = [ctypes.c_void_p, ctypes.POINTER(entry_type)]
+    kernel.Process32NextW.argtypes = [ctypes.c_void_p, ctypes.POINTER(entry_type)]
+    snapshot = kernel.CreateToolhelp32Snapshot(2, 0)
+    if snapshot == ctypes.c_void_p(-1).value:
+        raise ctypes.WinError(ctypes.get_last_error())
+    parent = None
+    complete = False
+    enumeration_error = None
+    try:
+        entry = entry_type(); entry.size = ctypes.sizeof(entry)
+        more = kernel.Process32FirstW(snapshot, ctypes.byref(entry))
+        if not more:
+            error = ctypes.get_last_error()
+            if error == 18: complete = True
+            else: enumeration_error = error
+        while more:
+            if entry.pid == pid:
+                parent = entry.parent
+                break
+            more = kernel.Process32NextW(snapshot, ctypes.byref(entry))
+            if not more:
+                error = ctypes.get_last_error()
+                if error == 18: complete = True
+                else: enumeration_error = error
+    finally:
+        kernel.CloseHandle(snapshot)
+    return parent, complete, enumeration_error
+
+
+def _windows_open_error(parent, complete, enumeration_error, open_error):
+    if enumeration_error is not None:
+        raise ctypes.WinError(enumeration_error)
+    if open_error == 87 and (parent is not None or complete):
+        raise ProcessEnded('process has ended')
+    if open_error is not None:
+        raise ctypes.WinError(open_error)
+    raise OSError('native process is present but its parent snapshot is inaccessible')
 
 
 def _windows_process(pid):
@@ -62,46 +120,36 @@ def _windows_process(pid):
         _fields_ = [('size', w.DWORD), ('usage', w.DWORD), ('pid', w.DWORD),
                     ('heap', ctypes.c_size_t), ('module', w.DWORD), ('threads', w.DWORD),
                     ('parent', w.DWORD), ('priority', w.LONG), ('flags', w.DWORD), ('exe', w.WCHAR*260)]
-    kernel.CreateToolhelp32Snapshot.argtypes = [w.DWORD, w.DWORD]
-    kernel.CreateToolhelp32Snapshot.restype = w.HANDLE
-    kernel.Process32FirstW.argtypes = [w.HANDLE, ctypes.POINTER(Entry)]
-    kernel.Process32NextW.argtypes = [w.HANDLE, ctypes.POINTER(Entry)]
-    snapshot = kernel.CreateToolhelp32Snapshot(2, 0)
-    if snapshot == ctypes.c_void_p(-1).value:
-        raise OSError('cannot read native process list')
-    parent = None
-    try:
-        entry = Entry(); entry.size = ctypes.sizeof(entry)
-        more = kernel.Process32FirstW(snapshot, ctypes.byref(entry))
-        while more:
-            if entry.pid == pid:
-                parent = entry.parent; break
-            more = kernel.Process32NextW(snapshot, ctypes.byref(entry))
-    finally:
-        kernel.CloseHandle(snapshot)
+    parent, complete, enumeration_error = _windows_snapshot_parent(kernel, Entry, pid)
     handle = kernel.OpenProcess(0x1000, False, pid)
-    if not handle or parent is None:
-        if handle: kernel.CloseHandle(handle)
-        raise OSError('cannot read native process identity')
+    error = ctypes.get_last_error() if not handle else None
+    if not handle:
+        _windows_open_error(parent, complete, enumeration_error, error)
     token = w.HANDLE()
     try:
         times = [w.FILETIME() for _ in range(4)]
         if not kernel.GetProcessTimes(handle, *(ctypes.byref(t) for t in times)):
-            raise OSError('cannot read native process birth')
+            raise ctypes.WinError(ctypes.get_last_error())
+        # An exited process can remain open while Toolhelp no longer lists it.
+        # Its handle-bound exit time is definitive; missing parent data is not.
+        if times[1].dwLowDateTime or times[1].dwHighDateTime:
+            raise ProcessEnded('process has ended')
+        if enumeration_error is not None or parent is None:
+            _windows_open_error(parent, complete, enumeration_error, None)
         image = ctypes.create_unicode_buffer(32768); length = w.DWORD(len(image))
         if not kernel.QueryFullProcessImageNameW(handle, 0, image, ctypes.byref(length)):
-            raise OSError('cannot read native process image')
+            raise ctypes.WinError(ctypes.get_last_error())
         if not advapi.OpenProcessToken(handle, 8, ctypes.byref(token)):
-            raise OSError('cannot read native process owner')
+            raise ctypes.WinError(ctypes.get_last_error())
         needed = w.DWORD()
         advapi.GetTokenInformation(token, 1, None, 0, ctypes.byref(needed))
         data = ctypes.create_string_buffer(needed.value)
         if not advapi.GetTokenInformation(token, 1, data, needed, ctypes.byref(needed)):
-            raise OSError('cannot read native process owner')
+            raise ctypes.WinError(ctypes.get_last_error())
         sid = ctypes.cast(data, ctypes.POINTER(ctypes.c_void_p))[0]
         result = w.LPWSTR()
         if not advapi.ConvertSidToStringSidW(sid, ctypes.byref(result)):
-            raise OSError('cannot read native process owner')
+            raise ctypes.WinError(ctypes.get_last_error())
         try: owner = result.value
         finally: kernel.LocalFree(ctypes.cast(result, ctypes.c_void_p))
         born = times[0].dwLowDateTime | (times[0].dwHighDateTime << 32)

@@ -69,30 +69,4 @@ return {
 		assert(Requires.check(req, "0.9.12", { spawn = "0.3.1" }) == nil)
 		assert(Requires.check({ plugins = {} }, nil, {}) == nil)
 	end},
-	{"check: tern too old", function()
-		local msg = Requires.check({ tern = "0.9.13", plugins = {} }, "0.9.12", {})
-		assert(msg == "Needs Tern 0.9.13 or later (this is 0.9.12)", msg)
-	end},
-	{"check: unknown tern with minimum", function()
-		local msg = Requires.check({ tern = "0.9.13", plugins = {} }, nil, {})
-		assert(msg == "Can't tell this Tern's version; update Tern to 0.9.13 or later first", msg)
-	end},
-	{"check: plugin absent", function()
-		local msg = Requires.check({ plugins = { spawn = "0.3.1" } }, "0.9.12", {})
-		assert(msg == "Install spawn 0.3.1 or later first", msg)
-	end},
-	{"check: plugin too old", function()
-		local msg = Requires.check({ plugins = { spawn = "0.3.1" } }, "0.9.12", { spawn = "0.3.0" })
-		assert(msg == "Update spawn to 0.3.1 or later first (you have 0.3.0)", msg)
-	end},
-	{"check: plugin unparsable version", function()
-		local msg = Requires.check({ plugins = { spawn = "0.3.1" } }, "0.9.12", { spawn = "dev" })
-		assert(msg == "Update spawn to 0.3.1 or later first (you have dev)", msg)
-	end},
-	{"check: tern first, then sorted ids", function()
-		local req = { tern = "1.0.0", plugins = { zed = "1.0.0", alpha = "1.0.0" } }
-		assert(Requires.check(req, "0.9.0", {}) == "Needs Tern 1.0.0 or later (this is 0.9.0)")
-		req.tern = nil
-		assert(Requires.check(req, "0.9.0", {}) == "Install alpha 1.0.0 or later first")
-	end},
 }

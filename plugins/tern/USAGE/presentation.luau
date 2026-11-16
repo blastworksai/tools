@@ -1,6 +1,7 @@
 --!strict
 -- Status, bar and details share account order, quota selection and freshness.
 local presentation = {}
+local snapshot = require("./snapshot")
 local PROVIDER_ORDER = { claude = 1, openai = 2, kimi = 3, muse = 4, antigravity = 5, grok = 6 }
 -- Tern's StatusSegment has no width/tooltip/custom SVG API. Keep the summary
 -- bounded independently of account count; the overflow opens the complete list.
@@ -10,7 +11,7 @@ presentation.MUSE_WAITING = "Awaiting usage after a turn"
 presentation.icons = {
 	claude = "provider-anthropic", openai = "provider-openai-codex",
 	kimi = "provider-kimi-code", muse = "provider-meta", antigravity = "provider-google-antigravity",
-	grok = "provider:xai",
+	grok = "provider:xai", omp = "pi-mark",
 }
 
 function presentation.ordered_accounts(accounts: { any }): { any }
@@ -93,7 +94,7 @@ function presentation.window_state(window: any?, now_ms: number?): string
 	if presentation.login_problem(window) ~= nil then return "login" end
 	local now = now_ms or math.floor(os.time() * 1000)
 	if window.resets_at_ms ~= nil and window.resets_at_ms <= now then return "reset_passed" end
-	if window.freshness == "stale" then return "stale" end
+	if window.freshness == "stale" or now - window.observed_at_ms > snapshot.LEASE_MS then return "stale" end
 	if window.unavailable_reason ~= nil or window.last_known_reason ~= nil then return "last_known" end
 	return "fresh"
 end
@@ -164,6 +165,7 @@ end
 function presentation.summary(model: any, now_ms: number?): any
 	local accounts = presentation.ordered_accounts(model.accounts)
 	local visible_count = math.min(#accounts, presentation.SUMMARY_LIMIT)
+	local conflicts = #(model.roster_conflicts or {})
 	local measured, current = 0, 0
 	for _, account in accounts do
 		local value = presentation.account_projection(account, now_ms)
@@ -171,9 +173,10 @@ function presentation.summary(model: any, now_ms: number?): any
 		if value.state == "fresh" then current += 1 end
 	end
 	return { accounts = accounts, visible_count = visible_count,
-		overflow_count = #accounts - visible_count, total_count = #accounts, current_count = current,
+		overflow_count = #accounts - visible_count, total_count = #accounts, current_count = current, conflict_count = conflicts,
 		header = tostring(#accounts) .. " accounts · " .. tostring(current)
-			.. " current · " .. tostring(measured - current) .. " last-known · " .. tostring(#accounts - measured) .. " unavailable" }
+			.. " current · " .. tostring(measured - current) .. " last-known · " .. tostring(#accounts - measured) .. " unavailable"
+			.. (if conflicts > 0 then " · " .. tostring(conflicts) .. " account-list conflicts" else "") }
 end
 
 function presentation.consumer_text(consumer: any): string
@@ -185,6 +188,9 @@ end
 function presentation.segments(model: any): { any }
 	local summary = presentation.summary(model)
 	local segments = {}
+	if summary.conflict_count > 0 then
+		table.insert(segments, { text = "Account list needs review", tone = "warn", command = "plugin.usage.details" })
+	end
 	local now_ms = math.floor(os.time() * 1000)
 	for index = 1, summary.visible_count do
 		local value = presentation.account_projection(summary.accounts[index], now_ms)
@@ -199,6 +205,83 @@ function presentation.segments(model: any): { any }
 		table.insert(segments, { text = presentation.EMPTY_TEXT, tone = "muted", command = "plugin.usage.details" })
 	end
 	return segments
+end
+
+-- Export only current, explicitly bound definitions. The same snapshot reducer
+-- and account projection select quota/status; labels never establish a join.
+function presentation.display_records(snapshots: any, access: any, now: number): { any }
+	local records = {}
+	local function same(left: any, right: any): boolean
+		if type(left) ~= type(right) then return false end
+		if type(left) ~= "table" then return left == right end
+		for key, value in left do if not same(value, right[key]) then return false end end
+		for key in right do if left[key] == nil then return false end end
+		return true
+	end
+	for _, scope in access.scopes do
+		local matching = {}
+		for publisher, source in snapshots do
+			for _, cached in if source.roster ~= nil then source.roster.scopes else {} do
+				if cached.id ~= scope.id or cached.revision ~= scope.revision then continue end
+				local valid = true
+				for _, definition in scope.accounts do
+					local found = false
+					for _, entry in cached.accounts do
+						if entry.id == definition.id and entry.definition_revision == definition.definition_revision
+							and same(entry.profile_binding, definition.profile_binding) then found = true; break end
+					end
+					if not found then valid = false; break end
+				end
+				if valid then
+					local copy = table.clone(source)
+					copy.roster = { version = 1, scopes = { cached } }
+					matching[publisher] = copy
+				end
+			end
+		end
+		local projected = snapshot.project(matching, now)
+		local byId = {}
+		for _, row in projected.accounts do
+			byId[row.id] = row
+			for _, alias in row.also_configured or {} do byId[alias.id] = row end
+		end
+		local byRecord = {}
+		for _, definition in scope.accounts do
+			local id = "spawn:" .. tostring(#scope.id) .. ":" .. scope.id .. ":" .. definition.id
+			local row = if definition.profile_binding ~= nil then byId[id] else nil
+			row = row or { provider = definition.provider, windows = {} }
+			local value = presentation.account_projection(row, now)
+			local window = value.window
+			local join = scope.spawn_join
+			-- SPAWN dispatch.catalog sets every row.revision to the authority's
+			-- config_revision (not a per-record counter); spawn_join carries that writer value.
+			local entry = { record_id = definition.id, record_revision = join.config_revision, definition_revision = definition.definition_revision,
+				scope_id = scope.id, roster_revision = scope.revision, namespace = join.namespace, host_key = join.host_key, config_revision = join.config_revision,
+				provider = definition.provider, provider_label = definition.provider_label, account_label = definition.account_label,
+				icon = value.icon, used = value.used, state = value.state, text = value.text,
+				observed_at_ms = if window ~= nil then window.observed_at_ms else nil,
+				resets_at_ms = if window ~= nil then window.resets_at_ms else nil,
+				age_ms = if window ~= nil and window.observed_at_ms > 0 then math.max(0, now - window.observed_at_ms) else nil,
+				reason = if definition.profile_binding == nil then "binding_unavailable"
+					elseif window ~= nil then window.last_known_reason or window.unavailable_reason else "not_reported" }
+			table.insert(records, entry)
+			byRecord[definition.id] = entry
+		end
+		for _, consumer in scope.consumers do
+			local underlying = if consumer.account_ids ~= nil and #consumer.account_ids == 1 then byRecord[consumer.account_ids[1]] else nil
+			local join = scope.spawn_join
+			local entry = if underlying ~= nil then table.clone(underlying) else {
+				scope_id = scope.id, roster_revision = scope.revision, namespace = join.namespace, host_key = join.host_key, config_revision = join.config_revision,
+				state = "unavailable", text = "Underlying subscription not linked", reason = "binding_unavailable" }
+			entry.record_id, entry.definition_revision = consumer.id, consumer.definition_revision
+			entry.record_revision = join.config_revision
+			entry.provider, entry.provider_label, entry.account_label, entry.icon = "omp", "OMP", consumer.label, presentation.icons.omp
+			entry.underlying_record_id = if underlying ~= nil then underlying.record_id else nil
+			table.insert(records, entry)
+		end
+	end
+	table.sort(records, function(a, b) return a.scope_id < b.scope_id or (a.scope_id == b.scope_id and a.record_id < b.record_id) end)
+	return records
 end
 
 return presentation

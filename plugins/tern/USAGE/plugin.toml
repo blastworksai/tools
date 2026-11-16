@@ -1,7 +1,7 @@
 schema = 1
 id = "usage"
 name = "USAGE"
-version = "2.3.0"
+version = "2.4.0"
 description = "Subscription usage for the accounts defined in SPAWN: headless refresh, compact, wide and bottom views, and account PIPs."
 icon = "gauge"
 host = "host.luau"
@@ -30,4 +30,16 @@ palette = false
 id = "capacity"
 title = "USAGE Capacity"
 icon = "gauge"
+palette = false
+
+[[blocks]]
+id = "display"
+title = "USAGE Display"
+icon = "gauge"
+palette = false
+
+[[blocks]]
+id = "updater-recovery"
+title = "Updater legacy recovery"
+icon = "download"
 palette = false

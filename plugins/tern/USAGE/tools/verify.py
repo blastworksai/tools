@@ -20,9 +20,9 @@ import uuid
 
 # Removing a shipped fixture must not silently make --suite all greener.
 REQUIRED_SUITES = frozenset({
-    "accounts", "aggregate", "capacity", "companion", "host_setup", "identity",
+    "accounts", "aggregate", "capacity", "display", "companion", "host_setup", "identity",
     "metadata_runner", "presentation", "protocol", "roster", "setup", "snapshot",
-    "source_collect", "window",
+    "source_collect", "usage_channel", "window",
 })
 MARKER = "USAGE_VERIFY "
 

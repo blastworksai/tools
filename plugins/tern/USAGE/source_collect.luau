@@ -191,7 +191,8 @@ tick = function(token: number)
 			tick(token)
 		end, { install_dependencies = false })
 	elseif tern.now() >= next_renew then
-		request(token, "register_client", { client_id = "host", kind = "host", ttl_seconds = 90 }, function(value, err)
+		companion.renew(function(value, err)
+			if not live(token) then return end
 			if value == nil or err ~= nil then ready = false; settle(token, "host_lease_unavailable"); return end
 			next_renew = tern.now() + RENEW_MS
 			transfer(token)

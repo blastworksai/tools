@@ -11,3 +11,9 @@ id = "list"
 title = "TODO"
 icon = "list-checks"
 palette = false
+
+[[blocks]]
+id = "updater-recovery"
+title = "Updater legacy recovery"
+icon = "download"
+palette = false

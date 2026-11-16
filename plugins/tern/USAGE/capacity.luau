@@ -23,6 +23,20 @@ function capacity.decode(raw: any): any?
 	for key in request do if not fields[key] then return nil end end
 	return request
 end
+function capacity.request(raw: any, done: (any) -> ())
+	local request = capacity.decode(raw)
+	if request == nil then
+		done({ version = 1, ok = false, status = "invalid_request", message = "Use the bounded capacity v1 read protocol." })
+		return
+	end
+	companion.request("capacity", request, function(value, err)
+		if value ~= nil and type(value.response) == "table" then done(value.response)
+		else done({ version = 1, request_id = request.request_id, op = request.op, ok = false,
+			status = if err ~= nil then err.code else "companion_unavailable",
+			message = if err ~= nil then err.message else "Open USAGE Setup to prepare its existing companion." }) end
+	end)
+end
+
 function capacity.install()
 	tern.block.define("capacity", {
 		init = function(_cx: any, _args: any, _saved: any): any
@@ -31,9 +45,10 @@ function capacity.install()
 		title = function(): string return "USAGE Capacity" end,
 		view = function(state: any, _cx: any): any
 			local node = tern.ui.text(capacity.PREFIX .. tern.json.encode(state.response))
-			node.p = node.p or {}
-			node.p.key = capacity.NODE
-			node.p.role = capacity.NODE
+			local props: { [string]: any } = node.p or {}
+			props.key = capacity.NODE
+			props.role = capacity.NODE
+			node.p = props
 			return { main = tern.ui.col({ node }) }
 		end,
 		event = function(state: any, event: any, cx: any)
@@ -50,13 +65,10 @@ function capacity.install()
 			state.busy = true
 			state.response = { version = 1, request_id = request.request_id, op = request.op, ok = false, status = "pending" }
 			cx:render()
-			companion.request("capacity", request, function(value, err)
+			capacity.request(event.value, function(response)
 				if state.serial ~= serial then return end
 				state.busy = false
-				if value ~= nil and type(value.response) == "table" then state.response = value.response
-				else state.response = { version = 1, request_id = request.request_id, op = request.op, ok = false,
-					status = if err ~= nil then err.code else "companion_unavailable",
-					message = if err ~= nil then err.message else "Open USAGE Setup to prepare its existing companion." } end
+				state.response = response
 				cx:render()
 			end)
 		end,

@@ -34,17 +34,17 @@ USAGE reads SPAWN's saved roster from SPAWN's plugin data on the same machine. S
 
 | | |
 | --- | --- |
-| Tern | 0.9.10 or later, desktop (Linux). |
+| Tern | 0.9.10 or later, desktop. Linux is the only qualified source-host platform. |
 | SPAWN | Installed on the same machine, with your accounts defined in it. |
 | Python | 3.11 or later, with `venv`/`pip`. USAGE installs its hash-locked dependencies (`aiohttp`, `cryptography`, `tzdata`; see `requirements.lock`) into its own private environment on first setup. That needs access to PyPI once. It never changes system packages. |
 | Provider CLIs | Installed and already signed in, on the machine where SPAWN runs them. |
-| Platform | **Linux.** macOS and Windows are not supported in this release (see [Limitations](#limitations)). iOS and Tern's web client cannot run the companion. |
+| Platform | **Linux is qualified. macOS and Windows remain unqualified** pending real runtime/provider acceptance, so USAGE shows a platform hold and withholds readings there. iOS and Tern's web client cannot run the companion (see [Limitations](#limitations)). |
 
 ### Supported providers
 
 | Provider (SPAWN name) | How USAGE reads it | What you get |
 | --- | --- | --- |
-| Claude | Claude Code's saved OAuth login (`~/.claude/.credentials.json`, or the `--config-dir` SPAWN passes) and Anthropic's OAuth usage endpoint. | 5-hour, weekly and model-specific weekly windows. |
+| Claude | Claude Code's saved OAuth login and Anthropic's OAuth usage endpoint. On macOS, USAGE asks the fixed system `security` tool for the login Keychain item (`Claude Code-credentials`, or the scoped item for the `--config-dir` SPAWN passes), then falls back to `.credentials.json`; other platforms read that JSON file. | 5-hour, weekly and model-specific weekly windows. |
 | Codex (OpenAI) | A private `codex app-server` process: account read plus rate-limit read. No conversation is opened. When the saved login reads as signed out, USAGE reads once more and lets Codex renew the login through its own refresh, the one the CLI runs itself. | 5-hour and weekly windows, plus a credit balance when Codex reports one. |
 | Antigravity | `agy --print /usage`. | Separate Gemini and Claude/GPT pools (Antigravity reports *remaining*; USAGE converts it to used). |
 | Grok | A private `grok agent stdio` process: subscription check and billing read. No session or model turn. | The current billing period. |
@@ -71,11 +71,15 @@ The plugin id is `usage`. Then:
 3. Choose **USAGE Refresh**, or press **Refresh** in the USAGE pane.
 4. Optional: **USAGE Show Summary** turns on Tern's status bar with a short summary. If you hide the status bar later, USAGE respects that.
 
+On macOS and Windows, Setup instead shows **PLATFORM HOLD** and platform/setup diagnostics. USAGE account panes and the status summary do not present readings as current or healthy there. Tern's catalog **ready** means only that the package is cataloged as ready; it is not a platform-support claim or a successful provider read.
+
 Tern plugins run with your OS account's access and are not sandboxed. Read the code before installing ([Tern: Trust](https://docs.stencil.so/tern/guides/distribution.html#trust)).
 
 ### Update
 
-Run **USAGE Check for updates** from the command palette. When a newer version is on GitHub, **USAGE Update** installs it in place: it checks the release's requirements and asks first, and can also update connected remote hosts. Tern then reloads all its plugins, and your settings carry over. If ORCH+ is running a controller, run **ORCH+ Reload recovery guide** afterwards.
+Run **USAGE Check for updates** from the command palette. When a newer version is on GitHub, **USAGE Update** installs it in place: it checks the release's requirements and asks first, and can also update connected remote hosts. Tern then reloads its plugins and retains your settings. Compatible ORCH+/SPAWN reconnection is automatic; unresolved identity or effects remain held rather than repeated.
+
+The preview is not a pinned commit. Installation checks the actual package, requirements and load evidence; a different installed version is not the preview's success. If reload or missing process evidence leaves an uncertain result, use **USAGE Resolve update outcome**. It never repeats the install, and resolving as unverified does not certify success. A positively running installer cannot be overridden.
 
 A copy installed before the updater existed needs one manual update:
 
@@ -91,7 +95,11 @@ Your settings, readings and pairings live in Tern's plugin data folder, not in t
 tern plugin remove usage        # or: tern plugin unlink usage, for a linked checkout
 ```
 
-The background companion stops by itself about 90 seconds after the last USAGE window or block lets go of it. Tern keeps the plugin's data folder (`plugin-data/usage/`, see [Tern: Removing](https://docs.stencil.so/tern/guides/distribution.html#removing)), so reinstalling finds your settings again. To erase everything, delete that folder after removing the plugin. It holds the companion database (account labels, logins and readings), its owner-only access token, its TLS key and the private Python environment.
+Removing or disabling USAGE stops renewal of that plugin VM's companion lease. A supported Tern unload notification releases only that exact client; runtimes that reject the documented notification use lease expiry instead. An abandoned lease expires within 90 seconds, and the service checks every five seconds. Other live USAGE clients and active requests/refresh work keep the service running. Reload uses new client identities, so an old callback cannot release its replacement.
+
+An already-started runtime-setup launcher has a 390-second timeout and may register late; that late lease must also expire. Ordinary renewal launchers have a 30-second timeout. Removal does not kill processes by name or PID, stop another window's client, or erase readings.
+
+Tern keeps the plugin's data folder (`plugin-data/usage/`, see [Tern: Removing](https://docs.stencil.so/tern/guides/distribution.html#removing)), so reinstalling finds your settings again. To erase everything, remove the plugin and let its companion settle before deleting that folder. It holds the companion database (account labels, logins and readings), its owner-only access token, its TLS key and the private Python environment.
 
 ## Moving from tern-fleet-usage
 
@@ -117,6 +125,7 @@ Nothing is deleted. Tern keeps `plugin-data/tern-fleet-usage/` after removal, an
 | **USAGE Diagnostics** | Companion, refresh and sharing state. |
 | **USAGE Check for updates** | Checks GitHub for a newer USAGE release (see [Update](#update)). |
 | **USAGE Update** | Shown once a newer release is known; installs it after asking (see [Update](#update)). |
+| **USAGE Resolve update outcome** | Inspects a retained update without repeating installation; uncertain outcomes require explicit unverified resolution. |
 
 The speedometer button in the Files pane header opens the same view:
 
@@ -143,6 +152,8 @@ Provider icons appear in every layout.
 - The status line reports progress, the time of the last completed refresh and how many accounts had a problem. The Configuration pane lists each problem.
 
 ### Reading the numbers
+
+**Platform hold comes first.** The current/last-known presentation below applies on qualified Linux source hosts. On macOS and Windows, USAGE replaces account readings and healthy status summaries with an explicit not-qualified hold. Setup and Diagnostics remain available for evaluation and recovery, but catalog status, retained data or a successful companion start never upgrades a reading to healthy.
 
 **Used, not remaining.** Every percentage is the share of the quota already used. A full bar means 100% used. Where a provider reports *remaining* (Antigravity), USAGE converts it.
 
@@ -197,6 +208,7 @@ When the current session's host is remote, **USAGE Setup** configures that host 
 
 The rows:
 
+- **Source platform gate · Linux only qualified** is a diagnostic, not a setting. A macOS or Windows attached host remains on hold; its own USAGE Configuration pane carries the platform-specific hold and remedies. The window does not guess the attached host's OS.
 - **Install private dependencies on <name>**, offered when the host's runtime isn't ready. Python 3.11+ must already be installed on the host.
 - **Allow / Stop headless usage reads on <name>**.
 - **Enable / Revoke capacity export on <name>**.
@@ -243,7 +255,7 @@ A binding ends by itself, and must be confirmed again, when you edit that SPAWN 
 
 ## Privacy and permissions
 
-- **What a read touches.** Claude: the saved OAuth login file, then `https://api.anthropic.com/api/oauth/usage`. Codex, Grok, Kimi, Muse, Antigravity: the provider's own CLI, run with an empty working directory, no terminal and a minimal environment. Codex can write a renewed login to its own `auth.json` during a read, exactly as it does when you use it. Antigravity identity uses Google's userinfo endpoint. Kimi's local web server is bound to loopback and stopped after the read.
+- **What a read touches.** Claude: on macOS, the selected login's Keychain item through `/usr/bin/security`, with the JSON credential-file fallback; on other platforms, the saved OAuth login file. USAGE never unlocks Keychain, changes its ACL or bypasses its consent. The OAuth usage read then goes to `https://api.anthropic.com/api/oauth/usage`. Codex, Grok, Kimi, Muse, Antigravity: the provider's own CLI, run with an empty working directory, no terminal and a minimal environment. Codex can write a renewed login to its own `auth.json` during a read, exactly as it does when you use it. Antigravity identity uses Google's userinfo endpoint. Kimi's local web server is bound to loopback and stopped after the read.
 - **What leaves the read.** Only normalized identity and quota fields. Raw responses, tokens and error text are never stored or logged.
 - **Other OS users.** If a SPAWN account names an OS `user`, USAGE reads it as that user with `sudo -n -u USER`, which only works if you already allow that without a password. The Python interpreter must be executable by that user, and the provider CLIs must be on `/usr/local/bin`, `/usr/bin`, `/bin`, or that user's `~/.local/bin` or `~/.bun/bin`. USAGE copies a small helper (code only, no credentials) to a temporary directory for the read and deletes it afterwards.
 - **Seat launchers.** A SPAWN account whose command is `/absolute/path/seat-agent-entry <user>`, with `<user>` the account's own OS `user` and no other arguments, is read as that user's default provider context. USAGE trusts the launcher only when root owns it and every directory above it and none of them is writable by group or others; any other shape is reported as "account context could not be verified".
@@ -256,8 +268,12 @@ A binding ends by itself, and must be confirmed again, when you edit that SPAWN 
 | "0 accounts" or "Define accounts in SPAWN" | Install SPAWN on this machine, define accounts and open SPAWN's Config once. USAGE reads SPAWN's saved roster, not open panes. |
 | "headless usage reads are off" | **USAGE Setup › Allow headless usage reads**. |
 | "USAGE setup is required" | **USAGE Setup › Install private dependencies**. It needs Python 3.11+ and access to PyPI once. In a window attached to a remote host, the row is **Install private dependencies on <host>**, and Python and PyPI access are needed on that host. |
+| **PLATFORM HOLD**, "macOS not qualified" or "Windows not qualified" | Real platform acceptance has not passed. Account readings and healthy summaries are intentionally withheld. Open **USAGE Setup › PLATFORM HOLD** or **USAGE Diagnostics** for the platform checklist. Do not treat catalog **ready** as support. |
 | "USAGE is not ready on host <name>" | Install USAGE on that host (the [Install](#install) steps, run there) and reload it. Setup in an attached window configures the host's USAGE; it can't install the plugin. |
-| "usage credentials unavailable on source" | Sign in once with the provider's own CLI as the OS user SPAWN uses, then refresh. An env-token or API-key setup can work interactively without a saved subscription login. |
+| "usage credentials unavailable on source" | Sign in once with the provider's own CLI as the OS user SPAWN uses, then refresh. An env-token or API-key setup can work interactively without a saved subscription login. On macOS, open Claude Code with the SPAWN-selected config directory and unlock/sign in through Keychain yourself; USAGE never unlocks Keychain or changes its ACL. |
+| Provider CLI unavailable / provider quota unavailable | Install and sign in to the provider's own CLI as the same OS user. On macOS, GUI discovery includes `/opt/homebrew/bin` and `/usr/local/bin`; on Windows it includes the resolved per-user `npm` directory and prefers a native `.exe` before `.cmd`/`.bat`. An absolute executable path in SPAWN avoids GUI PATH ambiguity. Refresh after correcting it. |
+| TLS/CA certificate failure with python.org Python on macOS | In that Python version's `/Applications/Python 3.x` folder, run **Install Certificates.command**, then retry Setup or Refresh. This installs the native certificate bundle without disabling verification; see [Python on macOS — Certificate verification and OpenSSL](https://docs.python.org/3/using/mac.html#certificate-verification-and-openssl). Never set an insecure TLS bypass. |
+| Windows `setup_required`, repeated Setup/Display timeouts, or a suspected ACL problem | The current OS user must own `plugin-data/usage`; every explicit/inherited rule must be that user's FullControl allow, with an effective rule and no deny or other-user access. Reparse points are rejected. Repair ownership/ACLs without granting broad access, then retry once. Real ACL latency against the 30-second request deadline remains a native qualification gate; never relax the checks to make it pass. |
 | "provider login expired" / `login expired` | Open the provider's CLI normally once so it renews its login, then refresh. For Codex, USAGE has already let Codex try to renew it; run `codex login` as the account's OS user. |
 | "signed in with an API key" | That login has no subscription quota to show. |
 | "account context could not be verified" | The SPAWN command passes a flag that can switch accounts or profiles (for example `--profile` or an auth override), or wraps the provider CLI in a launcher USAGE can't see into. USAGE won't guess which account that is. Point the command at the provider CLI itself, or use a root-controlled [seat launcher](#privacy-and-permissions). |
@@ -265,17 +281,65 @@ A binding ends by itself, and must be confirmed again, when you edit that SPAWN 
 | Muse "Awaiting usage after a turn" | Use Muse normally once; USAGE will not start a turn for you. |
 | Hub listener problem in Diagnostics | The saved sharing address is not available (for example after a network change). Choose **Share** again with a current address, or **Standalone**. Local use keeps working meanwhile. |
 
-**USAGE Diagnostics** shows the companion state, the last refresh and its problems, sharing state and whether the summary is hidden. Tern's own logs (`tern-daemon.log` for the host half, `tern.log` for windows) contain plugin load errors ([Tern: Debugging](https://docs.stencil.so/tern/guides/debugging.html)).
+**USAGE Diagnostics** shows platform qualification and setup remedies, the companion process state, the last refresh and its stable failure categories, sharing state and whether the summary is hidden. A companion that answers is not evidence of platform qualification. The companion deliberately normalizes low-level errors, so a provider-unavailable or timeout row can offer the relevant CLI/CA/ACL checks without claiming it proved which underlying component failed. Tern's own logs (`tern-daemon.log` for the host half, `tern.log` for windows) contain plugin load errors ([Tern: Debugging](https://docs.stencil.so/tern/guides/debugging.html)).
 
 ## Limitations
 
-- **Linux only for this release.** macOS is untested; Claude Code on macOS keeps its login in the Keychain, which USAGE does not read. Windows is untested, and the companion's file-permission checks are known to be slow there.
+- **Linux is the only qualified source-host platform.** macOS and Windows remain unqualified until their real runtime and provider tests pass. Their USAGE panes and status summaries therefore hold instead of presenting readings as healthy; catalog **ready** remains catalog-only.
+- **macOS gate:** default, custom-scope, missing and locked Keychain cases; real Claude/provider reads; Homebrew/minimal GUI PATH; CA behavior where applicable; and arm64/x64 interpreter environments still need supervised native acceptance. The Keychain adapter's presence is not a support claim.
+- **Windows gate:** real provider reads, native `.exe` and batch-adapter argument behavior, child/grandchild Job Object containment, owner/DACL negative controls and ACL latency against the 30-second request deadline, plus x64/x86 interpreter environments still need supervised native acceptance.
+- **Windows batch boundary:** the current adapter's admitted inputs and refusal cases are listed below. Admitting an input is not proof that an arbitrary installed shim preserves it.
+- **Mixed-estate gate:** cross-OS combinations remain unqualified until hub/member tests prove one merged login, the newest value per pool, hub-only member refresh, offline last-known behavior and revocation without changing source identity or freshness semantics.
+- **Roster conflicts:** account definitions are ordered by SPAWN configuration revision only within the same authority and host, not by publisher clocks. Different definitions at the same revision, competing authorities and incomparable legacy lists stay unavailable with an account-list review warning rather than guessing a winner. Choosing a newer definition never refreshes its quota reading. The mixed-estate qualification gate above still applies.
 - Usage is read from each provider's current CLI or endpoint. A provider can change its output; USAGE then reports "could not parse" rather than guessing.
 - A SPAWN account that runs over SSH is shown but never read from this machine.
 - Accounts on another machine show up only when that machine runs USAGE and shares with this one, or when your window is attached to that machine's Tern host.
 - In a window attached to a remote host, the status-bar summary and USAGE Diagnostics still describe the window's own machine. USAGE blocks opened in the attached session describe the host. The **USAGE Refresh** command needs one of those blocks open to reach the host.
 - Codex readings without an email (rare) are shown without an account identity and are not merged with other rows.
 - USAGE needs Python and a one-time dependency download. It does not install Python for you.
+
+### Windows command and batch-argument boundary
+
+Windows remains on platform hold. The supervisor prefers a native executable over
+a discovered `.cmd`/`.bat` shim. Native executables receive structured arguments;
+batch files use the fixed `cmd.exe /d /s /c call` adapter with `shell=False`.
+That still invokes a command interpreter: `shell=False` does **not** by itself
+prove argument safety or fidelity.
+
+| Input | Current supervisor behavior |
+| --- | --- |
+| Ordinary nonempty text, spaces and Unicode | Admitted for native executables and batch arguments. Discovered batch paths may also contain spaces/Unicode. |
+| Trailing backslashes, including after a space-containing path | Admitted, without trimming or normalization of arguments. Python's Windows CRT serializer doubles backslashes before a closing quote; shim forwarding must preserve the intended final argv. |
+| Embedded double quotes or any of `% & ^ < > \| ! ( )` | Refused anywhere in a batch executable path or argument, before launching that batch file. Native executable arguments are not subject to this batch restriction. |
+| C0 controls (U+0000–U+001F), DEL and C1 controls (U+007F–U+009F) | Refused in batch paths/arguments; NUL is refused for every executable and argument. Tabs/newlines are not escaped into batch commands. |
+| Empty executable or empty argument | Refused by the existing public supervisor boundary on every platform. An empty stdin payload (`b""`) is allowed and is not an empty argv entry. |
+
+Refusals use the existing unavailable error boundary; they do not retry through
+another shell or silently remove, rewrite or concatenate an argument. This is the
+supervisor's contract, not a relaxation of SPAWN record admission: Windows
+command records still require an unquoted executable-only command with no
+whitespace, plus a separate argument list. Profile-selector validation remains
+independent; accepted profile paths are conveyed through the selected environment.
+
+**Forwarding matters.** An intact `%*` tail passed to a native CRT-compatible
+argument parser is the intended batch route. A shim that consumes `%1` or
+reconstructs arguments using `%~1` is not equivalent. For example, the serializer
+quotes a space-containing path ending in one backslash with two backslashes
+before its closing quote. A final native parser can decode that pair, whereas
+`%~1` quote removal followed by custom reconstruction can preserve the doubled
+backslash or change argument boundaries. Requoting cannot soundly accommodate
+arbitrary shim programs.
+
+The unresolved qualification choice is to verify each actual installed shim's
+intact-forwarding behavior on Odin, or to use a separately reviewed native
+executable/per-shim adapter for a shim that rebuilds arguments. There is no generic
+shim-fidelity guarantee or runtime shim-content classifier today. Spaces, Unicode
+and trailing backslashes remain required native cases, not inputs to drop to make
+qualification pass. Quotes, empty arguments and controls/metacharacters need
+explicit refusal evidence too. Serialization assertions on Linux prove neither
+Windows execution nor provider compatibility; actual Windows argv readback, Job
+cleanup and real provider qualification remain required before lifting the hold.
+
 
 ## Development and tests
 
@@ -290,7 +354,20 @@ python3 tools/verify.py --control /path/to/window.sock --suite all
 python3 tools/verify.py --control /path/to/window.sock --suite presentation
 ```
 
-`tools/verify.py` runs each `tests/*.luau` suite through Tern's Carly Lua tool (`tern ctl … carly lua`), which records a Carly conversation turn but makes no model request. It checks Carly's result for each suite, prints each suite's `PASS` line and exits non-zero on any failure, timeout or missing suite. `--tern` selects the Tern executable and `--timeout` the per-suite deadline. One Python test is Windows-only and is skipped elsewhere.
+`tools/verify.py` runs each `tests/*.luau` suite through Tern's Carly Lua tool (`tern ctl … carly lua`), which records a Carly conversation turn but makes no model request. It checks Carly's result for each suite, prints each suite's `PASS` line and exits non-zero on any failure, timeout or missing suite. `--tern` selects the Tern executable and `--timeout` the per-suite deadline. Native Windows ACL cases are skipped elsewhere; mocked Job/architecture checks and argv serialization do not qualify Windows or macOS.
+
+The Linux harmless process-tree smoke checks timeout/cancellation cleanup without
+calling providers. Async cleanup terminates the owned process group, explicitly
+closes the supervisor's pipe transports and reaps the direct child. Waiting for an
+already-exited child alone does not establish pipe closure; cleanup does not drain
+to EOF after the deadline or grant extra time to an external inherited writer.
+Windows workers retain Job termination before pipe cleanup. The real timeout
+fixture inspects owned pipe closure before its event loop shuts down; native
+Windows containment still requires its own qualification.
+
+The November 2026 native type-contract repairs passed luau-lsp 1.70.1 analysis of the host/window entries and imported modules against generated Tern definitions. A private `tern shot` run of `accounts`, `roster`, `snapshot`, `companion`, `host_setup`, `capacity`, `setup` and `window` passed 361 checks. External effects remain mocked in those fixtures; this does not qualify provider calls, rendered UI, Windows or macOS.
+
+The presentation fixture isolates capacity/updater registration through its existing dependency mocks; their behavior is qualified separately. Shared updater installation and native host/window-load checks live under `shared/tern-updater/tests/` and run only in a private desktop.
 
 All fixtures are synthetic. Keep runtime data, logs and screenshots out of the package directory: Tern reloads a linked plugin whenever anything in it changes.
 

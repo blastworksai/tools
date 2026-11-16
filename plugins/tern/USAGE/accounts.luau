@@ -100,7 +100,10 @@ local function alias_index(readings: { Reading }): AliasIndex
 			provider[alias] = if previous == nil or previous == canonical then canonical else false
 		end
 		if reading.account_id ~= nil then associate(reading.account_id) end
-		for _, alias in reading.account_aliases or {} do associate(alias) end
+		local reading_aliases = reading.account_aliases
+		if reading_aliases ~= nil then
+			for _, alias in reading_aliases do associate(alias) end
+		end
 	end
 	return aliases
 end

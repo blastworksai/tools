@@ -19,7 +19,7 @@ end
 
 local function store(agents: { any }): any
 	return { authority = {
-		version = 3, host_key = "host:vm",
+		version = 3, host_key = "host:vm", config_revision = 7,
 		config = { schema = 2, hosts = {
 			["host:vm"] = { schema = 2, agents = agents },
 			["host:other"] = { schema = 2, agents = { record("elsewhere", {}) } },
@@ -37,6 +37,7 @@ local roster = spawn.decode(store({
 	record("custom", { provider = "Mystery" }),
 }), "linux")
 check(roster.problem == nil, "current SPAWN store decodes")
+check(roster.host_key == "host:vm" and roster.config_revision == 7 and roster.host_os == "linux", "launch revalidation identity stays with the host roster")
 check(#roster.agents == 5, "records without a plain id are left out; other hosts' buckets ignored")
 check(roster.agents[1].id == "claude-work" and roster.agents[1].label == "Claude — Work", "SPAWN's label")
 check(roster.agents[1].icon == "provider-anthropic" and roster.agents[1].disabled == nil, "enabled record with provider logo")
@@ -63,13 +64,13 @@ line, delivery = spawn.render(record("a", { provider = "Agy", command = "agy", a
 check(line == "SPAWN_PROVIDER=agy sudo -u agywork -H -- agy --dangerously-skip-permissions -i '/work-on example-project'", "agy -i prompt under the account: " .. tostring(line))
 check(delivery == "argument", "agy prompt delivered on the command line")
 
--- A seat wrapper drops extra arguments: the prompt is typed, never appended.
+-- A seat wrapper drops extra arguments: WORK copies the prompt instead of appending it.
 line, delivery = spawn.render(record("s", { command = "/usr/local/bin/seat-launcher", arguments = { "claudework" }, user = "claudework" }), prompt)
 check(line == "SPAWN_PROVIDER=claude sudo -u claudework -H -- /usr/local/bin/seat-launcher claudework", "seat wrapper line: " .. tostring(line))
-check(delivery == "type", "seat wrapper prompt is typed")
+check(delivery == "clipboard", "seat wrapper prompt uses clicking-window clipboard")
 
 line, delivery = spawn.render(record("k", { provider = "Kimi", command = "kimi", arguments = { "--yolo" } }), prompt)
-check(delivery == "type" and not string.find(line, "work-on", 1, true), "Kimi has no interactive prompt flag")
+check(delivery == "clipboard" and not string.find(line, "work-on", 1, true), "Kimi has no interactive prompt flag")
 
 -- A command that already starts with sudo isn't wrapped again; its last word is the CLI.
 line, delivery = spawn.render(record("o", { provider = "OMP", backend = "native-agent", command = "sudo -u ompwork -H -- omp", arguments = { "--approval-mode", "yolo" }, user = "ompwork", prompt = "Hello" }), prompt)

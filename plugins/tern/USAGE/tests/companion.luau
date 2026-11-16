@@ -10,6 +10,7 @@ local function fixture(options)
 	options = options or {}
 	local clock, serial = 0, 0
 	local processes, timers, logs = {}, {}, {}
+	local hooks = {}
 	local fake = {
 		context = options.context or "window", runtime = { os = options.os or "linux" },
 		plugin = { dir = "/installed package/USAGE", data = "/private data/USAGE" },
@@ -22,6 +23,14 @@ local function fixture(options)
 		end },
 		log = { warn = function(value) table.insert(logs, value) end },
 	}
+	fake.on = function(name, callback)
+		if options.hook_failure ~= nil then error(options.hook_failure, 0) end
+		if name ~= "unload" or not options.unload_supported then
+			if fake.context == "window" then error('tern.on: unknown window event `' .. name .. '`', 0) end
+			error('tern.on: unknown host event "' .. name .. '" (spawn, command_started, command_finished, cwd, title, pane_exited)', 0)
+		end
+		hooks[name] = callback
+	end
 	fake.timer = function(ms, callback)
 		local timer = { at = clock + ms, callback = callback, cancelled = false }
 		function timer:cancel() self.cancelled = true end
@@ -36,7 +45,7 @@ local function fixture(options)
 	local chunk = assert(loadstring(source, "companion"))
 	setfenv(chunk, setmetatable({ tern = fake }, { __index = environment }))
 	local bridge = chunk()
-	local f = { bridge = bridge, processes = processes, timers = timers, logs = logs }
+	local f = { bridge = bridge, processes = processes, timers = timers, logs = logs, hooks = hooks }
 	function f.advance(ms)
 		local target = clock + ms
 		while true do
@@ -100,7 +109,8 @@ test("ensure uses isolated validated Python and explicit default denial", functi
 	assert(launch.argv[4] == "/installed package/USAGE/usage_service.py" and launch.argv[5] == "ensure")
 	assert(launch.argv[6] == "--data-root" and launch.argv[7] == "/private data/USAGE/companion")
 	local body = real.json.decode(launch.opts.stdin)
-	assert(body.client_id == "window:one" and body.client_kind == "window" and body.install_dependencies == false)
+	assert(body.client_id:match("^window:") and body.client_id ~= "window:one"
+		and body.client_kind == "window" and body.install_dependencies == false)
 	assert(launch.opts.timeout_ms == 390000 - 12)
 	local cx = { completion = true }
 	f.resolve(2, ready(), cx)
@@ -304,6 +314,101 @@ test("changing client invalidates in-flight registration", function()
 	f.resolve(2, ready(), { stale = true })
 	f.advance(0)
 	oneError(calls, "cancelled")
+end)
+
+test("unavailable native unload events retain lease expiry without hiding other errors", function()
+	for _, context in { "host", "window" } do
+		local f = fixture({ context = context })
+		assert(f.bridge.on_unload(f.bridge.unload) == false)
+		assert(f.hooks.unload == nil and #f.logs == 1 and #f.processes == 0)
+		f.bridge.set_client(context, context)
+		f.bridge.ensure(function() end)
+		f.probe()
+		assert(f.processes[2].argv[5] == "ensure", "missing optional unload must not prevent the ordinary service path")
+	end
+	for _, message in { "registration budget exhausted", 'tern.on: unknown host event "pane_exited" (spawn)',
+		'tern.on: unknown window event `unload`' } do
+		local f = fixture({ context = "host", hook_failure = message })
+		local ok, err = pcall(f.bridge.on_unload, f.bridge.unload)
+		assert(not ok and tostring(err):find(message, 1, true) ~= nil and #f.logs == 0,
+			"only the exact unsupported current-context unload event may fall back")
+	end
+end)
+
+test("native non-string errors use rendering only for the exact capability rejection", function()
+	for _, observed in {
+		{ context = "host", message = 'runtime error: tern.on: unknown host event "unload" (spawn, command_started, command_finished, cwd, title, pane_exited)\nstack traceback:\n\t[native registration]' },
+		{ context = "window", message = 'runtime error: tern.on: unknown window event `unload`\nstack traceback:\n\t[native registration]' },
+	} do
+		local unsupported = setmetatable({}, { __tostring = function() return observed.message end })
+		local older = fixture({ context = observed.context, hook_failure = unsupported })
+		assert(older.bridge.on_unload(older.bridge.unload) == false and #older.logs == 1)
+	end
+	local unrelated = setmetatable({}, { __tostring = function()
+		return "runtime error: registration budget exhausted\nstack traceback:\n\t[native registration]"
+	end })
+	local broken = fixture({ context = "host", hook_failure = unrelated })
+	local ok, err = pcall(broken.bridge.on_unload, broken.bridge.unload)
+	assert(not ok and err == unrelated and #broken.logs == 0,
+		"an unrelated native error must propagate as its original non-string object")
+end)
+
+test("unload releases only its incarnation and rejects late continuations", function()
+	local f = fixture({ unload_supported = true })
+	assert(f.bridge.on_unload(f.bridge.unload) == true)
+	local calls, done = recorder()
+	f.bridge.set_client("window:reused", "window")
+	f.bridge.ensure(done)
+	f.probe()
+	local oldId = real.json.decode(f.processes[2].opts.stdin).client_id
+	f.hooks.unload()
+	assert(#f.processes == 3 and f.processes[3].argv[5] == "rpc")
+	local release = real.json.decode(f.processes[3].opts.stdin)
+	assert(release.operation == "unregister_client" and release.payload.client_id == oldId)
+	assert(f.processes[3].opts.timeout_ms == 30000)
+	f.bridge.unload()
+	f.resolve(2, ready(), { stale = true })
+	f.advance(0)
+	oneError(calls, "cancelled")
+	local late, lateDone = recorder()
+	f.bridge.ensure(lateDone)
+	f.bridge.renew(lateDone)
+	f.bridge.request("diagnostics", {}, lateDone)
+	f.advance(0)
+	assert(#f.processes == 3 and #late == 3)
+	for _, call in late do assert(call.err.code == "cancelled") end
+end)
+
+test("invalidation renews a different lease before an old release finishes", function()
+	local f = fixture()
+	f.bridge.set_client("host", "host")
+	f.bridge.ensure(function() end)
+	f.probe()
+	local oldId = real.json.decode(f.processes[2].opts.stdin).client_id
+	f.bridge.invalidate()
+	local oldRelease = real.json.decode(f.processes[3].opts.stdin)
+	assert(oldRelease.payload.client_id == oldId)
+	f.bridge.renew(function() end)
+	f.probe(4)
+	local renewed = real.json.decode(f.processes[5].opts.stdin)
+	assert(renewed.operation == "register_client" and renewed.payload.kind == "host"
+		and renewed.payload.client_id ~= oldId and renewed.payload.ttl_seconds == 90)
+	f.resolve(3, { ok = true, unregistered = true })
+	f.resolve(5, { ok = true, registered = true })
+	f.bridge.unload()
+	assert(real.json.decode(f.processes[6].opts.stdin).payload.client_id == renewed.payload.client_id)
+end)
+
+test("unload before interpreter discovery cannot start or release a helper", function()
+	local f = fixture()
+	local calls, done = recorder()
+	f.bridge.set_client("host", "host")
+	f.bridge.ensure(done)
+	f.bridge.unload()
+	f.probe()
+	f.advance(0)
+	oneError(calls, "cancelled")
+	assert(#f.processes == 1)
 end)
 
 test("host never receives a window context", function()

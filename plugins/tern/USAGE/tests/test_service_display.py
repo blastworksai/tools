@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 from uuid import uuid4
 
-from usage_service.display import Display, PAGE_BYTES, PART_BYTES
+from usage_service.display import Display, PAGE_BYTES, PART_BYTES, display_access
 from usage_service.protocol import Authority, ServiceError, decode, encode
 from usage_service.store import Store
 
@@ -36,6 +36,58 @@ class DisplayTests(unittest.TestCase):
         self.display=Display(self.store,clock=lambda:self.now)
         self.addCleanup(self.temp.cleanup)
         self.addCleanup(self.store.close)
+
+    def test_display_export_opt_in_revocation_and_mapping_identity(self):
+        from usage_service.refresh import Refresh
+        from test_spawn_roster import authority, record
+        refresh = Refresh(self.store, Path(self.temp.name) / "private")
+        refresh.path = Path(self.temp.name) / "spawn.json"
+        raw = authority([record(), record("omp", "OMP")])
+        raw["version"] = 4
+        refresh.path.write_bytes(encode({"authority": raw}))
+        def access():
+            return display_access(self.store, self.owner, {}, refresh.configuration)
+        self.assertFalse(self.store.settings()["display_enabled"])
+        with self.assertRaises(ServiceError) as caught:
+            access()
+        self.assertEqual(caught.exception.code, "display_disabled")
+        self.store.configure({"display_enabled": True})
+        first = access()
+        self.assertEqual(first["scopes"][0]["spawn_join"]["host_key"], raw["host_key"])
+        self.assertNotIn("private-command", encode(first).decode())
+        self.assertNotIn("fixture-one", encode(first).decode())
+        self.assertFalse(self.store.settings()["capacity_enabled"])
+        self.store.configure({"metadata_enabled": True})
+        _, _, roster, definitions = refresh.configuration()
+        scope = roster["scopes"][0]
+        from usage_service.spawn_roster import binding_key
+        binding = {"accounts": {binding_key(scope["id"], "claude-work"): {
+            "definition_revision": definitions[0]["revision"], "canonical_ids": ["claude:dummy"], "generation": 1}},
+            "consumers": {binding_key(scope["id"], "omp"): {
+                "definition_revision": scope["consumers"][0]["definition_revision"], "account_id": "claude-work"}}}
+        self.store.set_local_state("account_bindings", binding)
+        bound = access()
+        self.assertNotEqual(first["revision"], bound["revision"])
+        self.assertEqual(bound["scopes"][0]["consumers"][0]["account_ids"], ["claude-work"])
+        self.store.set_local_state("account_bindings", {"accounts": {}, "consumers": {}})
+        revoked = access()
+        self.assertNotEqual(bound["revision"], revoked["revision"])
+        self.assertNotIn("account_ids", revoked["scopes"][0]["consumers"][0])
+        raw["config"]["hosts"][raw["host_key"]]["agents"][0]["arguments"] = ["--profile", "changed"]
+        refresh.path.write_bytes(encode({"authority": raw}))
+        self.assertNotEqual(revoked["revision"], access()["revision"])
+        self.store.configure({"display_enabled": False})
+        with self.assertRaises(ServiceError):
+            access()
+        for invalid in ({"refresh": True}, {"cursor": "private"}):
+            with self.assertRaises(ServiceError):
+                display_access(self.store, self.owner, invalid, refresh.configuration)
+        remote = Authority(self.owner.device_id, self.owner.group_id, "peer", False)
+        with self.assertRaises(ServiceError):
+            display_access(self.store, remote, {}, refresh.configuration)
+        for invalid in (1, "true", None):
+            with self.assertRaises(ServiceError):
+                self.store.configure({"display_enabled": invalid})
 
     def assemble(self,first=None):
         page=first or self.display.page(self.owner,{})

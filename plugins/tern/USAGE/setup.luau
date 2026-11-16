@@ -6,6 +6,62 @@
 local companion = require("./companion")
 local host_setup = require("./host_setup")
 local setup = {}
+
+function setup.platform_hold(): string?
+	if tern.runtime.os == "macos" then return "macOS not qualified" end
+	if tern.runtime.os == "windows" then return "Windows not qualified" end
+	if tern.runtime.os ~= "linux" then return tostring(tern.runtime.os) .. " unsupported" end
+	return nil
+end
+
+function setup.diagnostic_items(): { any }
+	local os = tern.runtime.os
+	local hold = setup.platform_hold()
+	if hold == nil then return {} end
+	local items = {
+		{ label = "PLATFORM HOLD · " .. hold, detail = "Readings are hidden rather than shown as healthy. Catalog ready is catalog-only; real runtime/provider acceptance is still required." },
+	}
+	if os == "macos" then
+		table.insert(items, { label = "Claude Keychain/login unavailable", detail = "Open Claude Code once as this OS user with the SPAWN-selected config directory. Unlock/sign in through Keychain yourself; USAGE never unlocks it or changes its ACL, then Refresh." })
+		table.insert(items, { label = "Provider executable unavailable", detail = "Install/sign in as this OS user. GUI lookup includes /opt/homebrew/bin and /usr/local/bin; use an absolute SPAWN executable path when needed, then Refresh." })
+		table.insert(items, { label = "python.org CA certificates", detail = "For a TLS certificate failure, run Install Certificates.command in /Applications/Python 3.x, then Retry/Refresh. Keep TLS verification enabled." })
+	elseif os == "windows" then
+		table.insert(items, { label = "Provider executable unavailable", detail = "Install/sign in as this OS user. Prefer a native .exe or absolute SPAWN path; per-user npm and then .cmd/.bat adapters are searched, then Refresh." })
+		table.insert(items, { label = "Setup failed: private-data ACL", detail = "The current user must own plugin-data/usage with only that user's FullControl allow rules, no deny/other-user access and no reparse points. Repair without broad access, then Retry." })
+		table.insert(items, { label = "Setup/Display timeout: ACL performance gate", detail = "Check the owner-only ACL path and retry once. Real Windows ACL latency against the 30-second deadline is unqualified; never weaken permission checks." })
+	else
+		table.insert(items, { label = "Unsupported companion route", detail = "Use a qualified Linux desktop source. iOS and Tern's web client cannot run the USAGE companion." })
+	end
+	return items
+end
+
+function setup.failure_diagnostics(account: string?, code: string): { any }
+	local prefix = (account or "Source") .. " · "
+	local os = tern.runtime.os
+	if code == "local_login_unavailable" and os == "macos" then
+		return { { label = prefix .. "Claude Keychain/login unavailable", detail = "Open Claude Code with the selected config directory as this OS user; unlock/sign in through Keychain yourself, then Refresh. USAGE never changes Keychain ACLs." } }
+	end
+	if code == "source_usage_unavailable" and os == "macos" then
+		return { { label = prefix .. "provider executable or HTTPS read unavailable", detail = "Check the native CLI and absolute SPAWN path. For a python.org CA failure run Install Certificates.command; never disable TLS, then Refresh." } }
+	end
+	if code == "source_usage_unavailable" and os == "windows" then
+		return { { label = prefix .. "provider executable/read unavailable", detail = "Install/sign in as this OS user; prefer a native .exe or absolute SPAWN path over a batch adapter, then Refresh." } }
+	end
+	if code == "source_timeout" and os == "macos" then
+		return { { label = prefix .. "Keychain/provider read timed out", detail = "Check Claude/Keychain and the provider CLI as this OS user, then retry once. A timeout does not prove which component stalled." } }
+	end
+	if code == "source_timeout" and os == "windows" then
+		return { { label = prefix .. "provider read timed out", detail = "Check the native provider CLI and retry once. If Setup/Display also stalls, inspect the owner-only ACL path; Windows ACL performance remains unqualified." } }
+	end
+	if code == "setup_required" and os == "windows" then
+		return { { label = prefix .. "private runtime/ACL setup required", detail = "Retry Setup after confirming current-user ownership, owner-only FullControl rules and no reparse points. Do not grant broad access or bypass ACL checks." } }
+	end
+	if code == "unsupported_platform" or code == "unsupported_tern" then
+		return { { label = prefix .. "unsupported route", detail = "Use a qualified Linux desktop source. Catalog ready does not qualify this route or make readings healthy." } }
+	end
+	return {}
+end
+
 local function array(values: any): any
 	local result = tern.json.array()
 	for _, value in values do table.insert(result, value) end
@@ -117,6 +173,13 @@ function setup.new(changed: (any) -> ()): any
 			elseif item.action == "inspect" then confirm(fresh, own, title, detail, done) end
 		end)
 	end
+	local function platform_help(cx: any, own: number)
+		local items = setup.diagnostic_items()
+		table.insert(items, { label = "Close platform guidance", action = "close" })
+		pick(cx, own, "USAGE platform / setup diagnostics", items, function(item, fresh)
+			if item.action ~= "close" then platform_help(fresh, own) end
+		end)
+	end
 	local function rpc(own: number, operation: string, payload: any, done: (any, any) -> ())
 		companion.request(operation, payload, function(value, err, fresh)
 			if own ~= self.generation or fresh == nil then return end
@@ -193,13 +256,17 @@ function setup.new(changed: (any) -> ()): any
 		cx:toast("info", "USAGE summary enabled", "You can hide the status bar later; USAGE will respect that choice.")
 	end
 	local function runtime(cx: any, own: number, err: any)
-		pick(cx, own, "USAGE runtime — " .. (err.message or "Setup required"), {
+		local hold = setup.platform_hold()
+		local items: { PickItem } = {
 			{ label = "Install private dependencies", action = "install", detail = "Use Python 3.11+ to install hash-locked packages into USAGE's private environment. No system packages or privileges change." },
 			{ label = "Open official Python installer page", action = "python", detail = "Python 3.11+ is a prerequisite. Return here and Retry after graphical installation." },
 			{ label = "Select existing Python interpreter", action = "interpreter", detail = "Executable path only, not a command or shell arguments." },
 			{ label = "Retry runtime check", action = "retry" },
-		}, function(item, fresh)
-			if item.action == "python" then fresh:open("https://www.python.org/downloads/")
+		}
+		if hold ~= nil then table.insert(items, 1, { label = "PLATFORM HOLD · " .. hold, action = "platform", detail = "Read the platform/setup diagnostics before treating any reading as supported." }) end
+		pick(cx, own, "USAGE runtime — " .. (if hold ~= nil then hold .. " · " else "") .. (err.message or "Setup required"), items, function(item, fresh)
+			if item.action == "platform" then platform_help(fresh, own)
+			elseif item.action == "python" then fresh:open("https://www.python.org/downloads/")
 			elseif item.action == "retry" then self:open(fresh, "local")
 			elseif item.action == "interpreter" then
 				prompt(fresh, own, "Existing Python 3.11+ executable path (no arguments)", nil, 4096, function(path, next_cx)
@@ -285,7 +352,7 @@ function setup.new(changed: (any) -> ()): any
 		end)
 	end
 	local function revoke(cx: any, own: number, state: any)
-		local items = {}
+		local items: { PickItem } = {}
 		if type(state.hub) == "table" then table.insert(items, { label = "Leave paired hub", detail = state.hub.device_id, hub = true }) end
 		if state.settings.role ~= "member" then
 			for _, peer in state.peers do if not peer.revoked then table.insert(items, { label = "Revoke peer", detail = peer.device_id, device_id = peer.device_id }) end end
@@ -315,6 +382,14 @@ function setup.new(changed: (any) -> ()): any
 			if enabled then "Allow same-user Tern plugins such as ORCH+ to read account, source and SPAWN binding evidence, and the quota of accounts you bound. No credentials or source selectors. Tern block events do not authenticate plugins or humans. No refresh, configuration or launch authority is granted."
 			else "Invalidate capacity snapshots immediately. Already received data cannot be recalled.", function()
 				configure(own, { changes = { capacity_enabled = enabled }, consent = { capacity = enabled } }, target)
+			end)
+	end
+	local function display(cx: any, own: number, state: any, target: any)
+		local enabled = not state.settings.display_enabled
+		confirm(cx, own, target.prefix .. (if enabled then "Show usage in ORCH+?" else "Stop showing usage in ORCH+?"),
+			if enabled then "Share already-visible provider/account summaries with local plugins and windows attached to this host. Includes last-known percentages and their age, not credentials or paths. This does not enable quota routing or network sharing."
+			else "Invalidate display exports now. Already received summaries cannot be recalled.", function()
+				configure(own, { changes = { display_enabled = enabled }, consent = { display = enabled } }, target)
 			end)
 	end
 	local function bindings(cx: any, own: number, target: any)
@@ -406,19 +481,25 @@ function setup.new(changed: (any) -> ()): any
 				failed({ code = "decode_failed", message = "Host " .. name .. " returned an invalid USAGE Setup state." }, latest); return
 			end
 			local items = {
+				{ label = "Source platform gate · Linux only qualified", action = "host_platform",
+					detail = "A macOS/Windows attached host remains on hold; its own USAGE Configuration pane shows the hold and remedies. Never treat its readings as healthy." },
 				{ label = (if state.settings.metadata_enabled then "Stop headless usage reads on " else "Allow headless usage reads on ") .. name, action = "metadata",
 					detail = "Lets Refresh on " .. name .. " read usage for its SPAWN accounts without typing into agent sessions." },
 				{ label = (if state.settings.capacity_enabled then "Revoke capacity export on " else "Enable capacity export on ") .. name, action = "capacity",
 					detail = "Read-only evidence for ORCH+ quota routing in windows attached to " .. name .. "." },
+				{ label = (if state.settings.display_enabled then "Stop showing usage in ORCH+ on " else "Show usage in ORCH+ on ") .. name, action = "display",
+					detail = "Display-only summaries; does not enable quota routing." },
 			}
 			if state.settings.metadata_enabled then
 				table.insert(items, { label = "Bind SPAWN accounts on " .. name .. "…", action = "bind", detail = "Confirm which signed-in login each of its SPAWN accounts uses." })
 				table.insert(items, { label = "Associate OMP records on " .. name .. "…", action = "associate", detail = "Declare which bound account's quota an OMP record uses." })
 			end
 			table.insert(items, { label = "Configure this window's machine instead", action = "local", detail = "Runtime, pairing, summary and permissions of the machine running this window." })
-			pick(latest, own, "USAGE Setup — host " .. name .. " (attached source) · " .. state.settings.role .. " · " .. state.source.device_id, items, function(item, selected_cx)
-				if item.action == "metadata" then metadata(selected_cx, own, state, target)
+			pick(latest, own, "USAGE Setup — host " .. name .. " (attached source) · " .. (state.settings.role :: string) .. " · " .. state.source.device_id, items, function(item, selected_cx)
+				if item.action == "host_platform" then host_menu(own, target)
+				elseif item.action == "metadata" then metadata(selected_cx, own, state, target)
 				elseif item.action == "capacity" then capacity(selected_cx, own, state, target)
+				elseif item.action == "display" then display(selected_cx, own, state, target)
 				elseif item.action == "bind" then bindings(selected_cx, own, target)
 				elseif item.action == "associate" then associations(selected_cx, own, target)
 				elseif item.action == "local" then self:open(selected_cx, "local") end
@@ -442,7 +523,7 @@ function setup.new(changed: (any) -> ()): any
 			if value == nil then runtime(fresh, own, err or {}); return end
 			rpc(own, "setup_state", {}, function(state, _state_cx)
 				rpc(own, "diagnostics", {}, function(diagnostics, latest)
-					local items = {
+					local items: { PickItem } = {
 						{ label = "Enable summary / Show Summary", action = "summary", detail = "Explicitly enable Tern's status bar once; later hides are respected." },
 						{ label = "Copy installation UUID", action = "copy_identity", detail = state.source.device_id },
 						{ label = "Standalone / stop sharing", action = "standalone" }, { label = "Share from this installation", action = "share" },
@@ -452,13 +533,18 @@ function setup.new(changed: (any) -> ()): any
 							detail = "Lets Refresh read usage for SPAWN accounts without typing into agent sessions." },
 						{ label = if state.settings.capacity_enabled then "Revoke capacity export" else "Enable capacity export", action = "capacity",
 							detail = "Read-only evidence for same-user plugins such as ORCH+ quota routing." },
+						{ label = if state.settings.display_enabled then "Stop showing usage in ORCH+" else "Show usage in ORCH+", action = "display",
+							detail = "Share cached summaries with local plugins and attached windows, not routing permission." },
 					}
+					local hold = setup.platform_hold()
+					if hold ~= nil then table.insert(items, 1, { label = "PLATFORM HOLD · " .. hold, action = "platform", detail = "Read the platform/setup diagnostics; no reading is qualified on this platform." }) end
 					if state.settings.metadata_enabled then
 						table.insert(items, { label = "Bind SPAWN accounts…", action = "bind", detail = "Confirm which signed-in login each SPAWN account uses." })
 						table.insert(items, { label = "Associate OMP records…", action = "associate", detail = "Declare which bound account's quota an OMP record uses." })
 					end
-					pick(latest, own, "USAGE Setup — " .. state.settings.role .. " · " .. state.source.device_id, items, function(item, selected_cx)
-						if item.action == "summary" then self:show_summary(selected_cx)
+					pick(latest, own, "USAGE Setup — " .. (if hold ~= nil then hold .. " · " else "") .. state.settings.role .. " · " .. state.source.device_id, items, function(item, selected_cx)
+						if item.action == "platform" then platform_help(selected_cx, own)
+						elseif item.action == "summary" then self:show_summary(selected_cx)
 						elseif item.action == "copy_identity" then selected_cx:copy(state.source.device_id); selected_cx:toast("info", "USAGE installation UUID copied")
 						elseif item.action == "standalone" then standalone(selected_cx, own, state)
 						elseif item.action == "share" then share(selected_cx, own, state, diagnostics)
@@ -467,6 +553,7 @@ function setup.new(changed: (any) -> ()): any
 						elseif item.action == "revoke" then revoke(selected_cx, own, state)
 						elseif item.action == "metadata" then metadata(selected_cx, own, state, here)
 						elseif item.action == "capacity" then capacity(selected_cx, own, state, here)
+						elseif item.action == "display" then display(selected_cx, own, state, here)
 						elseif item.action == "bind" then bindings(selected_cx, own, here)
 						elseif item.action == "associate" then associations(selected_cx, own, here) end
 					end)

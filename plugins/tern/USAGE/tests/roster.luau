@@ -32,6 +32,10 @@ local function scope(entries, revision, at, consumers)
 	return { id = "host:fixture", revision = revision or "definition-1", updated_at_ms = at or 100,
 		accounts = entries, consumers = consumers or {} }
 end
+local function joined(value, revision, namespace)
+	value.spawn_join = { namespace = namespace or "spawn-fixture", host_key = value.id, config_revision = revision }
+	return value
+end
 local function source(publisher, readings, configured)
 	return assert(snapshot.decode({ version = 3, publisher = publisher, as_of_ms = 1000, readings = readings,
 		roster = if configured then { version = 1, scopes = { configured } } else nil }))
@@ -52,7 +56,7 @@ end
 local a = entry("primary", "claude", { "claude:one" })
 local old = reading("pane-a", "claude:one", 21, 1000)
 local newer = reading("pane-b", "claude:one", 34, 2000)
-local duplicate = source("a", { old, newer }, scope({ a }))
+local duplicate = source("a", { old, newer }, joined(scope({ a }, nil, 6000000), 7))
 local model = project({ a = duplicate })
 check(#model.accounts == 1 and model.accounts[1].windows[1].used == 34,
 	"duplicate sessions choose the latest observation, never sum")
@@ -80,15 +84,53 @@ check(project({ a = source("a", {}, scope({ custom })) }).accounts[1].provider =
 
 local changed = entry("primary", "claude", { "claude:two" })
 changed.account_label = "Edited account"
-local edit = source("b", { reading("new-pane", "claude:two", 52, 2500) }, scope({ changed }, "definition-2", 200))
+local edit = source("b", { reading("new-pane", "claude:two", 52, 2500) }, joined(scope({ changed }, "definition-2", 1), 8))
 local edited = project({ old = duplicate, new = edit })
 check(#edited.accounts == 1 and edited.accounts[1].account_label == "Edited account" and edited.accounts[1].windows[1].used == 52,
-	"latest scope replaces definitions and excludes stale associations")
-local removal = source("b", {}, scope({}, "definition-3", 300))
+	"a newer SPAWN revision replaces stale definitions despite the old publisher's future clock and its own past clock")
+local removal = source("b", {}, joined(scope({}, "definition-3", 300), 9))
 check(#project({ old = duplicate, new = removal }).accounts == 0, "scope removal cannot be undone by a stale source copy")
-local tie = source("a", {}, scope({ entry("tie", "muse") }, "tie-revision", 200))
-check(project({ a = tie, b = edit }).accounts[1].account_label == "Configured tie",
-	"equal-mtime conflicting definitions choose the deterministic publisher tie break")
+local stale_edit = project({ old = duplicate, new = edit }, 3000000)
+check(stale_edit.accounts[1].windows[1].observed_at_ms == 2500
+	and stale_edit.accounts[1].windows[1].freshness == "stale",
+	"selecting a newer definition never refreshes its measurement timestamp")
+local candidates = { duplicate, edit, removal }
+for _, order in { { 1, 2, 3 }, { 1, 3, 2 }, { 2, 1, 3 }, { 2, 3, 1 }, { 3, 1, 2 }, { 3, 2, 1 } } do
+	local values = {}
+	for _, index in order do values[candidates[index].publisher .. "-" .. tostring(index)] = candidates[index] end
+	local removed = project(values)
+	check(#removed.accounts == 0 and #removed.roster_conflicts == 0,
+		"the highest authority revision removes the account independently of publisher traversal and wall clocks")
+end
+local fork = source("fork", {}, joined(scope({ entry("fork", "muse") }, "fork-definition", 8000000), 8))
+local forked = project({ current = edit, fork = fork })
+check(#forked.accounts == 0 and #forked.roster_conflicts == 1
+	and forked.roster_conflicts[1].reason == "different_definitions",
+	"conflicting definitions at the same authority revision are not ordered by clocks or publisher names")
+check(presentation.summary(forked).conflict_count == 1
+	and presentation.segments(forked)[1].tone == "warn",
+	"an ambiguous list has an actionable status instead of appearing to be an empty configured roster")
+local replacement = source("replacement", {}, joined(scope({ entry("replacement", "muse") }, "replacement-definition", 9000000), 1, "different-spawn"))
+local authorities = project({ old = duplicate, replacement = replacement })
+check(#authorities.accounts == 0 and #authorities.roster_conflicts == 1
+	and authorities.roster_conflicts[1].reason == "different_authorities",
+	"unrelated SPAWN authorities cannot replace each other using counter values or machine clocks")
+check(#project({ old = duplicate, replacement = replacement }, 10000000).roster_conflicts == 1,
+	"waiting for a skewed clock to catch up cannot resolve authority ambiguity")
+local legacy_old = source("legacy-old", { old }, scope({ a }, "legacy-1", 100))
+local legacy_new = source("legacy-new", { newer }, scope({ changed }, "legacy-2", 200))
+check(#project({ a = legacy_old, b = legacy_new }).roster_conflicts == 1,
+	"legacy definitions without a comparable authority revision remain explicitly ambiguous")
+check(#project({ a = legacy_old, b = edit }).roster_conflicts == 1,
+	"a modern publication does not silently claim a conflicting legacy authority")
+local same_legacy = source("legacy-copy", { newer }, scope({ a }, "legacy-1", 5000000))
+check(project({ a = legacy_old, b = same_legacy }).accounts[1].windows[1].used == 34,
+	"identical legacy definitions still combine observations without ordering publisher clocks")
+local separate_scope = joined(scope({ entry("separate", "muse") }), 1)
+separate_scope.id, separate_scope.spawn_join.host_key = "host:separate", "host:separate"
+local partial = project({ old = duplicate, replacement = replacement, separate = source("separate", {}, separate_scope) })
+check(#partial.accounts == 1 and partial.accounts[1].account_label == "Configured separate"
+	and #partial.roster_conflicts == 1, "one ambiguous host does not hide independently configured accounts")
 local copy_a = source("a", {}, scope({ a }))
 local copy_b = source("b", { newer }, scope({ entry("primary", "claude", {}, { "pane-b" }) }))
 check(project({ a = copy_a, b = copy_b }).accounts[1].windows[1].used == 34,

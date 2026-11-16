@@ -19,7 +19,7 @@ here = Path(__file__).resolve().parent
 helpers = here if (here/'todo.py').exists() else here.parent/'bin'
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--work-dir', required=True, type=Path)
-parser.add_argument('--case', choices=['all', 'namespace', 'atomic', 'rename', 'forged'], default='all')
+parser.add_argument('--case', choices=['all', 'namespace', 'symlink', 'replace', 'atomic', 'writers', 'rename', 'forged'], default='all')
 args = parser.parse_args()
 root = args.work_dir.resolve()
 root.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -44,6 +44,7 @@ receipt = {'author': 'CodexBWAI', 'platform': sys.platform, 'python': sys.versio
            'checks': [], 'case': args.case, 'scope': 'Owned native program; private fixture metadata only'}
 owns_binding = False
 slow = None
+competitor = None
 release = root/'release-reader'
 try:
     chain = ancestors(os.getpid())
@@ -66,6 +67,10 @@ try:
 
     if os.name != 'nt' and args.case in {'all', 'namespace'}:
         folder = publication.directory(publication.owner())
+        target = folder/publication._key(native)
+        expected = (0o751, 0o640) if sys.platform.startswith('linux') else (0o700, 0o600)
+        assert (folder.stat().st_mode & 0o777, target.stat().st_mode & 0o777) == expected
+        receipt['checks'].append('platform metadata modes are Linux agents-sharing or owner-only')
         mode = folder.stat().st_mode & 0o777
         try:
             folder.chmod(0o777)
@@ -102,6 +107,29 @@ try:
         assert restored['state'] == 'active'
         receipt['checks'].append('plain-file and cyclic-link entries are not publication namespaces')
 
+    if sys.platform.startswith('linux') and args.case in {'all', 'symlink'}:
+        folder = publication.directory(publication.owner())
+        holding = root/'symlink-namespace-held'
+        victim = root/'symlink-target'
+        victim.mkdir(mode=0o755)
+        canonical = victim/'canonical.md'
+        canonical.write_text('unchanged\n', encoding='utf-8')
+        canonical.chmod(0o644)
+        folder.rename(holding)
+        try:
+            folder.symlink_to(victim, target_is_directory=True)
+            status, rejected = run('publish', '--plan', str(first), ok=False)
+            assert status == 1 and not rejected.get('ok')
+            assert victim.stat().st_mode & 0o777 == 0o755
+            assert canonical.stat().st_mode & 0o777 == 0o644
+            assert canonical.read_bytes() == b'unchanged\n'
+        finally:
+            if os.path.lexists(folder): folder.unlink()
+            holding.rename(folder)
+        _, restored = run('discover', '--parent-pid', str(native['pid']))
+        assert restored['state'] == 'active'
+        receipt['checks'].append('pre-created namespace symlink cannot change directory or canonical modes')
+
     if os.name != 'nt' and args.case in {'all', 'forged'}:
         forged = publication.root()/(publication.PREFIX+'999999999')
         forged.mkdir(mode=0o711)
@@ -129,7 +157,61 @@ try:
             ctypes.CDLL(None).prctl(15, previous.encode(), 0, 0, 0)
         receipt['checks'].append('same process can republish and clear after a native name change')
 
+    if args.case in {'all', 'writers'}:
+        release.unlink(missing_ok=True)
+        entered = root/'failed-writer-entered'
+        started = root/'competitor-started'
+        failing_code = '''import json,sys,time
+from pathlib import Path
+sys.path.insert(0,sys.argv[1])
+import publication
+def failing_reader(path):
+ Path(sys.argv[4]).write_text('ready')
+ deadline=time.monotonic()+10
+ while not Path(sys.argv[5]).exists():
+  if time.monotonic()>deadline:raise TimeoutError('writer barrier')
+  time.sleep(.02)
+ raise OSError('intentional competing writer failure')
+try:
+ publication.publish(Path(sys.argv[2]),failing_reader,int(sys.argv[3]))
+except OSError as error:
+ print(json.dumps({'ok':False,'error':str(error)}));sys.exit(1)
+'''
+        competing_code = '''import sys
+from pathlib import Path
+sys.path.insert(0,sys.argv[1])
+import publication,todo
+Path(sys.argv[4]).write_text('ready')
+publication.publish(Path(sys.argv[2]),todo.read_plan,int(sys.argv[3]))
+'''
+        slow = subprocess.Popen([sys.executable, '-I', '-c', failing_code, str(helpers), str(second),
+                                 str(os.getpid()), str(entered), str(release)],
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        deadline = time.monotonic()+8
+        while not entered.exists() and time.monotonic() < deadline and slow.poll() is None:
+            time.sleep(.02)
+        assert entered.exists(), 'failing writer did not enter the plan boundary'
+        competitor = subprocess.Popen([sys.executable, '-I', '-c', competing_code, str(helpers), str(second),
+                                       str(os.getpid()), str(started)],
+                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        deadline = time.monotonic()+8
+        while not started.exists() and time.monotonic() < deadline and competitor.poll() is None:
+            time.sleep(.02)
+        assert started.exists(), 'competing writer did not start'
+        time.sleep(.2)
+        assert competitor.poll() is None, 'competing writer was not serialized behind the failed writer'
+        release.write_text('fail')
+        stdout, stderr = slow.communicate(timeout=10)
+        assert slow.returncode == 1 and 'intentional competing writer failure' in stdout, stdout+stderr
+        stdout, stderr = competitor.communicate(timeout=10)
+        assert competitor.returncode == 0, stdout+stderr
+        _, current = run('discover', '--parent-pid', str(native['pid']))
+        assert current['state'] == 'active' and current['source']['plan_id'] == 'plan-222222222222'
+        receipt['checks'].append('competing native writers serialize and a failed old writer cannot retract the later success')
+        run('publish', '--plan', str(first))
+
     if args.case in {'all', 'atomic'}:
+        release.unlink(missing_ok=True)
         entered = root/'reader-entered'
         # Pause the production reader seam at a deterministic boundary. The real
         # writer and concurrent reader still use the ordinary process/filesystem.
@@ -162,6 +244,37 @@ publication.publish(Path(sys.argv[2]),slow_reader,int(sys.argv[3]))
         assert after['plan']['plan_id'] == binding['plan_id']
         receipt['checks'].append('same-plan republish has no missing-record window during validation')
 
+    if args.case in {'all', 'replace'}:
+        target = publication.directory(publication.owner())/publication._key(native)
+        previous = publication._read(target, publication.owner())
+        code = '''import sys
+from pathlib import Path
+from unittest.mock import patch
+sys.path.insert(0,sys.argv[1])
+import publication,todo
+native={'pid':int(sys.argv[4]),'birth':sys.argv[5]}
+target=publication.directory(publication.owner())/publication._key(native)
+previous=publication._read(target,publication.owner())
+reader=None
+try:
+ with target.open('rb') as reader:
+  with patch('publication._replace_publication',side_effect=OSError(13,'simulated sharing violation')):
+   publication.publish(Path(sys.argv[2]),todo.read_plan,int(sys.argv[3]))
+except OSError as error:
+ assert 'simulated sharing violation' in str(error)
+else:
+ raise AssertionError('replace failure unexpectedly published')
+finally:
+ assert reader is not None and reader.closed
+assert publication._read(target,publication.owner())==previous
+'''
+        child = subprocess.run([sys.executable, '-I', '-c', code, str(helpers), str(first),
+                                str(os.getpid()), str(native['pid']), native['birth']],
+                               capture_output=True, text=True, timeout=10)
+        assert child.returncode == 0, child.stdout+child.stderr
+        assert publication._read(target, publication.owner()) == previous
+        receipt['checks'].append('reader-open replace failure preserves the previous valid publication and closes handles')
+
     run('publish', '--plan', str(second))
     status, changed = run('published', '--binding', json.dumps(binding), ok=False)
     failed, _ = run('publish', '--plan', str(root/'missing.md'), ok=False)
@@ -184,6 +297,12 @@ finally:
         except subprocess.TimeoutExpired:
             slow.kill()
             slow.communicate(timeout=3)
+    if competitor is not None and competitor.poll() is None:
+        try:
+            competitor.communicate(timeout=10)
+        except subprocess.TimeoutExpired:
+            competitor.kill()
+            competitor.communicate(timeout=3)
     if owns_binding:
         try:
             run('clear')

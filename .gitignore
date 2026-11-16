@@ -16,3 +16,7 @@ client_secret*.json
 STATE.md
 CLAUDE.md
 AGENTS.md
+
+# Python bytecode caches
+__pycache__/
+*.pyc

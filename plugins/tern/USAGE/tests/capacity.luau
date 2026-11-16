@@ -32,4 +32,11 @@ local encoded = runtime.json.encode(view)
 check(encoded:find(module.NODE, 1, true) ~= nil and encoded:find("USAGE_CAPACITY v1", 1, true) ~= nil, "keyed versioned response")
 definition.event(state, { ev = "action", act = "configure", value = "{}" }, cx)
 check(#calls == 1, "unrelated actions cannot mutate")
+local direct = nil
+module.request(runtime.json.encode(request), function(value) direct = value end)
+check(#calls == 2 and calls[2].op == "capacity", "pane-free adapter calls the same authorized capacity service")
+calls[2].callback({ response = { version = 1, request_id = "one", ok = false, status = "export_disabled" } })
+check(direct.status == "export_disabled", "pane-free caller receives real consent refusal without block context")
+module.request('{"version":1,"request_id":"bad","op":"configure"}', function(value) direct = value end)
+check(#calls == 2 and direct.status == "invalid_request", "pane-free adapter cannot configure")
 return "PASS " .. checks .. " capacity checks"

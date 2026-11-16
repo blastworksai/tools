@@ -2,7 +2,7 @@
 -- Pure USAGE capacity consumer and quota routing rule (plan §7). No native effects, provider
 -- calls, credential reads or USAGE private state: the window reads USAGE's public native
 -- `usage.capacity` block; this module only verifies, normalizes and ranks that evidence.
-local codec = require("./transport")
+local codec = require("./wire/codec")
 local M = {}
 local MAX = 9007199254740991
 M.BLOCK = "usage.capacity"
@@ -97,11 +97,11 @@ function M.digest(v: any): string return codec.sha256(canonical(v)) end
 
 -- Routing-relevant policy only: pause, scheduling and exclusions never invalidate a routing decision.
 -- Plan §7 strict schema: initial_dispatch, worker_rollover and coordinator_rollover each carry an
--- explicit record allowlist and independent provider/account/model substitution booleans.
+-- explicit enabled record allowlist and independent provider/account permissions.
 M.SCOPES = { "initial_dispatch", "worker_rollover", "coordinator_rollover" }
 M.ROUTING_KEYS = { "quota_routing", "quota_reserve_pct", "quota_max_age_ms", "concurrency_limit" }
 for _, scope in M.SCOPES do
-	for _, suffix in { "_records", "_provider", "_account", "_model" } do table.insert(M.ROUTING_KEYS, scope .. suffix) end
+	for _, suffix in { "_enabled", "_records", "_provider", "_account" } do table.insert(M.ROUTING_KEYS, scope .. suffix) end
 end
 M.MAX_CONCURRENCY = 32
 -- SPAWN exposes only owner-entered `selector_evidence` text, never a typed verification status, so
@@ -128,11 +128,11 @@ function M.request(op: string, request_id: string, revision: string?, cursor: st
 end
 
 -- Returns the decoded response, or nil plus a typed problem. `pending`/`uncorrelated` mean wait.
-function M.decode_response(text: any, expected: any): (any?, any?)
-	if type(text) ~= "string" or #text > M.MAX_RESPONSE_CHARS or text:sub(1, #M.PREFIX) ~= M.PREFIX then
-		return nil, problem("incompatible", "USAGE capacity v1 response framing is required.")
+function M.decode_response_json(bytes: any, expected: any): (any?, any?)
+	if type(bytes) ~= "string" or #bytes > M.MAX_RESPONSE_CHARS - #M.PREFIX then
+		return nil, problem("incompatible", "USAGE capacity v1 JSON exceeds its response bound.")
 	end
-	local ok, r = pcall(tern.json.decode, text:sub(#M.PREFIX + 1))
+	local ok, r = pcall(tern.json.decode, bytes)
 	if not ok or type(r) ~= "table" or r.version ~= 1 then return nil, problem("incompatible", "USAGE capacity response is not version 1 JSON.") end
 	if r.request_id ~= expected.request_id or r.op ~= expected.op then return nil, problem("uncorrelated", "Waiting for the correlated USAGE response.") end
 	if r.ok ~= true then
@@ -156,6 +156,13 @@ function M.decode_response(text: any, expected: any): (any?, any?)
 		return nil, problem("invalid_response", "USAGE capacity page is malformed.")
 	end
 	return r, nil
+end
+-- Native USAGE block consumer; pane-free carriers call the same JSON validator directly.
+function M.decode_response(text: any, expected: any): (any?, any?)
+	if type(text) ~= "string" or #text > M.MAX_RESPONSE_CHARS or text:sub(1, #M.PREFIX) ~= M.PREFIX then
+		return nil, problem("incompatible", "USAGE capacity v1 response framing is required.")
+	end
+	return M.decode_response_json(text:sub(#M.PREFIX + 1), expected)
 end
 
 function M.assembly(first: any): (any?, any?)
@@ -488,7 +495,8 @@ function M.assess(evidence: any, id: string, revision: number, p: any, now_ms: n
 		binding = entry.binding, principal = entry.principal }
 	local function with(status: string, reason: string?): any out.status = status; out.reason = reason; return out end
 	if entry.observed_at_ms > now_ms + M.CLOCK_SKEW_MS then return with("unknown", "future_timestamp") end
-	if now_ms - entry.observed_at_ms > math.min(p.quota_max_age_ms, evidence.stale_after_ms) then return with("unknown", "stale") end
+	local maximum_age = if p.quota_max_age_ms > 0 then math.min(p.quota_max_age_ms, evidence.stale_after_ms) else evidence.stale_after_ms
+	if now_ms - entry.observed_at_ms > maximum_age then return with("unknown", "stale") end
 	if entry.reset_at_ms and entry.reset_at_ms <= now_ms then return with("unknown", "reset_passed") end
 	if entry.remaining_pct <= 0 then return with("insufficient", "exhausted") end
 	if entry.remaining_pct <= p.quota_reserve_pct then return with("insufficient", "below_reserve") end
@@ -502,19 +510,31 @@ end
 -- Changes relative to the owner-selected record. Account identity counts as changed unless both
 -- records are bound to the same USAGE principal with the same labels/profile (labels never prove sameness).
 local function needs(from: any, to: any): any
-	return { provider = (from.provider or "") ~= (to.provider or ""), model = (from.model or "") ~= (to.model or ""),
+	return { provider = (from.provider or "") ~= (to.provider or ""),
 		account = (from.account or "") ~= (to.account or "") or (from.profile or "") ~= (to.profile or "")
 			or from.principal == nil or from.principal ~= to.principal }
 end
 M.needs = needs
 local function permitted(p: any, need: any, scope: string): boolean
 	return (not need.provider or p[scope .. "_provider"] == true) and (not need.account or p[scope .. "_account"] == true)
-		and (not need.model or p[scope .. "_model"] == true)
+		and p[scope .. "_enabled"] == true
 end
 local function need_text(need: any): string?
 	local out = {}
-	for _, key in { "provider", "account", "model" } do if need[key] then table.insert(out, key) end end
+	for _, key in { "provider", "account" } do if need[key] then table.insert(out, key) end end
 	return if #out > 0 then table.concat(out, ",") else nil
+end
+
+-- Record fields remain immutable; effective project cwd/tab intent permits another record's
+-- own defaults only when the host will explicitly override those defaults in the launch.
+function M.location_matches(row: any, input: any): boolean
+	if row.backend ~= "native-agent" and row.placement == "replace_if_alone"
+		and input.presentation ~= "user_new_tab" and input.presentation ~= "coordinator_adjacent"
+		and not (input.presentation == "background" and (input.scope == "worker_rollover" or input.scope == "coordinator_rollover")) then return false end
+	local requested = input.requested or { id = input.record_id }
+	if row.id == requested.id or input.bound then return row.cwd == input.cwd and row.placement == input.placement end
+	return (row.cwd == input.cwd or input.execution_cwd ~= nil)
+		and (row.placement == input.placement or input.presentation == "user_new_tab" or input.presentation == "coordinator_adjacent" or input.presentation == "background")
 end
 
 -- input = { policy, scope?, catalog, evidence, requested = {id, revision}, coordinator, cwd, placement, now_ms, bound }
@@ -541,8 +561,8 @@ function M.decide(input: any): any
 	end
 	local function eligible(row: any): string?
 		if not row.eligible or row.enabled ~= true then return "Record is not eligible/enabled for managed dispatch." end
-		if row.cwd ~= input.cwd or row.placement ~= input.placement then return "Configured cwd/placement differ from this work." end
-		if input.coordinator and not table.find(row.capabilities or {}, COORDINATOR) then return "Coordinator start requires coordinator-control-v1." end
+		if not M.location_matches(row, input) then return "Configured cwd/placement differ from the bound record and no project override authorizes the change." end
+		if input.coordinator and (not table.find(row.capabilities or {}, COORDINATOR) or not table.find(row.capabilities or {}, "project-start-v1")) then return "Coordinator start requires prepared coordinator-control-v1 and project-start-v1 helpers." end
 		return nil
 	end
 	local requested_assessed = if p.quota_routing then M.assess(input.evidence, requested.id, requested.revision, p, input.now_ms) else nil
@@ -561,7 +581,7 @@ function M.decide(input: any): any
 		return decision
 	end
 	local alternatives = {}
-	if not input.bound then
+	if not input.bound and p[scope .. "_enabled"] == true then
 		for _, id in p[scope .. "_records"] do
 			local row = find(id, nil)
 			if not row then
@@ -582,7 +602,7 @@ function M.decide(input: any): any
 		return ra < rb or (ra == rb and a.row.id < b.row.id)
 	end)
 	for _, alt in alternatives do
-		if permitted(p, alt.need, scope) then
+		if not input.manual and permitted(p, alt.need, scope) then
 			decision.outcome = "selected"; decision.record = alt.row; decision.switched = true; decision.authority = "policy"
 			decision.from = from; decision.to = alt.to; decision.needs = need_text(alt.need)
 			decision.reason = { code = "policy_substitution", message = requested.id .. " is " .. requested_assessed.status .. " (" .. tostring(requested_assessed.reason)
@@ -594,8 +614,9 @@ function M.decide(input: any): any
 		local alt = alternatives[1]
 		decision.outcome = "owner_gate"; decision.record = alt.row; decision.switched = true; decision.from = from; decision.to = alt.to
 		decision.denied = need_text(alt.need)
-		decision.reason = { code = "fallback_denied", message = "The selected record is " .. requested_assessed.status .. " (" .. tostring(requested_assessed.reason)
-			.. "); " .. alt.row.id .. " has sufficient quota but Config does not permit a " .. tostring(decision.denied) .. " change. Owner decision required." }
+		decision.reason = { code = if input.manual then "manual_choice_required" else "fallback_denied",
+			message = "The selected record is " .. requested_assessed.status .. " (" .. tostring(requested_assessed.reason)
+				.. "); " .. alt.row.id .. " has sufficient quota. Choose explicitly before changing the selected agent/provider/account." }
 		return decision
 	end
 	decision.reason = { code = "quota_" .. requested_assessed.status, message = "No allowed record has sufficient fresh quota: "

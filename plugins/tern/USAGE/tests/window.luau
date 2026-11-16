@@ -4,7 +4,7 @@ local runtime, environment = tern, getfenv()
 local checks, preferences = 0, {}
 local function check(value, why) assert(value, why); checks += 1 end
 local function forbidden() error("owner pane input, provider process or unrelated mutation") end
-local function launch()
+local function launch(supports_unload)
 	local state = { commands = {}, hooks = {}, requests = {}, timers = {}, panes = {
 		{ pane = 11, tab = 1, title = "Editor" }, { pane = 22, tab = 1, title = "Owner agent" },
 		{ pane = 33, tab = 2, title = "Other window tab" },
@@ -58,15 +58,30 @@ local function launch()
 		table.insert(state.timers, timer); return timer
 	end
 	fake.command = function(value) state.commands[value.id] = value end
-	fake.on = function(name, callback) state.hooks[name] = callback end
+	local window_events = { window_start = true, focus = true, pane_created = true, pane_closed = true,
+		tab_created = true, tab_closed = true, command_started = true, command_finished = true,
+		cwd = true, title = true, agent_finished = true, agent_state = true,
+		float_moved = true, session_ended = true, budget = true, canvas_action = true }
+	window_events.unload = supports_unload == true
+	fake.on = function(name, callback)
+		if not window_events[name] then error('tern.on: unknown window event `' .. name .. '`', 0) end
+		state.hooks[name] = callback
+	end
 	fake.route = { link = function(callback) state.route = callback end }
 	fake.files = { button = function(value) state.files = value end }
 	fake.chrome = { status = function(callback) state.status = callback end, refresh = function() end }
+	fake.context = "window"
+	fake.log = { warn = function(message) state.lifecycle_warning = message end }
 	local modules = { companion = {
 		set_client = function() end, invalidate = function() end,
+		unload = function() state.unloaded = true end,
+		renew = function(done) table.insert(state.requests, { operation = "register_client", callback = done }) end,
 		ensure = function(done) table.insert(state.requests, { operation = "ensure", callback = done }) end,
 		request = function(operation, payload, done) table.insert(state.requests, { operation = operation, payload = payload, callback = done }) end,
 	}, ["updater/window"] = { register = function(cfg) state.updater = cfg end } }
+	local lifecycle = assert(loadstring(runtime.fs.read(root .. "/companion.luau"), "companion lifecycle"))
+	setfenv(lifecycle, setmetatable({ tern = fake }, { __index = environment }))
+	modules.companion.on_unload = lifecycle().on_unload
 	local function load(name)
 		name = name:gsub("^%./", "")
 		if modules[name] then return modules[name] end
@@ -224,4 +239,12 @@ local local_host = on_host("local")
 local_host.commands.refresh.run(local_host.cx)
 check(#local_host.events == 0 and #local_host.requests == 1 and local_host.requests[1].operation == "usage_refresh",
 	"a window on a local host refreshes its own companion as before")
+check(state.lifecycle_warning ~= nil, "a runtime without unload keeps the bounded lease-expiry path instead of failing load")
+local unloading = launch(true)
+unloading:tick()
+check(#unloading.requests == 1 and unloading.requests[1].operation == "ensure", "unload fixture has a real pending startup")
+unloading.hooks.unload(unloading.cx)
+unloading:reply("ensure", {})
+check(unloading.unloaded and #unloading.requests == 0, "a late startup completion after unload cannot request display or renew a lease")
+for _, timer in unloading.timers do check(timer.cancelled, "unload cancels this window's pending poll") end
 return "PASS " .. tostring(checks) .. " window behavior checks"
