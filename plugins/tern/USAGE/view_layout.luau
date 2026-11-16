@@ -58,16 +58,13 @@ function layout.new()
 		cx.layout:focus(fresh)
 		return fresh
 	end
-	function self:account(cx: any, origin: number, account: string)
-		if not owned(cx, origin, "usage.accounts") and not owned(cx, origin, "usage.account") then return end
-		local owner = self:owner(cx, origin)
-		if owner == nil then return end
-		local source = pane(cx, origin)
-		local key = tostring(source.tab) .. ":" .. account
+	-- The account's detail pane beside `owner`, floated; an open one for this tab is focused.
+	local function open_detail(cx: any, owner: number, tab: any, account: string): boolean
+		local key = tostring(tab) .. ":" .. account
 		local existing = self.details[key]
-		if owned(cx, existing, "usage.account") then cx.layout:focus(existing); return end
+		if owned(cx, existing, "usage.account") then cx.layout:focus(existing); return true end
 		local detail = cx:new_block("usage.account", { account }, "beside", { target = owner, dir = "right", ratio = 0.4, focus = false })
-		if detail == nil then return end
+		if detail == nil then return false end
 		self.details[key], self.owners[detail] = detail, owner
 		-- Target-addressed float: no deferred focus or external ctl process.
 		local ok, reason = cx.layout:float(detail, owner, "br", { focus = true, size = { 60, 22 } })
@@ -75,6 +72,23 @@ function layout.new()
 			-- A real detail split remains accessible; never pretend an overlay is a PIP.
 			cx.session:event(detail, { ev = "action", act = "pip_error", value = reason or "PIP unavailable; account detail remains in a split." })
 		end
+		return true
+	end
+	function self:account(cx: any, origin: number, account: string)
+		if not owned(cx, origin, "usage.accounts") and not owned(cx, origin, "usage.account") then return end
+		local owner = self:owner(cx, origin)
+		if owner == nil then return end
+		local source = pane(cx, origin)
+		open_detail(cx, owner, source.tab, account)
+	end
+	-- A status-bar click: the account's detail from whatever pane has focus, no list pane needed.
+	function self:focus_account(cx: any, account: string): boolean
+		local anchor = cx.session:focused()
+		local source = if anchor ~= nil then pane(cx, anchor) else nil
+		if source == nil then return false end
+		local owner = self:owner(cx, anchor :: number)
+		if owner == nil then return false end
+		return open_detail(cx, owner, source.tab, account)
 	end
 	function self:config(cx: any, origin: number?)
 		local target = origin or cx.session:focused()

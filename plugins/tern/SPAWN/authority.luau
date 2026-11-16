@@ -1149,9 +1149,13 @@ local function setup_context(scope,context)
 		or #context.window>256 or context.window:find("%c") or type(context.inventory)~="table"
 		or type(context.inventory.sessions)~="table" or type(context.inventory.clients)~="table"
 		or context.epoch~=nil and not text(context.epoch,4096) then return nil,"Fresh native setup context is unavailable" end
+	-- context.window is the CLIENT's key (an echo compared with saved requests); the
+	-- host daemon's own inventory is keyed by context.host_window when the host is remote.
+	local host_window=if context.host_window~=nil then context.host_window else context.window
+	if type(host_window)~="string" or #host_window>256 or host_window:find("%c") then return nil,"Fresh native setup context is unavailable" end
 	local client=nil
 	for _,value in ipairs(context.inventory.clients) do
-		if (value.kind=="window" or value.kind=="remote") and value.window==context.window then
+		if (value.kind=="window" or value.kind=="remote") and value.window==host_window then
 			if client or not integer(value.conn,0) or not integer(value.since,0) then return nil,"Native setup window incarnation is ambiguous" end
 			client=value
 		end
@@ -1360,6 +1364,8 @@ local function dispatch(root,key,r,now,context)
 			local ok,skill=pcall(tern.fs.read,tern.plugin.dir.."/skills/setup/SKILL.md",32001)
 			if not ok or type(skill)~="string" or #skill>32000 then return nil,"Packaged provider-neutral setup skill is unavailable" end
 			local prompt_context=clone(bootstrap)
+			-- The helper runs `tern send --window` on the host daemon: use the host's own key.
+			if context.host_window~=nil then prompt_context.window=context.host_window end
 			prompt_context.glitch_installation=SetupDiscovery.glitch(route.cwd)
 			initial_prompt,why=Backend.setup_prompt(records(root),d.setup_run_id,root.host_key,key,prompt_context,skill,route.shell)
 			if not initial_prompt then return nil,why end

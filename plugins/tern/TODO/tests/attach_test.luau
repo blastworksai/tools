@@ -16,7 +16,7 @@ local function fixture()
     function cx.hosts:switch(id) assert(id==f.host.id) end
     function cx.layout:focus(id) f.focused=id end
     function cx.layout:close(id) table.insert(f.closed,id) end
-    function cx:window_key() return "window-9" end
+    function cx:window_key() error("attach must never read the client window key") end
     function cx:prompt() error("no operator plan prompt") end
     function cx:run() error("no agent or shell input") end
     function cx:pick(opts) return {next=function(_,cb)table.insert(f.picks,{opts=opts,cb=cb})end} end
@@ -34,21 +34,12 @@ return {
     {"selected native split delegates process resolution to host, with no client process call",function()
         local f=fixture();f.controller.start(f.cx,false)
         local source=tern.json.decode(f.blocks[1].args[1])
-        assert(source.mode=="selected" and source.window=="window-9" and source.discover_pid==nil and source.path==nil)
+        assert(source.mode=="selected" and source.window==nil and next(source)~=nil and source.discover_pid==nil and source.path==nil)
         assert(f.blocks[1].opts.target==10 and f.blocks[1].opts.focus==false)
         f.timers[1](f.cx)
         assert(#f.events==1 and f.events[1].pane==11 and f.events[1].event.value==source.request)
     end},
-    {"Files picker chooses agent; changing title/cwd never becomes a source identity",function()
-        local f=fixture();f.controller.chooseSession(f.cx)
-        assert(#f.picks==1 and #f.blocks==0)
-        f.panes[1].title="New label";f.panes[1].cwd="/new"
-        f.picks[1].cb(f.picks[1].opts.items[1],nil,f.cx)
-        assert(f.focused==10 and #f.blocks==1)
-    end},
     {"closed or switched selected target cannot confirm a new TODO block",function()
-        local f=fixture();f.controller.chooseSession(f.cx);local choice=f.picks[1].opts.items[1];f.panes={};f.picks[1].cb(choice,nil,f.cx)
-        assert(#f.blocks==0)
         local g=fixture();g.controller.start(g.cx,false);g.host.id=2;g.timers[1](g.cx)
         assert(#g.events==0 and g.closed[1]==11)
     end},

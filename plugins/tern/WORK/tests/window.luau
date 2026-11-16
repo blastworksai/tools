@@ -110,6 +110,7 @@ local function new_window(name: string): any
 		name = name, splits = {}, agents = {}, copies = {}, toasts = {}, runs = {}, focuses = {}, next_pane = 100,
 		exit_created = false, spawn_snapshot = spawn_snapshot(), config_snapshots = {}, surface_reads = 0,
 		dispatch_available = true, current_revision = 7,
+		handlers = {}, commands = {}, file_buttons = {}, panels = 0, prompts = {},
 	}
 	local panes = {
 		[11] = { pane = 11, block = "tern-work.panel", kind = "plugin", title = "WORK" },
@@ -119,10 +120,11 @@ local function new_window(name: string): any
 	}
 	local fake_tern = {
 		json = tern.json,
-		on = function() end,
+		on = function(event: string, handler: any) window.handlers[event] = handler end,
 		route = { link = function(handler: any) window.route = handler end },
-		command = function() end,
-		files = { button = function() end },
+		command = function(def: any) window.commands[def.id] = def end,
+		files = { button = function(def: any) table.insert(window.file_buttons, def) end },
+		chrome = { status = function(fn: any) window.status = fn end },
 		timer = function() error("WORK must not poll or delay prompt delivery") end,
 	}
 	local cx: any = { session = {}, layout = {}, agents = {} }
@@ -163,7 +165,10 @@ local function new_window(name: string): any
 	function cx:toast(level: string, text: string, sub: string?) table.insert(window.toasts, { level = level, text = text, sub = sub }) end
 	function cx:run(pane: number, text: string) table.insert(window.runs, { pane = pane, text = text }) end
 	function cx:window_key(): string return name end
-	function cx:new_block(): number? return nil end
+	function cx:new_block(): number?
+		window.panels += 1
+		return nil
+	end
 	window.cx = cx
 	local chunk = assert(loadstring(tern.fs.read(root .. "/window.luau"), "work-window-entry-" .. name))
 	setfenv(chunk, setmetatable({
@@ -171,6 +176,9 @@ local function new_window(name: string): any
 		require = function(name: string)
 			if name == "./launch" then return Launch end
 			if name == "./spawn" then return Spawn end
+			if name == "./status/status_prompt" then
+				return { ensure = function(_cx: any, id: string) table.insert(window.prompts, id) end }
+			end
 			if name == "./updater/window" then return { register = function() end } end
 			error("unexpected require " .. name)
 		end,
@@ -179,6 +187,18 @@ local function new_window(name: string): any
 	assert(type(window.route) == "function", "window route registered")
 	return window
 end
+
+local status_window = new_window("status")
+check(#status_window.file_buttons == 0, "WORK registers no Files-pane button")
+check(status_window.commands.show_projects ~= nil and status_window.commands.show_projects.title == "WORK", "palette command WORK is kept")
+local segments = status_window.status({})
+check(#segments == 1 and segments[1].text == "WORK" and segments[1].icon == "list", "one WORK status segment with the list icon")
+check(segments[1].command == "plugin.tern-work.show_projects", "segment runs the WORK command")
+status_window.handlers.window_start(status_window.cx)
+check(#status_window.prompts == 1 and status_window.prompts[1] == "tern-work", "status-bar prompt ensured once on window start for tern-work")
+status_window.commands.show_projects.run(status_window.cx)
+check(status_window.panels == 1, "segment command opens the WORK panel exactly once")
+check(status_window.toasts[#status_window.toasts].level == "error", "open_panel reports an unavailable host honestly")
 
 local function follow(window: any, url: string, pane: number?): any
 	return window.route({ url = url, pane = pane, mods = {} }, window.cx)

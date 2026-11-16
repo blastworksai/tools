@@ -1,5 +1,6 @@
 --!strict
 local Launch = require("./launch")
+local status_prompt = require("./status/status_prompt")
 
 local PANEL_BLOCK = "tern-work.panel"
 local previous_non_panel: number? = nil
@@ -45,6 +46,8 @@ local function panel_in_focused_tab(cx: any): number?
 end
 
 tern.on("window_start", function(cx)
+	-- Offers the status bar once per install when it is off (WORK's launcher lives there).
+	status_prompt.ensure(cx, "tern-work")
 	local focused = cx.session:focused()
 	if focused ~= nil and panel_pane(cx, focused) == nil then previous_non_panel = focused end
 end)
@@ -178,12 +181,10 @@ tern.command({
 	end,
 })
 
-tern.files.button({
-	id = "work",
-	title = "WORK",
-	icon = "list",
-	run = function(_files, cx) open_panel(cx) end,
-})
+-- The launcher lives in the status bar; the segment runs the WORK command above.
+tern.chrome.status(function(_pane: StatusPaneInfo)
+	return { { icon = "list", text = "WORK", command = "plugin.tern-work.show_projects" } }
+end)
 
 require("./updater/window").register({
 	name = "WORK", dir = "WORK", title_prefix = "WORK ",

@@ -5,6 +5,7 @@ local dispatch = require("./dispatch_protocol")
 local quota = require("./quota")
 local source_adapter = require("./source_adapter")
 local provider_display = require("./provider_display")
+local status_prompt = require("./status/status_prompt")
 local picker_ui: any, source_ui: any, conversation_ui: any, forms_ui: any
 local work_tick: any
 local connection_attempts: any = {}
@@ -4955,9 +4956,11 @@ local function palette_continuation(cx: WindowCx, command: string, title: string
 end
 tern.command({ id = "continue_controller", title = "ORCH+ Continue controller in this window", icon = "flow", group = "ORCH+",
 	run = function(cx: WindowCx) palette_continuation(cx, "continue_controller", "ORCH+ Continue controller in this window") end })
--- Settings remain a deliberate secondary view, never the conversation's landing page.
-tern.files.button({ id = "open", title = "Open ORCH+ Settings", icon = "flow", run = function(_files: FilesInfo, cx: WindowCx) open(cx, true) end })
-tern.on("window_start", function(_cx: WindowCx) arm() end)
+-- Settings remain a deliberate secondary view, never the conversation's landing page. The status-bar
+-- launcher opens Config only: no controller, activation, admission, continuation or dispatch happens here.
+tern.command({ id = "status_open", title = "ORCH+ Config", icon = "flow", group = "ORCH+", run = function(cx: WindowCx) open(cx, true) end })
+tern.chrome.status(function(_pane: StatusPaneInfo) return { { icon = "flow", text = "ORCH+", tone = "muted", command = "plugin.orchplus.status_open" } } end)
+tern.on("window_start", function(cx: WindowCx) status_prompt.ensure(cx, "orchplus"); arm() end)
 tern.on("title", function(_event: any, cx: WindowCx)
 	pane_pushes = {}
 	local host, session = cx.hosts:current(), cx.sessions:current()

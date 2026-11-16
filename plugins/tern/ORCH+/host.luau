@@ -2631,4 +2631,5 @@ tern.on("pane_exited", function(ev: any, _cx: EffectCx) contexts[ev.pane] = nil 
 tern.on("title", function(_ev: any, _cx: EffectCx) render_all() end)
 arm() -- Module reload does not emit window_start; rearm independently of any view.
 require("./updater/host").register()
+require("./status/status_prompt").host_serve()
 return { new_authority = new_authority, inbox_observation = inbox_observation, repository_refs = repository_refs }

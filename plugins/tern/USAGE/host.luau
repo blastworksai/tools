@@ -7,6 +7,8 @@ local collector = require("./source_collect")
 local host_setup = require("./host_setup")
 local presentation = require("./presentation")
 local view_layout = require("./view_layout")
+local status_prefs = require("./status_preferences")
+local status_settings = require("./status_settings")
 local refresh: any
 local channel_status: any = { state = "starting" }
 type UsageWindow = any
@@ -25,6 +27,8 @@ type BlockState = {
 	problem: string?,
 	-- Config blocks only: host-run Setup for attached windows.
 	setup: any?,
+	-- Config blocks only: the window's last pushed status-bar state (status_settings.decode).
+	status: any?,
 }
 
 local blocks: { [number]: { cx: BlockCx, state: BlockState } } = {}
@@ -466,6 +470,7 @@ local function config_view(state: BlockState): Node
 	append_problems(children)
 	if refresh.preference_problem ~= nil then table.insert(children, ui.text(ui.span(refresh.preference_problem, "error"))) end
 	if state.problem ~= nil then table.insert(children, ui.text(ui.span(state.problem, "error"))) end
+	table.insert(children, status_settings.view(state.status))
 	if state.setup ~= nil then table.insert(children, host_setup.view(state.setup)) end
 	return ui.node("col", { role = "usage-config-root", gap = "sm" }, children)
 end
@@ -586,7 +591,19 @@ local function on_key(key: Key): boolean?
 end
 
 local function on_event(event: UiEvent, state: BlockState, cx: BlockCx)
+	if event.ev == "change" and state.kind == "config" then
+		-- A status-bar control: the window owns the choice and revalidates it against its roster.
+		local url = status_settings.link_for_event(event, view_layout.encode)
+		if url ~= nil then cx:open(url) end
+		return
+	end
 	if event.ev ~= "action" then return end
+	if event.act == status_settings.ACTION and state.kind == "config" then
+		local decoded = status_settings.decode(event.value)
+		if decoded ~= nil then state.status = decoded end
+		cx:render()
+		return
+	end
 	if event.act == host_setup.ACTION then
 		-- A completed host change is picked up by this host's collector and display at once.
 		if state.setup ~= nil then host_setup.event(state.setup, event, cx, function() collector.flush(); fetch() end) end
@@ -618,7 +635,11 @@ local function definition(kind: string): BlockDef<BlockState>
 			if kind ~= "accounts" then mode = kind end
 			local state: BlockState = { kind = kind, mode = mode, account = account, setup = if kind == "config" then host_setup.new() else nil }
 			blocks[cx.pane] = { cx = cx, state = state }
-			if kind == "config" then refresh:read_preferences() end
+			if kind == "config" then
+				refresh:read_preferences()
+				-- Ask the owning window for the status-bar state; it answers with a status_state event.
+				pcall(function() cx:open("usage://status/sync") end)
+			end
 			fetch()
 			arm_render()
 			return state
@@ -666,6 +687,18 @@ local function unload(_cx: any)
 	cancel_render()
 	companion.unload()
 end
+
+-- Before any companion data can exist: decides once whether this is a fresh or a retained
+-- install (status_preferences.load), whichever half loads first.
+status_prefs.load({
+	get = function(key: string): any return tern.kv.get(key) end,
+	set = function(key: string, value: any) tern.kv.set(key, value) end,
+	exists = function(path: string): boolean return tern.fs.exists(path) end,
+	data = tern.plugin.data,
+})
+
+-- Serves the shared "turn on the status bar?" prompt's one-time claim for this plugin's windows.
+require("./status/status_prompt").host_serve()
 
 -- The collector runs even when no USAGE block or desktop window is open.
 collector.start(source_updated)

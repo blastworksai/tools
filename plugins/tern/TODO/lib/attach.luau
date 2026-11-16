@@ -12,9 +12,8 @@ export type AttachApi = {
 }
 export type Controller = {
     start: (cx: WindowCx, forceManual: boolean, selected: number?) -> (),
-    chooseSession: (cx: WindowCx) -> (),
 }
-type Origin = { target: number, tab: number, host: number, window: string }
+type Origin = { target: number, tab: number, host: number }
 
 function attach.new(api: AttachApi): Controller
     local KIND = api.plugin.id .. ".list"
@@ -42,12 +41,13 @@ function attach.new(api: AttachApi): Controller
         local host = cx.hosts:current()
         if not pane or pane.tab == nil or pane.exited ~= nil or host.state ~= "connected" then changed(cx); return end
         if existing(cx, target) then cx:toast("info", "This tab already has a plan view."); return end
-        local origin: Origin = { target = target, tab = pane.tab, host = host.id, window = cx:window_key() }
+        local origin: Origin = { target = target, tab = pane.tab, host = host.id }
         -- Tern makes the split in the selected host's native namespace. The host
         -- resolves that split; client-side CLI ids cannot address a remote host.
+        -- SKILLS-174: the client window key is never sent; it is not host identity.
         local request = tostring(api.now()) .. ":" .. tostring(target)
         local label = (if host.kind == "remote" then "SSH · " else "Local · ") .. (host.address or host.name)
-        local panel = cx:new_block(KIND, { api.json.encode({ mode = "selected", label = label, window = origin.window, request = request }) }, "beside", { target = target, dir = "right", ratio = 0.3, focus = false })
+        local panel = cx:new_block(KIND, { api.json.encode({ mode = "selected", label = label, request = request }) }, "beside", { target = target, dir = "right", ratio = 0.3, focus = false })
         if not panel then changed(cx); return end
         local deadline = api.now() + 2500
         local function confirm(fresh: WindowCx?)
@@ -67,50 +67,6 @@ function attach.new(api: AttachApi): Controller
             end
         end
         api.timer(100, confirm)
-    end
-
-    function controller.chooseSession(cx: WindowCx)
-        local hosts: { [number]: ManagedHost } = {}
-        local sessions: { [number]: string } = {}
-        local items: { PickItem } = {}
-        for _, host in cx.hosts:list() do
-            if host.state == "connected" then
-                for _, id in host.panes do hosts[id] = host end
-            end
-        end
-        for _, session in cx.session:sessions() do
-            for _, tab in session.tabs do sessions[tab] = session.name end
-        end
-        for _, pane in cx.session:panes() do
-            local host = hosts[pane.pane]
-            -- CLI agents run in terminal panes; do not restrict this to native OMP.
-            if host and pane.tab and not pane.parked and pane.exited == nil and (pane.kind == "agent" or pane.kind == "terminal") then
-                table.insert(items, {
-                    label = (pane.title ~= "" and pane.title or pane.program or "Terminal") .. " · " .. string.format("%.0f", pane.pane),
-                    detail = (host.address or host.name) .. " · " .. (sessions[pane.tab] or "Session") .. " · " .. (pane.program or "Terminal"),
-                    target = pane.pane, host = host.id, tab = pane.tab, program = pane.program, cwd = pane.cwd, title = pane.title,
-                })
-            end
-        end
-        table.sort(items, function(a, b) return a.label < b.label end)
-        if #items == 0 then cx:toast("info", "No live agent or terminal sessions are available on connected hosts."); return end
-        cx:pick({ placeholder = "Which agent session should TODO attach to?", items = items }):next(function(choice: PickItem?, _err: string?, fresh: WindowCx?)
-            if not fresh or not choice then return end
-            local pane = fresh.session:pane(choice.target)
-            local host: ManagedHost? = nil
-            for _, candidate in fresh.hosts:list() do
-                if candidate.id == choice.host and candidate.state == "connected" then
-                    for _, id in candidate.panes do if id == choice.target then host = candidate end end
-                end
-            end
-            if not host or not pane or pane.exited ~= nil or pane.parked or pane.tab ~= choice.tab or pane.program ~= choice.program then
-                changed(fresh); return
-            end
-            fresh.hosts:switch(host.id)
-            fresh.layout:focus(choice.target)
-            if fresh.hosts:current().id ~= host.id then changed(fresh); return end
-            controller.start(fresh, false, choice.target)
-        end)
     end
     return controller
 end

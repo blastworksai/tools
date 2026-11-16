@@ -1,6 +1,6 @@
 -- Deterministic real reducer/host/window coverage. Run bounded sections in native host callbacks.
 local root, section = ...
-assert(section == nil or table.find({ "clock", "native", "controls", "timer", "epoch_window", "epoch_host", "finish", "continuation", "alias_recovery", "held_report", "sweep_schedule", "readable_views", "cp2_controls", "guided_recovery", "guided_recovery_empty", "guided_recovery_host_restart", "stopped_worker_view", "expired_wake", "revoked_authorization", "observe_retention", "uncertain_read", "quota_reader", "bridge_lifecycle", "withdraw_fenced", "config_cards", "work_picker", "inbox_window", "usage_row",
+assert(section == nil or table.find({ "clock", "native", "controls", "status_launcher", "timer", "epoch_window", "epoch_host", "finish", "continuation", "alias_recovery", "held_report", "sweep_schedule", "readable_views", "cp2_controls", "guided_recovery", "guided_recovery_empty", "guided_recovery_host_restart", "stopped_worker_view", "expired_wake", "revoked_authorization", "observe_retention", "uncertain_read", "quota_reader", "bridge_lifecycle", "withdraw_fenced", "config_cards", "work_picker", "inbox_window", "usage_row",
 	"reconnect_stale", "reconnect_missing", "reconnect_unknown", "reconnect_unrelated", "worker_attachment", "worker_attachment_form",
 	"driver_admission_noop", "driver_admission_refused", "driver_retry_original", "driver_retry_unrelated", "driver_retry_absent",
 	"driver_deadline_absent", "driver_deadline_unrelated", "driver_missing", "driver_suspension", "driver_fence_origin", "driver_fence_claim",
@@ -234,7 +234,10 @@ local function window_fixture(options: any?)
 		table.insert(processes, { argv = clone(argv), callback = callback })
 	end }
 	local palette = {}
-	ftern.command = function(def) palette[def.id] = def end; ftern.files = { button = function() end }
+	local files_buttons, status_formatters, prompt_calls = {}, {}, {}
+	ftern.command = function(def) palette[def.id] = def end; ftern.files = { button = function(def) table.insert(files_buttons, def) end }
+	ftern.chrome = table.clone(runtime.chrome or {})
+	ftern.chrome.status = function(formatter) table.insert(status_formatters, formatter) end
 	ftern.route = { link = function(callback) hooks.source_link = callback end }
 	local function find(node, key)
 		if node.p and node.p.key == key then return node end
@@ -686,6 +689,8 @@ local function window_fixture(options: any?)
 		local key = name:gsub("^%./", "")
 		-- The health fixture owns native interaction completion; the form_ui group exercises
 		-- the real host/window form transport, edits and stale-result protection separately.
+		-- The status-bar prompt is the shared module's own concern; this fixture records only that the window half asks.
+		if key == "status/status_prompt" then return { ensure = function(prompt_cx, id) table.insert(prompt_calls, { cx = prompt_cx, id = id }) end } end
 		if key == "form_window" then return { new = function()
 			local forms = {}
 			return {
@@ -720,7 +725,7 @@ local function window_fixture(options: any?)
 	setfenv(module, setmetatable({ tern = ftern, require = window_require, os = fixed_os }, { __index = environment }))
 	local api = module()
 	local w = { f = f, id = id, cx = cx, api = api, timers = timers, hooks = hooks, events = events, agents = agents, panes = panes, current = current, notices = notices, board_opened = board_opened,
-		processes = processes, wake_events = wake_events, toasts = toasts, notice_events = notice_events, managed_opened = managed_opened, hidden_views = hidden_views }
+		processes = processes, commands = palette, files_buttons = files_buttons, status_formatters = status_formatters, prompt_calls = prompt_calls, wake_events = wake_events, toasts = toasts, notice_events = notice_events, managed_opened = managed_opened, hidden_views = hidden_views }
 	function w:rendered(advanced) return runtime.json.encode(tree(advanced)) end
 	function w:visible_text(advanced)
 		local out = {}
@@ -1887,6 +1892,27 @@ if section == nil or section == "timer" then
 	end
 	check(next_round[first_id] and next_round[second_id],
 		"both workers rotate into their next protocol step after delayed receipt recovery without starvation")
+end
+if section == nil or section == "status_launcher" then
+	local w = window_fixture()
+	check(#w.files_buttons == 0, "ORCH+ registers no Files-pane button: its launcher lives in the status bar")
+	check(#w.status_formatters == 1, "ORCH+ registers exactly one status formatter")
+	local segments = w.status_formatters[1]({ pane = 9001, program = "shell", busy = false })
+	check(#segments == 1 and segments[1].icon == "flow" and segments[1].text == "ORCH+" and segments[1].command == "plugin.orchplus.status_open",
+		"the status segment carries the unchanged ORCH+ flow icon and the status_open command")
+	local command = w.commands[string.match(segments[1].command, "^plugin%.orchplus%.(.+)$")]
+	check(command ~= nil and command.icon == "flow", "the segment's command is a registered ORCH+ palette command with the flow icon")
+	check(w.commands.open ~= nil and w.commands.orch_setup ~= nil, "palette access to ORCH+ remains")
+	check(#w.prompt_calls == 0, "the status-bar prompt never runs while the window module initializes")
+	w.hooks.window_start(w.cx)
+	check(#w.prompt_calls == 1 and w.prompt_calls[1].id == "orchplus" and w.prompt_calls[1].cx == w.cx, "window_start asks the shared status-bar prompt once for plugin orchplus")
+	-- The click is inert: it opens Config only and starts no controller, admission, continuation or dispatch.
+	local before_events, before_writes, before_processes = #w.events, w.f.memory.writes, #w.processes
+	local registry_before = runtime.json.encode(w.f.authority.registry)
+	command.run(w.cx)
+	check(#w.events == before_events and w.f.memory.writes == before_writes and #w.processes == before_processes,
+		"clicking the launcher dispatches nothing: no host event, no authority write, no child process")
+	check(runtime.json.encode(w.f.authority.registry) == registry_before, "clicking the launcher leaves authority state untouched")
 end
 if section == nil or section == "timer" then
 	local w = window_fixture()

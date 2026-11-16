@@ -18,7 +18,7 @@ A schema-2 `control_authorize` challenge can instead receive an exact `revoked_e
 
 ## Ordinary launch and managed execution
 
-Use the SPAWN status/menu entry, command palette, or Files-pane SPAWN button beside WORK. Current agents, Start an agent, Agent settings and required resources/capabilities share the canonical host roster. Linking/reloading launches nothing. Ordinary JSON and transport details remain Advanced.
+Use the SPAWN status-bar entry (its menu) or the command palette. Current agents, Start an agent, Agent settings and required resources/capabilities share the canonical host roster. Linking/reloading launches nothing. Ordinary JSON and transport details remain Advanced.
 
 Guided setup uses Tern's actual configured default agent; OMP in ACP mode is recommended before the click, but other defaults remain supported. A bounded read-only Glitch-installation detector runs before structured questions and distinguishes incomplete/ambiguous discovery from an accessible bounded miss; it never enables integration. The helper discovers available providers and installed help before proposing permissions, with Normal default and explicit provider-specific unrestricted/all/subset overrides. It submits one run-bound immutable result for native review, not arbitrary unreviewed edits. Only Import reviewed records changes the roster; commit includes exact storage readback. The original helper then receives the run-bound save receipt and may report **SPAWN SETUP SUCCESSFUL**. Delivery alone gives the concrete Review setup result → Import reviewed records action, never a success claim. Required managed observations and optional paid readiness are separate.
 

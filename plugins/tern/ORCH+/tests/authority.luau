@@ -6,7 +6,10 @@ local function clone(value) return if value == nil then nil else runtime.json.de
 local function store()
 	local memory = { value = nil, marker = nil, fail_read = false, fail_write = false, writes = 0,
 		marker_writes = 0, fail_marker_read = false, fail_marker_write = false, write_order = {} }
+	-- The shared status-bar prompt keeps its own flag keys in the same kv; they are not authority state.
+	local function status_key(key) return key == "status_prompt.v1" or key == "status_prompt.v1.request" end
 	memory.get = function(key)
+		if status_key(key) then return nil end
 		if key == "authority_state_v4_original" then
 			if memory.fail_backup_read then error("injected backup read failure") end
 			return clone(memory.backup)
@@ -20,6 +23,7 @@ local function store()
 		return clone(memory.value)
 	end
 	memory.set = function(key, value)
+		if status_key(key) then return end
 		if key == "authority_state_v4_original" then
 			if memory.fail_backup_write then error("injected backup write failure") end
 			memory.backup = clone(value)
@@ -617,9 +621,10 @@ do
 	view1.dispatch_command_result, view1.notice, view1.conversation_result = previous_result, previous_notice, nil
 end
 -- Current-window tab membership routes views only; it never allocates logical owners.
-local open_command, files_button
-fake.command = function(command) if command.id == "open" then open_command = command.run end end
-fake.files = { button = function(button) files_button = button.run end }
+local open_command, status_open_command, files_buttons = nil, nil, 0
+fake.command = function(command) if command.id == "open" then open_command = command.run elseif command.id == "status_open" then status_open_command = command.run end end
+fake.files = { button = function() files_buttons += 1 end }
+fake.chrome = { status = function() end }
 fake.route = { link = function() end }
 local native_forms = load("form_window")
 local form_new, routing_forms = native_forms.new, nil
@@ -696,8 +701,9 @@ open_command(routing_cx)
 check(opened == 1 and focused == nil and picker == nil, "session B opening never silently focuses sole session A view")
 check(placements[1] == "tab", "first ORCH entry creates a fullscreen tab rather than splitting the user's active pane")
 native_panes = { other_view, here }
-files_button({}, routing_cx)
-check(opened == 1 and focused == 202 and config_requested == 202, "Files entry reveals only known current-session view in Config mode")
+check(files_buttons == 0, "ORCH+ registers no Files-pane button")
+status_open_command(routing_cx)
+check(opened == 1 and focused == 202 and config_requested == 202, "status entry reveals only known current-session view in Config mode")
 open_command(routing_cx)
 check(opened == 1 and focused == 202, "ordinary reopening focuses the existing arranged view without relocating it")
 native_panes = { other_view, unknown, current_chat }; focused = nil

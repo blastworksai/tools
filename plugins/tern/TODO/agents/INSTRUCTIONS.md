@@ -6,7 +6,7 @@ Read the installed planning companion at `<glitch-root>/_local/tern-todo/README.
 
 Publication is metadata only: path, existing plan id and OS-verified process identity. It does not copy or modify canonical content. The viewer reads that canonical file; the planning/execution workflow remains authoritative. No model prompt, terminal input, continuation, provider work or hook is sent/installed by TODO.
 
-The Files button asks the operator which session to follow. The host resolves that session's valid publication. No valid active publication means an informational notice and exit from the TODO flow; the selected agent stays open. Unsupported metadata/access or changed process/source produces a distinct error. An existing view never adopts a different plan automatically.
+The TODO status-bar entry (TODO Settings, Attach to) asks the operator which session to follow. The host resolves that session's valid publication. No valid active publication means an informational notice and exit from the TODO flow; the selected agent stays open. Unsupported metadata/access or changed process/source produces a distinct error. An existing view never adopts a different plan automatically.
 
 All source identity crosses through the existing native Tern execution host. Do not forward another Unix identity's socket or credentials. Raw SSH without native Tern host ancestry cannot publish. Helpers need only existing Python 3 and native OS interfaces; do not install anything to force a publication.
 

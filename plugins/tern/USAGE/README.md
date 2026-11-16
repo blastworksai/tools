@@ -69,7 +69,7 @@ The plugin id is `usage`. Then:
 1. Open **USAGE Setup** from the command palette. If USAGE has no private runtime yet, choose **Install private dependencies** and confirm. If Python is missing, use **Open official Python installer page**, or **Select existing Python interpreter** to point at a specific `python3` executable.
 2. In **USAGE Setup**, choose **Allow headless usage reads**. Refresh does nothing until you allow it. You can stop it again from the same menu.
 3. Choose **USAGE Refresh**, or press **Refresh** in the USAGE pane.
-4. Optional: **USAGE Show Summary** turns on Tern's status bar with a short summary. If you hide the status bar later, USAGE respects that.
+4. Optional: choose which accounts show in the status bar (see [Status bar](#status-bar)). The first time a USAGE window starts, a shared prompt asks once whether to turn on Tern's status bar when it is off. USAGE never turns it on by itself, and respects a later hide.
 
 On macOS and Windows, Setup instead shows **PLATFORM HOLD** and platform/setup diagnostics. USAGE account panes and the status summary do not present readings as current or healthy there. Tern's catalog **ready** means only that the package is cataloged as ready; it is not a platform-support claim or a successful provider read.
 
@@ -117,19 +117,29 @@ Nothing is deleted. Tern keeps `plugin-data/tern-fleet-usage/` after removal, an
 
 | Command | What it does |
 | --- | --- |
-| **USAGE Details** | Opens the USAGE pane in your saved layout, or focuses it if it is already open. The speedometer button in the Files pane header does the same. |
+| **USAGE Details** | Opens the USAGE pane in your saved layout, or focuses it if it is already open. The **USAGE** segment in the status bar does the same. |
 | **USAGE Refresh** | Starts one refresh for every account. Repeated requests while it runs join the same refresh. In a window attached to a remote Tern host, it refreshes that host (see [Configuring an attached remote host](#configuring-an-attached-remote-host)). |
 | **USAGE Configuration** | Layout and refresh interval. The × in its top-right corner closes it. |
-| **USAGE Setup** | Private runtime, headless-read permission, summary, capacity export, account bindings and optional sharing. In a window attached to a remote Tern host, it configures that host (see [Configuring an attached remote host](#configuring-an-attached-remote-host)). |
-| **USAGE Show Summary** | Turns the status-bar summary on once. |
+| **USAGE Setup** | Private runtime, headless-read permission, status-bar selection, capacity export, account bindings and optional sharing. In a window attached to a remote Tern host, it configures that host (see [Configuring an attached remote host](#configuring-an-attached-remote-host)). |
+| **USAGE Status Bar Settings** | Opens USAGE Configuration at the status-bar selection. |
+| **USAGE Account 1 … 16** | The palette fallback for the account segments in the status bar: one command per drawn segment, listed only while that segment is shown. |
 | **USAGE Diagnostics** | Companion, refresh and sharing state. |
 | **USAGE Check for updates** | Checks GitHub for a newer USAGE release (see [Update](#update)). |
 | **USAGE Update** | Shown once a newer release is known; installs it after asking (see [Update](#update)). |
 | **USAGE Resolve update outcome** | Inspects a retained update without repeating installation; uncertain outcomes require explicit unverified resolution. |
 
-The speedometer button in the Files pane header opens the same view:
+### Status bar
 
-![The USAGE speedometer button in the Files pane header, with its tooltip](assets/screenshots/files-button.png)
+USAGE has no Files pane button. Its buttons live in Tern's status bar:
+
+- A fixed **USAGE** segment (speedometer icon) always opens the full per-account pane with provider logos.
+- Per-account segments are opt-in. In **USAGE Configuration**, under the status-bar section, **Show usage statistics in status bar?** is the master switch. Beneath it, **Per-Agent Status Bar selection:** lists every account defined in SPAWN with one checkbox each. The settings say: *Don’t overcrowd your status bar.*
+- Master Off keeps your ticks, greys the checkboxes and draws no account segments. Master On draws only the ticked accounts, after the launcher, as `Provider: Label  ◔ 42%` with the ring and tone used elsewhere in USAGE. A ticked account with no reading shows `—`, never a zero. A value that is not current says `last-known`. At most 16 accounts can be ticked.
+- OMP records are listed but disabled with **No independent usage allowance**: OMP consumes another provider's quota.
+- Clicking an account segment opens that account's detail pane, which shows its reset time and countdown. Tern's status segments have no tooltip, width or height API, so nothing more is claimed on hover. If the segment cannot be clicked, use the **USAGE Account N** commands in the Command Palette.
+- A selection is stored under the SPAWN scope and account id, so a rename keeps it. A removed account draws nothing and no row is invented; its tick is kept in case it returns. The checkboxes are checked against the current account list each time, so a stale one cannot change anything.
+- Fresh install: master Off, nothing ticked, so the bar shows only the launcher. Upgrade or reinstall with retained USAGE data: master On, with exactly the accounts the old first-three summary showed (provider order), chosen once when the first account list arrives. Whether an install is fresh or retained is decided at its first start, before the companion creates any data.
+- Setup, loading and platform-hold notices stay in the bar when they need action; loading, partial and refresh progress appear only while the master is On.
 
 ### Layouts
 
@@ -213,7 +223,7 @@ The rows:
 - **Allow / Stop headless usage reads on <name>**.
 - **Enable / Revoke capacity export on <name>**.
 - **Bind SPAWN accounts on <name>…** and **Associate OMP records on <name>…**, shown while the host allows headless usage reads.
-- **Configure this window's machine instead** opens the ordinary Setup for the machine running the window: pairing, summary, interpreter choice and its own permissions.
+- **Configure this window's machine instead** opens the ordinary Setup for the machine running the window: pairing, interpreter choice and its own permissions.
 
 Each change needs the same explicit confirmation as local Setup; attaching enables nothing. Setup sends the confirmed change to the host's **USAGE Configuration** block. If none is open in the session, Setup opens one beside your current pane without taking focus. The block runs the change with the host's own companion and shows the result. It accepts only the operations listed above: it can't enable sharing, pair, refresh or change any other setting.
 
@@ -281,7 +291,7 @@ A binding ends by itself, and must be confirmed again, when you edit that SPAWN 
 | Muse "Awaiting usage after a turn" | Use Muse normally once; USAGE will not start a turn for you. |
 | Hub listener problem in Diagnostics | The saved sharing address is not available (for example after a network change). Choose **Share** again with a current address, or **Standalone**. Local use keeps working meanwhile. |
 
-**USAGE Diagnostics** shows platform qualification and setup remedies, the companion process state, the last refresh and its stable failure categories, sharing state and whether the summary is hidden. A companion that answers is not evidence of platform qualification. The companion deliberately normalizes low-level errors, so a provider-unavailable or timeout row can offer the relevant CLI/CA/ACL checks without claiming it proved which underlying component failed. Tern's own logs (`tern-daemon.log` for the host half, `tern.log` for windows) contain plugin load errors ([Tern: Debugging](https://docs.stencil.so/tern/guides/debugging.html)).
+**USAGE Diagnostics** shows platform qualification and setup remedies, the companion process state, the last refresh and its stable failure categories, sharing state and whether the status bar and the usage statistics are on. A companion that answers is not evidence of platform qualification. The companion deliberately normalizes low-level errors, so a provider-unavailable or timeout row can offer the relevant CLI/CA/ACL checks without claiming it proved which underlying component failed. Tern's own logs (`tern-daemon.log` for the host half, `tern.log` for windows) contain plugin load errors ([Tern: Debugging](https://docs.stencil.so/tern/guides/debugging.html)).
 
 ## Limitations
 
@@ -294,7 +304,7 @@ A binding ends by itself, and must be confirmed again, when you edit that SPAWN 
 - Usage is read from each provider's current CLI or endpoint. A provider can change its output; USAGE then reports "could not parse" rather than guessing.
 - A SPAWN account that runs over SSH is shown but never read from this machine.
 - Accounts on another machine show up only when that machine runs USAGE and shares with this one, or when your window is attached to that machine's Tern host.
-- In a window attached to a remote host, the status-bar summary and USAGE Diagnostics still describe the window's own machine. USAGE blocks opened in the attached session describe the host. The **USAGE Refresh** command needs one of those blocks open to reach the host.
+- In a window attached to a remote host, the status-bar selection and USAGE Diagnostics still describe the window's own machine. USAGE blocks opened in the attached session describe the host. The **USAGE Refresh** command needs one of those blocks open to reach the host.
 - Codex readings without an email (rare) are shown without an account identity and are not merged with other rows.
 - USAGE needs Python and a one-time dependency download. It does not install Python for you.
 
@@ -374,7 +384,8 @@ All fixtures are synthetic. Keep runtime data, logs and screenshots out of the p
 ### Files
 
 - `plugin.toml`: manifest (id `usage`) with the accounts, account, config and capacity blocks.
-- `window.luau`, `setup.luau`, `view_layout.luau`, `view_state.luau`, `usage.css`: commands, Setup, layouts and PIPs, refresh progress, styles.
+- `window.luau`, `setup.luau`, `view_layout.luau`, `view_state.luau`, `usage.css`: commands, status-bar segments, Setup, layouts and PIPs, refresh progress, styles.
+- `status_preferences.luau`, `status_settings.luau`: the stored status-bar choice with its migration, and its section of USAGE Configuration. `status/status_prompt.luau` is vendored from `shared/plugin-status-v1`; don't edit it here.
 - `host.luau`, `presentation.luau`: the USAGE blocks and what they show.
 - `capacity.luau`, `usage_service/capacity.py`: the read-only `usage.capacity` export.
 - `host_setup.luau`: host-run Setup for windows attached to a remote host (the `usage.setup` action on the config block).

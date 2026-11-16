@@ -1,0 +1,87 @@
+{
+ "client_keys": [
+  "",
+  "2"
+ ],
+ "client_window": "2",
+ "host_inventory": {
+  "clients": [
+   {
+    "conn": 8,
+    "identity": {
+     "hops": [
+      {
+       "from": "",
+       "host": "dev-blastworks",
+       "method": "local",
+       "principal": "claudebwai",
+       "user": "claudebwai"
+      }
+     ]
+    },
+    "kind": "remote",
+    "since": 1794802728681,
+    "window": ""
+   },
+   {
+    "conn": 11,
+    "identity": {
+     "hops": [
+      {
+       "from": "",
+       "host": "dev-blastworks",
+       "method": "local",
+       "principal": "claudebwai",
+       "user": "claudebwai"
+      }
+     ]
+    },
+    "kind": "cli",
+    "since": 1794802729224,
+    "window": ""
+   }
+  ],
+  "detached": [],
+  "panes": [],
+  "sessions": [
+   {
+    "id": 4,
+    "name": "Default",
+    "shown": true,
+    "tabs": [
+     {
+      "blocks": [
+       {
+        "args": [],
+        "cols": 0,
+        "command": null,
+        "cwd": "/opt/glitch",
+        "exited": null,
+        "focused": true,
+        "id": 5,
+        "keep_open": false,
+        "live": false,
+        "program": "",
+        "rows": 0,
+        "title": ""
+       }
+      ],
+      "id": 6,
+      "name": null,
+      "number": 1,
+      "shown": true,
+      "splits": {
+       "Leaf": 5
+      },
+      "zoomed": false
+     }
+    ]
+   }
+  ]
+ },
+ "host_pane": 5,
+ "host_refusal": {
+  "status": 1,
+  "stderr": "tern inspect: no window has key 2; window keys: \"\" (the first)"
+ }
+}

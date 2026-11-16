@@ -39,6 +39,7 @@ local function discovery_argv()
 	return Discovery.argv(tern.runtime.os, tern.getenv("SystemRoot") or tern.getenv("WINDIR"))
 end
 
+-- `window` must be a key THIS daemon lists (SKILLS-174): never a client window key from another machine.
 local function execute(window, options, arguments, callback)
 	if window ~= nil and not window_key(window) then error("Native inspection requires an opaque native window key") end
 	if type(callback) ~= "function" then error("Native operation requires a callback") end

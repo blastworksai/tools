@@ -12,6 +12,8 @@ local Prereq = require("./prereq")
 local PageNavigation = require("./page_navigation")
 local WindowJournal = require("./window_journal")
 local SetupDiscovery = require("./setup_discovery")
+-- The status-bar prompt claim is serialised on this single host thread (see status/status_prompt.luau).
+require("./status/status_prompt").host_serve()
 local observer_namespace, observer_migration_error = WindowJournal.host_initialize(function()
 	return string.format("observer-%d-%08x-%08x-%08x", os.time(), math.random(1,2147483647), math.random(1,2147483647), math.random(1,2147483647))
 end)
@@ -65,6 +67,47 @@ local function pane_sessions(inventory,pane)
 	return found
 end
 local auto_forget
+-- A remote client's window key names a window of the CLIENT's daemon, which this host
+-- daemon never lists (it knows the client as "" or as its own key). The captured key is
+-- a routing hint only: it is echoed back to the client and never handed to this host's
+-- `tern inspect --window`. For a remote execution host, find the host daemon's own window
+-- by the Config pane's membership in the keys this daemon lists (as bridge_membership does).
+local function remote_host(state)
+	return type(state.host)=="table" and state.host.kind=="remote"
+end
+local function resolve_host_window(state,pane,inspect_step,done)
+	if not remote_host(state) then state.host_window=nil;done(state.native_window,nil);return end
+	inspect_step(nil,function(initial,err)
+		if not initial then done(nil,err);return end
+		if type(initial.clients)~="table" then done(nil,"Host client inventory is unavailable");return end
+		local keys,seen={},{}
+		for _,client in ipairs(initial.clients) do
+			if (client.kind=="window" or client.kind=="remote") and type(client.window)=="string" and #client.window<=256 and not client.window:find("%c") and not seen[client.window] then
+				seen[client.window]=true;table.insert(keys,client.window)
+			end
+		end
+		if #keys==0 or #keys>MAX_WINDOWS then done(nil,"Visible host windows are missing or exceed the 16-window inspection limit");return end
+		local owner,session,index=nil,nil,0
+		local function scan()
+			index+=1
+			if index>#keys then
+				if owner==nil then done(nil,"Config pane is not visible in any host window; keep it visible in its original session");return end
+				state.host_window=owner;done(owner,nil);return
+			end
+			inspect_step(keys[index],function(inventory,why)
+				if not inventory then done(nil,why);return end
+				local found=pane_sessions(inventory,pane)
+				if not found then done(nil,"Corrupt native session identity");return end
+				for _,id in pairs(found) do
+					if session~=nil and session~=id then done(nil,"Config pane membership is ambiguous across host windows");return end
+					session=id;owner=owner or keys[index]
+				end
+				scan()
+			end)
+		end
+		scan()
+	end)
+end
 -- The captured native window is a routing hint, never session identity.
 -- Verify this host pane in that exact native view twice to fence membership drift.
 local function verify(state,cx,callback,deadline)
@@ -132,7 +175,11 @@ local function verify(state,cx,callback,deadline)
 		end)
 	end)
 	end
-	read_membership()
+	resolve_host_window(state,cx.pane,inspect_step,function(resolved,why)
+		if resolved==nil then finish(nil,why);return end
+		window=resolved
+		read_membership()
+	end)
 end
 -- Live native sessions from this host's own verified inspection (set by verify),
 -- never from a window. Unavailable, failed or empty inventory yields nil.
@@ -244,7 +291,7 @@ auto_forget=function(state,cx,native_result,deadline)
 	if not ok or not preview then state.forget_hold=tostring(if ok then why else preview);return end
 	if preview.sessions==0 then state.forget=preview;state.forget_hold=nil;return end
 	local windows,problem=cleanup_windows(native_result)
-	if not windows or not windows[state.native_window] then
+	if not windows or not windows[state.host_window or state.native_window] then
 		state.forget_hold=problem or "The owning native window incarnation is unavailable";return
 	end
 	local order={}
@@ -1367,20 +1414,25 @@ local definition={
 				end
 				if pending.recipient~=nil then return end
 				local retirement=WindowJournal.capture()
-				local started,why=pcall(Native.inspect,input.window_key,{timeout_ms=5000},function(result,problem)
+				-- A remote client's key is foreign to this host daemon: inspect through the
+				-- host window resolved by verification and match its remote client entries.
+				local remote=remote_host(state)
+				local scope=if remote then state.host_window else input.window_key
+				if scope==nil then state.notice="Launch recipient cannot be resolved until this Config pane is verified in a host window";return end
+				local started,why=pcall(Native.inspect,scope,{timeout_ms=5000},function(result,problem)
 					if state.closed then return end
 					local windows,identity_error,inventory=nil,problem,nil
 					if not identity_error then windows,identity_error,inventory=WindowJournal.client_inventory(result) end
 					local recipient=nil
-					if windows and windows[input.window_key] then
+					if windows and not remote and windows[input.window_key] then
 						local handle;handle,identity_error=WindowJournal.open(input.window_key,result,retirement)
 						if handle and WindowJournal.same_recipient(handle.recipient,input) then recipient=handle.recipient end
-					elseif windows and state.native_window==input.window_key then
+					elseif windows and (remote or state.native_window==input.window_key) then
 						-- Remote conn/since belong to this host's SSH connection, not
 						-- the desktop's native window. Keep the desktop's directed
 						-- recipient opaque; never open its journal on the remote host.
 						for _,client in ipairs(inventory.clients) do
-							if client.kind=="remote" and client.window==input.window_key and P.integer(client.conn,0) and P.integer(client.since,0) then
+							if client.kind=="remote" and client.window==scope and P.integer(client.conn,0) and P.integer(client.since,0) then
 								recipient={window_key=input.window_key,observer_id=input.observer_id,conn=input.conn,since=input.since}
 								break
 							end
@@ -1414,7 +1466,7 @@ local definition={
 			verify(state,cx,function(session,why)
 				if not session then state.transport_error=why;refuse(state,input,why);return end
 				if not state.binding then state.transport_error="Authority not initialized";refuse(state,input,state.transport_error);return end
-				local ok,reason=Authority.request(state.binding,input,{config_pane=cx.pane,window=state.native_window,inventory=state.inventory,epoch=Executor.epoch()})
+				local ok,reason=Authority.request(state.binding,input,{config_pane=cx.pane,window=state.native_window,host_window=state.host_window,inventory=state.inventory,epoch=Executor.epoch()})
 				if ok and (input.op=="launch_record" or input.op=="start_setup") then Executor.attach(state.binding) end
 				state.transport_error=if ok then nil else reason;reload(state)
 				if not ok then refuse(state,input,reason) end
@@ -1705,7 +1757,7 @@ local definition={
 							route.status=if summary then "observed" else "failed"
 							route.error=if pending then "Native terminal output did not complete before the diagnostic deadline" elseif err then tostring(err):gsub("%c"," "):sub(1,1024) else nil
 							cx:render()
-						end)
+						end,state.host_window)
 					end
 					observe()
 				end);return
@@ -1866,7 +1918,7 @@ local definition={
 						data.attempt_id=review.attempt_id;data.pending_digest=review.pending_digest
 					else data.records=review.records end
 					local request={version=2,request_id=observer..":"..tostring(seq),authority_id=state.binding.authority_id,observer_id=observer,request_sequence=seq,acknowledged_requests=acks,expected_config_revision=review.revision,op="import_records",data=data}
-					local ok,why=Authority.request(state.binding,request,{config_pane=cx.pane,window=state.native_window,inventory=state.inventory,epoch=Executor.epoch()})
+					local ok,why=Authority.request(state.binding,request,{config_pane=cx.pane,window=state.native_window,host_window=state.host_window,inventory=state.inventory,epoch=Executor.epoch()})
 					reload(state)
 					local reply=state.snapshot and state.snapshot.replies[request.request_id]
 					if ok and reply and reply.ok then state.import_review=nil;state.import_text="";state.notice="Imported "..tostring(reply.result.imported).." records. Manual recovery does not prove original automatic-source provenance. No agents were launched."
@@ -1946,7 +1998,7 @@ local definition={
 			local binding,window=state.binding,state.native_window
 			verify(state,cx,function(session,err)
 				if not session or not binding or state.binding~=binding or state.native_window~=window or not reload(state) then state.notice=err or "Setup submission Config source changed";return end
-				local accepted,problem=Authority.setup_submission(binding,envelope,{config_pane=cx.pane,window=window,inventory=state.inventory,epoch=Executor.epoch()})
+				local accepted,problem=Authority.setup_submission(binding,envelope,{config_pane=cx.pane,window=window,host_window=state.host_window,inventory=state.inventory,epoch=Executor.epoch()})
 				if not reload(state) then return end
 				if accepted then
 					for _,job in ipairs(state.snapshot.jobs) do
