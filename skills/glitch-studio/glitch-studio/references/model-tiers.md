@@ -6,7 +6,7 @@ You map them to real models.
 
 You make the first mapping at stage 0, because stage 1 already sends scouts and readers at a tier.
 Stage 5 picks a tier for each lane from it, and may revise it.
-Stage 6 runs before the build and records the intended tiers and the builder level you expect.
+Stage 6 runs after `/glitch-plan` and before the build, and records the intended tiers and the builder level the plan names.
 Stage 7 resume records what the lanes actually used.
 There is one plan.
 `/glitch-execute` runs every builder at the one builder level that plan names.

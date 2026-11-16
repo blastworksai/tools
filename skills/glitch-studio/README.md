@@ -33,10 +33,12 @@ Each stage writes one evidence file in a `studio/` folder in your project.
 4. **Domain skills (2).** Before product code touches an outside platform, a small skill for that platform exists.
    The skill looks for an existing one first.
 5. **Parts, contracts, lanes (3, 4, 5).** The skill writes one planning brief and hands it to `/glitch-plan`.
-   The brief carries the exact contract text. The first checkpoint's builder writes it, and the build commits it as the freeze, every separable part after it, and tasks cut on file boundaries and marked independent.
+   The brief carries the exact contract text, and the first checkpoint's builder writes it as the freeze.
+   Every separable part comes after it, in tasks cut on file boundaries and marked independent.
+   The skill then stops until `/glitch-plan` has written the plan.
 6. **Model per job (6).** Four tiers (deep, standard, bulk, light) mapped to the models your session can reach.
    The first mapping is made at stage 0, before the scouts start.
-   Stage 6 records the intended mapping before the build, and the tiers actually used are filled in after it.
+   Stage 6 records the intended mapping after the plan and before the build, and the tiers actually used are filled in after it.
    There is one plan, and `/glitch-execute` runs every builder at the one level it names.
    You choose that level at the stop of `/glitch-plan`, and the skill tells you when a deep part needs a higher one.
 7. **Review and integrate (7).** `/glitch-execute` with Glitch orchestration runs the lanes.

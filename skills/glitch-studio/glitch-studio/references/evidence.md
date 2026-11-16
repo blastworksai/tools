@@ -37,7 +37,7 @@ Stage 8 is never `none`.
 
 Files 03, 04 and 05 record what the planning brief asked for.
 They also carry a `Plan:` line that points at the plan once `/glitch-plan` has made it.
-Until then the line reads `Plan: not yet made`.
+Until then the line reads `Plan: not yet made`, and the skill stops at the hand-off.
 After the build, the archived plan path under `plans/archive/` is added beside it.
 Before the build, files 04 and 05 may hold `pending` for the freeze commit, "Changes after freeze" and "Stops raised", and file 06 for "tiers actually used".
 A `pending` value does not make a file unfinished.
@@ -53,8 +53,9 @@ There are no lane merges.
 3. Otherwise read every file.
    A file without the three ending lines is unfinished.
    Finish it first.
-4. If any of files 03, 04 and 05 says `Plan: not yet made`, continue the `/glitch-plan` hand-off.
-   Replace the placeholder in all three when the plan exists, before stage 6.
+4. If any of files 03, 04 and 05 says `Plan: not yet made`, ask whether `/glitch-plan` has written the plan.
+   If it has, put its path in all three, then go on to stage 6.
+   If it has not, give the brief again and STOP.
 5. If file 07 says `Picked: pending`, STOP until the build and every fix task have run.
    Then update file 07 first, and do the stage 7 resume steps.
 6. If file 08 or 09 says `Picked: pending`, STOP until its fix task has run.

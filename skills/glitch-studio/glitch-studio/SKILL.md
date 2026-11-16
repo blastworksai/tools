@@ -53,9 +53,9 @@ Run this first, every time.
    Finish it first.
    A `pending` value does not make a file unfinished.
    Stage 7 must replace it.
-4. If any of files 03, 04 and 05 says `Plan: not yet made`, continue the `/glitch-plan` hand-off.
-   Give the user the brief again.
-   When the plan exists, replace the placeholder in all three files before stage 6.
+4. If any of files 03, 04 and 05 says `Plan: not yet made`, ask the user whether `/glitch-plan` has written the plan.
+   If it has, put its path on the `Plan:` line in all three files, then go on to stage 6.
+   If it has not, give the user the brief again and STOP.
 5. If file 07 says `Picked: pending`, STOP until the build and every fix task have run.
    Then update file 07 first.
    Then do the stage 7 resume steps.
@@ -157,8 +157,12 @@ These three stages are one hand-off to `/glitch-plan`.
    If you revise the mapping now, write a revision note here.
 8. Give the user the filled brief to paste after `/glitch-plan` in a fresh window.
    Do not paste it yourself.
-9. When the plan exists, add its path on a `Plan:` line in files 03, 04 and 05.
-   Until then, write `Plan: not yet made`.
+9. Write `Plan: not yet made` in files 03, 04 and 05.
+10. STOP.
+   Tell the user to come back to this skill when `/glitch-plan` has written the plan.
+   Stage 6 and stage 7 need the plan.
+11. On return, add the plan's path on the `Plan:` line in files 03, 04 and 05.
+   Then go on to stage 6.
 
 The plan is the source of truth for the tasks.
 Files 04 and 05 record what was asked and where the plan is.
@@ -167,8 +171,8 @@ Files 04 and 05 record what was asked and where the plan is.
 
 Write `studio/06-model-tiers.md`.
 Read [model-tiers.md](references/model-tiers.md) and follow it.
-This stage runs before the build.
-It records what you intend.
+This stage runs after `/glitch-plan` has written the plan, and before the build.
+It records what you intend and the builder level the plan names.
 Stage 7 resume records what happened.
 
 1. Start from the latest mapping.
@@ -178,7 +182,7 @@ Stage 7 resume records what happened.
    Use only models this session can actually reach.
 4. Name the model family of each one.
    The critic needs a different family from the author.
-5. Record the intended tiers and the builder level you expect the plan to name.
+5. Record the intended tiers and the builder level the plan names.
    Write `pending` for "Tiers actually used".
 
 ## Stage 7 — Review and integrate
