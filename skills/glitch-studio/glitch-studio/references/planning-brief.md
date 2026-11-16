@@ -24,13 +24,17 @@ Every builder reads these before it writes anything.
 List them in the plan's context references as mandatory reading:
 - Study notes: <paths to the notes from stage 1, or "none">
 - Domain skills: <names or paths from stage 2, or "none">
-- Art direction: <path, or "no visual parts">
+- Art direction: <path, fixed screenshot sizes, or "no visual parts">
 - Third-party notices file: <path, or "none">
 
 ## Tiers
 
-The tier mapping is: <list: tier, model, from the stage 0 mapping>.
+The tier mapping is: <list: tier, model, from the latest mapping>.
 Each part has one tier: <list: part, tier>.
+The tier guides the builder level.
+`/glitch-execute` runs every builder at the one level this plan names.
+Choose that level for the hardest part in this plan.
+This plan covers only parts that fit one level: <list of parts>.
 
 ## Runtime models
 
@@ -51,9 +55,14 @@ Write that commit's name here: <base commit, or "not used">.
 
 1. The FIRST checkpoint writes the frozen contracts.
    - There is one contracts place: <folder, for example shared/contracts/>.
-   - The orchestrator writes it, and it is frozen before any lane starts.
+   - The exact contract text is below. It was written by the studio orchestrator before this plan.
+   - The task of this checkpoint is one builder task.
+     The builder writes that text into the contracts place, word for word.
+     It changes nothing else.
+   - The `/glitch-execute` orchestrator checks that the file equals the text below.
+     Then it commits the file as the freeze commit, before any lane starts.
    - The contracts are: <list: each shared type or interface, and which parts use it>.
-   - Only the orchestrator changes a contract.
+   - Only the studio orchestrator changes a contract.
    - A lane that needs a change stops and asks.
 2. Parts that can be built at the same time share one later checkpoint.
    `/glitch-execute` runs side by side only the tasks inside one checkpoint, and it lands checkpoints one at a time.
@@ -71,10 +80,16 @@ Write that commit's name here: <base commit, or "not used">.
    The orchestrator verifies the lane against the files on disk.
    Then it makes one commit for that lane, touching only the lane's folder.
 7. Each checkpoint's validation shows the work done, not only tests green.
-   - A visual part is shown by screenshots at these sizes: <list of sizes>.
+   - A visual part is shown by screenshots at these sizes: <list of sizes, from the art direction file>.
    - Every other part is shown by a real run of it.
-8. The plan ends with a final checkpoint where a reviewer of another model family reads every lane.
-   Lanes merge one at a time, and the tests run after each merge.
+8. There are no lane merges.
+   The lanes commit in order on the same branch, one commit per lane.
+   The tests run after each lane commit.
+9. The plan ends with a final checkpoint where a read-only reviewer of another model family reads every lane's diff.
+
+## Contract text
+
+<the exact contract text, as written in the studio contracts file, or "none">
 
 ## Build choices
 

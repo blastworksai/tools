@@ -38,9 +38,12 @@ It audits them.
 
 After build and proof, check every runtime model call against all four rules.
 Record one check per rule, with its result (pass or fail, and the evidence).
+Also check the three controls under "Also check".
+Record one audit line for each, with its result and evidence.
 If a check fails, write a fix task for the owning lane.
-The user runs it through `/glitch-execute`.
-After the fix is merged, refresh the stage 8 proof for that part.
+Give the user the task text to paste after `/glitch-plan` in a fresh window.
+Then give the `/glitch-execute` line it prints.
+After the fix is committed, refresh the stage 8 proof for that part.
 
 ## The evidence file
 
@@ -52,7 +55,8 @@ After the fix is merged, refresh the stage 8 proof for that part.
 - `Budget:` calls per request.
 - `Scoring:` the code that scores quality.
 
-It also holds one audit line per rule, with its result.
+It also holds one audit line per rule, with its result and evidence.
+It holds one audit line each for least access, reply validation and the fail-closed fallback, with result and evidence.
 It lists any fix task and the refreshed stage 8 proof.
 
 Then the ending lines.

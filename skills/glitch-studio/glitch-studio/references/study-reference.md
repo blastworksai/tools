@@ -29,7 +29,7 @@ If no part qualifies, write `Picked: none` and the reason.
    One agent per chosen candidate.
    It reads the design, not only the code.
    It answers: what idea do we take, what do we leave, what breaks if we copy it, and what does it cost to adopt.
-4. **Leave a study note** per candidate, in `studio/notes/<part>.md`.
+4. **Leave a study note** per candidate, in `studio/notes/<part>-<candidate>.md`.
    Keep each note short: idea, evidence, decision, credit.
 5. **Credits.**
    Add each source to a third-party notices file in the project root (for example `THIRD_PARTY_NOTICES.md`).
@@ -40,7 +40,7 @@ If no part qualifies, write `Picked: none` and the reason.
 
 `studio/01-study-reference.md` holds:
 - `Parts studied:` the parts, or `none`.
-- One line per candidate: part, name, licence, user's yes (date) or `not asked`.
+- One line per candidate: part, name, licence, user's yes (date), `no (date)` for a refused fetch, or `not asked`.
 - `Fetches:` each download, clone or install with its target, its licence and the user's yes, or `none`.
 - `Notes:` the paths of the study notes.
 - `Notices file:` its path.

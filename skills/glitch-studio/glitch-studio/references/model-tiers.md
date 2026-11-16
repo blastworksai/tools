@@ -6,12 +6,16 @@ You map them to real models.
 
 You make the first mapping at stage 0, because stage 1 already sends scouts and readers at a tier.
 Stage 5 picks a tier for each lane from it, and may revise it.
-Stage 6 writes down the final mapping.
+Stage 6 runs before the build and records the intended tiers and builder level.
+Stage 7 resume records what the lanes actually used.
+`/glitch-execute` runs every builder at the one level its plan names.
+The tier per part guides that choice.
+If parts need clearly different tiers, split them into separate plans, each with its own level.
 
 ## The four tiers
 
 - **deep.** Contracts, the parts that must be right, and the critic.
-- **standard.** Most features, integration and merges.
+- **standard.** Most features and integration.
 - **bulk.** Volume work: assets, tests, sweeps.
   Fan it out, with one folder for each worker.
 - **light.** Scouting and summaries.
@@ -34,10 +38,11 @@ Stage 6 writes down the final mapping.
 
 The first mapping goes in `studio/00-frame.md`.
 `studio/06-model-tiers.md` holds:
+- `Builder level:` the level each plan names.
 - A table: tier, model, family, reachable (yes or no).
 - A table: part, tier, reason.
-- `Tiers used:` the tier each lane actually used.
-- `Revision note:` what changed from the stage 0 mapping and why, or `none`.
+- `Tiers actually used:` the level each plan actually ran at, and the tier each lane had. `pending` until the build, then filled in at stage 7 resume.
+- `Revision note:` what changed from the latest earlier mapping and why, including any change the build drove, or `none`.
 - `Critic:` the model and family, or `none reachable`.
 - `Same-family review:` yes or no.
   If yes, add the user's decision.

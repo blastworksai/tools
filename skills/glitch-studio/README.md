@@ -10,7 +10,7 @@
 A long build in one session drifts.
 The agent forgets the plan, edits the same file twice, and calls a screen done that nobody has seen.
 The write-up behind this skill shows another way.
-One thread plans, writes the shared contracts, reviews and merges.
+One thread plans, writes the shared contracts, reviews and integrates.
 Many fresh lanes each build one part, one small check at a time.
 Nothing counts until it has been shown working.
 
@@ -33,13 +33,14 @@ Each stage writes one evidence file in a `studio/` folder in your project.
 4. **Domain skills (2).** Before product code touches an outside platform, a small skill for that platform exists.
    The skill looks for an existing one first.
 5. **Parts, contracts, lanes (3, 4, 5).** The skill writes one planning brief and hands it to `/glitch-plan`.
-   The brief asks for frozen contracts as the first checkpoint, every separable part after it, and tasks cut on file boundaries and marked independent.
+   The brief carries the exact contract text. The first checkpoint's builder writes it, and the build commits it as the freeze, every separable part after it, and tasks cut on file boundaries and marked independent.
 6. **Model per job (6).** Four tiers (deep, standard, bulk, light) mapped to the models your session can reach.
    The first mapping is made at stage 0, before the scouts start.
-   Stage 6 records the final mapping and the tiers the lanes used.
+   Stage 6 records the intended mapping before the build, and the tiers actually used are filled in after it.
+   `/glitch-execute` runs every builder at one level, so parts with very different tiers go in separate plans.
 7. **Review and integrate (7).** `/glitch-execute` with Glitch orchestration runs the lanes.
    A reviewer of another model family reads every lane.
-   Lanes merge one at a time.
+   Lanes commit in order, one commit each, and the tests run after each.
 8. **Prove (8).** Visual parts get screenshots at fixed sizes.
    Every other part gets a real run.
 9. **Models inside the product (9).** Only when the product itself calls a model.
@@ -47,6 +48,7 @@ Each stage writes one evidence file in a `studio/` folder in your project.
 
 If the `studio/` folder already holds files, the skill reads them all.
 It finishes any file that lacks the three ending lines first.
+It finishes an open plan hand-off, and it stops while the build has not run.
 Then it resumes at the first missing number.
 
 ## How to use it
@@ -62,7 +64,7 @@ Then say "build this the studio way" and name the product.
   One model for all four tiers works, but the review is then same-family and you decide whether to accept it.
 
 If you do not use Glitch, use the neutral `studio` skill from the same repository.
-It holds all nine stages in one skill and needs no other skill.
+It holds all nine method points in one skill and needs no other skill.
 
 ## The limits
 

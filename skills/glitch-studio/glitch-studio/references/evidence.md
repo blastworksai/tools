@@ -9,15 +9,15 @@ They are the same in the neutral studio skill and in this one.
 | Stage | Path | Must contain |
 | --- | --- | --- |
 | 0 | `studio/00-frame.md` | `Role:` orchestrator; the product; who it is for; what "done" means; the named hard parts; the named outside platforms or APIs; visual part yes or no; runtime model yes or no; the first tier-to-model mapping (tier, model, family, reachable); git state |
-| 1 | `studio/01-study-reference.md` | per hard part: candidates seen, candidate studied, licence, fetch approved (yes or no, with the date), study note path; the path of the notices file |
+| 1 | `studio/01-study-reference.md` | per hard part: candidates seen, candidate studied, licence, fetch approved (yes or no, with the date), study note path (`studio/notes/<part>-<candidate>.md`); the path of the notices file |
 | 2 | `studio/02-domain-skills.md` | per platform: skill path, found or written, endpoints covered, token types, rate limits, what is unverified |
-| 3 | `studio/03-parts-and-specs.md` | per part: name, folder scope, tier, calls a model at runtime (yes or no), contracts used; the filled planning brief; `Plan:` line |
-| 4 | `studio/04-contracts.md` | per contract: name, path, producer, readers; the freeze commit (or the base commit when there is one part and nothing shared); the rule that only the orchestrator changes a contract; a section "Changes after freeze", empty if none; or `Picked: none` with the reason; `Plan:` line |
-| 5 | `studio/05-lanes.md` | per lane: name, part, folder scope, tier chosen; stops raised; a revision note if the stage 0 mapping changed; `Plan:` line |
-| 6 | `studio/06-model-tiers.md` | the final tier-to-model table (tier, model, family, reachable); a tier per part with one line why; the tiers the lanes actually used; a revision note if the mapping changed, or `none`; the critic line (model and family, or `none reachable`); same-family review yes or no |
-| 7 | `studio/07-review-and-integrate.md` | per lane: review result, findings, critic model and family (or "same-family"), critic result, merge commit, test result after that merge; the merge order; any stop; the user's decision when a review was same-family |
+| 3 | `studio/03-parts-and-specs.md` | per part: name, folder scope, tier, calls a model at runtime (yes or no), contracts used; the filled planning brief; for a visual part, the art-direction path and the fixed screenshot sizes; `Plan:` line (and the archived plan path after the build) |
+| 4 | `studio/04-contracts.md` | the exact contract text; per contract: name, path, producer, readers; the freeze commit (`pending` until the build) (or the base commit when there is one part and nothing shared); the rule that only the orchestrator changes a contract; a section "Changes after freeze" (`pending` until the build, then empty if none); or `Picked: none` with the reason; `Plan:` line (and the archived plan path after the build) |
+| 5 | `studio/05-lanes.md` | per lane: name, part, folder scope, tier chosen; stops raised (`pending` until the build); a revision note if the stage 0 mapping changed; `Plan:` line (and the archived plan path after the build) |
+| 6 | `studio/06-model-tiers.md` | the final tier-to-model table (tier, model, family, reachable); a tier per part with one line why; the builder level each plan names; the tiers the lanes actually used (`pending` until the build); a revision note if the mapping changed, or `none`; the critic line (model and family, or `none reachable`); same-family review yes or no |
+| 7 | `studio/07-review-and-integrate.md` | per lane: review result, findings, critic model and family (or "same-family"), critic result, lane commit, test result after that commit; the commit order; any stop; the user's decision when a review was same-family |
 | 8 | `studio/08-proof.md` | per part: kind (visual or behaviour), proof file paths or command, sizes checked, judged against, result, what is wrong; never `Picked: none` |
-| 9 | `studio/09-runtime-models.md` | per runtime call: tier, grammar, builder, refusal rule, budget, scoring; one line per rule (four) with its audit result; any fix task and the refreshed stage 8 proof; or `Picked: none` with the reason |
+| 9 | `studio/09-runtime-models.md` | per runtime call: tier, grammar, builder, refusal rule, budget, scoring; one line per rule (four) with its audit result; one audit line each for least access, reply validation and fail-closed fallback, with evidence; any fix task and the refreshed stage 8 proof; or `Picked: none` with the reason |
 
 ## The ending
 
@@ -38,7 +38,13 @@ Stage 8 is never `none`.
 Files 03, 04 and 05 record what the planning brief asked for.
 They also carry a `Plan:` line that points at the plan once `/glitch-plan` has made it.
 Until then the line reads `Plan: not yet made`.
-File 07 records the reviews and merge order from the build run by `/glitch-execute`.
+After the build, the archived plan path under `plans/archive/` is added beside it.
+Before the build, files 04 and 05 may hold `pending` for the freeze commit, "Changes after freeze" and "Stops raised", and file 06 for "tiers actually used".
+A `pending` value does not make a file unfinished.
+The three ending lines decide that.
+Stage 7 resume must replace every `pending` value.
+File 07 records the reviews and the lane commit order from the build run by `/glitch-execute`.
+There are no lane merges.
 
 ## The resume rule
 
@@ -47,9 +53,13 @@ File 07 records the reviews and merge order from the build run by `/glitch-execu
 3. Otherwise read every file.
    A file without the three ending lines is unfinished.
    Finish it first.
-4. Then continue at the first missing number.
-5. Never redo a finished stage, unless the user asks.
-6. Say which stage you resume at.
+4. If files 03, 04 and 05 say `Plan: not yet made`, continue the `/glitch-plan` hand-off.
+   Replace the placeholder in all three when the plan exists, before stage 6.
+5. If file 07 says `Picked: pending`, STOP until the build has run.
+   Then update file 07 first, and do the stage 7 resume steps.
+6. Then continue at the first missing number.
+7. Never redo a finished stage, unless the user asks.
+8. Say which stage you resume at.
 
 ## A worked example
 
