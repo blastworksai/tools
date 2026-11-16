@@ -3,6 +3,7 @@
 local sync = require("../lib/board_sync")
 local claim = require("../lib/board_claim")
 local gate = require("../lib/sync_gate")
+local statusLib = require("../lib/sync_status")
 
 local function plan(planId, tweak)
     local p = {
@@ -619,6 +620,36 @@ local extra = {
         assert(finished == true, "the delayed pass read a snapshot that was correct when it was taken")
         local marked = g.mark(key, 1, gen)
         assert(marked == false and not g.matches(key, 1), "the stale completion must not mark the revision")
+    end},
+    {"a sync status change repaints an open Settings pane without reopening it, and never a closed one", function()
+        local timers, painted, open = {}, {}, true
+        local status
+        status = statusLib.new({
+            timer = function(_, fn) table.insert(timers, fn) end,
+            pane = function(_) return if open then 7 else nil end,
+            paint = function(cx, pane) table.insert(painted, { cx = cx, pane = pane, text = status.get() }) end,
+        })
+        local function flush() while #timers > 0 do table.remove(timers, 1)({ fresh = true }) end end
+        -- 251-entity refusal, as the window's sync tick reports it
+        local r = run(fakeBoard(), nestedPlan(251))
+        status.set(r.problem); flush()
+        assert(#painted == 1 and painted[1].pane == 7 and painted[1].text == sync.TOO_BIG and painted[1].cx.fresh)
+        -- a truncated-read error from a real pass, reported from the pass's callback
+        local b = fakeBoard()
+        local p = nestedPlan(250)
+        assert(run(b, p).ok)
+        for i = 1, 251 do b.user("Pending", "mine " .. i) end
+        local t = run(b, p)
+        assert(not t.ok)
+        status.set(t.problem); flush()
+        assert(#painted == 2 and painted[2].text == t.problem and painted[2].text:find("more cards", 1, true))
+        status.set(t.problem); flush()
+        assert(#painted == 2, "the same text does not repaint")
+        open = false
+        status.set("Board synced · 3 change(s)"); flush()
+        assert(#painted == 2, "a closed Settings pane is not painted")
+        status.set(nil); flush()
+        assert(status.get() == nil)
     end},
     {"switching the attached session also forgets the cached revision", function()
         local g = gate.new()

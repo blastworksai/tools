@@ -964,6 +964,16 @@ class WindowContract(unittest.TestCase):
         self.assertNotIn('lastRev', window)
         self.assertIn('synced.passed(key, entry.rev, gen, count, tern.now())', window)
 
+    def test_every_sync_status_change_repaints_an_open_settings_pane(self):
+        window = self.source('window.luau')
+        self.assertIn('sync_status.new(', window)
+        self.assertNotIn('syncStatus = "', window)
+        self.assertNotIn('syncStatus = problem', window)
+        self.assertNotIn('syncStatus = board_sync', window)
+        self.assertNotIn('syncStatus = nil', window)
+        self.assertGreaterEqual(window.count('syncStatus.set('), 7)
+        self.assertIn('pane = settingsPane', window)
+
     def test_manifest_keeps_version_and_icon(self):
         manifest = self.source('plugin.toml')
         self.assertIn('version = "0.7.2"', manifest)
