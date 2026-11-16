@@ -21,6 +21,7 @@ Where available, follow the Walkdown link in the table for the results.
 | [GLITCH IDEA](skills/glitch-idea/README.md) | Capture a software idea, explore it step by step in a local browser page with your agent, and hand a planning prompt to `/glitch-plan`. Opens on your own computer over SSH, docked in Tern. | [results](https://blastworksai.github.io/tools/skills/glitch-idea/walkdown/summary.html) |
 | [STUDIO](skills/studio/README.md) | Build big things with one orchestrator and many small checked lanes: specs and frozen contracts first, one task per check and commit, every lane reviewed, every result demonstrated. Method from the [Chatdom.io build write-up](https://devpost.com/software/chatdom-io). | [results](https://blastworksai.github.io/tools/skills/studio/walkdown/summary.html) |
 | [IDEA DISCOVERY](skills/idea-discovery/SKILL.md) | Discover ideas worth exploring with AI through a guided conversation. | [results](https://blastworksai.github.io/tools/skills/idea-discovery/walkdown/summary.html) |
+| [GLITCH STUDIO](skills/glitch-studio/README.md) | Build a product with one orchestrator and many checked lanes through `/glitch-idea`, `/glitch-plan` and `/glitch-execute`: study, domain skills, frozen contracts, review and proof. Method from the [Chatdom.io build write-up](https://devpost.com/software/chatdom-io). | [results](https://blastworksai.github.io/tools/skills/glitch-studio/walkdown/summary.html) |
 
 ## PLUGINS
 
