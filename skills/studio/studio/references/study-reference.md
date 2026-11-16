@@ -14,7 +14,7 @@ If no part qualifies, write the evidence file with `Picked: none`.
 ## Steps
 
 1. List the hard parts from the frame (stage 0).
-2. For each hard part, send a light-tier scout to list candidates. Ask for name, link, licence, size, last activity and what it does well.
+2. Use the tier mapping from stage 0. For each hard part, send a light-tier scout to list candidates. Ask for name, link, licence, size, last activity and what it does well.
 3. Choose the best one to three candidates per part. Prefer permissive licences. Mark any licence that limits reuse.
 4. Tell the user, in one message, every download or clone you want to do. Give the target and the licence for each.
 5. STOP. Wait for the user's yes. A yes to one item is not a yes to the rest. Reading a project page in a browser is not a download; cloning, downloading and installing are.

@@ -25,13 +25,13 @@ Use these names exactly.
 
 | File | Fields a checker reads |
 | --- | --- |
-| 00 | role (orchestrator); product; who it is for; what "done" means; the named hard parts; the named outside platforms or APIs; visual part yes or no; runtime model yes or no; git state |
+| 00 | role (orchestrator); product; who it is for; what "done" means; the named hard parts; the named outside platforms or APIs; visual part yes or no; runtime model yes or no; tier-to-model mapping (tier, model, effort, reachable); git state |
 | 01 | per hard part: candidates seen, candidate studied, licence, fetch approved (yes or no), study note path; the path of `THIRD_PARTY_NOTICES.md` |
 | 02 | per platform: skill path, found or written, endpoints covered, token type, rate limit, what is unverified |
 | 03 | per part: part, spec path, folder scope, task count, contracts used, calls a model at runtime (yes or no) |
 | 04 | per contract: name, path, producer, readers; the freeze commit (or the base commit when there is one part and nothing shared); a section "Changes after freeze", empty if none, otherwise each change with its reason and the lanes told; or `Picked: none` with the reason |
-| 05 | per lane: lane name, spec, branch, worktree path, folder scope, task count, commit count, tier chosen, stops raised |
-| 06 | the tier-to-model table (tier, model, effort, reachable); a tier per part with one line why; the tiers the lanes actually used; the critic line (model and family, or "none reachable") |
+| 05 | per lane: lane name, spec, branch, worktree path, folder scope, task count, commit count, tier chosen, stops raised; a note if the stage 0 mapping was revised |
+| 06 | the final tier-to-model table (tier, model, effort, reachable); a tier per part with one line why; the tiers the lanes actually used; the critic line (model and family, or "none reachable") |
 | 07 | per lane: review result, findings, critic model and family (or "same-family"), critic result, merge commit, test result after that merge; the merge order; the user's decision when a review was same-family |
 | 08 | per part: kind (visual or run), proof file paths, sizes checked, result, what is wrong; never `Picked: none` |
 | 09 | per runtime call: tier, grammar, builder, budget, scoring; one line per rule (five) with its audit result; any fix task and refreshed proof; or `Picked: none` with the reason |
@@ -71,9 +71,9 @@ It has a feed that calls an outside weather service, a chart, a card page and a 
 `studio/02-domain-skills.md`:
 
 ```
-| platform | skill path | endpoints | token type | rate limit |
-| --- | --- | --- | --- | --- |
-| weather service | skills/weather/SKILL.md | /current, /forecast, /stations | bearer key | 60 per minute |
+| platform | skill path | found or written | endpoints | token type | rate limit | unverified |
+| --- | --- | --- | --- | --- | --- | --- |
+| weather service | skills/weather/SKILL.md | written | /current, /forecast, /stations | bearer key | 60 per minute | the /stations paging limit |
 
 Picked: weather service, because the feed part calls it.
 Left out: the chart library, because it is a library and not a platform.

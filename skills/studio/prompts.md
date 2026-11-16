@@ -33,7 +33,9 @@ Name the hard parts of the product, for stage 1.
 Name every outside platform or API it touches, for stage 2.
 Note whether it has a visual part and whether it calls a model while it runs.
 Check the project is in git; if it is not, stop and ask me.
-Write `studio/00-frame.md` with your role, the product, who it is for, what done means, the hard parts, the outside platforms, the visual and runtime-model notes and the git state.
+List the models you can reach in this session, and map the four tiers (deep, standard, bulk, light) to them, each with an effort setting.
+Stages 1 and 5 use this mapping.
+Write `studio/00-frame.md` with your role, the product, who it is for, what done means, the hard parts, the outside platforms, the visual and runtime-model notes, the tier-to-model mapping (tier, model, effort, reachable) and the git state.
 End the file with the three lines.
 
 ## Prompt 01 of 09 . study reference
@@ -87,8 +89,9 @@ End the file with the three lines.
 
 ## Prompt 05 of 09 . lanes
 
-Before you start any lane, list the models you can reach in this session, map the four tiers (deep, standard, bulk, light) to them, and pick a tier for each lane.
-For each spec, make a git worktree on its own branch, cut from the contracts commit.
+Before you start any lane, pick a tier for each lane from the mapping in `studio/00-frame.md`.
+You may revise the mapping; if you do, say so.
+For each spec, make a git worktree on its own branch, cut from the freeze commit recorded in stage 4 (the base commit when there are no contracts).
 Start one fresh session per spec, at the lane's tier, and give it the spec path and its folder scope.
 Each lane follows this loop: take the next task, write its check, see it fail, make it pass, commit, repeat.
 A lane never edits outside its folder scope and never edits the contracts.
@@ -98,9 +101,9 @@ End the file with the three lines.
 
 ## Prompt 06 of 09 . model per job
 
-You chose the tier mapping in stage 5; write it down now.
+You made the tier mapping in stage 0, and stage 5 may have revised it; write the final mapping down now.
 Use four tiers: deep for contracts, the parts that must be right and the critic; standard for most features, integration and merges; bulk for volume work fanned out with one folder each; light for scouting and summaries.
-Write each tier's model from that mapping, with an effort setting.
+Write each tier's model from the final mapping, with an effort setting.
 Give every part a tier and one line why.
 Record the tier each lane actually used.
 Name the critic's model and family.
@@ -136,4 +139,5 @@ Only if the product itself calls a model while it runs, audit every runtime mode
 If the product calls no model at runtime, write `studio/09-runtime-models.md` with `Picked: none` and the reason.
 Otherwise write each runtime call with its tier, grammar, builder, budget and scoring, and one line per rule with its audit result.
 If any rule fails, send a fix task to the owning lane, then refresh the stage 8 proof for that part after the fix is merged.
+Record in the file each fix task you sent and the refreshed proof file.
 End the file with the three lines.

@@ -6,8 +6,8 @@ A lane is one fresh agent session working one spec.
 
 For each spec:
 
-0. Before the first lane, check which models you can reach, map the four tiers to them and pick a tier for each lane. Use [model-tiers.md](model-tiers.md). Write down the lane tiers; stage 6 records them.
-1. Make a git worktree on its own branch, cut from the commit that froze the contracts.
+0. Before the first lane, pick a tier for each lane from the mapping you made in stage 0. Use [model-tiers.md](model-tiers.md). You may revise the mapping; say so if you do. Write down the lane tiers; stage 6 records them.
+1. Make a git worktree on its own branch, cut from the freeze commit recorded in stage 4 (the base commit when there are no contracts).
 2. Give the lane the spec path and tell it its folder scope.
 3. Tell the lane to read the domain skills and study notes the spec names.
 4. Start a fresh sub-agent or fresh session at the lane's tier. It must not inherit your conversation.

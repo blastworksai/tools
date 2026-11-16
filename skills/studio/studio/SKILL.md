@@ -44,7 +44,10 @@ Give typing work to lanes.
 Ask the user for the product in one paragraph, who it is for and what "done" looks like.
 Name the hard parts (stage 1 reads them) and the outside platforms or APIs (stage 2 reads them).
 Note whether the product has a visual part and whether it calls a model at runtime.
-Write `studio/00-frame.md` with: role, product, who it is for, what "done" means, the hard parts, the outside platforms, the visual and runtime-model notes, and the project's git state.
+Read [references/model-tiers.md](references/model-tiers.md).
+Check which models you can reach, and map the four tiers (deep, standard, bulk, light) to them.
+Stages 1 and 5 use this mapping.
+Write `studio/00-frame.md` with: role, product, who it is for, what "done" means, the hard parts, the outside platforms, the visual and runtime-model notes, the tier-to-model mapping, and the project's git state.
 STOP if the project is not in git. Ask the user to start a repository.
 
 ## Stage 1. Study reference
@@ -84,8 +87,8 @@ Write `studio/04-contracts.md`.
 
 Read [references/lanes.md](references/lanes.md).
 Give each spec its own worktree and one folder scope.
-Before you start any lane, read [references/model-tiers.md](references/model-tiers.md).
-Check which models you can reach, map the four tiers to them and pick a tier for each lane.
+Before you start any lane, pick a tier for each lane from the stage 0 mapping.
+You may revise the mapping now. If you do, say so in `studio/05-lanes.md`.
 Start one fresh lane per spec.
 A lane follows the loop: take the next task, write its check, see it fail, make it pass, commit, repeat.
 A lane never edits outside its scope.
@@ -96,8 +99,8 @@ Write `studio/05-lanes.md`: lane, branch, folder scope, task count, tier chosen.
 
 Read [references/model-tiers.md](references/model-tiers.md).
 Use four tiers: deep, standard, bulk, light.
-The mapping and the lane tiers were chosen in stage 5, before the lanes started.
-Write that mapping, tier to model, in `studio/06-model-tiers.md`, and a tier for every part.
+You made the mapping in stage 0, and stage 5 may have revised it.
+Write the final mapping, tier to model, in `studio/06-model-tiers.md`, and a tier for every part.
 Record the tiers the lanes actually used.
 
 ## Stage 7. Review and integrate
