@@ -1,0 +1,6 @@
+{
+  "name": "glitch-studio",
+  "kind": "local-skill",
+  "summary": "Build a product the studio way through Glitch: frame, study, domain skills, then a planning brief for /glitch-plan, lanes run by /glitch-execute, review, proof.",
+  "way_in": "Say \"build this the studio way\" and name the product or idea."
+}
