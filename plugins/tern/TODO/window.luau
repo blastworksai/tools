@@ -4,6 +4,8 @@ local status_prompt = require("./status/status_prompt")
 local settings = require("./lib/settings")
 local board_sync = require("./lib/board_sync")
 local plan_view = require("./lib/plan_view")
+local board_claim = require("./lib/board_claim")
+local sync_gate = require("./lib/sync_gate")
 local KIND = tern.plugin.id .. ".list"
 local TITLE = "TODO Settings"
 local SYNC_MS, RETRY_MS = 2000, 10000
@@ -46,7 +48,7 @@ local function viewPanel(cx: any, target: number): (string, number?)
 end
 
 local syncStatus: string? = nil
-local lastRev: { [string]: number } = {}
+local synced = sync_gate.new()
 local failedAt = -RETRY_MS
 local busy = false
 
@@ -130,6 +132,7 @@ tern.on("canvas_action", function(ev: any, cx: any): boolean?
     if ev.owner ~= tern.plugin.id or ev.title ~= TITLE then return nil end
     local before = settings.load(tern.kv)
     local after = settings.apply(before, ev.act, ev.value, candidates(cx))
+    synced.settingsChanged(before, after)
     settings.save(tern.kv, after, before)
     if after.sync == false then syncStatus = nil end
     paint(cx, ev.pane)
@@ -151,7 +154,7 @@ local function syncTick(cx: any)
     local entry = tern.kv.get("plan/" .. string.format("%.0f", panel))
     if type(entry) ~= "table" or type(entry.rev) ~= "number" or plan_view.validate(entry.plan) ~= nil then return end
     local key = string.format("%.0f", panel) .. ":" .. entry.plan.plan_id
-    if lastRev[key] == entry.rev or tern.now() - failedAt < RETRY_MS then return end
+    if synced.matches(key, entry.rev) or tern.now() - failedAt < RETRY_MS then return end
     local path = board_sync.boardPath(tern.plugin.data, entry.plan.plan_id)
     local prepared = pcall(function()
         if not tern.fs.exists(path) then
@@ -165,14 +168,26 @@ local function syncTick(cx: any)
         local now = settings.load(tern.kv)
         return settings.mode(now) == "glitch-sync" and now.attach == target.pane
     end
-    board_sync.apply(cx, path, entry.plan, function(ok: boolean, problem: string?, count: number)
+    local env = {
+        kv = tern.kv, now = os.time, timer = function(ms: number, fn: (any?) -> ()) return tern.timer(ms, fn) end,
+        token = function(): string return string.format("%.0f-%.0f", tern.now(), math.random(1, 2147483646)) end,
+    }
+    -- The board is written by one window at a time (lib/board_claim, granted by the host half).
+    board_claim.acquire(env, cx, path, function(fresh: any, token: string, release: () -> ())
+        local function owned(): boolean return stillOn() and board_claim.holds(env, path, token) end
+        board_sync.apply(fresh, path, entry.plan, function(ok: boolean, problem: string?, count: number)
+            release()
+            busy = false
+            if ok then
+                synced.mark(key, entry.rev); syncStatus = "Board synced · " .. tostring(count) .. " change(s)"
+            elseif stillOn() then
+                failedAt = tern.now(); syncStatus = problem
+            end
+        end, owned)
+    end, function(reason: string)
         busy = false
-        if ok then
-            lastRev[key] = entry.rev; syncStatus = "Board synced · " .. tostring(count) .. " change(s)"
-        elseif stillOn() then
-            failedAt = tern.now(); syncStatus = problem
-        end
-    end, stillOn)
+        if stillOn() then failedAt = tern.now(); syncStatus = reason end
+    end)
 end
 local function schedule()
     tern.timer(SYNC_MS, function(cx: WindowCx?)

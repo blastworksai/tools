@@ -6,6 +6,7 @@ local polling = require("./lib/polling")
 local selection = require("./lib/host_selection")
 local plan_publish = require("./lib/plan_publish")
 local status_prompt = require("./status/status_prompt")
+local board_claim = require("./lib/board_claim")
 local KIND = tern.plugin.id .. ".list"
 
 type Source = {
@@ -218,3 +219,5 @@ tern.block.define("list", {
 
 require("./updater/host").register()
 status_prompt.host_serve()
+-- One host per daemon serialises board writes: only one window at a time may add cards to a board.
+board_claim.host_serve({ kv = tern.kv, now = os.time, timer = function(ms: number, fn: (any?) -> ()) return tern.timer(ms, fn) end, token = function(): string return "host" end })

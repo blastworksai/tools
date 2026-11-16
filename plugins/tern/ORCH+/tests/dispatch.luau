@@ -7569,6 +7569,30 @@ if section == nil or section == "policy_keys" then
 	check(save({ policy = { loop_cap = 6 }, template_put = template("t50", 32) }).code == "invalid_policy" and runtime.json.encode(f.authority.registry) == fence_before,
 		"a save carrying both a policy patch and a template edit is refused")
 	check(state.rehydrate(clone(f.authority.registry)) ~= nil, "the saved v4 policy restores")
+	-- SKILLS-181: a store saved under the earlier 4096-byte board_path limit still restores; only a new edit is held to 512.
+	do
+		local long = "/" .. string.rep("b", 512)
+		local stored = clone(f.authority.registry)
+		stored.dispatch.policies[sid].board_path = long
+		check(#long == 513 and dispatch.valid(stored.dispatch, stored), "a stored 513-byte board path is valid on the restore path")
+		check(state.rehydrate(clone(stored)) ~= nil, "a store with a 513-byte board path restores")
+		check(dispatch.valid_policy(stored.dispatch.policies[sid]) and not dispatch.valid_policy(stored.dispatch.policies[sid], nil, { board_path = "" }),
+			"the same path is refused when it is a new edit")
+		local before = runtime.json.encode(f.authority.registry)
+		check(save({ policy = { board_path = long } }).code == "invalid_policy" and runtime.json.encode(f.authority.registry) == before,
+			"an edit to a 513-byte board path is still refused with nothing changed")
+		-- An unrelated save must not be blocked by a stored long path; only a changed board_path meets the edit limit.
+		f.authority.registry.dispatch.policies[sid].board_path = long
+		local held = saved().loop_cap
+		local other = save({ policy = { loop_cap = if held == 7 then 8 else 7 } })
+		check(other.ok and saved().loop_cap ~= held and saved().board_path == long,
+			"a store holding a 513-byte board path saves a different setting and keeps the path: " .. tostring(other.code))
+		local changed = runtime.json.encode(f.authority.registry)
+		check(save({ policy = { board_path = "/" .. string.rep("c", 512) } }).code == "invalid_policy" and runtime.json.encode(f.authority.registry) == changed,
+			"changing board_path to another 513-byte value is refused")
+		check(save({ policy = { board_path = "/short/board" } }).ok and saved().board_path == "/short/board",
+			"a stored long path can be replaced by a short one")
+	end
 end
 -- Contract L loop caps present in 0.3.0: each loop runs exactly loop_cap times, the next attempt
 -- opens one loop_cap gate naming the loop; allow_more resets the counter, stop keeps it stopped.

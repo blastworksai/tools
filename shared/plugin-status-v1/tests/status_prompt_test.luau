@@ -395,4 +395,93 @@ do
 	check(w.kv["status_prompt.v2"] ~= nil and w.files["/data/status_prompt.v2.done"] ~= nil, "the current grant stands")
 end
 
+-- Detaches (and returns) every pending timer of one VM, so a test can hold it back like a delayed callback.
+local function hold(w, vm)
+	local held = {}
+	for index = #w.timers, 1, -1 do
+		if w.timers[index].vm == vm then table.insert(held, table.remove(w.timers, index)) end
+	end
+	return held
+end
+
+local function give_back(w, held)
+	for _, timer in held do table.insert(w.timers, timer) end
+end
+
+-- 21. SKILLS-185 (1): the window released its grant; a stale whole-store kv write then brings the request back (and
+-- drops the release). The host must not grant the released token again: a later healthy start asks exactly once.
+do
+	local w = world()
+	serve_host(w)
+	local first = w.window("w1", { fail_after = 1 })
+	w.load("w1").ensure(first, "spawn")
+	w.run(0) -- the host grants the request
+	local flag = w.kv["status_prompt.v2"]
+	check(flag ~= nil, "the host granted the first window")
+	local token = flag.token
+	w.run(300) -- the window releases and the host (still polling) consumes it
+	check(#w.picks == 0 and w.kv["status_prompt.v2"] == nil, "the release cleared the flag")
+	-- the stale VM's whole-store write: its older copy still holds the request, and has no release in it
+	w.kv["status_prompt.v2.request"] = { token = token, at = w.seconds }
+	w.kv["status_prompt.v2.release"] = nil
+	w.run(3000)
+	check(w.kv["status_prompt.v2"] == nil or w.kv["status_prompt.v2"].token ~= token, "a released token is never granted again")
+	check(w.files["/data/status_prompt.v2.done"] == nil or w.files["/data/status_prompt.v2.done"] ~= token .. "\n", "no marker for the released token")
+	w.load("w2").ensure(w.window("w2", false), "spawn")
+	w.run(3000)
+	check(#w.picks == 1 and w.picks[1].window == "w2", "a later healthy start asks exactly once")
+	w.load("w3").ensure(w.window("w3", false), "spawn")
+	w.run(20000)
+	check(#w.picks == 1, "and nobody asks twice")
+end
+
+-- 21b. The stale write also brings back the released FLAG: it must not count as "asked".
+do
+	local w = world()
+	serve_host(w)
+	w.load("w1").ensure(w.window("w1", { fail_after = 1 }), "spawn")
+	w.run(0)
+	local flag = w.kv["status_prompt.v2"]
+	w.run(3000)
+	w.kv["status_prompt.v2"] = flag -- resurrected by a stale write
+	w.load("host2").host_serve()
+	w.load("w2").ensure(w.window("w2", false), "spawn")
+	w.run(3000)
+	check(#w.picks == 1 and w.picks[1].window == "w2", "a resurrected flag of a released token does not suppress the question")
+end
+
+-- 22. SKILLS-185 (2): the window's callback runs after the host stopped polling (a delayed timer). The release must
+-- still take effect with no host consumer, and a restarted host serves the next window.
+do
+	local w = world()
+	serve_host(w)
+	w.load("w1").ensure(w.window("w1", { fail_after = 1 }), "spawn")
+	w.run(0)
+	check(w.kv["status_prompt.v2"] ~= nil, "granted")
+	local late = hold(w, "w1")
+	w.run(30000)
+	check(#w.timers == 0, "the host stopped polling")
+	give_back(w, late)
+	w.run(1000)
+	check(#w.picks == 0, "the delayed window opened no picker")
+	check(w.kv["status_prompt.v2"] == nil and w.files["/data/status_prompt.v2.done"] == nil, "a release after the host stopped still clears the grant")
+	w.load("host2").host_serve()
+	w.load("w2").ensure(w.window("w2", false), "spawn")
+	w.run(3000)
+	check(#w.picks == 1 and w.picks[1].window == "w2", "after a host restart the next healthy start asks once")
+end
+
+-- 22b. A release left in kv that no running host consumed: a host start processes it.
+do
+	local w = world()
+	serve_host(w)
+	w.load("w1").ensure(w.window("w1", false), "spawn")
+	w.run(2000)
+	local token = w.kv["status_prompt.v2"].token
+	w.run(30000)
+	w.kv["status_prompt.v2.release"] = { token = token, at = w.seconds }
+	w.load("host2").host_serve()
+	check(w.kv["status_prompt.v2"] == nil and w.files["/data/status_prompt.v2.done"] == nil, "a host start processes a release left behind")
+end
+
 return "PASS " .. checks .. " checks"

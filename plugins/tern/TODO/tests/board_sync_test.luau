@@ -1,6 +1,8 @@
 -- Board projection: pure desired/diff plus the serialized apply, against a fake board
 -- that can mutate, reload (invalidating native ids) and hold unrelated user cards.
 local sync = require("../lib/board_sync")
+local claim = require("../lib/board_claim")
+local gate = require("../lib/sync_gate")
 
 local function plan(planId, tweak)
     local p = {
@@ -91,7 +93,55 @@ local function expiringCx(b)
 end
 local function total(p) return #sync.desired(p) end
 
-return {
+
+-- SKILLS-182: two windows and the 500-card read boundary.
+local function bigPlan(n)
+    return plan(nil, function(p)
+        p.checkpoints = {}
+        for i = 1, n do table.insert(p.checkpoints, { id = "c" .. i, text = "Checkpoint " .. i, state = "pending" }) end
+    end)
+end
+local function cardCount(b) local n = 0; for _, l in b.lanes do n += #l.cards end; return n end
+-- Shared kv.json, a manual timer clock and the host half, for the claim.
+local function harness()
+    local h = { store = {}, ms = 0, timers = {} }
+    local kv = {
+        get = function(key) local v = h.store[key]; if type(v) == "table" then return table.clone(v) end; return v end,
+        set = function(key, value) h.store[key] = value end,
+    }
+    local function timer(ms, fn) table.insert(h.timers, { at = h.ms + ms, fn = fn }) end
+    function h.env(name)
+        return { kv = kv, now = function() return h.ms / 1000 end, timer = timer, token = function() return name end }
+    end
+    function h.run(cx, isDone)
+        for _ = 1, 100000 do
+            if isDone() or #h.timers == 0 then return end
+            local best = 1
+            for i, t in h.timers do if t.at < h.timers[best].at then best = i end end
+            local t = table.remove(h.timers, best)
+            h.ms = math.max(h.ms, t.at)
+            t.fn(cx)
+        end
+        error("harness did not settle")
+    end
+    return h
+end
+-- Starts one window's claim-then-sync, like window.luau's syncTick; `crash` leaves the grant held forever.
+local function window(h, b, name, p, results, tracker, crash)
+    local env = h.env(name)
+    claim.acquire(env, { board = b }, "board.md", function(fresh, token, release)
+        tracker.inside += 1; tracker.max = math.max(tracker.max, tracker.inside)
+        if crash then tracker.inside -= 1; results[name] = { ok = false, problem = "crashed" }; return end
+        sync.apply(fresh, "board.md", p, function(ok, problem, count)
+            tracker.inside -= 1
+            release()
+            results[name] = { ok = ok, problem = problem, count = count }
+        end, function() return claim.holds(env, "board.md", token) end)
+    end, function(reason) results[name] = { ok = false, problem = reason } end)
+end
+
+
+local tests = {
     {"projection covers every entity once with its canonical id, kind, parent and state lane", function()
         local d = sync.desired(plan())
         assert(#d == 8, #d)
@@ -273,3 +323,116 @@ return {
         assert(result == false and reads == 0 and b.writes == 0)
     end},
 }
+
+local extra = {
+    {"old window-only path: two windows racing a 500-entity plan leave 1,000 cards and every retry refuses", function()
+        local b = fakeBoard()
+        local bp = bigPlan(500)
+        assert(#sync.desired(bp) == 500)
+        local other
+        -- The other window read the empty board too; it writes its whole batch just before ours.
+        b.onFirstWrite = function()
+            sync.apply({ board = b }, "other.md", bp, function(ok, problem) other = { ok = ok, problem = problem } end)
+        end
+        local r = run(b, bp)
+        assert(other and other.ok, other and other.problem)
+        assert(cardCount(b) == 1000, cardCount(b))
+        assert(not r.ok, "a 1,000-card board looks like 500 correct cards to every read, so the retry refuses")
+    end},
+    {"claim: two windows racing a 500-entity plan end with exactly 500 cards, one writer at a time", function()
+        local b, h = fakeBoard(), harness()
+        local bp = bigPlan(500)
+        claim.host_serve(h.env("host"))
+        local results, tracker = {}, { inside = 0, max = 0 }
+        window(h, b, "A", bp, results, tracker)
+        window(h, b, "B", bp, results, tracker)
+        h.run({ board = b }, function() return results.A and results.B end)
+        assert(results.A and results.A.ok, results.A and results.A.problem)
+        assert(results.B and results.B.ok, results.B and results.B.problem)
+        assert(cardCount(b) == 500, cardCount(b))
+        assert(tracker.max == 1, tracker.max)
+        local n = 0
+        for id, count in b.managed() do assert(count == 1, "duplicate " .. id); n += 1 end
+        assert(n == 500)
+        assert(results.A.count + results.B.count == 500, "the second window found the board already complete")
+    end},
+    {"claim: a window that died holding the board does not block it past the lease", function()
+        local b, h = fakeBoard(), harness()
+        local bp = bigPlan(5)
+        claim.host_serve(h.env("host"))
+        local results, tracker = {}, { inside = 0, max = 0 }
+        window(h, b, "dead", bp, results, tracker, true)
+        h.run({ board = b }, function() return results.dead end)
+        -- like syncTick, a refused window tries again on a later tick
+        for attempt = 1, 10 do
+            results.B = nil
+            window(h, b, "B", bp, results, tracker)
+            h.run({ board = b }, function() return results.B end)
+            if results.B and results.B.ok then break end
+            assert(h.ms < claim.LEASE_S * 1000, "still refused after the lease ran out")
+        end
+        assert(results.B and results.B.ok, results.B and results.B.problem)
+        assert(h.ms >= claim.LEASE_S * 1000, h.ms)
+        assert(cardCount(b) == 5)
+    end},
+    {"claim: a window is refused (fail closed) when no host ever answers", function()
+        local b, h = fakeBoard(), harness()
+        local results, tracker = {}, { inside = 0, max = 0 }
+        window(h, b, "A", bigPlan(5), results, tracker)
+        h.run({ board = b }, function() return results.A end)
+        assert(results.A and not results.A.ok and cardCount(b) == 0)
+    end},
+    {"claim: a holder that lost its grant stops writing", function()
+        local b, h = fakeBoard(), harness()
+        local env = h.env("A")
+        claim.host_serve(h.env("host"))
+        local result
+        claim.acquire(env, { board = b }, "board.md", function(fresh, token, release)
+            b.onFirstWrite = function() h.store[claim.GRANT .. "board.md"] = nil end
+            sync.apply(fresh, "board.md", plan(), function(ok, problem) result = { ok = ok, problem = problem } end,
+                function() return claim.holds(env, "board.md", token) end)
+        end, function(reason) result = { ok = false, problem = reason } end)
+        h.run({ board = b }, function() return result end)
+        assert(result and not result.ok and b.writes == 1, b.writes)
+    end},
+    {"re-enabling sync forgets the cached revision, so a hand-edited card is repaired", function()
+        local b = fakeBoard()
+        local p = plan()
+        local g = gate.new()
+        local key = "7:" .. p.plan_id
+        local on = { schema = 1, glitch = true, board = true, sync = true, attach = 7 }
+        local off = { schema = 1, glitch = true, board = true, sync = false, attach = 7 }
+        local function tick(rev)
+            if g.matches(key, rev) then return "skipped" end
+            local r = run(b, p); assert(r.ok, r.problem); g.mark(key, rev); return "synced"
+        end
+        assert(tick(1) == "synced" and tick(1) == "skipped")
+        g.settingsChanged(on, off)
+        -- while sync is Off the owner deletes a managed card and edits another
+        local d = sync.desired(p)
+        local gone = "todo-id-" .. d[1].id
+        for _, l in b.lanes do
+            for i = #l.cards, 1, -1 do if table.find(l.cards[i].tags, gone) then table.remove(l.cards, i) end end
+        end
+        assert(b.laneOf(d[1].id) == nil)
+        local victim = b.lanes[1].cards[1] or b.lanes[2].cards[1]
+        victim.text = "tampered"
+        g.settingsChanged(off, on)
+        assert(tick(1) == "synced", "same plan revision must still reconcile after sync is turned on")
+        for id, n in b.managed() do assert(n == 1, id) end
+        local count = 0
+        for _ in b.managed() do count += 1 end
+        assert(count == #d, count)
+        assert(tick(1) == "skipped")
+    end},
+    {"switching the attached session also forgets the cached revision", function()
+        local g = gate.new()
+        local a = { schema = 1, glitch = true, board = true, sync = true, attach = 7 }
+        local c = { schema = 1, glitch = true, board = true, sync = true, attach = 9 }
+        g.mark("k", 1)
+        g.settingsChanged(a, a); assert(g.matches("k", 1))
+        g.settingsChanged(a, c); assert(not g.matches("k", 1))
+    end},
+}
+for _, t in extra do table.insert(tests, t) end
+return tests

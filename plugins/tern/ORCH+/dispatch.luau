@@ -558,7 +558,7 @@ end
 function M.previous_policy(value: any): boolean
 	return config.exact(value, "paused " .. config.keys.previous_editable)
 end
-local function valid_policy(p: any, legacy: boolean?): boolean
+local function valid_policy(p: any, legacy: boolean?, previous: any?): boolean
 	-- Exactly-CP2, exactly-CP3, exactly-pre-sweep, exactly-pre-rollover-routing and exactly-0.3.0
 	-- (27-key) policies are accepted only at the explicit restore boundary, which migrates them.
 	local keys = config.keys
@@ -590,7 +590,7 @@ local function valid_policy(p: any, legacy: boolean?): boolean
 		end
 		p = migrate_policy(p)
 	end
-	return next(config.policy_errors(p)) == nil
+	return next(config.policy_errors(p, previous)) == nil
 end
 function M.policy(registry: any, session_id: string): any return clone(policy(registry.dispatch or fresh(), session_id)) end
 function M.policy_revision(registry: any, session_id: string): number
@@ -640,7 +640,7 @@ function M.valid_family_declarations(value: any): boolean
 	for record, family in value do if not config.record(record) or not config.family(family) then return false end end
 	return true
 end
-function M.valid_policy(p: any, legacy: boolean?): boolean return valid_policy(p, legacy) end
+function M.valid_policy(p: any, legacy: boolean?, previous: any?): boolean return valid_policy(p, legacy, previous) end
 function M.seed_policy(registry: any, session_id: string, p: any)
 	assert(valid_policy(p), "invalid installation policy")
 	registry.dispatch = if registry.dispatch then table.clone(registry.dispatch) else fresh()
@@ -9323,7 +9323,7 @@ function M.apply(registry: any, event: any, clock: any, reserve: any): (any?, an
 		end
 		if event.command == "policy" then
 			if not config.fits(p) then return fail("policy_too_large", "The saved session policy would exceed " .. tostring(config.MAX_BYTES) .. " bytes in canonical form; shorten templates. Nothing was saved.") end
-			if not valid_policy(p) then return fail("invalid_policy", "Settings have invalid fields or bounds. Durations must be consistent, cleanup uses hh:mm:ss, concurrency is at most 32 and loop/review limits are 1..10.") end
+			if not valid_policy(p, nil, policy(d, event.orch_session_id)) then return fail("invalid_policy", "Settings have invalid fields or bounds. Durations must be consistent, cleanup uses hh:mm:ss, concurrency is at most 32 and loop/review limits are 1..10.") end
 		else p.paused = event.command == "pause" end
 		local previous = policy(d, event.orch_session_id)
 		if equal(p, previous) then return finish_command(n, event, result("no_progress")) end

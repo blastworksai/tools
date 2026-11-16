@@ -55,14 +55,52 @@ local function marker_token(): string?
 	return (text:gsub("%s+$", ""))
 end
 
+-- A released token is recorded in its own file in the data directory, never in kv: a whole-store kv write from a
+-- stale VM can resurrect a cleared request or flag, but it cannot touch these files. Everything that grants or
+-- reads a grant checks them, so a released token is never granted again and its leftovers never count as "asked".
+local function released_path(token: string): string
+	return tern.plugin.data .. "/status_prompt.v2.released." .. string.sub((string.gsub(token, "[^%w_%-]", "_")), -150)
+end
+
+local function is_released(token: any): boolean
+	if type(token) ~= "string" then return false end
+	local ok, exists = pcall(tern.fs.exists, released_path(token))
+	return ok and exists == true
+end
+
+local function mark_released(token: string)
+	pcall(tern.fs.mkdir, tern.plugin.data)
+	pcall(tern.fs.write, released_path(token), "released\n")
+end
+
 local function asked(): boolean
-	return tern.kv.get(FLAG) ~= nil or marker_set()
+	local flag = tern.kv.get(FLAG)
+	if flag ~= nil and not (type(flag) == "table" and is_released(flag.token)) then return true end
+	return marker_set() and not is_released(marker_token())
 end
 
 local function fresh_request(value: any): string?
 	if type(value) ~= "table" or type(value.token) ~= "string" or type(value.at) ~= "number" then return nil end
 	if math.abs(os.time() - value.at) > FRESH_S then return nil end
 	return value.token
+end
+
+-- Clears every record of one grant (flag, pending request, marker) that still names this token. True when it found any.
+local function clear_grant(token: string): boolean
+	local found = false
+	local flag = tern.kv.get(FLAG)
+	if type(flag) == "table" and flag.token == token then
+		tern.kv.set(FLAG, nil)
+		found = true
+	end
+	-- The granted request stays in its slot; left there it would be granted again to the window that just gave up.
+	local pending = tern.kv.get(REQUEST)
+	if type(pending) == "table" and pending.token == token then tern.kv.set(REQUEST, nil) end
+	if marker_set() and marker_token() == token then
+		pcall(tern.fs.remove, marker_path())
+		found = true
+	end
+	return found
 end
 
 -- Host only. One synchronous step: grants the pending request, if any. Returns the granted token.
@@ -74,31 +112,37 @@ function status_prompt.host_claim(): string?
 		if pending ~= nil then tern.kv.set(REQUEST, nil) end
 		return nil
 	end
+	if is_released(token) then
+		-- A stale kv write brought a released request back: it is never granted again.
+		tern.kv.set(REQUEST, nil)
+		return nil
+	end
 	tern.kv.set(FLAG, { state = "granted", token = token, at = os.time() })
 	marker_write(token)
 	return token
 end
 
 -- Host only. A window whose question could not be asked (its settings read failed after the grant) hands the grant
--- back by writing RELEASE = { token }. The host, the single serialiser, clears the flag and the marker only while they
--- still carry that token, so a later healthy start asks exactly once; a grant that moved on is left alone.
--- Returns true when it cleared a grant.
+-- back: it records the token as released in a file and writes RELEASE = { token } (and clears its own grant at once,
+-- so nothing depends on the host still polling). The host clears whatever the released token still holds, at every
+-- host start and while it polls. Returns true when it cleared a grant.
 function status_prompt.host_release(): boolean
+	local cleared = false
 	local request = tern.kv.get(RELEASE)
-	if request == nil then return false end
-	tern.kv.set(RELEASE, nil)
-	local token = if type(request) == "table" and type(request.token) == "string" then request.token else nil
-	if token == nil then return false end
+	if request ~= nil then
+		tern.kv.set(RELEASE, nil)
+		local token = if type(request) == "table" and type(request.token) == "string" then request.token else nil
+		if token ~= nil then
+			mark_released(token)
+			if clear_grant(token) then cleared = true end
+		end
+	end
+	-- A release recorded in a file (the window could not wait for the host, or kv lost the request) is honoured too.
 	local flag = tern.kv.get(FLAG)
-	local flag_mine = type(flag) == "table" and flag.token == token
-	local marker_mine = marker_set() and marker_token() == token
-	if not flag_mine and not marker_mine then return false end
-	if flag_mine then tern.kv.set(FLAG, nil) end
-	-- The granted request stays in its slot; left there it would be granted again to the window that just gave up.
-	local pending = tern.kv.get(REQUEST)
-	if type(pending) == "table" and pending.token == token then tern.kv.set(REQUEST, nil) end
-	if marker_mine then pcall(tern.fs.remove, marker_path()) end
-	return true
+	if type(flag) == "table" and type(flag.token) == "string" and is_released(flag.token) and clear_grant(flag.token) then cleared = true end
+	local marked = if marker_set() then marker_token() else nil
+	if marked ~= nil and is_released(marked) and clear_grant(marked) then cleared = true end
+	return cleared
 end
 
 -- Host only: polls for the first request until it is granted, then guards the flag briefly and stops.
@@ -109,7 +153,7 @@ function status_prompt.host_serve()
 	local granted: string? = nil
 	local until_ms = 0
 	local function step()
-		if granted ~= nil and status_prompt.host_release() then
+		if granted ~= nil and (status_prompt.host_release() or is_released(granted)) then
 			granted = nil -- the grant was handed back: serve the next request instead of re-asserting the flag
 			until_ms = 0
 		end
@@ -139,7 +183,10 @@ local function widget_placed(cx: any): boolean?
 end
 
 -- Hands this window's grant back through the host half; nothing is asked and the install stays unasked.
+-- The window clears its own grant itself, so the release does not wait for a host that may have stopped polling.
 local function release(token: string)
+	mark_released(token)
+	clear_grant(token)
 	tern.kv.set(RELEASE, { token = token, at = os.time() })
 end
 

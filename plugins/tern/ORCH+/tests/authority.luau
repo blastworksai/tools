@@ -7,7 +7,7 @@ local function store()
 	local memory = { value = nil, marker = nil, fail_read = false, fail_write = false, writes = 0,
 		marker_writes = 0, fail_marker_read = false, fail_marker_write = false, write_order = {} }
 	-- The shared status-bar prompt keeps its own flag keys in the same kv; they are not authority state.
-	local function status_key(key) return key == "status_prompt.v1" or key == "status_prompt.v1.request" end
+	local function status_key(key) return type(key) == "string" and key:sub(1, 14) == "status_prompt." end
 	memory.get = function(key)
 		if status_key(key) then return nil end
 		if key == "authority_state_v4_original" then
@@ -648,7 +648,11 @@ fake.route = { link = function() end }
 local native_forms = load("form_window")
 local form_new, routing_forms = native_forms.new, nil
 native_forms.new = function(api) local form = form_new(api); routing_forms = form; return form end
+local picker_module = load("picker_window")
+local picker_new, picker_api = picker_module.new, nil
+picker_module.new = function(api) picker_api = api; return picker_new(api) end
 load("window")
+picker_module.new = picker_new
 native_forms.new = form_new
 local native_session = { id = 2, host = 1, name = "B", current = true }
 local host_row = { id = 1, state = "connected", panes = { 101, 202, 303, 404 }, current = true }
@@ -1528,6 +1532,80 @@ do
 		source_event(replacement, "ack", runtime.json.encode({
 			route = published.message.route, id = published.message.id, incarnation = published.message.incarnation }))
 		for _ = 1, 8 do pump(); usage.settle(4) end
+		fake.pane.list = native_list
+	end
+	do
+		-- SKILLS-181: USAGE restarts between display pages. The real window reader meets the real host read constraint,
+		-- with nothing mocked at read_pending: the restarted helper's reply must be acknowledged so the next read starts.
+		local native_list = fake.pane.list
+		fake.pane.list = function()
+			local panes = native_list()
+			table.insert(panes, { pane = 14, program = "orchplus.orchestrator", title = "Restart source" })
+			return panes
+		end
+		renders[14] = 0
+		local cx4 = context(14)
+		local restart_view = definition.init(cx4, {}, nil)
+		local function labelled(node)
+			if type(node) ~= "table" then return end
+			if type(node.p) == "table" and node.p.key then node.id = "main." .. node.p.key end
+			for _, child in node.c or {} do labelled(child) end
+		end
+		local window_cx = {
+			window_key = function() return "restart-window" end,
+			hosts = { list = function() return { { id = 1, state = "connected", panes = { 14 }, current = true } } end },
+			session = {
+				sessions = function() return { { id = 2, tabs = { 20 } } } end,
+				pane = function(_, id) if id == 14 then return { pane = 14, tab = 20, block = "orchplus.orchestrator" } end; return nil end,
+				surface = function(_, id)
+					if id ~= 14 then return nil end
+					local tree = definition.view(restart_view, cx4).main; labelled(tree)
+					return { surface = { role = "plugin.orchplus.orchestrator" }, main = tree }
+				end,
+				event = function(_, id, event) assert(id == 14); definition.event(restart_view, event, cx4) end,
+			},
+		}
+		local origin = { alias_nonce = restart_view.alias_nonce, window_host_id = "1", native_session_id = "2" }
+		local endpoint = assert(picker_api.transport(window_cx, 14, "usage.display", {}, origin), "the real window opens its display relay")
+		local function read(request_id, op)
+			assert(picker_api.event(window_cx, endpoint, { act = "usage.display", value = runtime.json.encode({ version = 1, request_id = request_id, op = op }) }))
+		end
+		local function respond(helper, request, id)
+			local sent = runtime.json.decode(request.body)
+			local body = runtime.json.encode({ version = 1, request_id = sent.request_id, op = sent.op, display_only = true, ok = false, status = "disabled" })
+			assert(helper.send({ peer = "orchplus", route = "usage.display.response", binding = request.binding, id = id, body = body }))
+			for _ = 1, 8 do pump(); helper.settle(4) end
+		end
+		read("restart-page-1", "snapshot")
+		local first = assert(usage.receive(4)[1]); assert(usage.ack(first))
+		respond(usage, first, "restart-reply-1")
+		local node, bytes = picker_api.read_surface(window_cx, endpoint, "orchplus.orchestrator", "usage.display", "usage-display-response", 65536)
+		check(node ~= nil and bytes ~= nil and endpoint.peer_boot == "usage-fixture-boot", "the first display page reaches the real window reader")
+		check(picker_api.ack(window_cx, endpoint, "display"), "the reader acknowledges the page it consumed")
+		for _ = 1, 8 do pump(); usage.settle(4) end
+		read("restart-page-2", "page")
+		local second = assert(usage.receive(4)[1]); assert(usage.ack(second))
+		-- USAGE restarts: a new incarnation answers the retained page read.
+		local restarted = assert(Channel.open({ plugin_id = "usage", plugin_data = "/fixture/plugins/usage", incarnation = "usage-fixture-boot-restarted",
+			fs = fake.fs, json = fake.json, base64 = fake.base64 }))
+		respond(restarted, second, "restart-reply-2")
+		picker_api.read_surface(window_cx, endpoint, "orchplus.orchestrator", "usage.display", "usage-display-response", 65536)
+		check(endpoint.peer_changed == true, "the real window reader sees the helper restart")
+		-- The picker now abandons that reader without any further call; the host must already be free.
+		for _ = 1, 8 do pump(); restarted.settle(4) end
+		read("restart-page-3", "snapshot")
+		check(restart_view.usage_relay.display_error ~= "read_pending",
+			"after a USAGE restart between pages the host accepts the next display read: " .. tostring(restart_view.usage_relay.display_error))
+		local third = restarted.receive(4)
+		check(#third == 1 and runtime.json.decode(third[1].body).request_id == "restart-page-3",
+			"the next display read reaches the restarted helper")
+		-- Finish the cycle so later blocks see a clean carrier: ack, answer, and consume the answer.
+		assert(restarted.ack(third[1]))
+		respond(restarted, third[1], "restart-reply-3")
+		picker_api.read_surface(window_cx, endpoint, "orchplus.orchestrator", "usage.display", "usage-display-response", 65536)
+		check(endpoint.peer_boot == "usage-fixture-boot-restarted" and picker_api.ack(window_cx, endpoint, "display"),
+			"the restarted helper's own reply is consumed normally")
+		for _ = 1, 8 do pump(); restarted.settle(4); usage.settle(4) end
 		fake.pane.list = native_list
 	end
 	do

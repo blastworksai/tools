@@ -840,7 +840,14 @@ local function peer_surface(cx: WindowCx, endpoint: any, _block: string, role: s
 	if endpoint.peer == "spawn" and (not lane or not lane.peer_boot) then return nil, nil end
 	if endpoint.peer == "usage" and lane then
 		if lane.request_id ~= endpoint.request_id then return anchor, nil end
-		if endpoint.peer_boot and lane.peer_boot ~= endpoint.peer_boot then endpoint.peer_changed = true; return anchor, nil end
+		if endpoint.peer_boot and lane.peer_boot ~= endpoint.peer_boot then
+			endpoint.peer_changed = true
+			-- The restarted helper's reply to the retained read is never adopted, but the host holds the read until
+			-- that exact reply is acknowledged; without this the next request is refused as read_pending.
+			local reply = lane.message
+			if type(reply) == "table" and reply.binding ~= nil and reply.id ~= nil and reply.incarnation == lane.peer_boot then relay_ack(cx, endpoint, endpoint.kind, reply) end
+			return anchor, nil
+		end
 		if lane.peer_boot then endpoint.peer_boot = lane.peer_boot end
 	end
 	local proof = if endpoint.peer == "spawn" then lane.messages and lane.messages[kind] else lane and lane.message
