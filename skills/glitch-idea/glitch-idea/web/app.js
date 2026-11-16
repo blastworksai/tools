@@ -365,13 +365,25 @@ export function startApp(api = new IdeaApi()) {
     save.setAttribute('title', text);
   }
 
-  // A new idea starts with the asking session's project, else the configured default workspace, once; the fields stay editable and typed text is never replaced.
+  // Capture's saved fields, read the way load() seeds the buffer.
+  const savedCapture = state => state?.drafts?.capture ?? (state?.draft?.step === 'capture' ? state.draft.fields : null) ?? state?.accepted?.capture;
+  // A new idea starts with the asking session's project, else the configured default workspace, once; the fields stay
+  // editable and typed text is never replaced. An existing idea saved in the terminal with only its words gets the same
+  // prefill whenever its buffer holds no workspace at all (a refresh reseeds it from the words); once the buffer holds a
+  // workspace, typed or cleared, it is the operator's. An idea whose Capture already holds a workspace keeps it.
   function prefillWorkspace() {
-    if (flow.state?.idea_id) { flow.workspacePrefilled = false; return; }
     const chosen = flow.state?.session_workspace ?? flow.state?.default_workspace;
+    const usable = !flow.inputLocked() && chosen && typeof chosen.name === 'string' && typeof chosen.path === 'string' &&
+      chosen.name && chosen.path;
+    if (flow.state?.idea_id) {
+      flow.workspacePrefilled = false;  // the new-idea flag never carries over to or from an existing idea
+      const saved = savedCapture(flow.state);
+      if (!usable || !saved || Object.hasOwn(saved, 'workspace') || flow.buffers.capture?.workspace) return;
+      flow.buffers.capture = {...flow.buffers.capture, workspace: {name: chosen.name, path: chosen.path, confirmed: false}};
+      return;
+    }
     const current = flow.buffers.capture?.workspace;
-    if (flow.workspacePrefilled || flow.inputLocked() || !chosen || typeof chosen.name !== 'string' || typeof chosen.path !== 'string' ||
-        !chosen.name || !chosen.path || (current && (current.name || current.path))) return;
+    if (flow.workspacePrefilled || !usable || (current && (current.name || current.path))) return;
     flow.workspacePrefilled = true;
     flow.buffers.capture = {...flow.buffers.capture, workspace: {name: chosen.name, path: chosen.path, confirmed: false}};
   }
