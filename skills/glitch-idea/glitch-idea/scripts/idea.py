@@ -363,9 +363,10 @@ FOLLOW_RETRY=frozenset(('agent_transport_timeout','busy'))  # a late or locked a
 FOLLOW_RETRIES=3  # consecutive ones; then it is reported like any other refusal
 
 
-def _follow_file(path,runtime=None):
+def _follow_file(path,runtime=None,new=False):
     """Append-only descriptor for FILE in an existing folder only this account can open (0700).
-    FILE is created 0600 and never followed; the runtime folder itself is refused (the service checks its names)."""
+    FILE is created 0600 and never followed; the runtime folder itself is refused (the service checks its names).
+    A launch passes new=True: its open result must be line one, so FILE must not exist yet."""
     require(type(path) is str and os.path.isabs(path) and Path(path).name not in ('','.','..'),
             '--follow needs an absolute file path','usage')
     target=Path(path)
@@ -375,12 +376,14 @@ def _follow_file(path,runtime=None):
                 'The --follow file must not sit in the runtime folder','usage')
     refused=lambda: IdeaError('follow_not_private','The --follow file must sit in an existing folder only this account can open (mode 0700)')
     if os.name!='posix':
-        try: return os.open(path,os.O_WRONLY|os.O_CREAT|os.O_APPEND,0o600)
+        try: return os.open(path,os.O_WRONLY|os.O_CREAT|os.O_APPEND|(os.O_EXCL if new else 0),0o600)
         except OSError: raise refused() from None
     from idea_runtime import RuntimeError as OwnerError,_open_chain
     try: parent=_open_chain(target.parent,create=False,private_leaf=True)
     except (OwnerError,OSError): raise refused() from None
-    try: fd=os.open(target.name,os.O_WRONLY|os.O_CREAT|os.O_APPEND|os.O_NOFOLLOW|os.O_CLOEXEC,0o600,dir_fd=parent)
+    try: fd=os.open(target.name,os.O_WRONLY|os.O_CREAT|os.O_APPEND|os.O_NOFOLLOW|os.O_CLOEXEC|(os.O_EXCL if new else 0),0o600,dir_fd=parent)
+    except FileExistsError:
+        raise IdeaError('follow_exists','A launch needs a new --follow file, so its open result is line one') from None
     except OSError: raise refused() from None
     finally: os.close(parent)
     info=os.fstat(fd)
@@ -390,7 +393,8 @@ def _follow_file(path,runtime=None):
 
 
 def _follow_line(fd,value):
-    os.write(fd,(_json.dumps(value,sort_keys=True,separators=(',',':'))+'\n').encode())
+    data=memoryview((_json.dumps(value,sort_keys=True,separators=(',',':'))+'\n').encode())
+    while data: data=data[os.write(fd,data):]  # a short write is finished, never left as half a line
 
 
 def _follow(fd,client,after,timeout,refusal):
@@ -595,7 +599,7 @@ def run_launcher(args):
             require(reconnect is None and getattr(args,'browser',None)!='orca',
                     '--follow goes with a new or resumed session, not --reconnect or Orca mode','usage')
         store,runtime,config,executable=launcher_configuration(args)
-        follow_fd=_follow_file(follow,runtime) if follow is not None else None  # refused before any session exists
+        follow_fd=_follow_file(follow,runtime,new=True) if follow is not None else None  # refused before any session exists
         try: return _launch(args,store,runtime,config,executable,prefill,orcabinding,reconnect,follow_fd)
         finally:
             if follow_fd is not None: os.close(follow_fd)
@@ -635,7 +639,9 @@ def _launch(args,store,runtime,config,executable,prefill,orcabinding,reconnect,f
     if follow_fd is None: return result
     # The open is the file's first line (the agent reads it at once: the session, and in link mode the link);
     # the wait loop starts in this same process, so no turn of the agent's sits between the open and the first wait.
-    _follow_line(follow_fd,result)
+    try: _follow_line(follow_fd,result)
+    except OSError:  # the session is open: say so, with the loop's failure beside it, never as a failed launch
+        return dict(result,follow=dict(ok=False,error=dict(code='follow_write_failed',message='follow_write_failed')))
     return dict(result,follow=_follow_session(follow_fd,store,runtime,result['session_id'],None,0,25))
 
 
@@ -645,8 +651,12 @@ def _follow_session(fd,store,runtime,session,generation,after,timeout):
         from idea_agent_client import AgentClient, AgentClientError
         from idea_runtime import Runtime, RuntimeError
         from idea_bridge import BridgeError
-        client=AgentClient(Runtime(store,runtime),session,expected_generation=generation,timeout=5)
-        return _follow(fd,client,after,timeout,(AgentClientError,RuntimeError,BridgeError,IdeaError))
+        refusal=(AgentClientError,RuntimeError,BridgeError,IdeaError)
+        try: client=AgentClient(Runtime(store,runtime),session,expected_generation=generation,timeout=5)
+        except refusal as exc:  # owner_unavailable, binding_not_found...: the code is the stop, never hidden
+            result=dict(ok=False,error=dict(code=exc.code,message=_shown(exc)))
+            _follow_line(fd,result); return result
+        return _follow(fd,client,after,timeout,refusal)
     except Exception:
         result=dict(ok=False,error=dict(code='agent_failed',message='agent_failed'))
         try: _follow_line(fd,result)
@@ -741,6 +751,8 @@ def run_agent(args):
         store,runtime,_,_=launcher_configuration(args)
         follow=getattr(args,'follow',None)
         if follow is not None:
+            # Each wait must really wait: a zero timeout would turn the loop into a tight request spin.
+            require(args.timeout>=1,'--follow needs --timeout of at least 1 second','invalid_agent_input')
             fd=_follow_file(follow,runtime)
             try: return _follow_session(fd,store,runtime,args.session,args.generation,args.after,args.timeout)
             finally: os.close(fd)
