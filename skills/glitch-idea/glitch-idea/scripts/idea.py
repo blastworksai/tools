@@ -383,6 +383,10 @@ def _follow_file(path,runtime=None,new=False):
     except (OwnerError,OSError): raise refused() from None
     try: fd=os.open(target.name,os.O_WRONLY|os.O_CREAT|os.O_APPEND|os.O_NOFOLLOW|os.O_CLOEXEC|(os.O_EXCL if new else 0),0o600,dir_fd=parent)
     except FileExistsError:
+        # O_EXCL also meets a symlink here: that is a refusal of the place, not merely a used file.
+        try: there=os.lstat(target.name,dir_fd=parent)
+        except OSError: there=None
+        if there is None or not stat.S_ISREG(there.st_mode): raise refused() from None
         raise IdeaError('follow_exists','A launch needs a new --follow file, so its open result is line one') from None
     except OSError: raise refused() from None
     finally: os.close(parent)

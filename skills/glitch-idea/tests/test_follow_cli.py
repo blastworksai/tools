@@ -300,6 +300,16 @@ class FollowAfterOpenTests(unittest.TestCase):
         self.assertEqual(order, []); self.assertEqual(self.calls, [])
         self.assertEqual(self.follow.read_text(), '{"earlier":true}\n')
 
+    def test_a_launch_through_a_symlinked_file_is_refused_as_not_private(self):
+        target = self.private/'elsewhere.jsonl'; target.write_text(''); os.chmod(target, 0o600)
+        os.symlink(target, self.follow)
+        result, order = self.launch('--browser', 'system', '--follow', self.follow)
+        self.assertEqual(result['error']['code'], 'follow_not_private')
+        self.assertEqual(order, []); self.assertEqual(self.calls, []); self.assertEqual(target.read_text(), '')
+        os.unlink(self.follow); os.symlink(self.private/'absent.jsonl', self.follow)  # a dangling one too
+        result, order = self.launch('--browser', 'system', '--follow', self.follow)
+        self.assertEqual(result['error']['code'], 'follow_not_private'); self.assertFalse((self.private/'absent.jsonl').exists())
+
     def test_a_failed_first_line_keeps_the_open_result(self):
         with patch.object(idea, '_follow_line', side_effect=OSError('disk full')):
             result, order = self.launch('--browser', 'system', '--follow', self.follow)

@@ -604,6 +604,8 @@ export class Flow {
     this.dependents = DEPENDENTS;
     this.current = 'capture';
     this.buffers = defaultBuffers();
+    // Capture's one-time workspace prefill belongs to these buffers: it is cleared wherever they are reset.
+    this.workspacePrefilled = false;
     this.dirty = new Set();
     // Terminal conversation (R2): fields the agent filled, per step; last fill applied per request; automatic attempts already made.
     this.filled = {};
@@ -1185,7 +1187,7 @@ export class Flow {
         return true;
       }
       // Validation above precedes any buffer or proposal association reset.
-      this.buffers = defaultBuffers(); this.dirty.clear(); this.pending = null;
+      this.buffers = defaultBuffers(); this.workspacePrefilled = false; this.dirty.clear(); this.pending = null;
       this.proposalPending = null; this.proposalError = null; this.selectedProposals = {};
       this.selectionScope = null; this.selectionBinding = undefined; this.selectionIdea = undefined;
       this.selectionStorageAvailable = false; this.selectionUncertain = false; this.refreshUnauthorized = false;

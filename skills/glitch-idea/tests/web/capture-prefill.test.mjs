@@ -50,6 +50,7 @@ async function app(run, {stateExtra = {}, drop = []} = {}) {
   real.csrf = 'csrf'; real.sessionId = SA;
   const api = {bindingId: A, csrf: 'csrf', pinBinding() {}, session: async () => ({ok: true, code: 'ok', binding_id: A, session_id: SA, csrf_token: 'csrf'}),
     state: () => real.state(), ideas: async () => ({ok: true, code: 'ok', backlog_revision: 1, total: 0, ideas: []}),
+    selection: async id => ({ok: true, code: 'ok', idea_id: id, session_id: SA, revision: state.revision, draft_version: state.draft_version, backlog_revision: state.backlog_revision}),
     write: async () => ({ok: true, code: 'ok'}), reconcile: async () => ({result: null, state: structuredClone(state)})};
   let flow;
   try {
@@ -150,6 +151,21 @@ test('switching between a terminal-captured idea and a new idea prefills each', 
     assert.deepEqual(fields(h), ['Session Site', '/work/session']);
     await select(h, {idea_id: null}); assert.deepEqual(fields(h), ['Session Site', '/work/session']);  // new, existing, new
   }, {stateExtra: {idea_id: ID, drafts: {capture: {raw_text: 'from the terminal'}}, session_workspace: mine, default_workspace: dflt}});
+});
+
+// Review round 4: an existing idea opens on another step, so Capture never renders for it; the next new idea still
+// prefills. Driven through the page's real selectIdea, which resets the buffers.
+test('a new idea after an existing idea opened on another step still prefills', async () => {
+  await app(async h => {
+    await open(h); assert.deepEqual(fields(h), ['Session Site', '/work/session']);  // a new idea: its one prefill is used
+    Object.assign(h.state, {idea_id: ID, revision: 1, current_step: 'priorities',
+      drafts: {capture: {raw_text: 'x', workspace: {name: 'Saved', path: '/w', confirmed: true}}}});
+    assert.equal(await h.flow.selectIdea(ID), true); await h.settle();
+    assert.equal(h.flow.current, 'priorities');
+    Object.assign(h.state, {idea_id: null, revision: 0, current_step: 'capture', drafts: {}});
+    assert.equal(await h.flow.selectIdea(null), true); await h.settle();
+    await open(h); assert.deepEqual(fields(h), ['Session Site', '/work/session']);
+  }, {stateExtra: {session_workspace: mine}});
 });
 
 test('an idea whose Capture already holds a workspace is never prefilled', async () => {
