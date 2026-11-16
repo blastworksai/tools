@@ -13,12 +13,12 @@ Everything is MIT License, so fork away. Feedback is appreciated, and stars are 
 | --- | --- |
 | [DANGER PROTOCOL](skills/dangerprotocol/README.md) | Read-only check of a GitHub repo before you install or run it. |
 | [ROCKET FUEL](skills/rocket-fuel/README.md) | Founder-led collaboration with assigned seats and Operator-selected BASIC or FULL adversarial convergence. |
-| [TERN PLUGIN DEVELOPMENT](skills/tern-plugin-development/README.md) | Create, test, debug, and package Tern plugins with isolated integration tests and pure Luau modules. |
+| [IDEA DISCOVERY](skills/idea-discovery/SKILL.md) | Discover ideas worth exploring with AI through a guided conversation. |
 | [GCC SKILL REVIEW](skills/gcc-skill-review/README.md) | Find the weak step in your own skill: map its steps, check each one over five fresh runs, fix the one that fails and prove the fix. Method by Kem, [Glitch Cat Club](https://glitchcatclub.com) · [@kem_glitch](https://www.instagram.com/kem_glitch/). |
 | [GLITCH IDEA](skills/glitch-idea/README.md) | Capture a software idea, explore it step by step in a local browser page with your agent, and hand a planning prompt to `/glitch-plan`. Opens on your own computer over SSH, docked in Tern. |
-| [STUDIO](skills/studio/README.md) | Build big things with one orchestrator and many small checked lanes: specs and frozen contracts first, one task per check and commit, every lane reviewed, every result demonstrated. Method from the [Chatdom.io build write-up](https://devpost.com/software/chatdom-io). |
-| [IDEA DISCOVERY](skills/idea-discovery/SKILL.md) | Discover ideas worth exploring with AI through a guided conversation. |
+| [TERN PLUGIN DEVELOPMENT](skills/tern-plugin-development/README.md) | Create, test, debug, and package Tern plugins with isolated integration tests and pure Luau modules. |
 | [GLITCH STUDIO](skills/glitch-studio/README.md) | Build a product with one orchestrator and many checked lanes through `/glitch-idea`, `/glitch-plan` and `/glitch-execute`: study, domain skills, frozen contracts, review and proof. Method from the [Chatdom.io build write-up](https://devpost.com/software/chatdom-io). |
+| [STUDIO](skills/studio/README.md) | Build big things with one orchestrator and many small checked lanes: specs and frozen contracts first, one task per check and commit, every lane reviewed, every result demonstrated. Method from the [Chatdom.io build write-up](https://devpost.com/software/chatdom-io). |
 
 ## PLUGINS
 
