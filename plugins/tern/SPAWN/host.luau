@@ -423,6 +423,7 @@ local function mutate(state,cx,expected,op,data)
 		state.editing=nil
 	end)
 end
+local ProviderIcons=require("./provider_icons")
 local function action(state,name) return name.."@"..tostring(if state.snapshot then state.snapshot.config_revision else -1) end
 local function switch_row(id,label,on,hint) return {id=id,label=label,hint=hint,control={k="switch",on=on}} end
 local function text_row(id,label,value,hint,disabled) return {id=id,label=label,hint=hint,disabled=disabled,control={k="text",value=value,mono=true}} end
@@ -952,17 +953,57 @@ local function launch_blocked(record)
 	if record.backend=="native-agent" and not text(record.prompt):find("%S") then return "Needs an approved startup prompt in Configured agents" end
 	return nil
 end
-local function spawn_sections(state)
+-- Start an agent is SPAWN's own page: Tern's prefs rows have no icon slot (Tern 0.9.22),
+-- so this one page draws a documented table (provider icon cell, command cell, Spawn button cell)
+-- beside the same page navigation. Every other page stays on the prefs layout.
+-- One bordered card per row: icon and bold title in the head; the detail and the button share the body line.
+local function spawn_card(key,icon,title,detail,button,mono)
+	local line={ui.node("col",{grow=1},{ui.text(ui.span(detail or "",if mono then "muted mono" else "muted"))}),button}
+	local props={role="spawn-card",key=key}
+	if icon then props.icon=icon end
+	return ui.card(title,{ui.node("row",{role="spawn-line",gap="sm"},line)},props)
+end
+local function spawn_agent_rows(state)
 	local rows={}
 	for _,record in ipairs(state.config.agents) do
-		local row=action_row("spawn-launch:"..provider_key(record)..":"..record.id,record.provider.." — "..record.account_label,action(state,"launch:"..record.id),launch_line(record))
-		row.control.label="Spawn"
-		row.disabled=launch_blocked(record)
-		table.insert(rows,row)
+		local blocked=launch_blocked(record)
+		local title={ui.span(record.provider.." — "..record.account_label,"strong")}
+		-- The reason stays on the row so a blocked agent is never silently dimmed.
+		if blocked then table.insert(title,ui.span("  · "..blocked,"muted")) end
+		table.insert(rows,spawn_card("spawn-launch:"..provider_key(record)..":"..record.id,ProviderIcons.for_provider(record.provider),title,launch_line(record),
+			ui.button("Spawn",{size="sm",title=blocked,disabled=blocked or false,actions={click=action(state,"launch:"..record.id)}}),true))
 	end
-	if #rows==0 then table.insert(rows,static_row("spawn-launch-empty","Saved agents","None","Add agents in Setup first.")) end
-	if state.intent_refused then table.insert(rows,static_row("spawn-queue-full",QUEUE_FULL,"Refused","This click was not queued. Wait for the pending launch, then choose the agent again.")) end
-	return {{id="spawn-agents",page="spawn",title="Start an agent",rows=rows}}
+	return rows
+end
+local function spawn_page(state,lead)
+	local nav={}
+	for _,page in ipairs(PAGES) do
+		table.insert(nav,ui.button("",{icon=page.icon,title=page.label,aria={label=page.label},variant="quiet",on=page.id==state.page,
+			actions={click="page-go:"..page.id},key="spawn-nav:"..page.id}))
+	end
+	local body={
+		ui.node("row",{role="spawn-top"},{
+			ui.node("col",{grow=1},{ui.text(ui.span("02 · Start an agent","muted"))}),
+			ui.button("Close",{size="sm",variant="quiet",actions={click="close"},key="spawn-close"}),
+		}),
+		ui.md("# Start an agent"),
+		ui.text(ui.span(lead,"muted")),
+	}
+	local agents=spawn_agent_rows(state)
+	if #agents==0 then
+		table.insert(body,ui.card(ui.span("Saved agents","strong"),{ui.text(ui.span("None. Add agents in Setup first.","muted"))},{role="spawn-card",key="spawn-launch-empty"}))
+	else for _,card in ipairs(agents) do table.insert(body,card) end end
+	if state.intent_refused then
+		table.insert(body,ui.card(ui.span(QUEUE_FULL,"strong"),{ui.text(ui.span("This click was not queued. Wait for the pending launch, then choose the agent again.","muted"))},{role="spawn-card",key="spawn-queue-full"}))
+	end
+	table.insert(body,ui.text(ui.span("Options","muted")))
+	table.insert(body,spawn_card("spawn-refresh",nil,ui.span("Refresh","strong"),"Reload saved settings and current agents.",ui.button("Refresh",{size="sm",actions={click="refresh"}})))
+	table.insert(body,spawn_card("spawn-advanced",nil,ui.span(if state.advanced then "Close Advanced" else "Advanced","strong"),"Raw diagnostics, full-record JSON and manual recovery.",
+		ui.button(if state.advanced then "Close Advanced" else "Advanced",{size="sm",actions={click=if state.advanced then "advanced-close" else "advanced-open"}})))
+	return ui.node("row",{role="spawn-start-page",gap="md",align="start"},{
+		ui.node("col",{role="spawn-nav",gap="xs"},nav),
+		ui.node("col",{role="spawn-page",gap="sm",grow=1,flex=1,fill=true},body),
+	})
 end
 local function migration_hold(state,problem)
 	if type(problem)=="table" then problem=problem.message or problem.code end
@@ -1189,7 +1230,7 @@ local function view(state,cx)
 		if state.snapshot.migration then sections=review_sections(state)
 		elseif state.page=="managed" then sections=managed_sections(state)
 		elseif state.page=="setup" then sections=setup_sections(state)
-		elseif state.page=="spawn" then sections=spawn_sections(state)
+		elseif state.page=="spawn" then sections={}
 		elseif state.page=="runtime" then sections=runtime_sections(state)
 		else sections=record_sections(state) end
 	end
@@ -1206,7 +1247,8 @@ local function view(state,cx)
 		payload="SPAWN_STATE_V2 "..tern.json.encode({version=2,host_key=snapshot.host_key,authority_id=snapshot.authority_id,session_key=snapshot.session_key,config_revision=snapshot.config_revision,records={},attempt_revision=snapshot.attempt_revision,attempts={},jobs={},replies={},request_sequences={},host_os=snapshot.host_os,host_shell=snapshot.host_shell,ready=false,error="Snapshot exceeds capacity; preserved state was not truncated or reset"})
 	end
 	local diagnostic=ui.text(payload);diagnostic.p=diagnostic.p or {};diagnostic.p.key="spawn-state";diagnostic.p.hidden=true
-	local children={ui.node("prefs",{title="SPAWN",lead=lead,pages=PAGES,page=state.page,sections=sections,focus=state.focus,editing=state.editing}),diagnostic}
+	local own_page=state.snapshot~=nil and not state.snapshot.migration and state.page=="spawn"
+	local children={if own_page then spawn_page(state,lead) else ui.node("prefs",{title="SPAWN",lead=lead,pages=PAGES,page=state.page,sections=sections,focus=state.focus,editing=state.editing}),diagnostic}
 	if state.advanced then table.insert(children,ui.text("Advanced raw diagnostics\n"..payload)) end
 	-- Always publish a readable queue, including before a fresh Config's first click.
 	-- Only a matching queue identity can prove durable ACK removal.
@@ -1590,6 +1632,8 @@ local definition={
 				-- Match the rendered inspection token instead of borrowing newer state.
 				migration_start(state,cx,migration_operation,migration_nonce);return
 			end
+			local go_page=if type(event.act)=="string" then event.act:match("^page%-go:(%a+)$") else nil
+			if go_page then event.act="page";event.value=go_page end
 			if event.act=="page" and event.value=="start" then state.choose_start_page=true;open(state,cx);return end
 			if event.act=="page" and PAGE_IDS[event.value] then
 				if state.page_only and not state.binding then if state.page_entry then request_page_context(state,state.page_entry) end;return end

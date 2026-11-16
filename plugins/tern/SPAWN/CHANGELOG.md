@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.2
+
+- **Start an agent** shows Tern's own provider icon on every agent row, the way USAGE does. The page is now SPAWN's own layout beside the same page navigation, because Tern 0.9.22 settings rows have no icon slot: a heading, the lead, one bordered card per agent (icon and bold "provider — label", the command line underneath, **Spawn** at the right), Refresh and Advanced cards under Options, and Close at the top right. A disabled or review-gated agent shows its reason next to its name. Spawn clicks send the same `launch:<id>` action as before. An unknown provider shows a generic mark. Every other page stays on the settings layout.
+- One provider-to-icon map (`provider_icons.luau`) now serves both halves. The old CSS dots and artwork on the Start an agent rows are removed; tab artwork and `tern.chrome.program_icon` registration are unchanged.
+
 ## 0.6.1
 
 - The status-bar prompt follows Tern 0.9.22's widget bar: it offers to place the **Plugin segments** widget (preference `widgets`, id `status`) instead of reading the retired `status_bar` preference, which raised "Unknown preference" and marked the prompt as asked. Installs that hit that error are asked once more.

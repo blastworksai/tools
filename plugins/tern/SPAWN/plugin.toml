@@ -1,7 +1,7 @@
 schema = 1
 id = "spawn"
 name = "SPAWN"
-version = "0.6.1"
+version = "0.6.2"
 description = "SPAWN canonical roster, ordinary launches, and durable managed dispatch bridge."
 icon = "sparkle"
 host = "host.luau"
