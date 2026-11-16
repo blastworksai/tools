@@ -107,7 +107,8 @@ local function start(remote, local_host)
 		settings = { role = "standalone", metadata_enabled = false, export_enabled = false, sharing_bind = runtime.json.null, sharing_port = 0 },
 		peers = {}, hub = runtime.json.null, certificate_fingerprint = string.rep("a", 64) }
 	state.diagnostics = { group_id = id, export_fields = { "provider", "principal/account identity", "organization/workspace/tenant scope", "account label", "subscription", "quota windows", "reset/observation times", "source/agent label" } }
-	state.entry = setup.new(function(cx) cx:toast("info", "changed"); state.changed += 1 end)
+	state.status_opened = 0
+	state.entry = setup.new(function(cx) cx:toast("info", "changed"); state.changed += 1 end, function(cx) state.status_opened += 1 end)
 	state.entry:open(fresh())
 	return state
 end
@@ -181,11 +182,16 @@ local request = state.rpc[1]
 check(request.op == "pair_accept" and request.payload.consent.export == false and request.payload.consent.metadata == nil, "receive-only pairing never implies headless reads or export")
 check(request.payload.consent.pair_confirmation.fingerprint == invite.fingerprint and request.payload.consent.recipient_group == invite.group_id, "pair acceptance uses explicitly confirmed recipient and pin")
 check(next(state.kv) == nil and #state.clipboard == 0, "incoming invitation is not persisted or copied")
-start(); menu(); choose("summary")
-check(state.status_bar and state.setting_writes == 1 and next(state.kv) == nil, "explicit summary enable writes only the status-bar setting")
-state.status_bar = false
+start(); menu()
+for _, item in state.ui[1].options.items do
+	check(item.action ~= "summary" and not tostring(item.label):find("Show Summary", 1, true), "Setup no longer carries the old summary switch")
+end
+choose("status")
+check(state.status_opened == 1 and state.setting_writes == 0 and not state.status_bar and next(state.kv) == nil,
+	"the status-bar row opens USAGE Configuration and writes neither the Tern setting nor kv")
 state.entry:open(fresh()); menu(); answer(nil)
-check(not state.status_bar and state.setting_writes == 1, "opening setup later respects the owner's later hide")
+check(not state.status_bar and state.setting_writes == 0, "opening setup never turns the status bar on; the shared prompt owns that")
+check(setup.show_summary == nil and state.entry.show_summary == nil, "the old show-summary entry point is gone")
 start(); menu(); choose("metadata")
 local late = table.remove(state.ui, 1)
 state.entry:open(fresh())

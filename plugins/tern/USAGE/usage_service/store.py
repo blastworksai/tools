@@ -583,7 +583,12 @@ class Store:
                     raise ServiceError("expired", 410)
                 if row[1] != authority.device_id or row[2] != authority.group_id or row[3] != auth_revision:
                     raise ServiceError("forbidden", 403)
-                return decode(row[0])
+                page = decode(row[0])
+                if page.get("complete"):
+                    # The final page ends the read: free the session now instead of holding it to expiry.
+                    # A retried final page answers 410 "expired"; peer sync restarts from the first page.
+                    db.execute("DELETE FROM page_sessions WHERE session_id=(SELECT session_id FROM pages WHERE cursor=?)", (cursor,))
+                return page
             limits = self._settings(db)
             self._capacity(db, limits)
             target = min(page_bytes, limits["max_page_bytes"])

@@ -22,40 +22,80 @@ class Parser(argparse.ArgumentParser):
         raise ValueError(message)
 
 
+MAX_CHECKPOINTS = 30
+MAX_TASKS = 20      # per checkpoint
+MAX_ITEMS = 30      # per task
+MAX_ENTITIES = 500  # checkpoints + tasks + items, so every reader and board stays bounded
+ITEM_KINDS = {'file', 'step', 'validation'}
+ID_RE = re.compile(r'[a-z][a-z0-9_-]{0,39}')
+
+
+def _text(value, label, limit):
+    if not isinstance(value, str) or not 1 <= len(value.strip()) <= limit:
+        raise ValueError(f'{label} must contain 1\u2013{limit} characters')
+
+
+def _entity(item, label, extra, ids, active):
+    """Validate the fields every nested entity shares; ids are unique across the whole plan."""
+    if not isinstance(item, dict) or not {'id', 'text', 'state'} <= set(item) or set(item) - ({'id', 'text', 'state', 'reason'} | extra):
+        raise ValueError(f'{label} needs id, text, state and optional reason'
+                         + (' plus ' + ', '.join(sorted(extra)) if extra else '') + ' only')
+    if not isinstance(item['id'], str) or not ID_RE.fullmatch(item['id']) or item['id'] in ids:
+        raise ValueError(f'{label} ids must be stable and unique across the whole plan')
+    _text(item['text'], f'{label} text', 240)
+    if not isinstance(item['state'], str) or item['state'] not in STATES:
+        raise ValueError(f'unsupported {label} state')
+    reason = item.get('reason')
+    if reason is not None:
+        _text(reason, 'blocked reason', 400)
+    if (item['state'] == 'blocked') != (reason is not None):
+        raise ValueError(f'only blocked {label}s carry a required reason')
+    if len(ids) >= MAX_ENTITIES:
+        raise ValueError(f'a plan holds at most {MAX_ENTITIES} checkpoints, tasks and steps together')
+    ids[item['id']] = item['state']
+    if item['state'] == 'active':
+        active.append(item['id'])
+
+
 def validate(plan):
+    """Closed, bounded plan shape. Schema 1 holds checkpoints only; schema 2 nests
+    checkpoint -> task -> file/step/validation item. Parents are structural, so a
+    parent reference cannot dangle; every unknown key is refused."""
     if not isinstance(plan, dict) or set(plan) != {'schema', 'plan_id', 'title', 'current', 'checkpoints'}:
         raise ValueError('checkpoint block needs schema, plan_id, title, current and checkpoints only')
-    if type(plan['schema']) is not int or plan['schema'] != 1:
+    schema = plan['schema']
+    if type(schema) is not int or schema not in (1, 2):
         raise ValueError('unsupported checkpoint schema')
     if not isinstance(plan['plan_id'], str) or not re.fullmatch(r'plan-[0-9a-f]{12}', plan['plan_id']):
         raise ValueError('invalid stable plan_id')
-    if not isinstance(plan['title'], str) or not 1 <= len(plan['title'].strip()) <= 160:
-        raise ValueError('plan title must contain 1–160 characters')
-    if not isinstance(plan['checkpoints'], list) or not 1 <= len(plan['checkpoints']) <= 30:
-        raise ValueError('use 1–30 agreed checkpoints')
+    _text(plan['title'], 'plan title', 160)
+    if not isinstance(plan['checkpoints'], list) or not 1 <= len(plan['checkpoints']) <= MAX_CHECKPOINTS:
+        raise ValueError(f'use 1\u2013{MAX_CHECKPOINTS} agreed checkpoints')
     ids, active = {}, []
-    for item in plan['checkpoints']:
-        if not isinstance(item, dict) or not {'id', 'text', 'state'} <= set(item) or set(item) - {'id', 'text', 'state', 'reason'}:
-            raise ValueError('checkpoint needs id, text, state and optional reason only')
-        if not isinstance(item['id'], str) or not re.fullmatch(r'[a-z][a-z0-9_-]{0,39}', item['id']) or item['id'] in ids:
-            raise ValueError('checkpoint ids must be stable and unique')
-        if not isinstance(item['text'], str) or not 1 <= len(item['text'].strip()) <= 240:
-            raise ValueError('checkpoint text must contain 1–240 characters')
-        if not isinstance(item['state'], str) or item['state'] not in STATES:
-            raise ValueError('unsupported checkpoint state')
-        reason = item.get('reason')
-        if reason is not None and (not isinstance(reason, str) or not 1 <= len(reason.strip()) <= 400):
-            raise ValueError('blocked reason must contain 1–400 characters')
-        if (item['state'] == 'blocked') != (reason is not None):
-            raise ValueError('only blocked checkpoints carry a required reason')
-        ids[item['id']] = item['state']
-        if item['state'] == 'active':
-            active.append(item['id'])
+    for checkpoint in plan['checkpoints']:
+        _entity(checkpoint, 'checkpoint', {'tasks'} if schema == 2 else set(), ids, active)
+        tasks = checkpoint.get('tasks', [])
+        if not isinstance(tasks, list) or len(tasks) > MAX_TASKS:
+            raise ValueError(f'a checkpoint holds at most {MAX_TASKS} tasks, in a list')
+        for task in tasks:
+            _entity(task, 'task', {'items'}, ids, active)
+            items = task.get('items', [])
+            if not isinstance(items, list) or len(items) > MAX_ITEMS:
+                raise ValueError(f'a task holds at most {MAX_ITEMS} items, in a list')
+            for item in items:
+                if not isinstance(item, dict) or item.get('kind') not in ITEM_KINDS:
+                    raise ValueError('an item needs kind file, step or validation')
+                _entity(item, 'item', {'kind', 'path'}, ids, active)
+                has_path = 'path' in item
+                if (item['kind'] == 'file') != has_path:
+                    raise ValueError('only file items carry a required path')
+                if has_path:
+                    _text(item['path'], 'file path', 240)
     current = plan['current']
     if current is not None and (not isinstance(current, str) or current not in ids or ids[current] not in {'active', 'blocked'}):
-        raise ValueError('current must name an active/blocked checkpoint, or be null')
+        raise ValueError('current must name an active/blocked entity, or be null')
     if len(active) > 1 or (active and current != active[0]):
-        raise ValueError('at most one active checkpoint, named by current')
+        raise ValueError('at most one active entity, named by current')
     return plan
 
 
@@ -159,7 +199,7 @@ def main(argv=None):
             else: result=publication.read_binding(json.loads(args.binding),read_plan)
             print(json.dumps(result,ensure_ascii=True,separators=(',',':')))
         elif args.command == 'template':
-            plan = validate({'schema': 1, 'plan_id': 'plan-' + uuid.uuid4().hex[:12], 'title': args.title,
+            plan = validate({'schema': 2, 'plan_id': 'plan-' + uuid.uuid4().hex[:12], 'title': args.title,
                              'current': None, 'checkpoints': [{'id': f'cp{i}', 'text': text, 'state': 'pending'} for i, text in enumerate(args.step, 1)]})
             print(START+'\n```json\n'+json.dumps(plan, indent=2, ensure_ascii=False)+'\n```\n'+END)
         else:

@@ -54,7 +54,7 @@ reopen settled choices. Respect read-only sessions and another pane's ownership.
 
 Existing agent processes may retain a snapshot of their hooks. Installation is
 qualified only after a fresh ordinary planning/execution session follows the
-entry instruction and the real TODO button displays its plan. A payload probe
+entry instruction and the TODO pane (opened from the status bar) displays its plan. A payload probe
 alone proves instruction delivery, not adoption. Do not restart an acting agent
 or alter its plan from the installer.
 

@@ -465,7 +465,7 @@ function M.new(api: any): any
 		if not data then return nil, scope end
 		local folder = data .. "/boards/" .. scope
 		if configured == nil or configured == "" then return folder .. "/ORCH+ Board.md", scope end
-		if type(configured) ~= "string" or #configured > 512 or configured:find("[%c]") or utf8.len(configured) == nil then return nil, scope end
+		if type(configured) ~= "string" or #configured > protocol.BOARD_SETTING_PATH_BYTES or configured:find("[%c]") or utf8.len(configured) == nil then return nil, scope end
 		local absolute = adapter.normalize_root(configured, tern.runtime.os)
 		if absolute then return absolute, scope end
 		if configured:match("^%a:") or configured:sub(1, 1) == "/" or configured:sub(1, 1) == "\\" then return nil, scope end

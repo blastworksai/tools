@@ -1737,6 +1737,7 @@ local function host_block(db, authority, config)
 		if name == "./dispatch_state" then return load("dispatch_state") end
 		if name == "./wire/codec" then return load("wire/codec") end
 		if name == "./managed_setup" then return load("managed_setup") end
+		if name == "./status/status_prompt" then return { host_serve = function() end } end
 		if name == "./prereq" then return registration("prereq") end
 		if name == "./page_navigation" then return load("page_navigation") end
 		if name == "./window_journal" then return {host_initialize=function()return "fixture" end,client_inventory=load("window_journal").client_inventory} end

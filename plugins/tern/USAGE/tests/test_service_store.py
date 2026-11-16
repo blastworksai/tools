@@ -272,6 +272,36 @@ class StoreTests(unittest.TestCase):
         self.clock.advance(121)
         self.assert_error("expired", self.store.aggregate, viewer, cursor)
 
+    def test_final_page_releases_the_session_and_a_retry_is_expired(self):
+        self.store.configure({"export_enabled": True})
+        viewer = self.peer()
+        for index in range(6):
+            self.store.local_publish(f"pane-{index}", snapshot([reading(str(index))], observed=index))
+        for _ in range(self.store.settings()["max_page_sessions"] + 3):
+            page = self.store.aggregate(viewer, page_bytes=1800)
+            self.assertFalse(page["complete"])
+            previous = page["next_cursor"]
+            while not page["complete"]:
+                previous = page["next_cursor"]
+                page = self.store.aggregate(viewer, previous)
+            self.assertEqual(self.store.diagnostics()["counts"]["page_sessions"], 0)
+        self.assert_error("expired", self.store.aggregate, viewer, previous)
+
+    def test_final_page_releases_the_session_and_a_retry_is_expired(self):
+        self.store.configure({"export_enabled": True})
+        viewer = self.peer()
+        for index in range(6):
+            self.store.local_publish(f"pane-{index}", snapshot([reading(str(index))], observed=index))
+        for _ in range(self.store.settings()["max_page_sessions"] + 3):
+            page = self.store.aggregate(viewer, page_bytes=1800)
+            self.assertFalse(page["complete"])
+            previous = page["next_cursor"]
+            while not page["complete"]:
+                previous = page["next_cursor"]
+                page = self.store.aggregate(viewer, previous)
+            self.assertEqual(self.store.diagnostics()["counts"]["page_sessions"], 0)
+        self.assert_error("expired", self.store.aggregate, viewer, previous)
+
     def test_revocation_invalidates_other_viewers_frozen_pages_immediately(self):
         revoked, viewer = self.peer(), self.peer()
         self.store.publish(revoked, publication(revoked.device_id, readings=[reading(str(index)) for index in range(10)]))

@@ -267,7 +267,8 @@ function M.route(record,probe,context,revision,window,nonce)
  end
  return route,nil
 end
-function M.observe_route(route,session,pane,done)
+-- host_window is the host daemon's own key for a remote host; route.window stays the client's echo key.
+function M.observe_route(route,session,pane,done,host_window)
  if route.backend=='native-agent' then
   local function checked(child)
    local argv=if type(child)=='table' then child.argv else nil
@@ -283,7 +284,7 @@ function M.observe_route(route,session,pane,done)
    if matches~=1 then done(nil,'Actual native child argv does not uniquely retain the selected diagnostic argument sequence');return end
    done('Selected diagnostic argv and cwd observed in the actual native agent process; owned diagnostic cleanup separately required',nil)
   end
-  Native.observe_process(route.window,session,pane,function(result,err)
+  Native.observe_process(if host_window~=nil then host_window else route.window,session,pane,function(result,err)
    if err or not result or result.status~=0 or result.timed_out or type(result.stdout)~='string' or #result.stdout>2000000 then done(nil,err or 'Native process inspection failed or exceeded its bound');return end
    local ok,value=pcall(tern.json.decode,result.stdout)
    if not ok or type(value)~='table' or value.pane~=pane then done(nil,'Native process identity is unavailable');return end

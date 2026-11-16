@@ -6,7 +6,10 @@ local function clone(value) return if value == nil then nil else runtime.json.de
 local function store()
 	local memory = { value = nil, marker = nil, fail_read = false, fail_write = false, writes = 0,
 		marker_writes = 0, fail_marker_read = false, fail_marker_write = false, write_order = {} }
+	-- The shared status-bar prompt keeps its own flag keys in the same kv; they are not authority state.
+	local function status_key(key) return key == "status_prompt.v1" or key == "status_prompt.v1.request" end
 	memory.get = function(key)
+		if status_key(key) then return nil end
 		if key == "authority_state_v4_original" then
 			if memory.fail_backup_read then error("injected backup read failure") end
 			return clone(memory.backup)
@@ -20,6 +23,7 @@ local function store()
 		return clone(memory.value)
 	end
 	memory.set = function(key, value)
+		if status_key(key) then return end
 		if key == "authority_state_v4_original" then
 			if memory.fail_backup_write then error("injected backup write failure") end
 			memory.backup = clone(value)
@@ -538,6 +542,25 @@ local tick = { kind = "workflow_tick", request_id = "forged-window-tick", orch_s
 	now_ms = 9999999999999, mono_ms = 9999999999999, epoch = "forged-window" }
 definition.event(view1, { ev = "action", act = "dispatch-command", value = runtime.json.encode(tick) }, cx1)
 check(ui_store.writes == config_writes, "window cannot supply host-only timer clock authority")
+-- Document obligations settle only through the dedicated ruling route; the generic dispatch route
+-- never forwards caller-supplied buffer or disk evidence.
+do
+	local sid = view1.orch_session_id
+	local owner = ui_store.value.sessions[sid].controller
+	local origin = { logical_session_id = sid, owner_id = owner.owner_id, owner_generation = owner.generation,
+		host_pane_id = "11", alias_nonce = view1.alias_nonce, window_key = "", window_epoch = "forged-ruling",
+		native_session_id = "2", window_host_id = "1" }
+	for _, name in { "ruling_observe", "ruling_prepare", "ruling_reissue", "ruling_remote", "associate_document" } do
+		local before_result, before_writes = view1.dispatch_command_result, ui_store.writes
+		local input = { kind = "dispatch", command = name, request_id = "forged-" .. name, orch_session_id = sid,
+			authority_namespace = ui_store.value.authority_namespace, expected_revision = ui_store.value.revision, command_seq = 1,
+			controller_pane = "11", origin = origin, gate_id = "gate-1", gate_revision = 1, path = "/fixture/forged.md",
+			writer = { kind = "native", pane = "11" }, evidence = { existing = true, document = "forged bytes" } }
+		definition.event(view1, { ev = "action", act = "dispatch-command", value = runtime.json.encode(input) }, cx1)
+		check(view1.dispatch_command_result == before_result and ui_store.writes == before_writes,
+			name .. " is ignored on the generic dispatch route, which cannot carry document evidence")
+	end
+end
 -- Explicit retirement uses the real host receiver; background closure cannot borrow it.
 do
 	local sid = view1.orch_session_id
@@ -617,9 +640,10 @@ do
 	view1.dispatch_command_result, view1.notice, view1.conversation_result = previous_result, previous_notice, nil
 end
 -- Current-window tab membership routes views only; it never allocates logical owners.
-local open_command, files_button
-fake.command = function(command) if command.id == "open" then open_command = command.run end end
-fake.files = { button = function(button) files_button = button.run end }
+local open_command, status_open_command, files_buttons = nil, nil, 0
+fake.command = function(command) if command.id == "open" then open_command = command.run elseif command.id == "status_open" then status_open_command = command.run end end
+fake.files = { button = function() files_buttons += 1 end }
+fake.chrome = { status = function() end }
 fake.route = { link = function() end }
 local native_forms = load("form_window")
 local form_new, routing_forms = native_forms.new, nil
@@ -696,8 +720,9 @@ open_command(routing_cx)
 check(opened == 1 and focused == nil and picker == nil, "session B opening never silently focuses sole session A view")
 check(placements[1] == "tab", "first ORCH entry creates a fullscreen tab rather than splitting the user's active pane")
 native_panes = { other_view, here }
-files_button({}, routing_cx)
-check(opened == 1 and focused == 202 and config_requested == 202, "Files entry reveals only known current-session view in Config mode")
+check(files_buttons == 0, "ORCH+ registers no Files-pane button")
+status_open_command(routing_cx)
+check(opened == 1 and focused == 202 and config_requested == 202, "status entry reveals only known current-session view in Config mode")
 open_command(routing_cx)
 check(opened == 1 and focused == 202, "ordinary reopening focuses the existing arranged view without relocating it")
 native_panes = { other_view, unknown, current_chat }; focused = nil

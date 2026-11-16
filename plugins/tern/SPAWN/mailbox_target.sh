@@ -294,7 +294,7 @@ if [ "$mode" = retire ]; then
  for entry in "$box/"* "$box/".[!.]* "$box/"..?*; do
   [ ! -e "$entry" ] && [ ! -L "$entry" ] && continue
   case "${entry##*/}" in reports|replies|acks|watermarks|producer|consumer|staging|capacity.lock) safe_dir "$entry";;
-   provision.json|manifest.json) regular "$entry" || out binding_mismatch;; *) out binding_mismatch;; esac
+   provision.json|manifest.json|checkout-base) regular "$entry" || out binding_mismatch;; *) out binding_mismatch;; esac
  done
  for child in producer consumer staging; do
   safe_dir "$box/$child"
@@ -367,6 +367,7 @@ if [ "$mode" = compact ] || [ "$mode" = retire ]; then
  for child in reports replies acks watermarks; do rmdir "$box/$child" || out incomplete; done
  regular "$box/provision.json" || out incomplete
  if [ -e "$box/manifest.json" ] || [ -L "$box/manifest.json" ]; then regular "$box/manifest.json" || out binding_mismatch; rm "$box/manifest.json"; fi
+ if [ -e "$box/checkout-base" ] || [ -L "$box/checkout-base" ]; then regular "$box/checkout-base" || out binding_mismatch; rm "$box/checkout-base"; fi
  rm "$box/provision.json"
  rmdir "$admission" || out incomplete; admitted=0
  rmdir "$box" || out incomplete; out retired

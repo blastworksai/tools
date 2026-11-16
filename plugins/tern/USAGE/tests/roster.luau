@@ -108,7 +108,7 @@ check(#forked.accounts == 0 and #forked.roster_conflicts == 1
 	and forked.roster_conflicts[1].reason == "different_definitions",
 	"conflicting definitions at the same authority revision are not ordered by clocks or publisher names")
 check(presentation.summary(forked).conflict_count == 1
-	and presentation.segments(forked)[1].tone == "warn",
+	and presentation.segments(forked, { enabled = true, selected = {} })[2].tone == "warn",
 	"an ambiguous list has an actionable status instead of appearing to be an empty configured roster")
 local replacement = source("replacement", {}, joined(scope({ entry("replacement", "muse") }, "replacement-definition", 9000000), 1, "different-spawn"))
 local authorities = project({ old = duplicate, replacement = replacement })

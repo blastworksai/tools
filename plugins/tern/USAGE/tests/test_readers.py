@@ -137,6 +137,26 @@ class ParsingTests(unittest.TestCase):
                 self.assertEqual(len(projected["windows"]), 1)
                 self.assertNotIn("credit_balance", projected["windows"][0])
 
+    def test_the_named_provider_file_is_the_one_launched(self):
+        login = {"account": {"type": "chatgpt", "email": "fixture@example.test"}}
+        launched = []
+        def fake_rpc(argv, *_args, **_kwargs):
+            launched.append(argv[0])
+            return login, {"rateLimits": {}}
+        for command, expected in ((None, "codex"), ("/opt/custom/codex/bin/codex", "/opt/custom/codex/bin/codex")):
+            launched.clear()
+            with patch.object(readers, "rpc", side_effect=fake_rpc):
+                readers.collect("openai", Path("/source"), {}, None, command)
+            self.assertEqual(launched[0], expected)
+        seen = []
+        def fake_stdout(argv, *_args, **_kwargs):
+            seen.append(argv[0])
+            return b""
+        with patch.object(readers, "_bounded_stdout", side_effect=fake_stdout), \
+             patch("metadata_providers.collect", return_value={}):
+            readers.collect("antigravity", Path("/source"), {}, None, "/opt/agy/bin/agy")
+        self.assertEqual(seen, ["/opt/agy/bin/agy"])
+
     def test_codex_credit_balance_never_guesses_missing_or_unlimited_amounts(self):
         for credits in (None, {}, {"hasCredits": True, "unlimited": True, "balance": "10"},
                         {"hasCredits": True, "balance": "10"},

@@ -384,6 +384,22 @@ function W.rule_h(f)
 end
 
 if section == nil or section == "plan_import" then
+	-- Scope globs: unsupported syntax must never widen what a worker may change.
+	local rules = load("workflow_rules")
+	check(rules.path_in_scope("src/**", "src/api/a.luau") and rules.path_in_scope("src/*.luau", "src/a.luau")
+		and rules.path_in_scope("src", "src/a.luau") and not rules.path_in_scope("src/*.luau", "src/secrets.env"),
+		"supported scope globs and literal ancestors still match exactly")
+	check(not rules.path_in_scope("src/{api,ui}/**", "src/secrets.env"), "a brace glob does not widen scope to its literal prefix")
+	check(not rules.path_in_scope("src/[ab]*", "src/secrets.env"), "a character-class glob does not widen scope to its literal prefix")
+	check(not rules.path_in_scope(string.rep("*/", 9) .. "x", "a/b/c/d/e/f/g/h/i/x"), "a glob with more than eight wildcards matches nothing instead of its prefix")
+	local began = os.clock()
+	local pathological = not rules.path_in_scope("*a*a*a*a*a*a*a*b", string.rep("a", 200))
+	check(pathological and os.clock() - began < 1, "a pathological glob against a long name settles in bounded time with the same answer")
+	check(rules.path_in_scope("*a*a*a*a*a*a*a*b", string.rep("a", 200) .. "b") and rules.path_in_scope("src/**/x.luau", "src/x.luau")
+		and rules.path_in_scope("src/**/x.luau", "src/a/b/x.luau") and not rules.path_in_scope("src/*/x.luau", "src/a/b/x.luau"),
+		"memoized matching keeps `**` and `*` segment semantics")
+end
+if section == nil or section == "plan_import" then
 	local importer, codec = load("plan_import"), load("wire/codec")
 	local function task_of(plan, id)
 		for _, cp in plan.checkpoints do for _, t in cp.tasks do if t.id == id then return t end end end

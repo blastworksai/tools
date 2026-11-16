@@ -1,7 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.6.0
 
+- Move the ORCH+ launcher from the Files pane to a status-bar segment (flow icon) that opens Config, and remove the Files-pane button. Palette access is unchanged. ORCH+ asks once, through the shared status-bar prompt, whether to turn the status bar on when it is off. Clicking the launcher starts no controller, activation, admission, continuation or dispatch.
 - Retire the two settings that changed no behavior, Glitch project discovery and default work source. Remove them from defaults, saved settings, validation and the settings form; previously saved settings still load and drop both fields without changing any other choice. Both are listed as future work in `documentation/backlog.md`.
 - Add public technical documentation under `documentation/`: four walks, the architecture and the two-client/shared-host mapping, plus a seven-item backlog.
 - Add capability-negotiated immutable project START replies and exact coordinator claim reports. Keep coordinated work held until the authenticated claim is durably accepted; preserve original delivery identity across retries and reloads.

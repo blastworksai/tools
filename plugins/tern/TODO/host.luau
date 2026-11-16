@@ -4,6 +4,8 @@
 local view = require("./lib/plan_view")
 local polling = require("./lib/polling")
 local selection = require("./lib/host_selection")
+local plan_publish = require("./lib/plan_publish")
+local status_prompt = require("./status/status_prompt")
 local KIND = tern.plugin.id .. ".list"
 
 type Source = {
@@ -13,8 +15,8 @@ type Source = {
     ssh: string?,
     label: string?,
 }
-type Selection = { mode: string, label: string, window: string, request: string }
-type Plan = { plan_id: string, title: string, checkpoints: { any } }
+type Selection = { mode: string, label: string, request: string }
+type Plan = { schema: number?, plan_id: string, title: string, current: string?, checkpoints: { any } }
 type State = {
     panel: number,
     source: Source?,
@@ -31,6 +33,7 @@ type State = {
     updated: string?,
     terminal: boolean?,
     failures: number?,
+    publisher: plan_publish.Publisher,
 }
 local instances: { [number]: State } = {}
 local python = selection.interpreter({
@@ -44,12 +47,16 @@ local function sourceValid(source: any): boolean
         and (source.ssh == nil or (type(source.ssh) == "string" and source.ssh ~= ""))
         and (source.label == nil or (type(source.label) == "string" and #source.label <= 400))
 end
+-- The window half reads the last plan this panel validated from plugin KV (board sync).
+-- A failed read, a closed panel or a fresh start removes it (lib/plan_publish), so a window never syncs a stale success.
+local function publish(state: State, plan: Plan?) state.publisher.publish(plan) end
 local function live(state: State): boolean
-    if state.finished or instances[state.panel] ~= state then return false end
+    if state.finished or instances[state.panel] ~= state then publish(state, nil); return false end
     for _, pane in tern.pane.list() do
         if pane.pane == state.panel then return pane.program == KIND end
     end
     instances[state.panel] = nil
+    publish(state, nil)
     return false
 end
 local function redraw(state: State, cx: BlockCx)
@@ -77,7 +84,7 @@ local function refresh(state: State, cx: BlockCx)
         if not live(state) then return end
         state.reading = false
         if result == nil then
-            state.plan = nil
+            state.plan = nil; publish(state, nil)
             state.error = problem or "Could not start the read-only source reader. Tern 0.9.8+ and Python 3 are required."
             state.failures = (state.failures or 0) + 1
             redraw(state, cx)
@@ -101,7 +108,7 @@ local function refresh(state: State, cx: BlockCx)
                 refresh(state, cx); return
             end
             local message = outcome.error or "Could not resolve this session's plan publication."
-            state.plan = nil; state.error = message
+            state.plan = nil; publish(state, nil); state.error = message
             if outcome.action == "terminal" then
                 state.finished = true; instances[state.panel] = nil
                 pcall(function() cx:toast("error", message) end)
@@ -115,17 +122,19 @@ local function refresh(state: State, cx: BlockCx)
         end
         state.terminal = decoded and type(envelope) == "table" and envelope.terminal == true
         local plan = if decoded and type(envelope) == "table" then envelope.plan else nil
+        local invalid = if type(plan) == "table" then view.validate(plan) else nil
         if result.status ~= 0 or not decoded or envelope.ok ~= true or type(plan) ~= "table" then
-            state.plan = nil
+            state.plan = nil; publish(state, nil)
             state.error = if decoded and type(envelope) == "table" and type(envelope.error) == "string" then envelope.error else "Could not read the selected source. Check its location, access and Python 3."
-        elseif type(plan.plan_id) ~= "string" or type(plan.checkpoints) ~= "table" or type(plan.title) ~= "string" then
-            state.plan = nil; state.error = "Source returned an invalid checkpoint report."
+        elseif invalid ~= nil then
+            state.plan = nil; publish(state, nil); state.error = "Source returned an invalid checkpoint report: " .. invalid
         elseif state.plan_id ~= nil and state.plan_id ~= plan.plan_id then
-            state.plan = nil; state.error = "This file now belongs to a different plan. Close this panel and explicitly attach the intended plan."
+            state.plan = nil; publish(state, nil); state.error = "This file now belongs to a different plan. Close this panel and explicitly attach the intended plan."
         else
             local needsSave = not state.bindingSaved
             state.plan_id = plan.plan_id
             state.plan = plan
+            publish(state, plan)
             state.error = nil
             state.updated = os.date("!%Y-%m-%d %H:%M:%S UTC")
             if needsSave then
@@ -143,14 +152,16 @@ end
 
 tern.block.define("list", {
     init = function(cx: BlockCx, args: { string }, saved: any): State
-        local state: State = { panel = cx.pane }
+        local state: State = { panel = cx.pane, publisher = plan_publish.new(tern.kv, tern.json.encode, tern.now, cx.pane) }
+        -- A plan an earlier instance of this panel published must not outlive a reload.
+        state.publisher.clear()
         -- A saved binding can only read the same selected source and stable plan id.
         -- Legacy bare-pane saves/args are deliberately not migrated or followed.
         if type(saved) == "table" and saved.schema == 2 and sourceValid(saved.source) and type(saved.plan_id) == "string" then
             state.source = saved.source; state.plan_id = saved.plan_id; state.bindingSaved = true
         elseif saved == nil and type(args[1]) == "string" then
             local ok, source = pcall(tern.json.decode, args[1])
-            if ok and type(source) == "table" and source.mode == "selected" and type(source.window) == "string" and #source.window <= 256 and not source.window:find("%c") and type(source.request) == "string" and #source.request <= 128 and type(source.label) == "string" and #source.label <= 400 then
+            if ok and type(source) == "table" and source.mode == "selected" and type(source.request) == "string" and #source.request <= 128 and type(source.label) == "string" and #source.label <= 400 then
                 state.selection = source
             elseif ok and sourceValid(source) then
                 state.source = source
@@ -185,7 +196,9 @@ tern.block.define("list", {
         if not selected or state.selectionStarted or not live(state) or event.ev ~= "action" or event.id ~= "main" or event.act ~= "confirm-selection" or event.value ~= selected.request then return end
         state.selectionStarted = true
         local ok = pcall(function()
-            selection.resolve(state.panel, selected.window, function() return live(state) end, function(pid: number?, why: string?)
+            -- SKILLS-174: the attach args carry no client window key (it is not host identity). "" names this daemon's own first
+            -- window; the resolver then walks every window key this daemon itself lists.
+            selection.resolve(state.panel, "", function() return live(state) end, function(pid: number?, why: string?)
                 if not live(state) then return end
                 if pid == nil then
                     state.finished = true; instances[state.panel] = nil
@@ -204,3 +217,4 @@ tern.block.define("list", {
 })
 
 require("./updater/host").register()
+status_prompt.host_serve()

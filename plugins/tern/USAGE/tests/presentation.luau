@@ -46,13 +46,23 @@ local raw = { version = 3, publisher = "synthetic-publisher", as_of_ms = now, re
 local source = assert(snapshot.decode(configure(raw)))
 local model = snapshot.project({ [source.publisher] = source }, now)
 local ordered = presentation.ordered_accounts(model.accounts)
-local segments = presentation.segments(model)
+local function everyone(accounts)
+	local ids = {}
+	for _, account in presentation.ordered_accounts(accounts) do table.insert(ids, account.id) end
+	return { enabled = true, selected = ids }
+end
+local on = everyone(model.accounts)
+local segments, segment_ids = presentation.segments(model, on)
 local summary = presentation.summary(model)
 check(summary.total_count == 5 and summary.current_count == 4
 	and summary.header == "5 accounts · 4 current · 0 last-known · 1 unavailable",
 	"configured counts distinguish numeric availability, including genuine zero")
-check(#ordered == 5 and #segments == presentation.SUMMARY_LIMIT + 1
-	and summary.visible_count + summary.overflow_count == #ordered, "bounded summary accounts for every input account")
+check(#ordered == 5 and #segments == #ordered + 1 and #segment_ids == #ordered and summary.visible_count == nil and summary.overflow_count == nil,
+	"the launcher plus one segment per selected account; no automatic overflow count")
+check(segments[1].text == "USAGE" and segments[1].icon == "gauge" and segments[1].command == "plugin.usage.details",
+	"the first segment is the fixed USAGE launcher")
+check(segments[2].text == "claude: Synthetic claude  ◕ 72%" and segments[2].icon == "provider-anthropic",
+	"an account segment reads Provider: Label, two spaces, ring and percentage, with the provider icon")
 check(ordered[1].provider == "claude" and ordered[2].provider == "openai" and ordered[5].provider == "antigravity",
 	"status uses the established provider ordering")
 check(presentation.account_projection(ordered[1]).used == 72, "weekly default quota wins over the five-hour fallback")
@@ -64,8 +74,8 @@ check(presentation.account_window(reversed).pool == presentation.account_window(
 check(presentation.ring(nil) ~= presentation.ring(0) and presentation.ring(0) ~= presentation.ring(1)
 	and presentation.ring(99) ~= presentation.ring(100), "missing, zero, positive and full quota have distinct glyphs")
 check(presentation.account_projection(ordered[2]).used == 0 and presentation.account_projection(ordered[3]).used == nil
-	and segments[2].text ~= segments[3].text, "missing quota never appears as zero")
-check(segments[1].tone == "warn" and segments[2].tone == "ok" and segments[3].tone == "muted"
+	and segments[3].text ~= segments[4].text and segments[4].text == "kimi: Synthetic kimi  —", "missing quota never appears as zero")
+check(segments[2].tone == "warn" and segments[3].tone == "ok" and segments[4].tone == "muted"
 	and presentation.account_projection(ordered[4]).tone == "error", "only supported status tones are emitted")
 check(presentation.heat(0, "fresh") == "usage-heat-0" and presentation.heat(54, "fresh") == "usage-heat-50"
 	and presentation.heat(55, "fresh") == "usage-heat-60" and presentation.heat(100, "fresh") == "usage-heat-100",
@@ -74,7 +84,9 @@ check(presentation.heat(nil, "fresh") == nil and presentation.heat(80, "stale") 
 	and presentation.heat(80, "last_known") == nil, "missing and non-current usage is never coloured as live")
 local stale = snapshot.project({ [source.publisher] = source }, now + 900001)
 check(presentation.account_projection(stale.accounts[1]).state == "stale"
-	and presentation.segments(stale)[1].tone == "muted", "stale numeric observations are not current usage")
+	and presentation.segments(stale, everyone(stale.accounts))[2].tone == "muted"
+	and presentation.segments(stale, everyone(stale.accounts))[2].text:find("last-known", 1, true) ~= nil,
+	"stale numeric observations are not current usage")
 local expired = table.clone(ordered[1])
 expired.windows = { window("weekly", 100) }
 expired.windows[1].resets_at_ms = now - 1
@@ -133,15 +145,56 @@ check(aged.state == "stale" and aged.text == "◔ 35% used last-known · stale �
 local shuffled = table.clone(model)
 shuffled.accounts = {}
 for index = #ordered, 1, -1 do table.insert(shuffled.accounts, ordered[index]) end
-check(tern.json.encode(presentation.segments(shuffled)) == tern.json.encode(segments),
-	"account input order cannot alter bounded status membership")
-for count = 0, presentation.SUMMARY_LIMIT do
+check(tern.json.encode((presentation.segments(shuffled, on))) == tern.json.encode(segments),
+	"account input order cannot alter status membership or order")
+for count = 0, #ordered do
 	local small = { accounts = {} }
 	for index = 1, count do table.insert(small.accounts, ordered[index]) end
 	local small_summary = presentation.summary(small)
-	check(small_summary.total_count == count and small_summary.overflow_count == 0
-		and #presentation.segments(small) == math.max(1, count), "empty and within-cap summaries never invent overflow")
+	check(small_summary.total_count == count and #presentation.segments(small, everyone(small.accounts)) == (if count == 0 then 2 else count + 1),
+		"empty roster adds only the SPAWN hint; otherwise launcher plus the selected accounts")
 end
+-- Selection invariants over every segment.
+local off_segments = presentation.segments(model, { enabled = false, selected = on.selected })
+check(#off_segments == 1 and off_segments[1].text == "USAGE", "master Off renders the launcher alone and keeps nothing else")
+check(#(presentation.segments(model, nil)) == 1, "no preference record renders the launcher alone")
+local partial = presentation.segments(model, { enabled = true, selected = { ordered[2].id, "gone-account", ordered[2].id } })
+check(#partial == 2 and partial[2].text:find("openai: Synthetic openai", 1, true) == 1 and partial[2].text:find("○ 0%", 1, true) ~= nil,
+	"only checked accounts render; an id no longer in the roster draws no fabricated row; a genuine zero keeps its zero")
+local seen_commands = {}
+for _, segment in segments do
+	check(seen_commands[segment.command] == nil or segment == segments[1], "no two account segments share a command")
+	seen_commands[segment.command] = true
+end
+check(segments[1].command ~= segments[2].command and segments[2].command == "plugin.usage.status_account_1" and segments[6].command == "plugin.usage.status_account_5",
+	"account commands are deterministic slot numbers")
+local renamed = table.clone(ordered[2])
+renamed.account_label = "Renamed"
+local after_rename = presentation.segments({ accounts = { renamed } }, { enabled = true, selected = { ordered[2].id } })
+check(after_rename[2].text:find("openai: Renamed", 1, true) == 1, "a rename changes the text and keeps the selection (identity is the id)")
+local aliased = table.clone(ordered[2])
+aliased.id = "other-row-id"
+aliased.also_configured = { { id = ordered[2].id, account_label = "Alias" } }
+check(#presentation.segments({ accounts = { aliased } }, { enabled = true, selected = { ordered[2].id } }) == 2,
+	"a selection saved under an id the row also answers to still renders it")
+local conflicted = presentation.segments({ accounts = {}, roster_conflicts = { { scope_id = "x" } } }, on)
+check(conflicted[2].tone == "warn" and conflicted[2].text == "Account list needs review" and #conflicted == 2,
+	"an ambiguous roster shows its review segment, not the empty-roster hint")
+local many = { accounts = {} }
+local many_ids = {}
+for index = 1, presentation.MAX_ACCOUNT_SEGMENTS + 5 do
+	local extra = table.clone(ordered[1])
+	extra.id, extra.account_label = "bulk-" .. string.format("%02d", index), "Bulk " .. index
+	table.insert(many.accounts, extra)
+	table.insert(many_ids, extra.id)
+end
+check(#presentation.segments(many, { enabled = true, selected = many_ids }) == presentation.MAX_ACCOUNT_SEGMENTS + 1,
+	"account segments are bounded")
+local last_known = table.clone(ordered[1])
+last_known.windows = { window("weekly", 35) }
+last_known.windows[1].last_known_reason = "server_sent_no_usage"
+local last_text = presentation.segments({ accounts = { last_known } }, { enabled = true, selected = { last_known.id } })[2]
+check(last_text.text:find("last-known", 1, true) ~= nil and last_text.tone == "muted", "a last-known value is never drawn as current")
 local mixed = table.clone(ordered[1])
 mixed.windows = { window("five_hour", 12), window("seven_day", 72) }
 mixed.windows[2].freshness = "stale"
@@ -221,13 +274,23 @@ modules["updater/host"] = { register = function() end }
 modules["channel/channel"] = { open = function() return nil, { code = "fixture_carrier_unavailable" } end }
 local host_events = { spawn = true, command_started = true, command_finished = true,
 	cwd = true, title = true, pane_exited = true, unload = true }
+local kv_store = {}
 local runtime = {
 	ui = tern.ui, json = tern.json,
 	runtime = { os = "linux" },
 	plugin = { data = "/fixture/usage" },
 	pane = { list = function() return live end },
-	kv = { get = function() error("host must not read a duplicate layout/interval registry") end,
-		set = function() writes += 1; error("host must not replace companion preferences") end },
+	-- Only the status-bar records (selection, shared prompt) may live in kv; layout and cadence stay out.
+	kv = { get = function(key)
+			if key == "usage_status_prefs" or key:find("^status_prompt%.") then return kv_store[key] end
+			error("host must not read a duplicate layout/interval registry")
+		end,
+		set = function(key, value)
+			if key == "usage_status_prefs" or key:find("^status_prompt%.") then kv_store[key] = value; return end
+			writes += 1; error("host must not replace companion preferences")
+		end },
+	fs = { exists = function() return false end },
+	now = function() return 0 end,
 	block = { define = function(id, value) defs[id] = value end },
 	on = function(name, callback)
 		assert(host_events[name], "unknown host event " .. name)
@@ -331,6 +394,41 @@ config_def.event(config, { ev = "action", act = "interval", value = "300" }, con
 check(interval == 300 and writes == 0, "configuration persists cadence only through companion operation")
 config_def.event(config, { ev = "action", act = "interval", value = "59" }, config_cx)
 check(interval == 300, "invalid interval cannot reach companion persistence")
+-- Status-bar section of the configuration block: a view of what the window pushed, nothing more.
+check(kv_store.usage_status_prefs ~= nil and kv_store.usage_status_prefs.enabled == false and kv_store.usage_status_prefs.migration_complete == true
+	and #kv_store.usage_status_prefs.selected == 0, "host start on a fresh install records master Off with no selection, once")
+local opened = {}
+config_cx.open = function(_self, url) table.insert(opened, url) end
+check(has_span(config_def.view(config, config_cx).main, "Loading status bar settings…"), "before the window answers the block says it is loading")
+local function pushed(value)
+	config_def.event(config, { ev = "action", act = "status_state", value = tern.json.encode(value) }, config_cx)
+	return tern.json.encode(config_def.view(config, config_cx).main)
+end
+local settings_view = pushed({ version = 1, enabled = false, pending = false,
+	accounts = { { id = "acct-1", label = "claude: One", selected = true, full = false }, { id = "acct-2", label = "openai: Two", selected = false, full = false } },
+	consumers = { { id = "omp-1", label = "OMP: Orchestrator" } } })
+check(settings_view:find("Show usage statistics in status bar?", 1, true) and settings_view:find("Per-Agent Status Bar selection:", 1, true)
+	and settings_view:find("Don’t overcrowd your status bar.", 1, true), "settings show the master label, heading and the exact warning")
+check(settings_view:find("claude: One", 1, true) and settings_view:find("openai: Two", 1, true), "every current account has a row")
+check(settings_view:find("No independent usage allowance", 1, true) and settings_view:find("OMP: Orchestrator", 1, true), "an OMP record is listed with its reason")
+local function disabled_count(text) return select(2, text:gsub('"disabled":true', "")) end
+check(disabled_count(settings_view) == 3, "master Off greys every account row and OMP stays disabled")
+local on_view = pushed({ version = 1, enabled = true, pending = false,
+	accounts = { { id = "acct-1", label = "claude: One", selected = true, full = false }, { id = "acct-2", label = "openai: Two", selected = false, full = false } },
+	consumers = { { id = "omp-1", label = "OMP: Orchestrator" } } })
+check(disabled_count(on_view) == 1, "master On enables the account rows; only OMP stays disabled")
+check(pushed({ version = 1, enabled = true, pending = false, accounts = { { id = "a", label = "x", selected = false, full = true } }, consumers = {} })
+	:find("Selection full", 1, true) ~= nil, "a full selection disables unticked rows with its reason")
+local before_bad = tern.json.encode(config_def.view(config, config_cx).main)
+config_def.event(config, { ev = "action", act = "status_state", value = "{not json" }, config_cx)
+config_def.event(config, { ev = "action", act = "status_state", value = tern.json.encode({ version = 1, enabled = "yes", pending = false, accounts = {}, consumers = {} }) }, config_cx)
+check(tern.json.encode(config_def.view(config, config_cx).main) == before_bad, "a malformed push cannot change what the block shows")
+config_def.event(config, { ev = "change", name = "status_master", checked = true }, config_cx)
+config_def.event(config, { ev = "change", name = "status_account", value = "acct/1", checked = false }, config_cx)
+config_def.event(config, { ev = "change", name = "status_omp", value = "omp-1", checked = true }, config_cx)
+check(#opened == 2 and opened[1] == "usage://status/master/on" and opened[2] == "usage://status/account/acct%2F1/off",
+	"a status checkbox asks the window through a link; an OMP control never does")
+check(interval == 300 and writes == 0, "status changes never touch cadence or kv from the block")
 collector_health = { code = "source_publication_failed" }
 check(has_span(config_def.view(config, config_cx).main, "Source collection: could not publish refresh results; last readings retained.", "error"),
 	"configuration shows collector health")

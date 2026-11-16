@@ -107,6 +107,14 @@ local candidate=assert(Migration.prepare(source,pair,Migration.selection(normal)
 check(candidate.sessions.session.admission_seq==1 and candidate.admission_cursor==1 and candidate.workers['session/launch'].request==nil and next(candidate.requests)==nil,'migration keeps current worker facts and sorted admission, not completed launch request/body')
 check(candidate.sessions.closed==nil and candidate.sessions.session.control.request_floor==1 and candidate.sessions.session.control.next_request_serial==1,'old tombstones do not reconstruct admissions and maximum old fences do not raise issuance floors')
 do
+ -- A terminal worker that earned its continuation proof must still inspect as a valid current source.
+ local proof={platform='windows',session=1,route={executable='/bin/tern',socket='/run/tern.sock',window='w',pane=44},root_pid=10,root_identity='root-id',provider_pid=11,provider_identity='provider-id'}
+ local withProof=P.clone(candidate);withProof.workers['session/launch'].terminal_process=P.clone(proof)
+ check(Migration.proof(withProof,State.validate_registry)~=nil,'a current worker carrying persisted terminal-process proof inspects as valid')
+ local badProof=P.clone(withProof);badProof.workers['session/launch'].terminal_process.root_pid=0
+ check(Migration.proof(badProof,State.validate_registry)==nil,'a malformed persisted terminal-process proof is still refused')
+end
+do
  -- C2 persisted empty nested lists as ordinary JSON objects. Inspect those
  -- semantic lists without rewriting the immutable catalog or source bytes.
  local withCatalog=active()

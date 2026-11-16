@@ -349,6 +349,11 @@ local function save_setup(state: State)
 	local candidate = { glitch_root = root, agent = { kind = setup.kind, argv = argv } }
 	local normalized, problem = Config.validate(candidate, tern.runtime.os)
 	if normalized == nil then hold(setup, tostring(problem)); return end
+	if not current.exists then
+		-- A first root is committed only after its host registry reads; a typo must not lock Setup read-only.
+		local registry_ok, registry_problem = projects.registry_ok(normalized.glitch_root)
+		if not registry_ok then hold(setup, tostring(registry_problem) .. " No file was written."); return end
+	end
 	local document = {
 		glitch_root = root,
 		agent = { kind = normalized.agent.kind, argv = tern.json.array(normalized.agent.argv) },

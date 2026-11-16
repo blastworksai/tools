@@ -3,9 +3,12 @@
 local presentation = {}
 local snapshot = require("./snapshot")
 local PROVIDER_ORDER = { claude = 1, openai = 2, kimi = 3, muse = 4, antigravity = 5, grok = 6 }
--- Tern's StatusSegment has no width/tooltip/custom SVG API. Keep the summary
--- bounded independently of account count; the overflow opens the complete list.
-presentation.SUMMARY_LIMIT = 3
+-- Tern's StatusSegment has no width/tooltip/custom SVG API: a fixed USAGE launcher plus one
+-- segment per account the owner ticked in USAGE settings, bounded by MAX_ACCOUNT_SEGMENTS.
+presentation.LAUNCHER_TEXT = "USAGE"
+presentation.DETAILS_COMMAND = "plugin.usage.details"
+presentation.ACCOUNT_COMMAND_PREFIX = "plugin.usage.status_account_"
+presentation.MAX_ACCOUNT_SEGMENTS = 16
 presentation.EMPTY_TEXT = "Define accounts in SPAWN to show usage."
 presentation.MUSE_WAITING = "Awaiting usage after a turn"
 presentation.icons = {
@@ -164,7 +167,6 @@ end
 
 function presentation.summary(model: any, now_ms: number?): any
 	local accounts = presentation.ordered_accounts(model.accounts)
-	local visible_count = math.min(#accounts, presentation.SUMMARY_LIMIT)
 	local conflicts = #(model.roster_conflicts or {})
 	local measured, current = 0, 0
 	for _, account in accounts do
@@ -172,8 +174,7 @@ function presentation.summary(model: any, now_ms: number?): any
 		if value.used ~= nil then measured += 1 end
 		if value.state == "fresh" then current += 1 end
 	end
-	return { accounts = accounts, visible_count = visible_count,
-		overflow_count = #accounts - visible_count, total_count = #accounts, current_count = current, conflict_count = conflicts,
+	return { accounts = accounts, total_count = #accounts, current_count = current, conflict_count = conflicts,
 		header = tostring(#accounts) .. " accounts · " .. tostring(current)
 			.. " current · " .. tostring(measured - current) .. " last-known · " .. tostring(#accounts - measured) .. " unavailable"
 			.. (if conflicts > 0 then " · " .. tostring(conflicts) .. " account-list conflicts" else "") }
@@ -185,26 +186,55 @@ function presentation.consumer_text(consumer: any): string
 	return consumer.label .. " · Uses underlying subscription · " .. accounts
 end
 
-function presentation.segments(model: any): { any }
-	local summary = presentation.summary(model)
-	local segments = {}
-	if summary.conflict_count > 0 then
-		table.insert(segments, { text = "Account list needs review", tone = "warn", command = "plugin.usage.details" })
+function presentation.launcher(): any
+	return { text = presentation.LAUNCHER_TEXT, icon = "gauge", command = presentation.DETAILS_COMMAND }
+end
+
+-- "Provider: Label" for a status segment.
+function presentation.status_label(account: any): string
+	return (account.provider_label or account.provider) .. ": " .. account.account_label
+end
+
+-- The ring and percentage of a measured value; "—" when there is no number (never a zero).
+-- A value that is not current says so, so it never reads as live.
+function presentation.status_value(value: any): string
+	if value.used == nil then return "—" end
+	local text = presentation.ring(value.used) .. " " .. tostring(math.floor(value.used + 0.5)) .. "%"
+	if value.state == "login" then return text .. " · " .. (presentation.login_problem(value.window) :: string) end
+	if value.state ~= "fresh" then return text .. " last-known" end
+	return text
+end
+
+-- Launcher, then (master On) one segment per selected account in provider order.
+-- `prefs` is a status_preferences record; nil or Off renders the launcher alone.
+-- The second result lists the account ids behind the account segments, in segment order.
+function presentation.segments(model: any, prefs: any?, now_ms: number?): ({ any }, { string })
+	local segments = { presentation.launcher() }
+	local ids: { string } = {}
+	if prefs == nil or prefs.enabled ~= true then return segments, ids end
+	local now = now_ms or math.floor(os.time() * 1000)
+	if #(model.roster_conflicts or {}) > 0 then
+		table.insert(segments, { text = "Account list needs review", tone = "warn", command = presentation.DETAILS_COMMAND })
 	end
-	local now_ms = math.floor(os.time() * 1000)
-	for index = 1, summary.visible_count do
-		local value = presentation.account_projection(summary.accounts[index], now_ms)
-		table.insert(segments, { text = value.text, icon = value.icon,
-			tone = value.tone, command = "plugin.usage.details" })
+	local set: { [string]: boolean } = {}
+	for _, id in prefs.selected do set[id] = true end
+	for _, account in presentation.ordered_accounts(model.accounts) do
+		if #ids >= presentation.MAX_ACCOUNT_SEGMENTS then break end
+		local chosen = set[account.id] == true
+		for _, alias in account.also_configured or {} do
+			if set[alias.id] == true then chosen = true end
+		end
+		if chosen then
+			local value = presentation.account_projection(account, now)
+			table.insert(ids, account.id)
+			table.insert(segments, { text = presentation.status_label(account) .. "  " .. presentation.status_value(value),
+				icon = value.icon, tone = value.tone, command = presentation.ACCOUNT_COMMAND_PREFIX .. tostring(#ids) })
+		end
 	end
-	if summary.overflow_count > 0 then
-		table.insert(segments, { text = "+" .. tostring(summary.overflow_count),
-			tone = "muted", command = "plugin.usage.details" })
+	if #model.accounts == 0 and #segments == 1 then
+		table.insert(segments, { text = presentation.EMPTY_TEXT, tone = "muted", command = presentation.DETAILS_COMMAND })
 	end
-	if #segments == 0 then
-		table.insert(segments, { text = presentation.EMPTY_TEXT, tone = "muted", command = "plugin.usage.details" })
-	end
-	return segments
+	return segments, ids
 end
 
 -- Export only current, explicitly bound definitions. The same snapshot reducer

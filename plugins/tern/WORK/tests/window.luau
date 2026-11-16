@@ -105,24 +105,26 @@ local function spawn_url(id: string, delivery: string, revision: number?): strin
 	})
 end
 
-local function new_window(name: string): any
+local function new_window(name: string, panel_tab: number?): any
 	local window = {
 		name = name, splits = {}, agents = {}, copies = {}, toasts = {}, runs = {}, focuses = {}, next_pane = 100,
 		exit_created = false, spawn_snapshot = spawn_snapshot(), config_snapshots = {}, surface_reads = 0,
 		dispatch_available = true, current_revision = 7,
+		handlers = {}, commands = {}, file_buttons = {}, panels = 0, prompts = {}, closed = {},
 	}
 	local panes = {
-		[11] = { pane = 11, block = "tern-work.panel", kind = "plugin", title = "WORK" },
-		[12] = { pane = 12, block = nil, kind = "terminal", title = "shell" },
+		[11] = { pane = 11, block = "tern-work.panel", kind = "plugin", title = "WORK", tab = panel_tab or 2 },
+		[12] = { pane = 12, block = nil, kind = "terminal", title = "shell", tab = 1 },
 		[20] = { pane = 20, block = "spawn.spawner", kind = "plugin", title = "SPAWN A" },
 		[21] = { pane = 21, block = "spawn.spawner", kind = "plugin", title = "SPAWN B" },
 	}
 	local fake_tern = {
 		json = tern.json,
-		on = function() end,
+		on = function(event: string, handler: any) window.handlers[event] = handler end,
 		route = { link = function(handler: any) window.route = handler end },
-		command = function() end,
-		files = { button = function() end },
+		command = function(def: any) window.commands[def.id] = def end,
+		files = { button = function(def: any) table.insert(window.file_buttons, def) end },
+		chrome = { status = function(fn: any) window.status = fn end },
 		timer = function() error("WORK must not poll or delay prompt delivery") end,
 	}
 	local cx: any = { session = {}, layout = {}, agents = {} }
@@ -133,6 +135,7 @@ local function new_window(name: string): any
 		return result
 	end
 	function cx.session:tabs(): { any } return {} end
+	function cx.session:tab_of(id: number): number? return if panes[id] ~= nil then panes[id].tab else nil end
 	function cx.session:focused(): number return 12 end
 	function cx.session:block_types(): { any } return { { kind = "spawn.spawner" } } end
 	function cx.session:surface(pane: number, _options: any): any
@@ -144,6 +147,7 @@ local function new_window(name: string): any
 		assert(panes[pane] ~= nil, "focus target exists")
 		table.insert(window.focuses, pane)
 	end
+	function cx.layout:close(pane: number) table.insert(window.closed, pane) end
 	function cx.layout:split(target: number, direction: string, launch: any): number
 		assert(panes[target] ~= nil and direction == "right", "split origin is live and explicit")
 		window.next_pane += 1
@@ -163,7 +167,10 @@ local function new_window(name: string): any
 	function cx:toast(level: string, text: string, sub: string?) table.insert(window.toasts, { level = level, text = text, sub = sub }) end
 	function cx:run(pane: number, text: string) table.insert(window.runs, { pane = pane, text = text }) end
 	function cx:window_key(): string return name end
-	function cx:new_block(): number? return nil end
+	function cx:new_block(): number?
+		window.panels += 1
+		return nil
+	end
 	window.cx = cx
 	local chunk = assert(loadstring(tern.fs.read(root .. "/window.luau"), "work-window-entry-" .. name))
 	setfenv(chunk, setmetatable({
@@ -171,6 +178,9 @@ local function new_window(name: string): any
 		require = function(name: string)
 			if name == "./launch" then return Launch end
 			if name == "./spawn" then return Spawn end
+			if name == "./status/status_prompt" then
+				return { ensure = function(_cx: any, id: string) table.insert(window.prompts, id) end }
+			end
 			if name == "./updater/window" then return { register = function() end } end
 			error("unexpected require " .. name)
 		end,
@@ -179,6 +189,22 @@ local function new_window(name: string): any
 	assert(type(window.route) == "function", "window route registered")
 	return window
 end
+
+local status_window = new_window("status")
+check(#status_window.file_buttons == 0, "WORK registers no Files-pane button")
+check(status_window.commands.show_projects ~= nil and status_window.commands.show_projects.title == "WORK", "palette command WORK is kept")
+local segments = status_window.status({})
+check(#segments == 1 and segments[1].text == "WORK" and segments[1].icon == "list", "one WORK status segment with the list icon")
+check(segments[1].command == "plugin.tern-work.show_projects", "segment runs the WORK command")
+status_window.handlers.window_start(status_window.cx)
+check(#status_window.prompts == 1 and status_window.prompts[1] == "tern-work", "status-bar prompt ensured once on window start for tern-work")
+status_window.commands.show_projects.run(status_window.cx)
+check(status_window.panels == 1, "segment command opens the WORK panel exactly once")
+check(status_window.toasts[#status_window.toasts].level == "error", "open_panel reports an unavailable host honestly")
+
+local held = new_window("panel-in-tab", 1)
+held.commands.show_projects.run(held.cx)
+check(held.panels == 0 and #held.closed == 1 and held.closed[1] == 11, "a click with WORK already in the focused tab closes it instead of opening a second")
 
 local function follow(window: any, url: string, pane: number?): any
 	return window.route({ url = url, pane = pane, mods = {} }, window.cx)
@@ -305,6 +331,11 @@ function projects_stub.load_selection(current: any): any return projects.selecti
 function projects_stub.selection(current: any, selected: any): any return projects.selection(current, selected) end
 function projects_stub.save_selection() end
 projects_stub.work_on_url = projects.work_on_url
+local registry_roots: { [string]: boolean } = { ["/fresh/glitch"] = true }
+function projects_stub.registry_ok(root: string): (boolean, string?)
+	if registry_roots[root] then return true, nil end
+	return false, "That folder has no valid Glitch workspace registry."
+end
 local spawn_stub = {}
 function spawn_stub.load(): any
 	return {
@@ -414,6 +445,12 @@ state.setup = nil
 panel.view(state, block_cx)
 action(panel, state, "setup-open", block_cx)
 check(state.setup.root == "" and state.setup.root_readonly == false, "fresh installed Setup starts with an editable empty root")
+panel.event(state, { ev = "focus", id = "main.setup-root" }, block_cx)
+panel.key(state, { name = "paste", text = "/typo/glitch", ctrl = false, alt = false, meta = false }, block_cx)
+panel.view(state, block_cx)
+action(panel, state, "setup-save", block_cx)
+check(writes == 0 and files[path] == nil and state.setup ~= nil and state.setup.hold ~= nil, "a first root without a readable registry is held and nothing is written")
+state.setup.root, state.setup.root_cursor = "", 0
 panel.event(state, { ev = "focus", id = "main.setup-root" }, block_cx)
 panel.key(state, { name = "paste", text = "/fresh/glitch", ctrl = false, alt = false, meta = false }, block_cx)
 panel.view(state, block_cx)

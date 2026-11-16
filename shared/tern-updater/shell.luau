@@ -92,4 +92,34 @@ function Backend.serialize(executable: string, args: {string}, cwd: string?, os:
 	local encoded = tern.base64.encode(utf16)
 	return bounded("powershell.exe -NoLogo -NoProfile -EncodedCommand " .. encoded, os)
 end
+
+-- Preparation adopts only literal same-host account routing, never shell code.
+-- removed counts argv entries through the wrapped executable (for task slots).
+local ROUTE_WRAPPERS={sudo=true,su=true,doas=true,runuser=true,env=true,ssh=true,sh=true,bash=true,dash=true,zsh=true,ksh=true}
+function Backend.same_host_route(executable,arguments,user)
+	user=user or ''
+	local argv=table.clone(arguments);local removed=0
+	if executable:match('([^/]+)$')=='sudo' then
+		local selected=nil;local index=1
+		while index<=#argv do
+			local word=argv[index]
+			if word=='--' then index+=1;break end
+			if word:sub(1,1)~='-' then break end
+			local value=word:match('^%-%-user=(.+)$') or word:match('^%-u(.+)$')
+			if word=='-u' or word=='--user' then index+=1;value=argv[index] end
+			if value then
+				if selected then return nil,'Same-host sudo route has ambiguous OS-user selectors' end
+				selected=value
+			elseif word~='-n' and word~='-H' then return nil,'Review this same-host sudo route explicitly; only literal -n, -H and OS-user selection are supported' end
+			index+=1
+		end
+		if not selected or selected=='' or selected:sub(1,1)=='-' or selected:find('[%s%c:/]') or not argv[index] or argv[index]=='' then return nil,'Same-host sudo route must explicitly select an existing OS account and executable' end
+		if user~='' and user~=selected then return nil,'Configured OS user conflicts with the literal sudo account selector' end
+		user=selected;executable=argv[index];removed=index
+		local remaining={};for i=index+1,#argv do table.insert(remaining,argv[i]) end;argv=remaining
+	end
+	local name=executable:match('([^/]+)$')
+	if executable=='' or executable:find('%c') or executable:sub(1,1)=='-' or executable:find('=',1,true) or ROUTE_WRAPPERS[name] then return nil,'Same-host route requires an actual literal worker executable; nested, shell, environment and remote wrappers require explicit review' end
+	return {executable=executable,arguments=argv,user=user,removed=removed},nil
+end
 return Backend

@@ -83,21 +83,29 @@ class Display:
 
     def _freeze(self, authority, limits):
         assembly, cached = _Assembly(limits), _CachedAssembly(limits)
-        cursor = None
-        while True:
-            page = self.store.aggregate(authority, cursor, PAGE_BYTES)
-            snapshots, chunks = page.get("cached_snapshots"), page.get("cached_chunks")
-            if not isinstance(snapshots, list) or not isinstance(chunks, list):
-                raise ServiceError("invalid_request")
-            cursor = assembly.add(page, local_cache=True)
-            for snapshot in snapshots:
-                cached._record(snapshot)
-            for chunk in chunks:
-                cached._chunk(chunk)
-            if assembly.size + cached.size > limits["max_total_bytes"]:
-                raise ServiceError("capacity", 413)
-            if cursor is None:
-                break
+        cursor = first_cursor = None
+        # The store keeps a multi-page aggregate as a temporary session until it expires.
+        # This display keeps its own copy, so the store's session is released once assembled.
+        try:
+            while True:
+                page = self.store.aggregate(authority, cursor, PAGE_BYTES)
+                if first_cursor is None:
+                    first_cursor = page.get("next_cursor")
+                snapshots, chunks = page.get("cached_snapshots"), page.get("cached_chunks")
+                if not isinstance(snapshots, list) or not isinstance(chunks, list):
+                    raise ServiceError("invalid_request")
+                cursor = assembly.add(page, local_cache=True)
+                for snapshot in snapshots:
+                    cached._record(snapshot)
+                for chunk in chunks:
+                    cached._chunk(chunk)
+                if assembly.size + cached.size > limits["max_total_bytes"]:
+                    raise ServiceError("capacity", 413)
+                if cursor is None:
+                    break
+        finally:
+            if first_cursor is not None:
+                self.store.release_aggregate(authority, first_cursor)
         revision, records, sources = assembly.finish()
         if cached.chunks:
             raise ServiceError("conflict", 409)
@@ -184,7 +192,12 @@ class Display:
                     if session["authority"] != authority:
                         raise ServiceError("forbidden", 403)
                     # Copy through JSON so callers cannot mutate the frozen revision.
-                    return decode(session["pages"][cursor])
+                    page = decode(session["pages"][cursor])
+                    if page.get("complete"):
+                        # The final page ends the read: free the session now. A retried final page
+                        # answers 410 "expired"; the window restarts from the first page on any failed read.
+                        self.sessions = {key: value for key, value in self.sessions.items() if value is not session}
+                    return page
             raise ServiceError("expired", 410)
         limits = self.store.settings()
         tokens, pages = self._freeze(authority, limits)

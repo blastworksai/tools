@@ -301,7 +301,7 @@ def http_json(url, headers, *, method="GET", timeout=8, rejected=None):
     return obj(json.loads(raw)) if raw else {}
 
 
-def kimi(env, io):
+def kimi(env, io, command=None):
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         port = sock.getsockname()[1]
@@ -309,7 +309,7 @@ def kimi(env, io):
     pattern = re.compile(rb"(http://127\.0\.0\.1:" + str(port).encode() +
                          rb")/#token=([A-Za-z0-9_.~-]+)")
     try:
-        with interactive_bounded(["kimi", "web", "--no-open", "--port", str(port)],
+        with interactive_bounded([command or "kimi", "web", "--no-open", "--port", str(port)],
                                  env, env.get("HOME"), 40) as session:
             base = headers = None
             while base is None:
@@ -394,7 +394,7 @@ def _principal(value, *, plan=None, organization_id=None):
     return result
 
 
-def collect(provider, home, env, io):
+def collect(provider, home, env, io, command=None):
     from metadata_providers import collect as metadata, collect_usage
     observed = int(time.time() * 1000)
     credit_balance = None
@@ -427,7 +427,7 @@ def collect(provider, home, env, io):
         windows = parse_claude(document, observed)
     elif provider == "openai":
         def read_codex(refresh):
-            return rpc(["codex", "app-server", "--stdio"], env,
+            return rpc([command or "codex", "app-server", "--stdio"], env,
                 {"clientInfo": {"name": "usage", "version": "1"}, "capabilities": {"experimentalApi": True}},
                 [("account/read", {"refreshToken": refresh}), ("account/rateLimits/read", {"excludeResetCreditDetails": True})], initialized=True)
         login, quota = read_codex(False)
@@ -460,11 +460,11 @@ def collect(provider, home, env, io):
         windows = parse_codex(quota, observed)
         credit_balance = codex_credit_balance(quota)
     elif provider == "antigravity":
-        raw = _bounded_stdout(["agy", "--print", "/usage", "--print-timeout", "45s"], env, 50)
+        raw = _bounded_stdout([command or "agy", "--print", "/usage", "--print-timeout", "45s"], env, 50)
         windows = parse_agy(raw.decode("utf-8"), observed)
         account = metadata(provider, home, env, io)
     elif provider == "grok":
-        subscription, quota = rpc(["grok", "agent", "stdio"], env,
+        subscription, quota = rpc([command or "grok", "agent", "stdio"], env,
             {"protocolVersion": 1, "clientCapabilities": {}},
             [("_x.ai/auth/check_subscription", {}), ("_x.ai/billing", {})])
         if subscription is None:
@@ -480,7 +480,7 @@ def collect(provider, home, env, io):
             account = _principal(meta["email"], plan=meta.get("subscription_tier"), organization_id=meta.get("team_id"))
         windows = parse_grok(quota, observed)
     elif provider == "kimi":
-        account, quota = kimi(env, io)
+        account, quota = kimi(env, io, command)
         data = account.get("data", {})
         candidates = [account.get("userInfo"), account.get("user_info"), data.get("userInfo") if isinstance(data, dict) else None,
                       data.get("user_info") if isinstance(data, dict) else None, data, account]
@@ -511,8 +511,8 @@ def handle(envelope):
         home = helper.current_home()
         env = helper.profile_environment(request["kind"], home, selectors)
         env["USAGE_SOURCE_KIND"] = request["kind"]
-        io = helper.SourceIO(home, env)
-        metadata, usage = collect(request["provider"], home, env, io)
+        io = helper.SourceIO(home, env, request.get("command"))
+        metadata, usage = collect(request["provider"], home, env, io, request.get("command"))
         if metadata is not None:
             response["metadata"] = helper.project_metadata(metadata, io.secrets)
         response["usage"] = helper.project_usage(usage, io.secrets)

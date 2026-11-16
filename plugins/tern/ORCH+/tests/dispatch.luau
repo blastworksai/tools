@@ -14,7 +14,7 @@ local sections = { fixture = true, core = true, control_rebind = true, receipts 
 	quota_rollover = true, quota_coordinator_rollover = true, quota_ledger = true, quota_selector = true, quota_continuation = true, window_bookkeeping = true, intent_buttons = true,
 	background_settlement = true, foreground_bootstrap = true, background_launch = true, background_adjacent = true, stale_intent = true,
 	assembly_restore = true, assembly_capacity = true, poll_continuation = true,
-	withdraw_fenced = true, policy_keys = true, loop_caps = true, worker_fields = true,
+	withdraw_fenced = true, policy_keys = true, loop_caps_rollover = true, loop_caps_retry = true, loop_caps_reports = true, loop_caps_landing_migration = true, loop_caps_landing_caps = true, loop_caps_landing_transport = true, loop_caps_landing_target_moved = true, worker_fields = true,
 	current_retention = true, current_ack_holes = true, current_nonce = true, current_close = true, current_handover = true, consumed_scope = true,
 	stale_result = true, stale_result_lost = true, stale_result_unrelated = true, stale_result_kind = true, stale_result_grant = true,
 	stale_result_grant_change = true, held_withdrawal = true, capacity_withdrawal = true,
@@ -1935,6 +1935,7 @@ local function window_vm()
 	local registered = {}
 	wtern.timer = function() return { cancel = function() end } end
 	wtern.command = function(def) registered[def.id] = def end; wtern.files = { button = function() end }; wtern.on = function() end
+	wtern.chrome = { status = function() end } -- the window registers its status segment at load
 	wtern.route = { link = function() end }
 	local chunk = assert(loadstring(runtime.fs.read(root .. "/window.luau"), "intent-window"))
 	setfenv(chunk, setmetatable({ tern = wtern, require = iload }, { __index = environment }))
@@ -2099,6 +2100,7 @@ local function window_consumer(mode)
 	window_tern.now = function() return clock end
 	local palette_commands = {}
 	window_tern.command = function(def) palette_commands[def.id] = def end; window_tern.files = { button = function() end }
+	window_tern.chrome = { status = function() end } -- the window registers its status segment at load
 	window_tern.route = { link = function() end }
 	window_tern.timer = function(_, fn) table.insert(timers, fn); return {} end
 	local local_host = { id = "local", state = "connected", panes = { 9001 } }
@@ -2404,7 +2406,7 @@ local function window_consumer(mode)
 				if stale_result_mode and a.request.op == "mailbox_publish_ack" then
 					table.insert(result_deliveries, { event = clone(ev), result = clone(last_result) })
 				end
-				if last_result.ok then last_receipt = { action_id = a.request.action_id, grant_id = a.claim.grant_id, response_sha256 = response_hash } end
+				if last_result.ok then last_receipt = { action_id = a.request.action_id, grant_id = a.claim.grant_id, response_sha256 = codec.sha256(response_bytes) } end
 				local retained = scoped_results[a.request.action_id] or {}
 				retained.result = last_result
 				if last_result.ok then retained.receipt = last_receipt end
@@ -2425,7 +2427,11 @@ local function window_consumer(mode)
 			elseif ev.act == "dispatch-notice" then
 				local input = runtime.json.decode(ev.value)
 				assert(input.source_nonce == wf.origin.alias_nonce and type(input.message) == "string" and #input.message <= 1024)
-				notice = input.message; table.insert(notices, input.message)
+				-- The window's own start-up mailbox-inventory probe is answered `uncertain` by this fixture (it owns no mailbox
+				-- filesystem) and says so once per window. That is not a dispatch notice; keep it out of the dispatch notice log.
+				if input.message:sub(1, 41) ~= "Communication files could not be checked " then
+					notice = input.message; table.insert(notices, input.message)
+				end
 			elseif ev.act == "config-panes" then observed_panes = runtime.json.decode(ev.value)
 			elseif ev.act == "upgrade-window-readback" then
 				local readback = runtime.json.decode(ev.value)
@@ -2465,7 +2471,9 @@ local function window_consumer(mode)
 			return
 		end
 		control_bytes[pane] = nil
-		table.insert(events, { op = ev.act, bytes = ev.value })
+		-- `events` is the ordered log of SPAWN effect requests. The window's read-only mailbox-inventory probe
+		-- runs on its own schedule before any effect; it is answered below but is not an effect request.
+		if ev.act ~= "mailbox_inventory" then table.insert(events, { op = ev.act, bytes = ev.value }) end
 		if ev.act == "catalog" then
 			catalog_sends += 1
 			local success = frame(request, "catalog", { catalog_version = 2, setup = catalog_setup(0), namespace = "fixture-spawn", host_key = "fixture-host", config_revision = 0, revision = 0, records = runtime.json.array() })
@@ -2687,6 +2695,9 @@ local function window_consumer(mode)
 	end
 	assert(palette_commands.continue_controller).run(table.clone(cx))
 	assert(command_result and command_result.ok, "initial continuation failed: " .. tostring(notice) .. "; result=" .. runtime.json.encode(command_result))
+	-- The continuation guide watches for this exact receipt on its next observation; give it that turn before the
+	-- next command replaces the receipt, or it reports "continuation result is not yet confirmed" after 5 s awake.
+	tick()
 	click("pause")
 	assert(command_result and command_result.ok, "initial pause failed: " .. tostring(notice) .. "; result=" .. runtime.json.encode(command_result))
 	must(wf:control("admit_session").ok)
@@ -2988,7 +2999,7 @@ local function window_consumer(mode)
 				and wf.authority.registry.dispatch.workers[queued_worker].phase == "provisioned", "late timer consumes conclusive status-found provisioning before considering timeout")
 			hold_results = true
 			local launch_id = wf.authority.registry.dispatch.workers[queued_worker].launch_action_id
-			for _ = 1, 8 do
+			for _ = 1, 24 do
 				tick()
 				local launch = wf:action(launch_id)
 				if launch and launch.claim and count_events("launch") == 1 then break end
@@ -3011,7 +3022,7 @@ local function window_consumer(mode)
 				and count_events("status") == 1 and launch_deliveries == 1,
 				"read-only reconciliation never reexecutes provisioning and does not suppress the separately granted first launch")
 		elseif mode == "refused_chain" then
-			for _ = 1, 10 do
+			for _ = 1, 24 do
 				tick()
 				if launch_deliveries == 1 then break end
 			end
@@ -3021,6 +3032,9 @@ local function window_consumer(mode)
 			local refusal_id = command_result.request_id
 			check(command_result.code == "orchestrator_slot_occupied" and selected == first_action,
 				"second operator start refuses without replacing original active action")
+			-- A refused start is a pure refusal and no longer advances the registry, so the captured launch delivery
+			-- would commit instead of going stale. Make the premise explicit with a real intervening authority commit.
+			assert(wf:apply("pause").ok); assert(wf:apply("resume").ok)
 			tick(); tick()
 			check_window(command_result.request_id == refusal_id and command_result.code == "orchestrator_slot_occupied"
 				and wf:action(first_action) ~= nil and wf:action(first_action).claim.grant_id == grant
@@ -3054,7 +3068,17 @@ local function window_consumer(mode)
 		else
 			-- The lost launch delivery is replayed after 1 s of awake backoff (two ticks), not on the next
 			-- tick; the extra ticks after settlement also show no SPAWN effect is ever repeated.
-			for _ = 1, 12 do tick() end
+			-- The first launch delivery is lost. Nothing else commits to the registry in this mode any more, so the replay
+			-- of that captured observation would commit instead of going stale; make the premise explicit with a real
+			-- intervening authority commit right after the loss, before the replay is due.
+			for _ = 1, 24 do if launch_deliveries >= 1 then break end; tick() end
+			assert(wf:apply("pause").ok); assert(wf:apply("resume").ok)
+			-- Control is re-admitted between effects, so reaching the replayed delivery takes more ticks than it
+			-- once did. The fixture receipt carries the production response hash, so the window recognises settlement;
+			-- the extra ticks after the settling delivery must not replace the settled outcome checked below. (The
+			-- suite has a 60 s wall bound; about one second per tick, so the extra ticks stay few.)
+			for _ = 1, 36 do if launch_deliveries >= 3 then break end; tick() end
+			for _ = 1, 3 do tick() end
 			check(count_events("mailbox_provision") == 1 and count_events("launch") == 1 and launch_deliveries == 3,
 				"provision-to-launch chain performs each effect once and freshly observes the positively refused stale delivery")
 		end
@@ -3081,6 +3105,12 @@ local function window_consumer(mode)
 			and last_result.code == "bridge_rejected", "observed launch rejection commits precise prerequisite instead of timing out as uncertainty")
 		check(wf.authority.registry.sessions[wf.origin.logical_session_id].controller.pending_executors == 0
 			and wf.authority.registry.sessions[wf.origin.logical_session_id].orchestrator ~= nil, "rejection settles only its executor and retains coordinator reservation")
+		if mode == "chain" or mode == "refused_chain" then
+			-- Extra ticks after settlement: no SPAWN effect is ever repeated.
+			for _ = 1, 12 do tick() end
+			check(count_events("mailbox_provision") == 1 and count_events("launch") == 1,
+				"ticks after settlement never repeat provisioning or launch")
+		end
 		return
 	end
 	if mode == "background_settlement" then
@@ -3485,7 +3515,14 @@ local function window_consumer(mode)
 		local delivered = held_results
 		click("catalog")
 		local stuck = selected
-		for _ = 1, 10 do tick(); if held_results > delivered then break end end
+		-- The held log also counts replays of the earlier settled delivery, so wait until the second catalog has
+		-- actually been sent and its own outcome is the one that was held.
+		local before = delivered
+		for _ = 1, 40 do
+			if catalog_sends < 2 then before = held_results end
+			tick()
+			if catalog_sends == 2 and held_results > before then break end
+		end
 		check(stuck ~= waiting and held_results > delivered and catalog_sends == 2, "a second outcome is captured")
 		for _ = 1, 80 do clock += 4000; tick() end -- 360 s awake without any rendered host progress.
 		check(count_commands("lost", stuck) == 1 and wf:action(stuck).phase == "uncertain",
@@ -3502,7 +3539,11 @@ local function window_consumer(mode)
 	else
 		check(last_result.code == "backpressure", "native full response reaches explicit backpressure state")
 		local previous_grant = wf:action(selected).claim.grant_id
-		click("retry"); tick(); tick()
+		click("retry")
+		-- The fresh driver re-admits its control channel (bridge_control) before it claims, so the claim and resend land a few
+		-- awake ticks after the click; advance until then, bounded, rather than assuming a fixed tick count.
+		tick(); tick()
+		for _ = 1, 8 do if #events >= 2 then break end; tick() end
 		check_window(wf:action(selected).phase == "claimed" and wf:action(selected).claim.grant_id ~= previous_grant
 			and #events == 2 and events[2].bytes ~= events[1].bytes, "real window uses a fresh request/action/serial for the proven pre-effect retry")
 		tick()
@@ -7385,7 +7426,7 @@ if section == nil or section == "policy_keys" then
 
 		{ "checkout_roots", { { "relative/root" }, { "/" .. string.rep("r", 512) }, { "/a", "/b", "/c", "/d", "/e", "/f", "/g", "/h", "/i" } },
 			{ { "/" .. string.rep("r", 511) }, { "/a", "/b", "/c", "/d", "/e", "/f", "/g", "/h" }, {} } },
-		{ "board_path", { "../escape", runtime.json.null }, { "ORCH+ Board.tern", "/srv/board.md", "" } },
+		{ "board_path", { "../escape", runtime.json.null, "/" .. string.rep("b", 512) }, { "ORCH+ Board.tern", "/srv/board.md", "", "/" .. string.rep("b", 511) } },
 		{ "inbox_folder", { "../escape", runtime.json.null }, { "inbox", "/srv/inbox", "" } },
 		{ "board_lanes", { { queued = "Todo", running = "Doing", review = "Review" }, { queued = "Todo", running = "Doing", review = "Review", done = string.rep("d", 65) },
 			{ queued = "Todo", running = "Doing", review = "Review", done = "Done", extra = "X" } },
@@ -7563,7 +7604,8 @@ local function settle_receipts(f, id)
 	end
 	assert(f:watermark(id).ok)
 end
-if section == nil or section == "loop_caps" then
+-- loop_caps is split into four sections so each stays inside the runner's 60 s per-section wall bound.
+if section == nil or section == "loop_caps_rollover" then
 	-- Rollover checkpoint re-request, at cap 1 (stop) and cap 10 (allow_more).
 	for _, cap in { 1, 10 } do
 		local f, id = rollover_fixture()
@@ -7603,6 +7645,8 @@ if section == nil or section == "loop_caps" then
 				and rollover_of(f, hid).phase == "checkpoint_pending", "a stopped rollover loop refuses the re-request, opens no new gate and stays held")
 		end
 	end
+end
+if section == nil or section == "loop_caps_retry" then
 	-- Owner retry of full backpressure, at cap 1 and cap 10.
 	local FULL = { resource = "window_authorization", current = 1, limit = 1, retryable = true, effect_started = false }
 	for _, cap in { 1, 10 } do
@@ -7629,8 +7673,11 @@ if section == nil or section == "loop_caps" then
 		check(over.code == "loop_capped" and g and g.kind == "loop_cap" and f:action(launch).phase == "backpressure" and f:action(launch).retry_loop.count == cap,
 			"cap " .. cap .. ": the next owner retry opens a loop_cap gate and the action stays in backpressure")
 		check(starts(g.question, "Owner retry of full backpressure reached " .. cap .. " attempts; last error: full:window_authorization."), "the retry loop gate names the loop and the last error")
-		local automatic = f:apply("retry", { action_id = launch }); assert(automatic.ok); launch = automatic.action_id
-		check(f:action(launch).retry_loop.count == cap, "automatic recheck uses a fresh identity without counting or bypassing the live owner loop decision")
+		local gated_before = runtime.json.encode(f.authority.registry)
+		local automatic = f:apply("retry", { action_id = launch })
+		check(not automatic.ok and automatic.code == "loop_gated" and f:action(launch).phase == "backpressure"
+			and f:action(launch).retry_loop.count == cap and runtime.json.encode(f.authority.registry) == gated_before,
+			"an automatic recheck cannot bypass the open owner gate: it is refused and creates no replacement action")
 		assert(f:control("reconcile_session").ok)
 		check(state.rehydrate(clone(f.authority.registry)) ~= nil, "a gated retry loop restores")
 		if cap == 1 then
@@ -7645,6 +7692,41 @@ if section == nil or section == "loop_caps" then
 				"a stopped retry loop refuses the owner retry and opens no new gate")
 		end
 	end
+end
+if section == nil or section == "loop_caps_retry" then
+	-- Automatic capacity rechecks (no owner trigger) neither count toward the owner retry cap nor open its gate.
+	local FULL = { resource = "window_authorization", current = 1, limit = 1, retryable = true, effect_started = false }
+	local f = fixture(); f:catalog(0)
+	assert(f:apply("policy", { policy = { loop_cap = 1 } }).ok)
+	local queued = f:queue(false); assert(queued.ok, queued.message)
+	assert(f:finish(queued.action_id, "provisioned", { handle = "mailbox-auto", binding_digest = string.rep("e", 64),
+		capabilities = runtime.json.array({ "report-files-v1", "native-ask-v1" }), limits = {} }).ok)
+	local launch = f.authority.registry.dispatch.workers[queued.worker_id].launch_action_id
+	assert(f:finish(launch, "full", FULL).code == "backpressure")
+	for round = 1, 2 do
+		local automatic = f:apply("retry", { action_id = launch })
+		check(automatic.ok and automatic.code ~= "loop_capped" and open_loop_gates(f, "full_retry") == 0,
+			"automatic recheck " .. round .. " at loop_cap 1 opens no owner retry gate")
+		launch = assert(automatic.action_id)
+		check((f:action(launch).retry_loop or { count = 0 }).count == 0, "automatic recheck " .. round .. " leaves the owner retry count at zero")
+		assert(f:apply("claim", { action_id = launch, executor = f.origin.window_epoch }).code == "peer_reconcile_required")
+		assert(f:control("reconcile_session").ok)
+		assert(f:finish(launch, "full", FULL).code == "backpressure")
+	end
+	local owner = f:apply("retry", { action_id = launch, trigger = "owner" })
+	check(owner.ok and open_loop_gates(f, "full_retry") == 0, "the first owner retry still runs after automatic rechecks")
+	-- A ready action carrying a gated or stopped retry loop can never be claimed.
+	assert(owner.ok)
+	local action = f.authority.registry.dispatch.actions[owner.action_id]
+	for _, state in { "gated", "stopped" } do
+		action.retry_loop = action.retry_loop or { count = 1 }
+		action.retry_loop.state = state
+		local claimed = f:apply("claim", { action_id = owner.action_id, executor = f.origin.window_epoch })
+		check(not claimed.ok and claimed.code == "loop_gated" and f:action(owner.action_id).phase == "ready",
+			"a ready action whose retry loop is " .. state .. " cannot be claimed before the owner answers")
+	end
+end
+if section == nil or section == "loop_caps_reports" then
 	-- Automatic report requests without a new report, at cap 1 and cap 10.
 	for _, cap in { 1, 10 } do
 		local clock = { now_ms = 1000, mono_ms = 1000, epoch = "report-loop-host" }
@@ -7697,6 +7779,8 @@ if section == nil or section == "loop_caps" then
 		end
 		check(state.rehydrate(clone(f.authority.registry)) ~= nil, "the report loop restores")
 	end
+end
+if section == nil or (section ~= nil and string.sub(section, 1, 18) == "loop_caps_landing_") then
 	-- Landing refresh cycles (stale_target) at cap 1 and cap 3, and the transport bound of 8 grants.
 	-- Grants need Rule H proof (review required, other family optional: a passing helper CHECK_RESULT for every
 	-- declared check at the source revision plus an approved review from a reviewer worker) and go to
@@ -7841,6 +7925,7 @@ if section == nil or section == "loop_caps" then
 			target_ref = it.request.target_ref, target_revision = gr.target_revision, source_revision = gr.source_revision, outcome = "stale_target",
 			observed_target_revision = observed, evidence = runtime.json.array({ "log:fixture" }) }, { action_id = gr.action_id, action_revision = gr.action_revision })
 	end
+	if section == nil or section == "loop_caps_landing_migration" then
 	do
 		local f = lfixture(); local id = lbuilder(f, "9002")
 		local lid = landing_cycle(f, id, "migration", "head-0")
@@ -7868,6 +7953,8 @@ if section == nil or section == "loop_caps" then
 		check(state.rehydrate(drained) == nil and drained.dispatch.landing.items[lid].grants[1].bytes == grant.bytes,
 			"settling a grant does not authorize implicit rewriting of an obsolete policy in a current store")
 	end
+	end
+	if section == nil or section == "loop_caps_landing_caps" then
 	for _, cap in { 1, 3 } do
 		local f = lfixture(); local id = lbuilder(f, "9002")
 		assert(f:apply("policy", { policy = { loop_cap = cap } }).ok)
@@ -7888,6 +7975,8 @@ if section == nil or section == "loop_caps" then
 		check(answer_gate(f, g.id, "allow_more").code == "loop_cap_answered" and item(f, lid).refresh_loop.count == 1 and item(f, lid).refresh_loop.state == nil,
 			"allow_more resets the refresh loop and the owed refresh is issued, counting once")
 	end
+	end
+	if section == nil or section == "loop_caps_landing_transport" then
 	do
 		local f = lfixture(); local id = lbuilder(f, "9002")
 		assert(f:apply("policy", { policy = { loop_cap = 10 } }).ok)
@@ -7908,7 +7997,9 @@ if section == nil or section == "loop_caps" then
 		check(answer_gate(f, g.id, "stop").code == "loop_cap_answered" and item(f, lid).grant_loop.state == "stopped" and #item(f, lid).grants == 8, "stop keeps the grants stopped")
 		check(state.rehydrate(clone(f.authority.registry)) ~= nil, "a stopped grant loop restores")
 	end
+	end
 	-- target_moved notices count on the same refresh counter as stale_target results.
+	if section == nil or section == "loop_caps_landing_target_moved" then
 	do
 		-- Queue order is la, lc, lb: a blocked item keeps its place, so a refreshed lc is granted
 		-- ahead of the refreshed lb and its landing moves the head under lb a second time.
@@ -7938,6 +8029,7 @@ if section == nil or section == "loop_caps" then
 		local g = f.authority.registry.dispatch.gates[item(f, lb).refresh_loop.gate_id]
 		check(starts(g.question, "Landing refresh cycles reached 1 for " .. lb .. "; last cause: target_moved."), "the refresh gate names target_moved as the last cause")
 		check(state.rehydrate(clone(f.authority.registry)) ~= nil, "a target_moved-gated refresh loop restores")
+	end
 	end
 end
 -- Contract A worker fields (CP1 storage): queue-time role/family, strict validators, 0.3.0

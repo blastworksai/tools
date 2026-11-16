@@ -1,12 +1,33 @@
 # TODO for Tern
 
-Checkpoint visibility for the interactive `/glitch-plan` → `/glitch-execute` workflow. The canonical plan contains explicit agreed checkpoints, their current state and a blocked reason. The panel is a read-only native Tern checklist.
+Plan visibility for the interactive `/glitch-plan` → `/glitch-execute` workflow. The canonical plan contains explicit agreed checkpoints, and optionally the tasks, file changes, implementation steps and validation checks under them, each with a current state and, when blocked, a reason. The panel is a read-only native Tern checklist. TODO also works as a native Tern board when Glitch is off.
+
+## Status bar, settings and boards
+
+TODO lives in Tern's status bar: the **TODO** segment (icon `list-checks`) opens a **TODO Settings** pane, a new pane and never a popout. The same pane opens from the Command Palette (`Ctrl+Shift+P`) with **TODO: Open Settings**. If the status bar is off, the first window start asks once, per plugin installation, whether to turn it on (the shared status-bar prompt); the palette command always works. TODO adds nothing to the Files pane.
+
+The settings pane has these fields:
+
+1. **Attach to**: the live agent or terminal sessions that suit the current mode. Closed, parked or ineligible sessions never appear, and the choice is checked again right before TODO attaches, opens a board or syncs.
+2. **Do you use Glitch?** Off by default.
+3. Glitch **Off**: **Board** (On by default) opens Tern's ordinary board for the attached local session's folder. Board Off shows `No TODO source is enabled. Turn on Board or enable Glitch integration in TODO Settings.`
+4. Glitch **On**: the TODO pane shows `/glitch-plan progress will be shown in the TODO pane.` and **Sync Glitch Plan to Tern Board?** (Off by default).
+
+Settings are stored in the plugin's own key/value store with closed validation and safe defaults.
+
+### Board sync (Glitch to Tern, one way)
+
+With sync On, TODO keeps one managed board per stable plan (`<plugin data>/boards/<plan_id>.md`) with the lanes Pending, Active, Blocked and Done. Every checkpoint, task, file change, step and validation check is a card. A card's identity is its canonical id, kept in a `todo-id-<id>` tag, never its title or a native card id, so renames update in place and re-reading a plan changes nothing. Reordering changes nothing on the board. Changing a state moves the card to its lane. An entity removed from the plan has its managed card removed. A different plan id gets a different board; the old board is left alone. Cards without a `todo-id-` tag are never touched. Turning sync Off stops all writes and leaves the cards where they are; there is no cleanup. Tern edits never write to the Glitch plan. `cx.board` is desktop and local only, so remote sessions can be viewed (sync Off) but cannot be a board target; the settings list leaves them out for the board modes.
 
 TODO is adapted from [Felipe Carneiro's session-list](https://github.com/felipevdc1/tern-session-list), MIT.
 
 ![TODO’s native checklist beside an interactive agent session](assets/screenshots/todo-blurred.png)
 
 *The TODO checklist stays readable; surrounding panes and connection details are blurred for privacy.*
+
+## Plan schema
+
+`schema` 2 nests `checkpoints[] -> tasks[] -> items[]`. Checkpoints carry `id`, `text`, `state`, optional `reason` and optional `tasks`. Tasks carry the same fields and optional `items`. Items carry the same fields plus `kind` (`file`, `step` or `validation`); a `file` item also carries its `path`. `schema` 1 (checkpoints only) stays valid and readable. Ids are lowercase, unique across the whole plan and stable; the nesting itself is the parent link, so a parent reference cannot dangle. At most one entity is `active` and `current` names it; a blocked entity needs a reason. Bounds: 30 checkpoints, 20 tasks per checkpoint, 30 items per task, 500 entities in all, 240 characters of text, 400 of reason.
 
 ## Scope
 
@@ -50,7 +71,7 @@ The outside/non-cooperating **same-record** cleanup limitation remains: comparin
 
 ## Session discovery and source location
 
-Click **TODO** in the Files pane, choose the live agent session, and TODO resolves its explicitly published plan. It never asks the operator for the plan path or types into the agent. The planning companion publishes after an agreed plan is created or deliberately resumed/revised:
+Pick the live agent session under **Attach to** in TODO Settings (or run **TODO: attach to this panel**), and TODO resolves its explicitly published plan. It never asks the operator for the plan path or types into the agent. The planning companion publishes after an agreed plan is created or deliberately resumed/revised:
 
 ```sh
 todo publish --agent-pid 12345 --plan /absolute/canonical/PLAN.md
@@ -61,7 +82,7 @@ Identify the agent’s actual durable process with its runtime or `todo ancestry
 
 No active publication shows **No active plan is published for this session** and exits the TODO flow, leaving the agent running. Invalid metadata/access produces a detection error instead. This works with ordinary CLI agents: no native agent composer, draft inspection, prompt submission, hook, socket access or copied credential is needed.
 
-Local and native SSH Tern sessions use the same host-side resolver. The viewing client confirms the native split beside the selected session; the execution host resolves that split to its own process metadata, then reads its own published canonical file. Client-side pane handles are never interpreted as host CLI ids. The label shows Local or SSH and the native host. Raw SSH into a machine without native Tern ancestry is unsupported; there is no guessed local path or automatic secondary SSH login. If multiple native windows can claim the new TODO panel, membership is ambiguous and attachment fails closed rather than selecting a window or source arbitrarily. Attach again from one unambiguous window/layout.
+Local and native SSH Tern sessions use the same host-side resolver. The viewing client confirms the native split beside the selected session; the execution host resolves that split to its own process metadata, using only window keys its own daemon lists (the client window's key is never sent across), then reads its own published canonical file. Client-side pane handles are never interpreted as host CLI ids. The label shows Local or SSH and the native host. Raw SSH into a machine without native Tern ancestry is unsupported; there is no guessed local path or automatic secondary SSH login. If multiple native windows can claim the new TODO panel, membership is ambiguous and attachment fails closed rather than selecting a window or source arbitrarily. Attach again from one unambiguous window/layout.
 
 Direct source checks (no Tern environment required):
 
@@ -113,4 +134,4 @@ Original plugin/native-checklist approach: Felipe Carneiro (`felipevdc1/tern-ses
 
 ### Quick invocation
 
-Hover over Tern’s Files pane header to reveal its controls, click **TODO**, choose a live agent session, then let TODO resolve that session’s published canonical plan. The picker lists native agents and terminal panes (including CLI agents), labelled with their host, Tern session, program and pane identity. Selection reveals the chosen panel, uses native process metadata to resolve its published plan on the execution host. Closed, parked or disconnected targets are excluded; a target that changes while the picker is open must be selected again. **TODO: attach to this panel** in the command palette remains the direct route for the focused panel. The existing bindable action remains `plugin.todo.show`.
+Click **TODO** in the status bar (or press `Ctrl+Shift+P` and run **TODO: Open Settings**), choose a live agent session under **Attach to**, then let TODO resolve that session’s published canonical plan. The list shows native agents and terminal panes (including CLI agents), labelled with their host, program and pane identity. Closed, parked or disconnected targets are excluded. **TODO: attach to this panel** in the command palette remains the direct route for the focused panel. The existing bindable actions are `plugin.todo.show` and `plugin.todo.settings`.

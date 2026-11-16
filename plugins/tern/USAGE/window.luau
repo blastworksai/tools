@@ -8,6 +8,9 @@ local layouts = view_layout.new()
 local refresh: any
 local presentation = require("./presentation")
 local setup_module = require("./setup")
+local status_prefs = require("./status_preferences")
+local status_settings = require("./status_settings")
+local status_prompt = require("./status/status_prompt")
 local BLOCK = "usage.accounts"
 local DETAILS = "plugin.usage.details"
 local DIAGNOSTICS = "plugin.usage.diagnostics"
@@ -21,25 +24,65 @@ local ready = false
 local window: string? = nil
 local diagnostics_generation = 0
 local unloaded = false
+-- The status-bar choice (kv record, shared with the host half and other windows) and the
+-- account ids behind the account segments as last drawn: a click resolves its slot here.
+local kv_env = {
+	get = function(key: string): any return tern.kv.get(key) end,
+	set = function(key: string, value: any) tern.kv.set(key, value) end,
+	exists = function(path: string): boolean return tern.fs.exists(path) end,
+	data = tern.plugin.data,
+}
+-- Decided here, before any poll can create companion data, so fresh and retained installs differ.
+local prefs: any = status_prefs.load(kv_env)
+local rendered_ids: { string } = {}
+local pushed: { [number]: string } = {}
+
+-- True once a published snapshot carries SPAWN's roster. A successful display that arrives
+-- before the host has published says nothing about which accounts exist.
+local function roster_known(): boolean
+	for _, published in aggregate.snapshots do
+		if published.roster ~= nil then return true end
+	end
+	return false
+end
+
+-- Reads the shared record, and completes a pending migration once the roster has answered.
+-- Not for formatters: it touches kv.
+local function sync_prefs(model: any)
+	prefs = status_prefs.load(kv_env)
+	if not prefs.migration_complete and phase == "ready" and roster_known() then
+		local ids: { string } = {}
+		for _, account in presentation.ordered_accounts(model.accounts) do table.insert(ids, account.id) end
+		local settled = status_prefs.complete_migration(prefs, ids)
+		if status_prefs.save(kv_env, settled) then prefs = settled end
+	end
+end
 
 local function render()
 	if unloaded then return end
 	local model = aggregate:project(math.floor(os.time() * 1000))
 	local hold = setup_module.platform_hold()
+	sync_prefs(model)
 	-- Until the companion has answered, an empty model says nothing about SPAWN.
-	status_segments = if hold ~= nil then {
-		{ text = "USAGE hold · " .. hold, icon = "gauge", tone = "warning", command = DIAGNOSTICS },
-	} elseif #model.accounts > 0 or phase == "ready" then presentation.segments(model) else {}
-	if hold == nil and phase ~= "ready" then
-		table.insert(status_segments, { text = if phase == "loading" then "USAGE loading" elseif phase == "setup_required" then "USAGE setup required" else "USAGE unavailable · last known",
-			icon = "gauge", tone = "muted", command = DIAGNOSTICS })
-	end
-	if hold == nil and phase == "ready" and aggregate.diagnostics ~= nil and (aggregate.diagnostics.stale_sources or 0) > 0 then
-		table.insert(status_segments, { text = "USAGE partial · " .. tostring(aggregate.diagnostics.stale_sources) .. " sources not current",
-			icon = "gauge", tone = "muted", command = DIAGNOSTICS })
-	end
-	if hold == nil and refresh ~= nil and (refresh.requesting or refresh.problem ~= nil or (refresh.progress and refresh.progress.state == "running")) then
-		table.insert(status_segments, { text = refresh:text(), icon = "gauge", tone = "muted", command = DETAILS })
+	local known = hold == nil and (#model.accounts > 0 or phase == "ready")
+	status_segments, rendered_ids = presentation.segments(model, if known then prefs else nil)
+	-- A hold or a missing setup is actionable and always shown; the rest only when the owner
+	-- turned the usage statistics on, so the default bar stays a lone launcher.
+	if hold ~= nil then
+		table.insert(status_segments, { text = "USAGE hold · " .. hold, icon = "gauge", tone = "warning", command = DIAGNOSTICS })
+	elseif phase == "setup_required" then
+		table.insert(status_segments, { text = "USAGE setup required", icon = "gauge", tone = "muted", command = DIAGNOSTICS })
+	elseif prefs.enabled then
+		if phase ~= "ready" then
+			table.insert(status_segments, { text = if phase == "loading" then "USAGE loading" else "USAGE unavailable · last known",
+				icon = "gauge", tone = "muted", command = DIAGNOSTICS })
+		elseif aggregate.diagnostics ~= nil and (aggregate.diagnostics.stale_sources or 0) > 0 then
+			table.insert(status_segments, { text = "USAGE partial · " .. tostring(aggregate.diagnostics.stale_sources) .. " sources not current",
+				icon = "gauge", tone = "muted", command = DIAGNOSTICS })
+		end
+		if refresh ~= nil and (refresh.requesting or refresh.problem ~= nil or (refresh.progress and refresh.progress.state == "running")) then
+			table.insert(status_segments, { text = refresh:text(), icon = "gauge", tone = "muted", command = DETAILS })
+		end
 	end
 	tern.chrome.refresh()
 end
@@ -50,7 +93,70 @@ local function set_problem(err: any?)
 	phase = if code == "setup_required" or code == "python_required" or code == "migration_conflict" then "setup_required" else "unavailable"
 end
 local poll: (any?) -> ()
-local setup = setup_module.new(function(cx) poll(cx) end)
+local details: (any?) -> ()
+
+-- Sends the status-bar section's state to every open configuration block of this session
+-- (`force` also re-sends an unchanged state, for a block that has just asked).
+local function push_status(cx: any?, force: boolean?)
+	if cx == nil or unloaded then return end
+	local targets = {}
+	for _, pane in cx.session:panes() do
+		if pane.block == "usage.config" then table.insert(targets, pane.pane) end
+	end
+	if #targets == 0 then return end
+	local encoded = tern.json.encode(status_settings.snapshot(prefs, aggregate:project(math.floor(os.time() * 1000))))
+	for _, id in targets do
+		if force == true or pushed[id] ~= encoded then
+			pushed[id] = encoded
+			cx.session:event(id, { ev = "action", act = status_settings.ACTION, value = encoded })
+		end
+	end
+end
+
+-- A configuration block asked to change the status bar. The roster is read now, so a stale
+-- checkbox for a removed or changed account is refused; nothing here reads a provider.
+local function status_link(cx: any, request: any)
+	if request.kind == "sync" then push_status(cx, true); return end
+	local now = math.floor(os.time() * 1000)
+	local model = aggregate:project(now)
+	sync_prefs(model)
+	if request.kind == "master" then
+		local changed = status_prefs.with_enabled(prefs, request.on)
+		if status_prefs.save(kv_env, changed) then prefs = changed else cx:toast("error", "USAGE status bar choice was not saved", "Tern's plugin store is unavailable. Try again.") end
+	elseif not prefs.migration_complete then
+		cx:toast("info", "USAGE is still loading accounts", "Your earlier status bar choice carries over once the account list arrives.")
+	elseif not prefs.enabled then
+		cx:toast("info", "Usage statistics are off", "Turn them on first; your selection is kept while they are off.")
+	else
+		local changed, why = status_prefs.with_selected(prefs, request.id, request.on, status_prefs.roster_map(model.accounts))
+		if changed == nil then
+			cx:toast("info", if why == "selection_full" then "Status bar selection is full" else "That account is no longer in SPAWN",
+				if why == "selection_full" then "Untick another account first." else "The list below shows the current accounts.")
+		elseif status_prefs.save(kv_env, changed) then prefs = changed
+		else cx:toast("error", "USAGE status bar choice was not saved", "Tern's plugin store is unavailable. Try again.") end
+	end
+	render()
+	push_status(cx, true)
+end
+
+-- A status-bar account segment: resolve its slot against the roster now, then show that account.
+local function open_status_account(cx: any?, slot: number)
+	if cx == nil then return end
+	local id = rendered_ids[slot]
+	local row = nil
+	if id ~= nil then
+		for _, candidate in aggregate:project(math.floor(os.time() * 1000)).accounts do
+			if candidate.id == id then row = candidate; break end
+		end
+	end
+	if row == nil then
+		if id ~= nil then cx:toast("info", "That account is no longer in SPAWN", "USAGE shows the current accounts.") end
+		details(cx)
+		return
+	end
+	if not layouts:focus_account(cx, row.id) then details(cx) end
+end
+local setup = setup_module.new(function(cx) poll(cx) end, function(cx) layouts:config(cx) end)
 local function schedule(delay: number)
 	if timer ~= nil then timer:cancel() end
 	if unloaded then return end
@@ -76,11 +182,12 @@ poll = function(cx: any?)
 		schedule(POLL_MS)
 	end
 	local function display()
-		aggregate:refresh(function(ok, err)
+		aggregate:refresh(function(ok, err, fresh)
 			if unloaded then return end
 			if ok then phase, problem = "ready", nil else set_problem(err) end
 			finished()
 			if ok then refresh:poll() end
+			push_status(fresh, false)
 		end)
 	end
 	if not ready then
@@ -98,7 +205,7 @@ poll = function(cx: any?)
 		end)
 	end
 end
-local function details(cx: any?)
+details = function(cx: any?)
 	if cx == nil then return end
 	layouts:show(cx)
 end
@@ -113,7 +220,8 @@ local function diagnostics(cx: any?)
 		for _, item in setup_module.diagnostic_items() do table.insert(items, item) end
 		table.insert(items, { label = "Companion: " .. phase, detail = if problem ~= nil then problem.message elseif setup_module.platform_hold() ~= nil then "Companion process state only; this is not platform qualification or healthy usage evidence." else "Original observation times retained; missing quotas are not zero." })
 		table.insert(items, { label = refresh:text(), detail = "The companion runs headless usage reads. No owner-pane input or synthetic turns." })
-		table.insert(items, { label = if hidden then "Summary hidden (status bar off)" else "Summary enabled", detail = "Show Summary turns on Tern's status bar; USAGE never changes it on its own.", action = "summary" })
+		table.insert(items, { label = if hidden then "Status bar off" elseif prefs.enabled then "Usage statistics in status bar: on" else "Usage statistics in status bar: off",
+			detail = "Choose which accounts show in USAGE Configuration. USAGE never turns Tern's status bar on by itself; it asks once.", action = "status" })
 		table.insert(items, { label = "Open USAGE Setup", detail = "Runtime, pairing, export and headless-read permission. Accounts come from SPAWN.", action = "setup" })
 		if refresh.progress ~= nil then
 			for _, failure in refresh.progress.failures or {} do
@@ -134,7 +242,7 @@ local function diagnostics(cx: any?)
 		fresh:pick({ placeholder = "USAGE Diagnostics", icon = "gauge", items = items }):next(function(item, _error, latest)
 			if request_generation ~= diagnostics_generation or latest == nil or item == nil then return end
 			if item.action == "setup" then setup:open(latest)
-			elseif item.action == "summary" then setup:show_summary(latest) end
+			elseif item.action == "status" then layouts:config(latest) end
 		end)
 	end
 	companion.request("diagnostics", {}, function(remote, err, fresh)
@@ -165,7 +273,12 @@ tern.command({ id = "refresh", title = "USAGE Refresh", icon = "gauge", group = 
 	end)
 end })
 tern.command({ id = "details", title = "USAGE Details", icon = "gauge", group = "USAGE", run = details })
-tern.files.button({ id = "usage", title = "USAGE", icon = "gauge", run = function(_files, cx) details(cx) end })
+-- Palette fallback for the status bar's account segments: one command per slot, listed only while its segment is drawn.
+for slot = 1, presentation.MAX_ACCOUNT_SEGMENTS do
+	tern.command({ id = "status_account_" .. tostring(slot), title = "USAGE Account " .. tostring(slot), icon = "gauge", group = "USAGE",
+		available = function(_cx: any) return rendered_ids[slot] ~= nil end,
+		run = function(cx) open_status_account(cx, slot) end })
+end
 tern.command({ id = "config", title = "USAGE Configuration", icon = "gauge", group = "USAGE", run = function(cx) layouts:config(cx) end })
 local prompt_generation = 0
 tern.route.link(function(link, cx)
@@ -181,9 +294,13 @@ tern.route.link(function(link, cx)
 		if account ~= nil then layouts:account(cx, link.pane, account) end
 	elseif link.url == "usage://config" then layouts:config(cx, link.pane)
 	elseif origin.block == "usage.config" then
+		local status = link.url:match("^usage://status/(.+)$")
+		local change = if status ~= nil then status_settings.parse_link(status, view_layout.decode) else nil
 		local mode = link.url:match("^usage://layout/(%a+)$")
 		local interval = link.url:match("^usage://interval/(%d+)$")
-		if link.url == "usage://config/close" then
+		if status ~= nil then
+			if change ~= nil then status_link(cx, change) end
+		elseif link.url == "usage://config/close" then
 			cx.layout:close(link.pane)
 		elseif mode ~= nil then
 			layouts:show(cx, mode, link.pane)
@@ -213,7 +330,7 @@ tern.route.link(function(link, cx)
 end)
 tern.command({ id = "diagnostics", title = "USAGE Diagnostics", icon = "gauge", group = "USAGE", run = diagnostics })
 tern.command({ id = "setup", title = "USAGE Setup", icon = "gauge", group = "USAGE", run = function(cx) setup:open(cx) end })
-tern.command({ id = "show_summary", title = "USAGE Show Summary", icon = "gauge", group = "USAGE", run = function(cx) setup:show_summary(cx) end })
+tern.command({ id = "status_settings", title = "USAGE Status Bar Settings", icon = "gauge", group = "USAGE", run = function(cx) layouts:config(cx) end })
 local function unload(_cx: any)
 	unloaded = true
 	diagnostics_generation += 1
@@ -221,7 +338,11 @@ local function unload(_cx: any)
 	if timer ~= nil then timer:cancel(); timer = nil end
 	companion.unload()
 end
-tern.on("window_start", function(cx) poll(cx) end)
+-- First start path: the shared prompt asks once per install whether to turn on the status bar.
+tern.on("window_start", function(cx)
+	status_prompt.ensure(cx, "usage")
+	poll(cx)
+end)
 render()
 schedule(0)
 

@@ -249,6 +249,18 @@ class RefreshTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(spec["selectors"], {"CLAUDE_CONFIG_DIR": "/account-home"})
         self.assertEqual(self.spec_error(command="sudo -u another-account -H -- claude"), "source_context_ambiguous")
 
+    async def test_spawns_absolute_executable_is_carried_to_the_usage_read(self):
+        self.save([definition(1, "Codex", command="/opt/custom/codex/bin/codex", arguments=["--codex-home", "/account-home"])])
+        spec = self.refresh._spec(self.refresh.configuration()[3][0])
+        self.assertEqual(spec["command"], "/opt/custom/codex/bin/codex")
+        self.assertEqual(spec["selectors"], {"CODEX_HOME": "/account-home"})
+        # A bare name keeps the search-path lookup; a relative or misnamed file is never guessed.
+        self.save([definition(1, "Codex", command="codex")])
+        self.assertNotIn("command", self.refresh._spec(self.refresh.configuration()[3][0]))
+        for command in ("./codex", "bin/codex", "/opt/custom/not-codex", "/opt/my tools/codex"):
+            with self.subTest(command=command):
+                self.assertEqual(self.spec_error(provider="Codex", command=command), "source_context_ambiguous")
+
     async def test_root_controlled_seat_launcher_reads_that_users_default_context(self):
         launcher = "/usr/local/lib/seat/seat-agent-entry"
         with patch.object(refresh_module, "_root_controlled", return_value=True):
@@ -342,6 +354,40 @@ class RefreshTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.acquire.await_count, 1)
         self.assertEqual(self.refresh.status()["completed"], 3)
         self.assertEqual(len(self.refresh.results()["items"]), 3)
+
+    async def test_different_executables_are_never_coalesced(self):
+        self.save([definition(1, "Codex", command="/opt/old/codex", arguments=["--codex-home", "/h"]),
+                   definition(2, "Codex", command="/opt/new/codex", arguments=["--codex-home", "/h"]),
+                   definition(3, "Codex", command="/opt/new/codex", arguments=["--codex-home", "/h"])])
+        async def acquire(_store, spec):
+            if spec["command"] == "/opt/old/codex":
+                raise ServiceError("source_usage_unavailable")
+            return response("codex")
+        self.acquire.side_effect = acquire
+        self.refresh.request()
+        await self.refresh.job
+        self.assertEqual(sorted(spec["command"] for spec in self.specs()), ["/opt/new/codex", "/opt/old/codex"])
+        items = {item["id"]: item["response"] for item in self.refresh.results()["items"]}
+        self.assertIn("error", items["account-1"])
+        self.assertNotIn("error", items["account-2"])
+        self.assertNotIn("error", items["account-3"])
+
+    async def test_different_executables_are_never_coalesced(self):
+        self.save([definition(1, "Codex", command="/opt/old/codex", arguments=["--codex-home", "/h"]),
+                   definition(2, "Codex", command="/opt/new/codex", arguments=["--codex-home", "/h"]),
+                   definition(3, "Codex", command="/opt/new/codex", arguments=["--codex-home", "/h"])])
+        async def acquire(_store, spec):
+            if spec["command"] == "/opt/old/codex":
+                raise ServiceError("source_usage_unavailable")
+            return response("codex")
+        self.acquire.side_effect = acquire
+        self.refresh.request()
+        await self.refresh.job
+        self.assertEqual(sorted(spec["command"] for spec in self.specs()), ["/opt/new/codex", "/opt/old/codex"])
+        items = {item["id"]: item["response"] for item in self.refresh.results()["items"]}
+        self.assertIn("error", items["account-1"])
+        self.assertNotIn("error", items["account-2"])
+        self.assertNotIn("error", items["account-3"])
 
     async def test_stale_spawn_config_never_replaces_the_authority_roster(self):
         self.save([definition(1, account_label="Current")], stale=[definition(7, "Codex"), definition(8, "Muse")])

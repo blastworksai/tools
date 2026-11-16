@@ -25,8 +25,8 @@ ROOT = TESTS.parents[2]
 BASELINE = 'b8c9df4e8ea920586f51d7dd5ecec09963a1bc69'
 GROUPS = {
     'orch': ('state', 'transport', 'authority', 'dispatch', 'reports', 'gates', 'health', 'workflow', 'source_adapter', 'source_ui', 'picker_ui', 'conversation_ui', 'channel', 'setup_ui', 'form_ui', 'readiness_ui', 'rulings', 'reclamation'),
-    'spawn': ('behavior', 'setup_review', 'authority', 'backend', 'dispatch', 'dispatch_state', 'dispatch_migration', 'window_dispatch', 'window_journal', 'window_migration', 'mailbox', 'host_editor', 'retirement_adapter', 'managed_route', 'page_navigation', 'terminal_identity', 'setup_discovery'),
-    'usage': ('accounts', 'aggregate', 'capacity', 'display', 'companion', 'host_setup', 'identity', 'metadata_runner', 'presentation', 'protocol', 'roster', 'setup', 'snapshot', 'source_collect', 'usage_channel', 'window'),
+    'spawn': ('behavior', 'setup_review', 'authority', 'backend', 'dispatch', 'dispatch_state', 'dispatch_migration', 'window_dispatch', 'window_journal', 'window_migration', 'mailbox', 'host_editor', 'retirement_adapter', 'managed_route', 'page_navigation', 'terminal_identity', 'setup_discovery', 'remote_window_key'),
+    'usage': ('accounts', 'aggregate', 'capacity', 'display', 'companion', 'host_setup', 'identity', 'metadata_runner', 'presentation', 'protocol', 'roster', 'setup', 'snapshot', 'source_collect', 'usage_channel', 'window', 'status_preferences', 'status_settings'),
     'work': ('projects', 'spawn', 'window', 'orchestration'),
 }
 PLUGINS = {'orch': 'ORCH+', 'spawn': 'SPAWN', 'usage': 'USAGE', 'work': 'WORK'}

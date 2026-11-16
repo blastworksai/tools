@@ -1,7 +1,13 @@
 # Changelog
 
-## Unreleased
+## 0.6.0
 
+- Fix mailbox retirement after a `checkout` without a manifest `base_ref`: the `checkout-base` pin is now a recognised file in producer, withdrawn-tail and target retirement (POSIX and Windows), and is removed with the mailbox instead of blocking it and its reservation.
+- A `run-checks` result is refused (`git_unavailable: HEAD changed while the check ran`) when HEAD moves during the check, so a result never names a commit that was not checked.
+- Inspect a current source whose worker or retained request carries persisted `terminal_process` proof as valid instead of `state_corrupt`.
+- The status-bar prompt keeps a marker file beside `kv.json`, so a flag lost to a whole-store kv write and a host restart no longer asks twice.
+- Fix a Windows (or any remote) window attached to a Linux host: SPAWN's host half no longer runs `tern inspect --window <client key>` on its own daemon, where a remote client's window key (for example the client's second window, `2`) does not exist ("Host session inspection unavailable or over limit"). For a remote execution host the host finds its own window for the Config pane from the windows its daemon lists; the client key stays a routing hint. Single-machine behaviour (key `""` or equal keys) is unchanged. Regression: `tests/remote_window_key.luau`. The same translation covers Guided setup (the host resolves its own window key for the client lookup and the `tern send --window` helper) and the managed diagnostic's native process inspection; the client key stays the echo value between the two halves.
+- Remove the Files-pane button. The status-bar segment (sparkle) and the command palette remain; the plugin offers once to enable the status bar when it is off.
 - Load setup-only window modules when needed rather than during native window initialization, retaining Tern's unchanged load and callback budgets.
 - Accept Tern's `agent` presentation kind for real terminal-agent continuation, clipboard enrollment and authorized pane stop while preserving backend, binding, exit and retained process-identity checks.
 - Revoke never-consumed old-window authorizations in the same durable commit as a newly admitted controller continuation. Preserve earlier outcomes and consumed authorizations instead of leaving unissued reads permanently pending.

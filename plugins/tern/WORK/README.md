@@ -10,6 +10,12 @@ WORK is a native Tern pane for active Glitch workspaces. It reads the same gener
 
 This revision does **not** yet claim qualified real-device support on macOS, Windows, Linux, remote/mixed-OS installations, or full multi-window operation. Source fixtures exercise configuration, command construction, direct-origin routing and clipboard behavior, but they are not native GUI or installed-package acceptance. The remaining gates are listed under [Acceptance and remaining gates](#acceptance-and-remaining-gates).
 
+## Opening WORK
+
+- Click the **WORK** segment (list icon) in Tern's status bar. Clicking it again with a WORK pane open in the tab closes that pane and returns focus to your previous pane.
+- Or run the Command Palette command `WORK` (`Ctrl+Shift+P` is the fallback when the status bar is hidden).
+- On first start, if the status bar is off, WORK offers once per install to turn it on. WORK no longer adds a button to the Files pane.
+
 ## What it does
 
 - Lists every registry entry whose `status` is `active`.
@@ -220,13 +226,13 @@ The component verification above does not close these native GUI or installed-pa
 - `config.luau` — structured host root and ACP/CLI argv validation
 - `projects.luau` — configuration/registry loading, validation and workspace view model
 - `launch.luau` — execution-host command construction for POSIX and Windows
-- `window.luau` — direct-origin configured ACP/CLI launch, clicking-window clipboard delivery and legacy-SPAWN refusal
+- `window.luau` — status-bar WORK segment, `WORK` palette command, direct-origin configured ACP/CLI launch, clicking-window clipboard delivery and legacy-SPAWN refusal
 - `spawn.luau` — read-only SPAWN roster decoding and held-row view data
 - `blocks/panel.luau` — native root/agent Setup, stable workspace rows, configured launch link and SPAWN hold rows
 - `styles.css` — WORK row and launch-link styling
 - `tests/projects.luau` — registry/configuration and installed/linked host-root regression fixtures
 - `tests/spawn.luau` — SPAWN roster decoding and retained pure launch-line fixtures
-- `tests/window.luau` — route, origin, argv, Setup, SPAWN-hold/refusal and clipboard fixtures
+- `tests/window.luau` — status segment (icon, command, no Files button), route, origin, argv, Setup, SPAWN-hold/refusal and clipboard fixtures
 - `tests/run.txt` — runs all three groups: `env WORK_PACKAGE_DIR=<package> tern shot <package>/tests/run.txt` (failures print `run(s) failed`)
 - `assets/screenshots/` — README screenshots
 

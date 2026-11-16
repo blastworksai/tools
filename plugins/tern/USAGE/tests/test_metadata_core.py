@@ -149,6 +149,15 @@ class TrustTests(unittest.TestCase):
         with self.assertRaises(core.SafeError):
             reader.run_json(["muse", "usage", "--json"], {**env, "MUSE_PROFILE": "other"})
 
+    def test_the_named_provider_file_runs_instead_of_the_search_path_copy(self):
+        env = {"PATH": "/usr/bin"}
+        reader = core.SourceIO(Path.home(), env, "/opt/custom/muse/bin/muse")
+        with patch.object(core, "resolve_executable", return_value="/opt/custom/muse/bin/muse") as resolved, \
+             patch.object(core, "bounded_process", return_value=b"{}") as process:
+            reader.run_json(["muse", "usage", "--json"], env)
+        self.assertEqual(resolved.call_args.args[0], "/opt/custom/muse/bin/muse")
+        self.assertEqual(process.call_args.args[0][0], "/opt/custom/muse/bin/muse")
+
     def test_muse_identity_and_quota_consumers_share_one_request_snapshot(self):
         env = {"PATH": "/usr/bin"}
         reader = core.SourceIO(Path.home(), env)

@@ -160,7 +160,7 @@ function M.policy_errors(p: any): any
 		errors.require_other_family = "Enable code review first, or turn review by another provider Off."
 	end
 	for _, key in { "board_path", "inbox_folder" } do
-		local maximum = if key == "board_path" then protocol.DESKTOP_BOARD_PATH_BYTES else 512
+		local maximum = 512 -- board_path matches protocol.BOARD_SETTING_PATH_BYTES, the limit board opening enforces
 		require_field(key, p[key] == "" or config.absolute(p[key], maximum) or config.relative(p[key], maximum),
 			"Leave blank or choose a path of at most " .. tostring(maximum) .. " bytes, without parent-directory (..) segments.")
 	end

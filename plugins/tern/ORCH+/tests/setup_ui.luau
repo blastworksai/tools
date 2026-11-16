@@ -940,6 +940,7 @@ local function native_migration_fixture()
 	fake.now = function() return clock end
 	fake.command, fake.on = function() end, function() end
 	fake.files = { button = function() end }
+	fake.chrome = { status = function() end }
 	fake.route = { link = function() end }
 	fake.timer = function() return { cancel = function() end } end
 	local function native_load(name, base)

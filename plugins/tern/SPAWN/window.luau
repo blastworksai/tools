@@ -10,6 +10,7 @@ local DispatchWindow = require("./dispatch_window")
 local ManagedRoute: any = nil
 local PageNavigation = require("./page_navigation")
 local WindowJournal = require("./window_journal")
+local status_prompt = require("./status/status_prompt")
 local BLOCK = "spawn.spawner"
 local PREFIX = "SPAWN_STATE_V2 "
 local MAX_QUEUE = 64
@@ -1787,14 +1788,10 @@ end
 table.sort(launch_rules)
 tern.css("spawn-launch", table.concat(launch_rules, "\n"))
 tern.chrome.status(function(_pane) return { { icon = "sparkle", text = "SPAWN", tone = "muted", command = "plugin.spawn.spawn_menu" } } end)
-local function register_files()
-	tern.files.button({ id = "spawn", title = "SPAWN", icon = "sparkle", run = function(_files, cx) menu(cx) end })
-end
-register_files()
--- Preserve the existing Files/WORK registration order; never override ordinary +.
+-- The status segment above is the launcher; there is no Files-pane button.
 tern.timer(250, function(cx)
-	register_files()
 	if cx ~= nil then
+		status_prompt.ensure(cx, "spawn")
 		for _, message in icon_errors do fail(cx, "Provider icon registration failed: " .. message) end
 		ensure_observer(cx, function(fresh, err)
 			if err ~= nil then fail(fresh, err); return end

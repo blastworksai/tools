@@ -124,7 +124,7 @@ local function config_pane(cx: any, known: number?, open: boolean): (number?, bo
 	return cx:new_block("usage.config", {}, "beside", { focus = false }), true
 end
 
-function setup.new(changed: (any) -> ()): any
+function setup.new(changed: (any) -> (), open_status: (any) -> ()): any
 	local self: any = { generation = 0, requests = 0 }
 	local function fail(cx: any, err: any?)
 		cx:toast("error", "USAGE setup did not complete", if err ~= nil then err.message else "The local operation is unavailable. Retry USAGE Setup.")
@@ -247,13 +247,6 @@ function setup.new(changed: (any) -> ()): any
 	local function configure(own: number, payload: any, target: any?)
 		local via = target or here
 		via.rpc(own, "configure", payload, via.saved)
-	end
-	function self:show_summary(cx: any)
-		-- Only this explicit action writes the setting. Poll/reload never restores
-		-- a bar the owner subsequently hides.
-		if cx.settings:get("status_bar") ~= true then cx.settings:set("status_bar", true) end
-		tern.chrome.refresh()
-		cx:toast("info", "USAGE summary enabled", "You can hide the status bar later; USAGE will respect that choice.")
 	end
 	local function runtime(cx: any, own: number, err: any)
 		local hold = setup.platform_hold()
@@ -453,14 +446,14 @@ function setup.new(changed: (any) -> ()): any
 		end)
 	end
 	-- The attached host's Setup: only what configures its own acquisition source. Pairing,
-	-- summary and interpreter choice stay with this window's machine ("instead" row).
+	-- and interpreter choice stay with this window's machine ("instead" row).
 	local host_menu: any
 	local function host_runtime(cx: any, own: number, target: any, err: any)
 		local name = target.host
 		pick(cx, own, target.prefix .. "USAGE runtime — " .. (err.message or "Setup required"), {
 			{ label = "Install private dependencies on " .. name, action = "install", detail = "Runs on " .. name .. ": its Python 3.11+ installs hash-locked packages into USAGE's private environment there. No system packages or privileges change." },
 			{ label = "Retry runtime check on " .. name, action = "retry" },
-			{ label = "Configure this window's machine instead", action = "local", detail = "Runtime, pairing, summary and permissions of the machine running this window." },
+			{ label = "Configure this window's machine instead", action = "local", detail = "Runtime, pairing and permissions of the machine running this window." },
 		}, function(item, fresh)
 			if item.action == "retry" then host_menu(own, target)
 			elseif item.action == "local" then self:open(fresh, "local")
@@ -494,7 +487,7 @@ function setup.new(changed: (any) -> ()): any
 				table.insert(items, { label = "Bind SPAWN accounts on " .. name .. "…", action = "bind", detail = "Confirm which signed-in login each of its SPAWN accounts uses." })
 				table.insert(items, { label = "Associate OMP records on " .. name .. "…", action = "associate", detail = "Declare which bound account's quota an OMP record uses." })
 			end
-			table.insert(items, { label = "Configure this window's machine instead", action = "local", detail = "Runtime, pairing, summary and permissions of the machine running this window." })
+			table.insert(items, { label = "Configure this window's machine instead", action = "local", detail = "Runtime, pairing and permissions of the machine running this window." })
 			pick(latest, own, "USAGE Setup — host " .. name .. " (attached source) · " .. (state.settings.role :: string) .. " · " .. state.source.device_id, items, function(item, selected_cx)
 				if item.action == "host_platform" then host_menu(own, target)
 				elseif item.action == "metadata" then metadata(selected_cx, own, state, target)
@@ -524,7 +517,7 @@ function setup.new(changed: (any) -> ()): any
 			rpc(own, "setup_state", {}, function(state, _state_cx)
 				rpc(own, "diagnostics", {}, function(diagnostics, latest)
 					local items: { PickItem } = {
-						{ label = "Enable summary / Show Summary", action = "summary", detail = "Explicitly enable Tern's status bar once; later hides are respected." },
+						{ label = "Status bar usage selection…", action = "status", detail = "Choose which accounts show in the status bar. Opens USAGE Configuration." },
 						{ label = "Copy installation UUID", action = "copy_identity", detail = state.source.device_id },
 						{ label = "Standalone / stop sharing", action = "standalone" }, { label = "Share from this installation", action = "share" },
 						{ label = "Create invitation and copy", action = "invitation" }, { label = "Join using an invitation", action = "join" },
@@ -544,7 +537,7 @@ function setup.new(changed: (any) -> ()): any
 					end
 					pick(latest, own, "USAGE Setup — " .. (if hold ~= nil then hold .. " · " else "") .. state.settings.role .. " · " .. state.source.device_id, items, function(item, selected_cx)
 						if item.action == "platform" then platform_help(selected_cx, own)
-						elseif item.action == "summary" then self:show_summary(selected_cx)
+						elseif item.action == "status" then open_status(selected_cx)
 						elseif item.action == "copy_identity" then selected_cx:copy(state.source.device_id); selected_cx:toast("info", "USAGE installation UUID copied")
 						elseif item.action == "standalone" then standalone(selected_cx, own, state)
 						elseif item.action == "share" then share(selected_cx, own, state, diagnostics)

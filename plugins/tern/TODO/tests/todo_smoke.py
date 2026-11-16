@@ -32,7 +32,6 @@ def wait_for(check, description, seconds=10):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--evidence', required=True, type=Path)
-    parser.add_argument('--files-button', action='store_true', help='Require the actual Files button/picker; needs an available client UI')
     parser.add_argument('--published', action='store_true', help='Attach through the real publication/discovery path')
     parser.add_argument('--contracts-only', action='store_true', help='Run native module/controller contracts without opening a UI window')
     args = parser.parse_args()
@@ -133,17 +132,14 @@ tern.timer(100, captureFixtureState)
                 metadata=json.loads(command('process',first,'--window','','--json'))
                 assert metadata['pane']==first and metadata['child']['pid']>0, metadata
                 evidence['native_process_window_metadata']=metadata
-                if args.files_button:
-                    selector='.ft-plugin[data-plugin="todo-test"][data-id="todo"]'
-                    if not ctl('tree',selector).get('nodes'):ctl('plugins','run','files')
-                    wait_for(lambda:ctl('tree',selector).get('nodes'),'native TODO Files button',8)
-                    ctl('a11y','click',selector)
-                    wait_for(lambda:'Which agent session' in json.dumps(ctl('tree')),'native session picker',8)
-                    ctl('type',str(first));ctl('key','Enter')
-                    evidence['checks'].append('real Files button selects the publisher session without an agent or operator plan prompt')
-                else:action('show' if args.published else 'test_local')
+                action('show' if args.published else 'test_local')
                 wait_for(lambda:has_row('pending','Prove the outcome'),'local source checklist')
                 evidence['checks'].append('explicit local checkpoint block renders native pending state')
+                assert not ctl('tree','.ft-plugin[data-plugin="todo-test"]').get('nodes'),'TODO must not register a Files-pane button'
+                action('settings')
+                wait_for(lambda:'Do you use Glitch?' in json.dumps(ctl('tree')),'TODO Settings pane opens in a new pane',8)
+                evidence['checks'].append('TODO: Open Settings opens the settings pane; no Files-pane button exists')
+                command('focus',first)
                 write_plan(local,plan(state='done'))
                 wait_for(lambda:has_row('done'),'automatic source refresh')
                 evidence['checks'].append('canonical edit automatically renders done without an agent hook')
@@ -220,7 +216,7 @@ tern.timer(100, captureFixtureState)
             else:
                 evidence['visual_qualification']='Native module/controller contracts only; no window or live agent queried.'
             evidence['runtime']=command('--version').strip()
-            evidence['source_hashes']={name:hashlib.sha256((ROOT/name).read_bytes()).hexdigest() for name in ['host.luau','window.luau','lib/plan_view.luau','lib/polling.luau','lib/attach.luau','lib/selected_binding.luau','lib/host_selection.luau','lib/native_cli.luau','bin/todo.py','bin/publication.py','bin/process_identity.py']}
+            evidence['source_hashes']={name:hashlib.sha256((ROOT/name).read_bytes()).hexdigest() for name in ['host.luau','window.luau','lib/plan_view.luau','lib/polling.luau','lib/attach.luau','lib/selected_binding.luau','lib/host_selection.luau','lib/native_cli.luau','lib/settings.luau','lib/board_sync.luau','lib/plan_publish.luau','bin/todo.py','bin/publication.py','bin/process_identity.py']}
             evidence['passed']=True
         except Exception as error:
             evidence['passed']=False;evidence['error']=str(error)

@@ -119,6 +119,46 @@ class DisplayTests(unittest.TestCase):
         self.store.local_publish("host",value)
         return value
 
+    def test_display_polls_never_retain_the_stores_temporary_aggregate_sessions(self):
+        self.large()
+        first = self.display.page(self.owner, {})
+        self.assertFalse(first["complete"])
+        self.assertEqual(self.store.diagnostics()["counts"]["page_sessions"], 0)
+        # Past the store's own session limit, a session kept per poll would be refused.
+        for _ in range(self.store.settings()["max_page_sessions"] + 3):
+            self.now += 121
+            self.display.page(self.owner, {})
+            self.assertEqual(self.store.diagnostics()["counts"]["page_sessions"], 0)
+
+    def test_final_page_releases_the_display_session_and_a_retry_is_expired(self):
+        self.large()
+        first = self.display.page(self.owner, {})
+        self.assertFalse(first["complete"])
+        self.assemble(first)
+        self.assertEqual(self.display.sessions, {})
+        page = first
+        # Many completed multi-page polls never fill the session pool.
+        for _ in range(self.store.settings()["max_page_sessions"] + 3):
+            self.assemble(self.display.page(self.owner, {}))
+            self.assertEqual(self.display.sessions, {})
+        with self.assertRaises(ServiceError) as error:
+            self.display.page(self.owner, {"cursor": page["next_cursor"]})
+        self.assertEqual(error.exception.code, "expired")
+
+    def test_final_page_releases_the_display_session_and_a_retry_is_expired(self):
+        self.large()
+        first = self.display.page(self.owner, {})
+        self.assertFalse(first["complete"])
+        self.assemble(first)
+        self.assertEqual(self.display.sessions, {})
+        # Many completed multi-page polls never fill the session pool.
+        for _ in range(self.store.settings()["max_page_sessions"] + 3):
+            self.assemble(self.display.page(self.owner, {}))
+            self.assertEqual(self.display.sessions, {})
+        with self.assertRaises(ServiceError) as error:
+            self.display.page(self.owner, {"cursor": first["next_cursor"]})
+        self.assertEqual(error.exception.code, "expired")
+
     def test_frozen_multibyte_revision_survives_intervening_publication(self):
         original=self.large()
         first=self.display.page(self.owner,{})

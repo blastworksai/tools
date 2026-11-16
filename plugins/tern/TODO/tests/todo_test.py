@@ -768,5 +768,192 @@ class WorkflowEntryContract(unittest.TestCase):
         ]
         self.assertEqual([(r.returncode, r.stdout) for r in map(self.hook, cases)], [(0, ''), (0, '')])
 
+
+def detailed_plan(plan_id='plan-0123456789ab'):
+    """Every entity kind and every state, three levels deep."""
+    return {'schema': 2, 'plan_id': plan_id, 'title': 'Detailed task', 'current': 'impl',
+            'checkpoints': [
+                {'id': 'model', 'text': 'Model', 'state': 'done', 'tasks': [
+                    {'id': 'parse', 'text': 'Parser', 'state': 'done', 'items': [
+                        {'id': 'parse-file', 'kind': 'file', 'path': 'bin/todo.py', 'text': 'Edit validate', 'state': 'done'},
+                        {'id': 'parse-step', 'kind': 'step', 'text': 'Nest the ids', 'state': 'done'},
+                        {'id': 'parse-check', 'kind': 'validation', 'text': 'Unit tests pass', 'state': 'done'}]}]},
+                {'id': 'ui', 'text': 'UI', 'state': 'pending', 'tasks': [
+                    {'id': 'impl', 'text': 'Implement', 'state': 'active', 'items': [
+                        {'id': 'impl-file', 'kind': 'file', 'path': 'window.luau', 'text': 'Status segment', 'state': 'pending'},
+                        {'id': 'impl-wait', 'kind': 'step', 'text': 'Await owner A-or-B', 'state': 'blocked', 'reason': 'Owner choice'}]}]},
+                {'id': 'ship', 'text': 'Ship', 'state': 'pending'}]}
+
+
+def mutated(value, edit):
+    value = copy.deepcopy(value)
+    edit(value)
+    return value
+
+
+class DetailedSchema(unittest.TestCase):
+    """Schema 2 nests checkpoint -> task -> file/step/validation; schema 1 stays readable."""
+
+    def setUp(self):
+        self.reader = reader_module()
+        self.scratch = tempfile.TemporaryDirectory(prefix='detailed-plan-')
+        self.addCleanup(self.scratch.cleanup)
+        self.path = Path(self.scratch.name)/'PLAN.md'
+
+    def rejects(self, value, pattern):
+        with self.assertRaisesRegex(ValueError, pattern):
+            self.reader.validate(value)
+
+    def test_every_entity_kind_and_state_round_trips_through_the_cli(self):
+        # The one blocked entity must carry its reason; the active one is named by current.
+        value = detailed_plan()
+        write_plan(self.path, value)
+        result = subprocess.run([sys.executable, '-I', str(READER), 'source', '--plan', str(self.path)], capture_output=True, text=True, timeout=6)
+        self.assertEqual((result.returncode, json.loads(result.stdout)['plan']), (0, value))
+        kinds = {item['kind'] for cp in value['checkpoints'] for task in cp.get('tasks', []) for item in task['items']}
+        states = {e['state'] for cp in value['checkpoints'] for e in [cp, *cp.get('tasks', [])]}
+        self.assertEqual(kinds, {'file', 'step', 'validation'})
+        self.assertEqual(states, {'done', 'active', 'pending'})  # only the leaf being worked is active
+
+    def test_schema_one_block_published_before_this_change_still_parses(self):
+        # A real schema-1 block, as /opt/glitch/plans/tern-plugins-review-and-retire-cmdr.md carries.
+        legacy = {'schema': 1, 'plan_id': 'plan-4d31a4dc1f2e', 'title': 'Old', 'current': None,
+                  'checkpoints': [{'id': 'a', 'text': 'A', 'state': 'pending'}, {'id': 'b', 'text': 'B', 'state': 'done'}]}
+        self.assertEqual(self.reader.validate(legacy), legacy)
+        real = Path('/opt/glitch/plans/tern-plugins-review-and-retire-cmdr.md')
+        if real.exists():
+            self.assertEqual(self.reader.read_plan(real)['schema'], 1)
+        self.rejects(mutated(legacy, lambda v: v['checkpoints'][0].update(tasks=[])), 'checkpoint needs')
+
+    def test_template_is_a_valid_schema_two_block(self):
+        out = subprocess.run([sys.executable, '-I', str(READER), 'template', '--title', 'T', '--step', 'one', '--step', 'two'], capture_output=True, text=True, timeout=6).stdout
+        self.path.write_text(out)
+        plan_ = self.reader.read_plan(self.path)
+        self.assertEqual((plan_['schema'], len(plan_['checkpoints'])), (2, 2))
+
+    def test_rename_and_reorder_keep_ids_and_validity(self):
+        value = detailed_plan()
+        renamed = mutated(value, lambda v: v['checkpoints'][1]['tasks'][0].update(text='Implement, renamed'))
+        reordered = mutated(value, lambda v: v['checkpoints'][1]['tasks'][0]['items'].reverse())
+        for variant in (renamed, reordered):
+            self.reader.validate(variant)
+        ids = lambda v: sorted(e for cp in v['checkpoints'] for e in [cp['id'], *[t['id'] for t in cp.get('tasks', [])],
+                                                                    *[i['id'] for t in cp.get('tasks', []) for i in t['items']]])
+        self.assertEqual(ids(renamed), ids(value))
+        self.assertEqual(ids(reordered), ids(value))
+
+    def test_duplicate_ids_are_refused_across_kinds(self):
+        self.rejects(mutated(detailed_plan(), lambda v: v['checkpoints'][2].update(id='parse')), 'unique')
+        self.rejects(mutated(detailed_plan(), lambda v: v['checkpoints'][1]['tasks'][0]['items'][0].update(id='ui')), 'unique')
+
+    def test_unsupported_state_unknown_field_and_bad_kind_are_refused(self):
+        self.rejects(mutated(detailed_plan(), lambda v: v['checkpoints'][0]['tasks'][0].update(state='finished')), 'state')
+        self.rejects(mutated(detailed_plan(), lambda v: v['checkpoints'][0]['tasks'][0]['items'][0].update(extra=1)), 'item needs')
+        self.rejects(mutated(detailed_plan(), lambda v: v['checkpoints'][0]['tasks'][0]['items'][0].update(kind='note')), 'kind')
+        self.rejects(mutated(detailed_plan(), lambda v: v['checkpoints'][0]['tasks'][0]['items'][1].update(path='x')), 'path')
+        self.rejects(mutated(detailed_plan(), lambda v: v['checkpoints'][0]['tasks'][0]['items'][0].pop('path')), 'item needs|path')
+
+    def test_malformed_nesting_is_refused(self):
+        self.rejects(mutated(detailed_plan(), lambda v: v['checkpoints'][0]['tasks'][0].update(tasks=[])), 'task needs')
+        self.rejects(mutated(detailed_plan(), lambda v: v['checkpoints'][0]['tasks'][0]['items'][0].update(items=[])), 'item needs')
+        self.rejects(mutated(detailed_plan(), lambda v: v['checkpoints'][0].update(tasks={})), 'list')
+        self.rejects(mutated(detailed_plan(), lambda v: v['checkpoints'][0]['tasks'].append('x')), 'task needs')
+        self.rejects(mutated(detailed_plan(), lambda v: v['checkpoints'][0]['tasks'][0].update(items='x')), 'list')
+
+    def test_multiple_active_blocked_without_reason_and_bad_current_are_refused(self):
+        self.rejects(mutated(detailed_plan(), lambda v: v['checkpoints'][1]['tasks'][0]['items'][0].update(state='active')), 'at most one active')
+        self.rejects(mutated(detailed_plan(), lambda v: v['checkpoints'][1]['tasks'][0]['items'][1].pop('reason')), 'blocked')
+        self.rejects(mutated(detailed_plan(), lambda v: v['checkpoints'][1]['tasks'][0]['items'][0].update(reason='why')), 'blocked')
+        self.rejects(mutated(detailed_plan(), lambda v: v.update(current='ship')), 'current')
+        self.rejects(mutated(detailed_plan(), lambda v: v.update(current='ghost')), 'current')
+        self.rejects(mutated(detailed_plan(), lambda v: v.update(current=None)), 'at most one active')
+
+    def test_bounds_are_enforced_at_each_level(self):
+        def cp(i, tasks):
+            return {'id': f'c{i}', 'text': 'c', 'state': 'pending', 'tasks': tasks}
+        base = lambda cps: {'schema': 2, 'plan_id': 'plan-0123456789ab', 'title': 't', 'current': None, 'checkpoints': cps}
+        task = lambda i, items=(): {'id': f't{i}', 'text': 't', 'state': 'pending', 'items': list(items)}
+        step = lambda i: {'id': f's{i}', 'kind': 'step', 'text': 's', 'state': 'pending'}
+        self.reader.validate(base([cp(0, [task(i) for i in range(20)])]))
+        self.rejects(base([cp(0, [task(i) for i in range(21)])]), 'at most 20 tasks')
+        self.reader.validate(base([cp(0, [task(0, [step(i) for i in range(30)])])]))
+        self.rejects(base([cp(0, [task(0, [step(i) for i in range(31)])])]), 'at most 30 items')
+        self.rejects(base([cp(i, []) for i in range(31)]), '1.30')
+        # 30 checkpoints x 20 tasks = 630 > 500 entities
+        self.rejects(base([cp(i, [{'id': f't{i}x{j}', 'text': 't', 'state': 'pending'} for j in range(20)]) for i in range(30)]), 'at most 500')
+        self.rejects(mutated(detailed_plan(), lambda v: v['checkpoints'][0]['tasks'][0].update(text='x' * 241)), 'text')
+        self.rejects(mutated(detailed_plan(), lambda v: v['checkpoints'][0]['tasks'][0]['items'][0].update(path='x' * 241)), 'path')
+        self.rejects(mutated(detailed_plan(), lambda v: v['checkpoints'][0]['tasks'][0]['items'][0].update(id='A' * 3)), 'unique')
+
+    def test_maximal_unicode_plan_fits_the_ssh_ceiling(self):
+        emoji = '\U0001f600'
+        entities = []
+        checkpoints = []
+        count = 0
+        for c in range(9):
+            tasks = []
+            for t in range(5):
+                items = []
+                for i in range(9):
+                    count += 1
+                    items.append({'id': f'i{count}', 'kind': 'file', 'path': emoji*240, 'text': emoji*240, 'state': 'blocked', 'reason': emoji*400})
+                count += 1
+                tasks.append({'id': f't{count}', 'text': emoji*240, 'state': 'blocked', 'reason': emoji*400, 'items': items})
+            count += 1
+            checkpoints.append({'id': f'c{count}', 'text': emoji*240, 'state': 'blocked', 'reason': emoji*400, 'tasks': tasks})
+        value = {'schema': 2, 'plan_id': 'plan-ffffffffffff', 'title': emoji*160, 'current': checkpoints[0]['id'], 'checkpoints': checkpoints}
+        self.assertLessEqual(count, self.reader.MAX_ENTITIES)
+        self.assertEqual(self.reader.validate(value), value)
+        write_plan(self.path, value)
+        # The file is only bounded by LIMIT; a plan this large is refused there, never truncated.
+        if self.path.stat().st_size > self.reader.LIMIT:
+            with self.assertRaisesRegex(ValueError, '1 MiB'):
+                self.reader.read_plan(self.path)
+        else:
+            encoded = (self.reader._source_envelope(value)+'\n').encode()
+            self.assertLessEqual(len(encoded), self.reader.SSH_RESPONSE_LIMIT)
+
+    def test_entity_text_may_be_one_codepoint_and_non_ascii(self):
+        value = mutated(detailed_plan(), lambda v: v['checkpoints'][2].update(text='\u00e9'))
+        self.assertEqual(self.reader.validate(value), value)
+
+
+class WindowContract(unittest.TestCase):
+    """Static contracts for window/host sources that no Python helper exercises."""
+
+    def source(self, name):
+        return (ROOT/name).read_text()
+
+    def test_files_button_is_gone_and_status_segment_opens_settings(self):
+        window = self.source('window.luau')
+        self.assertNotIn('files.button', window)
+        self.assertIn('icon = "list-checks", text = "TODO"', window)
+        self.assertIn('"settings"', window)
+        self.assertIn('TODO: Open Settings', window)
+        self.assertIn('status_prompt.ensure(cx, tern.plugin.id)', window)
+        self.assertEqual(window.count('status_prompt.ensure('), 1)
+
+    def test_host_never_sends_the_client_window_key_to_the_host_resolver(self):
+        host = self.source('host.luau')
+        self.assertNotIn('selected.window', host.split('selection.resolve(')[1].split('function')[0])
+        self.assertIn('selection.resolve(state.panel, ""', host)
+
+    def test_attach_args_carry_no_client_window_key_and_picker_is_gone(self):
+        attach = self.source('lib/attach.luau')
+        self.assertNotIn('window_key', attach)
+        self.assertNotIn('window =', attach)
+        self.assertNotIn('chooseSession', attach)
+        host = self.source('host.luau')
+        self.assertNotIn('source.window', host)
+        self.assertNotIn('window: string', host)
+        for name in ['window.luau', 'host.luau', 'lib/attach.luau']:
+            self.assertNotIn('chooseSession', self.source(name))
+
+    def test_manifest_keeps_version_and_icon(self):
+        manifest = self.source('plugin.toml')
+        self.assertIn('version = "0.7.0"', manifest)
+        self.assertIn('icon = "list-checks"', manifest)
+
+
 if __name__ == '__main__':
     unittest.main()
