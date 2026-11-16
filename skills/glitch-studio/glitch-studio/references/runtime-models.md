@@ -3,6 +3,14 @@
 This stage applies only when the product itself calls a model while it runs.
 If it does not, write `studio/09-runtime-models.md` with `Picked: none` and the reason.
 
+## Decided early, audited late
+
+The four rules are decided early.
+The planning brief asks that every part which calls a model at runtime gets the four rules as tasks.
+The lane builds them with the rest of the part.
+Stage 9 does not design them.
+It audits them.
+
 ## The four rules
 
 1. **The model chooses; code builds.**
@@ -26,13 +34,25 @@ If it does not, write `studio/09-runtime-models.md` with `Picked: none` and the 
 - Model output is validated against the grammar before anything uses it.
 - A failed or invalid reply has a defined fallback that fails closed.
 
+## The stage 9 audit
+
+After build and proof, check every runtime model call against all four rules.
+Record one check per rule, with its result (pass or fail, and the evidence).
+If a check fails, write a fix task for the owning lane.
+The user runs it through `/glitch-execute`.
+After the fix is merged, refresh the stage 8 proof for that part.
+
 ## The evidence file
 
-`studio/09-runtime-models.md` holds:
+`studio/09-runtime-models.md` holds, per runtime call:
+- `Tier:` the tier the call uses.
 - `Grammar:` where it is defined.
 - `Builder:` the code that builds from it.
 - `Refusal rule:` the two-read rule as built.
 - `Budget:` calls per request.
 - `Scoring:` the code that scores quality.
+
+It also holds one audit line per rule, with its result.
+It lists any fix task and the refreshed stage 8 proof.
 
 Then the ending lines.

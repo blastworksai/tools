@@ -8,16 +8,16 @@ They are the same in the neutral studio skill and in this one.
 
 | Stage | Path | Must contain |
 | --- | --- | --- |
-| 0 | `studio/00-frame.md` | `Role:` orchestrator; the product; its parts |
-| 1 | `studio/01-study-reference.md` | parts studied, candidates with licences, fetches with the user's yes, notes paths, notices file |
-| 2 | `studio/02-domain-skills.md` | per platform: skill, endpoints, token types, limits |
-| 3 | `studio/03-parts-and-specs.md` | the parts, one folder each, and the filled planning brief; `Plan:` line |
-| 4 | `studio/04-contracts.md` | each contract, where it lives, the frozen rule; `Plan:` line |
-| 5 | `studio/05-lanes.md` | one lane per part, one folder scope each; `Plan:` line |
-| 6 | `studio/06-model-tiers.md` | tier mapping, tier per part, the critic and its family |
-| 7 | `studio/07-review-and-integrate.md` | each review, the critic's family, the merge order, any stop |
-| 8 | `studio/08-proof.md` | per part: kind, proof, judged against, result |
-| 9 | `studio/09-runtime-models.md` | the four rules as built, or `Picked: none` |
+| 0 | `studio/00-frame.md` | `Role:` orchestrator; the product; who it is for; what "done" means; the named hard parts; the named outside platforms or APIs; visual part yes or no; runtime model yes or no; the first tier-to-model mapping (tier, model, family, reachable); git state |
+| 1 | `studio/01-study-reference.md` | per hard part: candidates seen, candidate studied, licence, fetch approved (yes or no, with the date), study note path; the path of the notices file |
+| 2 | `studio/02-domain-skills.md` | per platform: skill path, found or written, endpoints covered, token types, rate limits, what is unverified |
+| 3 | `studio/03-parts-and-specs.md` | per part: name, folder scope, tier, calls a model at runtime (yes or no), contracts used; the filled planning brief; `Plan:` line |
+| 4 | `studio/04-contracts.md` | per contract: name, path, producer, readers; the freeze commit (or the base commit when there is one part and nothing shared); the rule that only the orchestrator changes a contract; a section "Changes after freeze", empty if none; or `Picked: none` with the reason; `Plan:` line |
+| 5 | `studio/05-lanes.md` | per lane: name, part, folder scope, tier chosen; stops raised; a revision note if the stage 0 mapping changed; `Plan:` line |
+| 6 | `studio/06-model-tiers.md` | the final tier-to-model table (tier, model, family, reachable); a tier per part with one line why; the tiers the lanes actually used; a revision note if the mapping changed, or `none`; the critic line (model and family, or `none reachable`); same-family review yes or no |
+| 7 | `studio/07-review-and-integrate.md` | per lane: review result, findings, critic model and family (or "same-family"), critic result, merge commit, test result after that merge; the merge order; any stop; the user's decision when a review was same-family |
+| 8 | `studio/08-proof.md` | per part: kind (visual or behaviour), proof file paths or command, sizes checked, judged against, result, what is wrong; never `Picked: none` |
+| 9 | `studio/09-runtime-models.md` | per runtime call: tier, grammar, builder, refusal rule, budget, scoring; one line per rule (four) with its audit result; any fix task and the refreshed stage 8 proof; or `Picked: none` with the reason |
 
 ## The ending
 
@@ -44,9 +44,12 @@ File 07 records the reviews and merge order from the build run by `/glitch-execu
 
 1. On start, list the `studio/` folder.
 2. If it is missing, begin at stage 0.
-3. Otherwise continue at the first missing number.
-4. Never redo a stage whose file exists, unless the user asks.
-5. Say which stage you resume at.
+3. Otherwise read every file.
+   A file without the three ending lines is unfinished.
+   Finish it first.
+4. Then continue at the first missing number.
+5. Never redo a finished stage, unless the user asks.
+6. Say which stage you resume at.
 
 ## A worked example
 
@@ -60,6 +63,7 @@ Found or written: written
 Endpoints: GET /current, GET /forecast, GET /stations
 Token types: one bearer token, valid for one hour
 Limits: 60 calls per minute
+Unverified: the paging limit of GET /stations
 
 Picked: one domain skill, for weather-feed
 Left out: the card screen, which uses no outside platform

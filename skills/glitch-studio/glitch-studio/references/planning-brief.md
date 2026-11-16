@@ -27,7 +27,27 @@ List them in the plan's context references as mandatory reading:
 - Art direction: <path, or "no visual parts">
 - Third-party notices file: <path, or "none">
 
+## Tiers
+
+The tier mapping is: <list: tier, model, from the stage 0 mapping>.
+Each part has one tier: <list: part, tier>.
+
+## Runtime models
+
+These parts call a model while the product runs: <list, or "none">.
+For each of them, add these as tasks inside the part's own task:
+1. The model fills a typed grammar of fixed options, and code builds the result from it.
+2. Two independent reads must agree before a refusal.
+3. A fixed call budget for each request, counted in code.
+4. Code scores quality, never the model.
+Also: least access for the model, validation of every reply, and a fallback that fails closed.
+
 ## Checkpoint rules
+
+If there is one part and nothing shared, skip rule 1.
+There is then no contracts checkpoint.
+The freeze point is the base commit before the first lane.
+Write that commit's name here: <base commit, or "not used">.
 
 1. The FIRST checkpoint writes the frozen contracts.
    - There is one contracts place: <folder, for example shared/contracts/>.

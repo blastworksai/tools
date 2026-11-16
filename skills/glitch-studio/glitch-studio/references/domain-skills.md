@@ -36,10 +36,11 @@ If you cannot read it, say so in the skill and mark each fact as unchecked.
 
 `studio/02-domain-skills.md` holds one block per platform:
 - `Platform:` its name.
-- `Skill:` the name or path of the skill (found or written).
+- `Skill:` the name or path of the skill.
 - `Found or written:` which one.
 - `Endpoints:` the endpoints named in it.
 - `Token types:` the ones named.
 - `Limits:` the rate limits named.
+- `Unverified:` the facts you could not check, or `none`.
 
 Then the ending lines.

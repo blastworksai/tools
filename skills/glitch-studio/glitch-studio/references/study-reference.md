@@ -15,11 +15,14 @@ If no part qualifies, write `Picked: none` and the reason.
 1. **Scout (light tier).**
    One scout per part.
    Each scout lists up to five candidates: name, link, licence, size, last activity, and one line on fit.
-   A scout reads only what is already on disk or what the user has approved.
+   Use the tier mapping from stage 0.
+   A scout may read what is on disk and may read project pages in a browser.
+   A browser read is not a download.
 2. **Ask the user.**
-   Before any download or clone, show the user a list.
+   Before any download, clone or install, show the user a list.
    Each row names the target and its licence.
    Wait for the user's yes.
+   A yes to one item is not a yes to the rest.
    Do one fetch per yes, or one list per yes if the user says so.
    A candidate with a licence your project cannot use is not offered.
 3. **Take apart (deep tier).**
@@ -38,7 +41,7 @@ If no part qualifies, write `Picked: none` and the reason.
 `studio/01-study-reference.md` holds:
 - `Parts studied:` the parts, or `none`.
 - One line per candidate: part, name, licence, user's yes (date) or `not asked`.
-- `Fetches:` each download with its target and the user's yes, or `none`.
+- `Fetches:` each download, clone or install with its target, its licence and the user's yes, or `none`.
 - `Notes:` the paths of the study notes.
 - `Notices file:` its path.
 

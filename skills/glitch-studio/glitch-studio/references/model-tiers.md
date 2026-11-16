@@ -4,6 +4,10 @@ Goal: spend strong models where an error costs most, and cheap models on volume.
 The skill names four tiers.
 You map them to real models.
 
+You make the first mapping at stage 0, because stage 1 already sends scouts and readers at a tier.
+Stage 5 picks a tier for each lane from it, and may revise it.
+Stage 6 writes down the final mapping.
+
 ## The four tiers
 
 - **deep.** Contracts, the parts that must be right, and the critic.
@@ -28,9 +32,12 @@ You map them to real models.
 
 ## The evidence file
 
+The first mapping goes in `studio/00-frame.md`.
 `studio/06-model-tiers.md` holds:
 - A table: tier, model, family, reachable (yes or no).
 - A table: part, tier, reason.
+- `Tiers used:` the tier each lane actually used.
+- `Revision note:` what changed from the stage 0 mapping and why, or `none`.
 - `Critic:` the model and family, or `none reachable`.
 - `Same-family review:` yes or no.
   If yes, add the user's decision.

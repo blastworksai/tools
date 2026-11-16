@@ -13,7 +13,10 @@ A part is visual if a person looks at it.
 3. Take a screenshot of the real running part at each size.
 4. Judge each screenshot against the art direction.
    Say what matches and what does not.
-5. Fix and repeat until the screenshots match.
+5. Send each defect back to the owning lane as a task.
+   You do not fix product code yourself.
+   After the fix is merged, take new screenshots.
+   Repeat until the screenshots match.
 6. Check that each image file has the size you named.
 7. Save the images in the project and list their paths.
 
@@ -24,6 +27,8 @@ A part is visual if a person looks at it.
 2. Record the command and the output.
 3. Show one case that must fail, and show that it fails.
 4. A unit test alone does not count.
+5. Send each defect back to the owning lane as a task.
+   After the fix is merged, run the part again.
 
 ## The evidence file
 
