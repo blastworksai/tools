@@ -1,7 +1,7 @@
 # glitch-studio-pr2: full report
 
-skills/glitch-studio | retrieved 2026-11-16 | sha256 223f8ed2993da2c0c9d596c03ade8a8d9f3b5378de14e1de16d5bd6cb2ff5129
-Run 2026-11-16_223f8ed | Walkdown 0.3.1+blastworks.1
+skills/glitch-studio | retrieved 2026-11-16 | sha256 a749703c5628a017149b610805962b7bd0dc88dc61d62cc2702176767adcdd52
+Run 2026-11-16_a749703 | Walkdown 0.3.1+blastworks.1
 Static examination only. Nothing executed. Every finding below is a location to look at; none is a verdict. Stage order; nothing is ranked.
 
 ## 1 What ships
@@ -10,7 +10,7 @@ Static examination only. Nothing executed. Every finding below is a location to 
 
 Validation: PASS (gate 26/26, negative 7/7; measured 2026-11-02, same code and fixtures)
 
-Pin: sha256 223f8ed2993da2c0c9d596c03ade8a8d9f3b5378de14e1de16d5bd6cb2ff5129, 12 files, 41,869 bytes.
+Pin: sha256 a749703c5628a017149b610805962b7bd0dc88dc61d62cc2702176767adcdd52, 12 files, 42,345 bytes.
 
 Formats: md 9, (none) 2, json 1.
 
@@ -116,7 +116,7 @@ None.
 
 ### Dynamic loads (1)
 
-- README.md:57: directory `glitch-studio/` (mention) resolves to 9 files
+- README.md:59: directory `glitch-studio/` (mention) resolves to 9 files
 
 ### On disk, left out of the manifest (a host that finds components by folder may still load them) (0)
 
@@ -125,7 +125,7 @@ None.
 ### Dangling references (6)
 
 - README.md:24: `studio/` (code)
-- README.md:50: `studio/` (code)
+- README.md:52: `studio/` (code)
 - glitch-studio/SKILL.md:49: `studio/` (code)
 - glitch-studio/references/evidence.md:3: `studio/` (code)
 - glitch-studio/references/evidence.md:51: `studio/` (code)
@@ -139,11 +139,11 @@ None.
 - glitch-studio/SKILL.md:145: `studio/03-parts-and-specs.md` (code)
 - glitch-studio/SKILL.md:148: `studio/04-contracts.md` (code)
 - glitch-studio/SKILL.md:154: `studio/05-lanes.md` (code)
-- glitch-studio/SKILL.md:168: `studio/06-model-tiers.md` (code)
-- glitch-studio/SKILL.md:186: `studio/07-review-and-integrate.md` (code)
-- glitch-studio/SKILL.md:204: `plans/archive/` (code)
-- glitch-studio/SKILL.md:227: `studio/08-proof.md` (code)
-- glitch-studio/SKILL.md:245: `studio/09-runtime-models.md` (code)
+- glitch-studio/SKILL.md:172: `studio/06-model-tiers.md` (code)
+- glitch-studio/SKILL.md:190: `studio/07-review-and-integrate.md` (code)
+- glitch-studio/SKILL.md:208: `plans/archive/` (code)
+- glitch-studio/SKILL.md:231: `studio/08-proof.md` (code)
+- glitch-studio/SKILL.md:249: `studio/09-runtime-models.md` (code)
 - glitch-studio/references/domain-skills.md:37: `studio/02-domain-skills.md` (code)
 - glitch-studio/references/evidence.md:11: `studio/00-frame.md` (code)
 - glitch-studio/references/evidence.md:12: `studio/01-study-reference.md` (code)
@@ -156,8 +156,8 @@ None.
 - glitch-studio/references/evidence.md:19: `studio/08-proof.md` (code)
 - glitch-studio/references/evidence.md:20: `studio/09-runtime-models.md` (code)
 - glitch-studio/references/evidence.md:41: `plans/archive/` (code)
-- glitch-studio/references/evidence.md:69: `studio/02-domain-skills.md` (code)
-- glitch-studio/references/evidence.md:73: `skills/weather-feed/SKILL.md` (code)
+- glitch-studio/references/evidence.md:70: `studio/02-domain-skills.md` (code)
+- glitch-studio/references/evidence.md:74: `skills/weather-feed/SKILL.md` (code)
 - glitch-studio/references/model-tiers.md:42: `studio/00-frame.md` (code)
 - glitch-studio/references/model-tiers.md:43: `studio/06-model-tiers.md` (code)
 - glitch-studio/references/planning-brief.md:57: `shared/contracts/` (code)
@@ -186,7 +186,7 @@ None.
 
 ## 4 What the text asks for
 
-4a 0 · 4b 6 · 4c 2 · 4d 0 hits on 8 lines (5 read by a model, 3 human-facing); benign share not measured (stage 6 labels did not run). Hosts: 3, 0 not named in the docs. Confirm-first or prohibited actions in instruction text: 0, 0 with no confirmation step, 0 stated as prohibitions. Conditionals: 9 absence, 2 error, 2 harness. Definitions: 2, 1 conflict, 2 safety-word definitions. Long files with flagged lines: 0, 0 with some past the reader window. Sentences repeated across files: 17, 1 flagged. Lines that look like committed secrets: 0.
+4a 0 · 4b 6 · 4c 2 · 4d 0 hits on 8 lines (5 read by a model, 3 human-facing); benign share not measured (stage 6 labels did not run). Hosts: 3, 0 not named in the docs. Confirm-first or prohibited actions in instruction text: 0, 0 with no confirmation step, 0 stated as prohibitions. Conditionals: 9 absence, 2 error, 2 harness. Definitions: 2, 1 conflict, 2 safety-word definitions. Long files with flagged lines: 0, 0 with some past the reader window. Sentences repeated across files: 16, 1 flagged. Lines that look like committed secrets: 0.
 
 Validation: PASS (gate 153/153, negative 121/121, recall 43/43; measured 2026-11-02, same code and fixtures)
 
@@ -223,7 +223,7 @@ None.
 Patterns: B.safety-exception 2
 
 - glitch-studio/SKILL.md:65 [B.safety-exception] (model): `8. Never redo a finished stage, unless the user asks.`
-- glitch-studio/references/evidence.md:63 [B.safety-exception] (model): `8. Never redo a finished stage, unless the user asks.`
+- glitch-studio/references/evidence.md:64 [B.safety-exception] (model): `8. Never redo a finished stage, unless the user asks.`
 
 #### phrase.H.anti-review (2 lines)
 
@@ -271,7 +271,7 @@ None.
 
 ### Tables
 
-Hosts: 3, 0 not named in the docs. Confirm-first or prohibited actions in instruction text: 0, 0 with no confirmation step, 0 stated as prohibitions. Conditionals: 9 absence, 2 error, 2 harness. Definitions: 2, 1 conflict, 2 safety-word definitions. Long files with flagged lines: 0, 0 with some past the reader window. Sentences repeated across files: 17, 1 flagged. Lines that look like committed secrets: 0.
+Hosts: 3, 0 not named in the docs. Confirm-first or prohibited actions in instruction text: 0, 0 with no confirmation step, 0 stated as prohibitions. Conditionals: 9 absence, 2 error, 2 harness. Definitions: 2, 1 conflict, 2 safety-word definitions. Long files with flagged lines: 0, 0 with some past the reader window. Sentences repeated across files: 16, 1 flagged. Lines that look like committed secrets: 0.
 
 ### Endpoints (hosts named anywhere; documented = named in the docs) (3)
 
@@ -288,8 +288,8 @@ None.
 - glitch-studio/SKILL.md:50: absence: if `If it is missing` then `begin at stage 0.`
 - glitch-studio/SKILL.md:119: absence: if `If none exists` then `write a small domain skill before any product code.`
 - glitch-studio/SKILL.md:144: absence: if `If no part is deep tier` then `the default level is fine.`
-- glitch-studio/SKILL.md:213: absence: if `If no other family is reachable` then `write same-family and ask the user to decide.`
-- glitch-studio/SKILL.md:254: error: if `If a check fails` then `write a fix task for the owning lane.`
+- glitch-studio/SKILL.md:217: absence: if `If no other family is reachable` then `write same-family and ask the user to decide.`
+- glitch-studio/SKILL.md:258: error: if `If a check fails` then `write a fix task for the owning lane.`
 - glitch-studio/references/domain-skills.md:11: harness: if `If no platform applies` then `` write `Picked: none` and the reason. ``
 - glitch-studio/references/domain-skills.md:18: harness: if `If a skill covers the platform` then `read it and record its name.`
 - glitch-studio/references/evidence.md:15: absence: if `` if none); or `Picked `` then `` | 4 | `studio/04-contracts.md` | the exact contract text; per contract: name, path, producer, readers; the freeze commit (`pending` until the build) (or the base commit when there is one part and nothing shared); the rule that only the orchestrator changes a contract; a section "Changes after freeze" (`pending` until the build, then empty none` with the reason; `Plan:` line (and the archived plan path after the build) | ``
@@ -325,25 +325,24 @@ None.
 
 None.
 
-### Sentences repeated across files a model reads (17)
+### Sentences repeated across files a model reads (16)
 
 - glitch-studio/SKILL.md:31: in 2 files (2 times): `A yes to one item is not a yes to the rest.`
 - glitch-studio/SKILL.md:50: in 2 files (2 times): `If it is missing, begin at stage 0.`
 - glitch-studio/SKILL.md:52: in 2 files (2 times): `A file without the three ending lines is unfinished.`
 - glitch-studio/SKILL.md:54: in 2 files (2 times): `` A `pending` value does not make a file unfinished. ``
-- glitch-studio/SKILL.md:56: in 2 files (2 times): `` If any of files 03, 04 and 05 says `Plan: not yet made`, continue the `/glitch-plan` hand-off. ``
 - glitch-studio/SKILL.md:59: in 2 files (2 times): `` If file 07 says `Picked: pending`, STOP until the build and every fix task have run. ``
 - glitch-studio/SKILL.md:62: in 2 files (2 times): `` If file 08 or 09 says `Picked: pending`, STOP until its fix task has run. ``
 - glitch-studio/SKILL.md:65: in 2 files (2 times), flagged B.safety-exception: `Never redo a finished stage, unless the user asks.`
 - glitch-studio/SKILL.md:142: in 2 files (2 times): `` The user chooses that level at the stop of `/glitch-plan`. ``
 - glitch-studio/SKILL.md:144: in 2 files (2 times): `If no part is deep tier, the default level is fine.`
-- glitch-studio/SKILL.md:215: in 3 files (6 times): `` Give the user the task text to paste after `/glitch-plan` in a fresh window. ``
-- glitch-studio/SKILL.md:216: in 3 files (6 times): `` Then give the `/glitch-execute` line it prints. ``
-- glitch-studio/SKILL.md:235: in 2 files (2 times): `You do not fix product code yourself.`
-- glitch-studio/SKILL.md:243: in 2 files (2 times): `Stage 9 — Models inside the product`
-- glitch-studio/SKILL.md:254: in 2 files (2 times): `If a check fails, write a fix task for the owning lane.`
-- glitch-studio/SKILL.md:260: in 2 files (2 times): `Rerun every failed stage 9 check.`
-- glitch-studio/SKILL.md:262: in 2 files (2 times): `Then refresh the stage 8 proof for that part.`
+- glitch-studio/SKILL.md:219: in 3 files (6 times): `` Give the user the task text to paste after `/glitch-plan` in a fresh window. ``
+- glitch-studio/SKILL.md:220: in 3 files (6 times): `` Then give the `/glitch-execute` line it prints. ``
+- glitch-studio/SKILL.md:239: in 2 files (2 times): `You do not fix product code yourself.`
+- glitch-studio/SKILL.md:247: in 2 files (2 times): `Stage 9 — Models inside the product`
+- glitch-studio/SKILL.md:258: in 2 files (2 times): `If a check fails, write a fix task for the owning lane.`
+- glitch-studio/SKILL.md:264: in 2 files (2 times): `Rerun every failed stage 9 check.`
+- glitch-studio/SKILL.md:266: in 2 files (2 times): `Then refresh the stage 8 proof for that part.`
 
 ### Will it trigger
 
@@ -415,20 +414,20 @@ Bytes at load: descriptions 240 (1, exact).
 Expected context: 32,000 tokens (a line for 200,000 beside it). Tokens are estimated from size: about 4 bytes of English text per token; text in other scripts runs high.
 
 - Every session, once installed (descriptions, hooks): 60 tokens, under 1% of 32,000, under 1% of 200,000
-- When the largest skill runs: 3,334 tokens, 10% of 32,000, 2% of 200,000
-- That skill and everything it names: 8,659 tokens, 27% of 32,000, 4% of 200,000
+- When the largest skill runs: 3,407 tokens, 11% of 32,000, 2% of 200,000
+- That skill and everything it names: 8,760 tokens, 27% of 32,000, 4% of 200,000
 - The largest is `glitch-studio/SKILL.md`, of 1 skill, agent, or command.
 
 Every skill, agent, or command, by tier (tokens):
 
-- glitch-studio/SKILL.md: runs 3,334, with what it names 8,659, with wildcard loads 8,659
+- glitch-studio/SKILL.md: runs 3,407, with what it names 8,760, with wildcard loads 8,760
 
-#### Loads into the AI: 8 files, 33.8 KB, 8,659 tokens
+#### Loads into the AI: 8 files, 34.2 KB, 8,760 tokens
 
-- `glitch-studio/SKILL.md`: skills, agents, and commands, 13.0 KB, 3,334 tokens
+- `glitch-studio/SKILL.md`: skills, agents, and commands, 13.3 KB, 3,407 tokens
 - `glitch-studio/references/domain-skills.md`: named by a file the AI loads, 1.7 KB, 439 tokens, reached from `glitch-studio/SKILL.md`
-- `glitch-studio/references/evidence.md`: named by a file the AI loads, 5.9 KB, 1,509 tokens, reached from `glitch-studio/SKILL.md`
-- `glitch-studio/references/model-tiers.md`: named by a file the AI loads, 2.4 KB, 615 tokens, reached from `glitch-studio/SKILL.md`
+- `glitch-studio/references/evidence.md`: named by a file the AI loads, 6.0 KB, 1,530 tokens, reached from `glitch-studio/SKILL.md`
+- `glitch-studio/references/model-tiers.md`: named by a file the AI loads, 2.4 KB, 622 tokens, reached from `glitch-studio/SKILL.md`
 - `glitch-studio/references/planning-brief.md`: named by a file the AI loads, 4.3 KB, 1,089 tokens, reached from `glitch-studio/SKILL.md`
 - `glitch-studio/references/prove-it.md`: named by a file the AI loads, 1.9 KB, 485 tokens, reached from `glitch-studio/SKILL.md`
 - `glitch-studio/references/runtime-models.md`: named by a file the AI loads, 2.6 KB, 669 tokens, reached from `glitch-studio/SKILL.md`
@@ -438,10 +437,10 @@ Every skill, agent, or command, by tier (tokens):
 
 None.
 
-#### Not used at run time: 4 files, 7.1 KB, 1,812 tokens
+#### Not used at run time: 4 files, 7.1 KB, 1,830 tokens
 
 - `LICENSE`: written for people, 1.3 KB, 334 tokens
-- `README.md`: written for people, 4.2 KB, 1,066 tokens
+- `README.md`: written for people, 4.2 KB, 1,084 tokens
 - `glitch-studio/LICENSE`: written for people, 1.3 KB, 334 tokens
 - `capability.json`: nothing points to it, 311 bytes, 78 tokens
 
@@ -505,7 +504,7 @@ Questions a pattern cannot settle, and the answers of the backends named here. E
     - soft.label: skipped (no labeling backend)
 - glitch-studio/references/evidence.md:20 [label] Does this line tell the reader to do the matched action, tell them not to, describe it, or quote / give an example of it?
     - soft.label: skipped (no labeling backend)
-- glitch-studio/references/evidence.md:63 [label] Does this line tell the reader to do the matched action, tell them not to, describe it, or quote / give an example of it?
+- glitch-studio/references/evidence.md:64 [label] Does this line tell the reader to do the matched action, tell them not to, describe it, or quote / give an example of it?
     - soft.label: skipped (no labeling backend)
 - glitch-studio/references/evidence.md:11 [relational] Against the word's ordinary meaning, what does this definition change about how a model would act on instructions that use the word?
     - soft.read: skipped (no relational backend)
