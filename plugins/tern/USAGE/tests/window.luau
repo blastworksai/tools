@@ -5,6 +5,7 @@ local checks, preferences = 0, {}
 local function check(value, why) assert(value, why); checks += 1 end
 local function forbidden() error("owner pane input, provider process or unrelated mutation") end
 local STATUS_KEY = "usage_status_prefs"
+local os_override: string? = nil
 local function launch(supports_unload, installed)
 	local state = { prompt_asks = {}, companion_data = installed == true, commands = {}, hooks = {}, requests = {}, timers = {}, panes = {
 		{ pane = 11, tab = 1, title = "Editor" }, { pane = 22, tab = 1, title = "Owner agent" },
@@ -42,7 +43,7 @@ local function launch(supports_unload, installed)
 	function cx:prompt(opts)
 		return { next = function(_, callback) table.insert(state.prompts, callback) end }
 	end
-	function cx:pick() return { next = function() end } end
+	function cx:pick(opts) state.picks = state.picks or {}; table.insert(state.picks, opts); return { next = function() end } end
 	function cx:toast(kind, title, body)
 		state.toasts = state.toasts or {}
 		table.insert(state.toasts, { kind = kind, title = title, body = body })
@@ -52,6 +53,7 @@ local function launch(supports_unload, installed)
 	fake.kv = { get = function(key) return preferences[key] end, set = function(key, value)
 		check(key == "usage_layout" or key == STATUS_KEY, "UI stores only layout and the status-bar choice, not acquisition cadence"); preferences[key] = value
 	end }
+	if os_override ~= nil then fake.runtime = { os = os_override } end
 	fake.process, fake.fetch = { run = forbidden }, forbidden
 	fake.timer = function(ms, callback)
 		local timer = { ms = ms, callback = callback, cancelled = false }
@@ -422,4 +424,35 @@ local timed = launch(false, true)
 local started = os.clock()
 for _ = 1, 200 do timed.status({}) end
 check((os.clock() - started) / 200 < 0.004, "the status formatter stays within its 4 ms budget")
+-- The platform hold and the missing-setup segment follow the bar statistics master switch.
+local function setup_required_window()
+	local w = launch(false, true)
+	w:tick()
+	w:reply("ensure", nil, { code = "setup_required", message = "Set up USAGE" })
+	return w
+end
+local function texts(w)
+	local out = {}
+	for _, segment in w.status({}) do table.insert(out, segment.text) end
+	return table.concat(out, " | ")
+end
+os_override = "macos"
+reset_store({ [STATUS_KEY] = { version = 1, migration_complete = true, enabled = false, selected = {} } })
+local hold_off = launch(false, true)
+check(#hold_off.status({}) == 1 and hold_off.status({})[1].text == "USAGE", "master Off with a platform hold shows the launcher only")
+hold_off.commands.diagnostics.run(hold_off.cx)
+hold_off:reply("diagnostics", nil, { code = "unavailable", message = "fixture" })
+local found_hold = false
+for _, item in hold_off.picks[#hold_off.picks].items do if item.label:find("PLATFORM HOLD", 1, true) then found_hold = true end end
+check(found_hold, "Diagnostics lists PLATFORM HOLD with the master Off")
+reset_store({ [STATUS_KEY] = { version = 1, migration_complete = true, enabled = true, selected = {} } })
+local hold_on = launch(false, true)
+check(texts(hold_on):find("USAGE hold", 1, true) ~= nil, "master On with a platform hold shows the hold segment")
+os_override = nil
+reset_store({ [STATUS_KEY] = { version = 1, migration_complete = true, enabled = false, selected = {} } })
+local setup_off = setup_required_window()
+check(#setup_off.status({}) == 1 and setup_off.status({})[1].text == "USAGE", "master Off with setup required shows the launcher only")
+reset_store({ [STATUS_KEY] = { version = 1, migration_complete = true, enabled = true, selected = {} } })
+local setup_on = setup_required_window()
+check(texts(setup_on):find("USAGE setup required", 1, true) ~= nil, "master On with setup required shows the segment")
 return "PASS " .. tostring(checks) .. " window behavior checks"
