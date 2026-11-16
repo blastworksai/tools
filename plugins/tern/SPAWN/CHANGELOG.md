@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.0
 
 - Fix a Windows (or any remote) window attached to a Linux host: SPAWN's host half no longer runs `tern inspect --window <client key>` on its own daemon, where a remote client's window key (for example the client's second window, `2`) does not exist ("Host session inspection unavailable or over limit"). For a remote execution host the host finds its own window for the Config pane from the windows its daemon lists; the client key stays a routing hint. Single-machine behaviour (key `""` or equal keys) is unchanged. Regression: `tests/remote_window_key.luau`. The same translation covers Guided setup (the host resolves its own window key for the client lookup and the `tern send --window` helper) and the managed diagnostic's native process inspection; the client key stays the echo value between the two halves.
 - Remove the Files-pane button. The status-bar segment (sparkle) and the command palette remain; the plugin offers once to enable the status bar when it is off.
