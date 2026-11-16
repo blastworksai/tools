@@ -299,9 +299,41 @@ def _private_home():
     return Path.home()
 
 
+def _xdg_runtime_root():
+    """The OS runtime dir's glitch-idea folder when XDG_RUNTIME_DIR names an owner-only directory, else None."""
+    xdg=os.environ.get('XDG_RUNTIME_DIR')
+    if not xdg or not os.path.isabs(xdg): return None
+    try: info=os.lstat(xdg)
+    except OSError: return None
+    if not (stat.S_ISDIR(info.st_mode) and info.st_uid==os.getuid() and stat.S_IMODE(info.st_mode)==0o700):
+        return None
+    return Path(xdg)/'glitch-idea'
+
+
+def _private_child(open_chain,home,name):
+    """Open (creating 0700 if absent) one owner-only folder inside the home, anchored on the home's own
+    descriptor: the home must already exist and pass the chain, and nothing but this leaf is ever created.
+    The leaf is opened no-follow and checked on its descriptor; an existing folder is never re-moded."""
+    from idea_runtime import _directory
+    flags=os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC
+    parent=open_chain(home,create=False,private_leaf=False)
+    try:
+        try: os.mkdir(name,0o700,dir_fd=parent)
+        except FileExistsError: pass
+        child=os.open(name,flags,dir_fd=parent)
+        try: _directory(child,private=True)
+        except Exception:
+            os.close(child); raise
+        return child
+    finally:
+        os.close(parent)
+
+
 def _default_runtime_root():
-    """Home first; when its chain is not private, the OS runtime dir by itself. Returns (path, fallback or None)."""
-    home_default=_private_home()/'.local/state/glitch-idea'
+    """Home default first; when its chain is not private, the OS runtime dir; then an owner-only
+    .glitch-idea folder directly in the private home. Returns (path, fallback or None)."""
+    home=_private_home()
+    home_default=home/'.local/state/glitch-idea'
     if os.name!='posix': return home_default,None
     try:
         from idea_runtime import RuntimeError as OwnerError,_open_chain
@@ -311,13 +343,14 @@ def _default_runtime_root():
         except OwnerError as exc:
             if exc.code!='runtime_not_private': return home_default,None
         else: return home_default,None
-        xdg=os.environ.get('XDG_RUNTIME_DIR')
-        if not xdg or not os.path.isabs(xdg): return home_default,None
-        info=os.lstat(xdg)
-        if not (stat.S_ISDIR(info.st_mode) and info.st_uid==os.getuid() and stat.S_IMODE(info.st_mode)==0o700):
-            return home_default,None
-        target=Path(xdg)/'glitch-idea'
-        return target,{'from':str(home_default),'to':str(target),'reason':'home_not_private'}
+        target=_xdg_runtime_root()
+        if target is not None:
+            return target,{'from':str(home_default),'to':str(target),'reason':'home_not_private'}
+        # The descriptor chain creates the folder 0700 if absent and refuses a symlink, a file,
+        # another owner's folder or a loose mode; an existing folder is checked, never re-moded.
+        target=home/'.glitch-idea'
+        os.close(_private_child(_open_chain,home,target.name))
+        return target,{'from':str(home_default),'to':str(target),'reason':'home_state_not_private'}
     except Exception:
         return home_default,None
 
@@ -690,7 +723,8 @@ def _main(argv=None):
                         message='launcher_failed' if launching else str(exc)))
     fallback=result.get('runtime_root_fallback') if launching else None
     if type(fallback) is dict:
-        sys.stderr.write('Runtime folder: the home folder is shared on this account, so Glitch idea uses %s for this login.\n'%fallback['to'])
+        shared='a folder on the path to ~/.local/state/glitch-idea' if fallback.get('reason')=='home_state_not_private' else 'the home folder'
+        sys.stderr.write('Runtime folder: %s is shared on this account, so Glitch idea uses %s for this login.\n'%(shared,fallback['to']))
     sys.stdout.buffer.write(encoded(result))
     return 0 if result['ok'] else 1
 
