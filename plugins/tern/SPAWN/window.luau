@@ -24,7 +24,8 @@ local OBSOLETE_OPS = { resolve_attempt = true, resolve_lost_attempts = true }
 local OBSOLETE_NOTICE = "An old Mark-no-longer-running request was cleared; SPAWN now does this automatically"
 local MODES = { ["native-agent"] = "Native OMP", ["local-terminal"] = "Terminal", ["ssh-command"] = "SSH terminal", ["setup-default"] = "Setup default" }
 local COLORS: { [string]: string } = { claude = "orange", codex = "green", kimi = "teal", muse = "blue", agy = "red", grok = "yellow", omp = "purple" }
-local ICONS: { [string]: string } = { claude = "provider-anthropic", codex = "provider-openai-codex", kimi = "provider-kimi-code", muse = "provider-meta", agy = "provider-google-antigravity", grok = "provider:xai", omp = "pi-mark" }
+local ProviderIcons = require("./provider_icons")
+local ICONS: { [string]: string } = ProviderIcons.ICONS
 local icon_errors = {}
 local ARTWORK: { [string]: string } = {
 	kimi = "light-dark(url(assets/icons/kimi-light.svg), url(assets/icons/kimi-dark.svg))",
@@ -1772,21 +1773,6 @@ tern.css("reset-danger", [[
 [data-surface="plugin.spawn.spawner"] [data-row="setup-reset"] button { color: var(--error); }
 [data-surface="plugin.spawn.spawner"] [data-row="setup-reset"] button { border-color: var(--error); }
 ]])
--- Config › Spawn agents rows: provider artwork (or a tinted dot) and a one-line mono command hint.
--- The launch intent node is machine-only.
-local launch_rules = {
-	-- Machine nodes use native hidden properties supplied by the host, not CSS hiding.
-	'[data-surface="plugin.spawn.spawner"] .pf-row[data-row^="spawn-launch:"] .pf-lbl .h { font-family: var(--mono, ui-monospace, monospace); font-size: 0.85em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }',
-}
-for program, color in pairs(COLORS) do
-	local logo = '[data-surface="plugin.spawn.spawner"] .pf-row[data-row^="spawn-launch:' .. program .. ':"] .pf-lbl .t::before { content: ""; display: inline-block; margin-right: 0.4em; '
-	local image = ARTWORK[program]
-	if image ~= nil then logo ..= "width: 1em; height: 1em; vertical-align: -0.15em; background: " .. image .. " center / contain no-repeat; }"
-	else logo ..= "width: 0.6em; height: 0.6em; border-radius: 50%; background: " .. color .. "; }" end
-	table.insert(launch_rules, logo)
-end
-table.sort(launch_rules)
-tern.css("spawn-launch", table.concat(launch_rules, "\n"))
 tern.chrome.status(function(_pane) return { { icon = "sparkle", text = "SPAWN", tone = "muted", command = "plugin.spawn.spawn_menu" } } end)
 -- The status segment above is the launcher; there is no Files-pane button.
 tern.timer(250, function(cx)

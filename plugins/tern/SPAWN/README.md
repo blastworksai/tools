@@ -55,7 +55,7 @@ Open **SPAWN** from its status-bar segment (sparkle icon) or the command palette
 1. **Set up agents.** On **Setup**, use **Guided setup**, or **Add agent on current machine** for manual entry. The description identifies the execution host. The desktop and an attached remote host are different machines.
    Guided setup uses the working folder reported by that execution host. A desktop can display remote paths in its own format; SPAWN does not use that display path to launch the helper. If the host folder changes before startup, setup stops without starting a helper.
 2. **Review and save.** Check the executable, arguments, account routing, folder and permission choices. **Save and prepare** saves the reviewed roster and completes the required ORCH+ preparation in the same approved workflow. **Save settings only** saves the roster without preparing it.
-3. **Start an agent.** Choose one eligible saved account. Disabled or review-required records show why they cannot start. Each click creates a separate session; it does not reuse an unrelated running pane.
+3. **Start an agent.** Choose one eligible saved account. Each agent row shows Tern's own icon for its provider (a generic mark for an unknown one), its launch command underneath and a **Spawn** button. Disabled or review-required records show why they cannot start. This one page is SPAWN's own layout (a heading, one bordered card per agent, Options cards) beside the same page navigation, because Tern's settings rows have no icon slot; every other page keeps the settings layout. Each click creates a separate session; it does not reuse an unrelated running pane.
 4. **Watch current agents.** **Current agents** shows current observations and lets you open the corresponding sessions. Failed/exited history, raw identifiers and request repair are under **Advanced**. Missing evidence means unknown, not stopped.
 5. **Finished launches clear themselves.** SPAWN observes its panes and moves definitively ended launches to history. This updates SPAWN's own records; it does not stop an agent or close its pane to make the status look successful.
 
@@ -235,6 +235,7 @@ Mailbox helper regressions run outside Tern: `python3 tests/mailbox_posix.py` on
 ## Files
 
 - `plugin.toml`: package, Config block and `spawn.dispatch` block declaration
+- `provider_icons.luau`: the one provider-to-icon map, used by the window (tab icons) and the host (Start an agent rows)
 - `window.luau`: menus, status-bar launcher, request transport, pane allocation, outcome display, tab names, colours and icons
 - `host.luau`: Config, setup and Running agents block on the execution host
 - `authority.luau`: saved configuration, reservations and request handling (the only writer of SPAWN's state)

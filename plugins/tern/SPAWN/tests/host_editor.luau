@@ -48,7 +48,9 @@ local fake=setmetatable({
  timer=function(ms,callback)table.insert(timers,{ms=ms,callback=callback});return {} end,
  pane={write=function()error('Editor attempted provider input') end,list=function()return clone(paneList) end},
  block={define=function(name,definition)definitions[name]=definition end},
- ui={node=function(kind,props)return {k=kind,p=props} end,col=function(children)return {children=children} end,text=function(value)return {text=value} end,span=function(value)return value end},
+ ui={node=function(kind,props,children)return {k=kind,p=props,c=children} end,col=function(children)return {children=children} end,text=function(value)return {text=value} end,span=function(value)return value end,
+  table=function(cols,rows,opts)return {k='table',cols=cols,rows=rows,opts=opts} end,button=function(text,props)return {k='button',text=text,p=props} end,rule=function(label)return {k='rule',text=label} end,
+  card=function(head,children,props)return {k='card',head=head,c=children,p=props} end,md=function(text)return {k='md',text=text} end},
  process={run=function()error('Editor attempted a real subprocess') end},
 },{__index=runtime})
 modules.native_cli={inspect=function(_window,_options,callback)
@@ -311,7 +313,34 @@ check(admitted.jobs[1].attempt_id==admitted.attempts[1].id and type(admitted.job
 check(admitted.attempts[1].purpose~='managed','ordinary editor admission never converts managed metadata into a managed reservation')
 definition.event(state,{ev='action',act='advanced-close'},cx)
 check(state.editing==nil and state.import_review==nil and not state.advanced,'closing Advanced clears editable/review state without altering the authority')
+local prefs_pages
 local function prefs()return definition.view(state,cx).main.children[1].p end
+-- Start an agent is SPAWN's own page (a table with icon cells), not a prefs page.
+local function page_nodes(kind)
+ local found={}
+ local function walk(node)
+  if type(node)~='table' then return end
+  if node.k==kind then table.insert(found,node) end
+  for _,child in ipairs(node.c or {}) do walk(child) end
+  for _,child in ipairs(node.children or {}) do walk(child) end
+ end
+ walk(definition.view(state,cx).main.children[1])
+ return found
+end
+local function spawn_rows()
+ local found,ordered={},{}
+ for _,card in ipairs(page_nodes('card')) do
+  if type(card.p.key)=='string' and card.p.key:find('^spawn%-launch:') then
+   local line=card.c[1]
+   local go=line.c[2]
+   local head=card.head
+   local item={id=card.p.key,label=head[1],icon=card.p.icon,hint=line.c[1].c[1].text,reason=head[2],
+    disabled=if go.p.disabled then go.p.disabled else nil,control={k='action',act=go.p.actions.click,label=go.text}}
+   found[item.id]=item;table.insert(ordered,item)
+  end
+ end
+ return found,ordered
+end
 local function rows_of(page)
  state.page=page
  local found,ordered={},{}
@@ -328,6 +357,7 @@ end
 -- Managed setup is prominent without removing ordinary Setup/Spawn/Running pages.
 local pageIds,pageLabels={},{}
 for _,page in ipairs(prefs().pages) do table.insert(pageIds,page.id);pageLabels[page.id]=page.label end
+prefs_pages=prefs().pages
 check(P.equal(pageIds,{'runtime','spawn','agents','managed','setup'}) and pageLabels.spawn=='Start an agent','current agents and launch choices precede setup without removing ordinary pages')
 local restoreCx={pane=8,save=function()end,render=function()end}
 check(definition.init(restoreCx,{runtime.json.encode({host={name='fixture'},native_window='fixture-window'})},{page='spawn'}).page=='spawn','saved page restore accepts spawn')
@@ -382,7 +412,8 @@ refresh()
 definition.event(state,{ev='action',id='main',act='page',value='start'},cx)
 check(state.page=='spawn','the main SPAWN entry selects single-agent start from the authoritative reviewed roster')
 local rev=state.snapshot.config_revision
-local spawnRows,spawnOrder=rows_of('spawn')
+state.page='spawn'
+local spawnRows,spawnOrder=spawn_rows()
 local launchRows={}
 for _,item in ipairs(spawnOrder) do if item.id:find('^spawn%-launch:') then table.insert(launchRows,item) end end
 check(#launchRows==#roster,'one Spawn row per saved record')
@@ -395,6 +426,47 @@ check(argsRow~=nil and argsRow.hint=='ordinary-cli '..C.render_arguments({'--mod
 check(spawnRows['spawn-launch:custom:other'].hint=='ordinary-cli · default folder','record without a folder names the default folder')
 check(spawnRows['spawn-launch:custom:off'].disabled=='Disabled in Config','disabled record is shown greyed with its reason')
 check(spawnRows['spawn-launch:custom:needs'].disabled=='Needs settings review: Review the new command','needs-review record is shown greyed with its reason')
+check(spawnRows['spawn-launch:custom:off'].reason=='  · Disabled in Config' and spawnRows['spawn-launch:kimi:argsy'].reason==nil,'a blocked agent shows its reason in the row, a ready one shows none')
+-- Every agent row carries Tern's own provider icon cell: the right name per provider, a fallback for an unknown one.
+do
+ local Icons=load('provider_icons')
+ local expected={claude='provider-anthropic',codex='provider-openai-codex',kimi='provider-kimi-code',muse='provider-meta',agy='provider-google-antigravity',grok='provider:xai',omp='pi-mark'}
+ local saved_roster=clone(snapshot().records)
+ local seeded=clone(saved_roster)
+ local keys={}
+ for key in pairs(expected) do table.insert(keys,key) end
+ table.sort(keys)
+ for _,key in ipairs(keys) do local r=record('icon-'..key);r.provider=key;r.account_label='Icon';table.insert(seeded,r) end
+ local unknown=record('icon-unknown');unknown.provider='Zorblax';unknown.account_label='Icon';table.insert(seeded,unknown)
+ check(A.edit(state.binding,snapshot().config_revision,'replace-records',{records=seeded}),'seed one record per provider plus an unknown provider')
+ refresh();state.page='spawn'
+ local iconRows,iconOrder=spawn_rows()
+ check(#iconOrder==#seeded,'one icon row per saved record')
+ for _,key in ipairs(keys) do
+  check(iconRows['spawn-launch:'..key..':icon-'..key].icon==expected[key],'the '..key..' row shows '..expected[key])
+  check(Icons.ICONS[key]==expected[key],'the shared map names '..key..' as '..expected[key])
+ end
+ check(iconRows['spawn-launch:zorblax:icon-unknown'].icon==Icons.FALLBACK and Icons.FALLBACK=='sparkle','an unknown provider shows the generic fallback icon')
+ for _,item in ipairs(iconOrder) do check(type(item.icon)=='string' and item.icon~='','every agent row has an icon: '..item.id) end
+ check(A.edit(state.binding,snapshot().config_revision,'replace-records',{records=saved_roster}),'restore the roster after the icon fixture')
+ refresh();state.page='spawn'
+ rev=state.snapshot.config_revision
+end
+-- Page navigation on the own page reaches the existing page handler; every other page stays on prefs.
+do
+ state.page='spawn'
+ local navActs={}
+ for _,button in ipairs(page_nodes('button')) do if button.p and type(button.p.actions)=='table' then navActs[button.p.actions.click]=true end end
+ for _,page in ipairs(prefs_pages) do check(navActs['page-go:'..page.id],'the Start an agent page navigates to '..page.id) end
+ check(#page_nodes('md')==1 and page_nodes('md')[1].text=='# Start an agent','the page shows its title once, as a heading')
+ check(navActs.refresh and navActs['advanced-open'] and navActs.close,'the Start an agent page keeps Refresh, Advanced and Close')
+ definition.event(state,{ev='action',act='page-go:setup'},cx)
+ check(state.page=='setup' and definition.view(state,cx).main.children[1].k=='prefs','a page-go click opens Setup on the prefs layout')
+ definition.event(state,{ev='action',act='page-go:spawn'},cx)
+ check(state.page=='spawn' and definition.view(state,cx).main.children[1].k~='prefs','a page-go click returns to the own Start an agent page')
+ for _,other in ipairs({'runtime','agents','managed','setup'}) do state.page=other;check(definition.view(state,cx).main.children[1].k=='prefs','page '..other..' stays on the prefs layout') end
+ state.page='spawn'
+end
 -- Launch intents: every click queues a fresh intent (oldest first); an ack removes only its own.
 local function intents()
  local node=nil
@@ -450,9 +522,10 @@ local full=intents()
 check(#full==16,'the queue holds 16 intents')
 definition.event(state,{ev='action',act='launch:argsy@'..rev},cx)
 check(#intents()==16 and state.notice=='Too many launches queued; wait a moment','a 17th click is refused')
-check(rows_of('spawn')['spawn-queue-full']~=nil,'the refusal is shown as a notice row on Spawn agents')
+state.page='spawn'
+check(runtime.json.encode(definition.view(state,cx).main.children[1]):find('This click was not queued',1,true)~=nil,'the refusal is shown as a notice line on Start an agent')
 for _,pending in ipairs(full) do ack(pending.intent_id) end
-check(#intents()==0 and rows_of('spawn')['spawn-queue-full']==nil,'draining the queue clears pending work and the notice row')
+check(#intents()==0 and runtime.json.encode(definition.view(state,cx).main.children[1]):find('This click was not queued',1,true)==nil,'draining the queue clears pending work and the notice row')
 definition.event(state,{ev='action',act='launch:argsy@'..(rev-1)},cx)
 check(#intents()==0 and state.notice:find('stale%-config'),'a stale click queues no intent')
 -- Setup page: Guided setup goes through the intent; Review setup result only while a setup run is active.
@@ -1373,7 +1446,7 @@ do
   return table.concat(parts,'\n')
  end
  local function field(id)
-  for _,section in ipairs(definition.view(panel,cx).main.children[1].p.sections)do
+  for _,section in ipairs(definition.view(panel,cx).main.children[1].p.sections or {})do
    for _,item in ipairs(section.rows)do if item.id==id then return item end end
   end
   return nil
