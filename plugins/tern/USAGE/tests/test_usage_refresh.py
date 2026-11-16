@@ -355,6 +355,40 @@ class RefreshTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.refresh.status()["completed"], 3)
         self.assertEqual(len(self.refresh.results()["items"]), 3)
 
+    async def test_different_executables_are_never_coalesced(self):
+        self.save([definition(1, "Codex", command="/opt/old/codex", arguments=["--codex-home", "/h"]),
+                   definition(2, "Codex", command="/opt/new/codex", arguments=["--codex-home", "/h"]),
+                   definition(3, "Codex", command="/opt/new/codex", arguments=["--codex-home", "/h"])])
+        async def acquire(_store, spec):
+            if spec["command"] == "/opt/old/codex":
+                raise ServiceError("source_usage_unavailable")
+            return response("codex")
+        self.acquire.side_effect = acquire
+        self.refresh.request()
+        await self.refresh.job
+        self.assertEqual(sorted(spec["command"] for spec in self.specs()), ["/opt/new/codex", "/opt/old/codex"])
+        items = {item["id"]: item["response"] for item in self.refresh.results()["items"]}
+        self.assertIn("error", items["account-1"])
+        self.assertNotIn("error", items["account-2"])
+        self.assertNotIn("error", items["account-3"])
+
+    async def test_different_executables_are_never_coalesced(self):
+        self.save([definition(1, "Codex", command="/opt/old/codex", arguments=["--codex-home", "/h"]),
+                   definition(2, "Codex", command="/opt/new/codex", arguments=["--codex-home", "/h"]),
+                   definition(3, "Codex", command="/opt/new/codex", arguments=["--codex-home", "/h"])])
+        async def acquire(_store, spec):
+            if spec["command"] == "/opt/old/codex":
+                raise ServiceError("source_usage_unavailable")
+            return response("codex")
+        self.acquire.side_effect = acquire
+        self.refresh.request()
+        await self.refresh.job
+        self.assertEqual(sorted(spec["command"] for spec in self.specs()), ["/opt/new/codex", "/opt/old/codex"])
+        items = {item["id"]: item["response"] for item in self.refresh.results()["items"]}
+        self.assertIn("error", items["account-1"])
+        self.assertNotIn("error", items["account-2"])
+        self.assertNotIn("error", items["account-3"])
+
     async def test_stale_spawn_config_never_replaces_the_authority_roster(self):
         self.save([definition(1, account_label="Current")], stale=[definition(7, "Codex"), definition(8, "Muse")])
         self.assertEqual([(item["id"], item["label"]) for item in self.refresh.results()["items"]],

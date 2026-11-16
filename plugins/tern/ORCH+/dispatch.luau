@@ -9112,6 +9112,9 @@ function M.apply(registry: any, event: any, clock: any, reserve: any): (any?, an
 			if not w or not config.worker_start_allowed(d, w) or w.checks_pending or w.launch_gates then return fail("project_held", "START this project and settle its checkout decisions before issuing new work.") end
 		end
 		if a.phase ~= "ready" then return fail("effect_already_claimed", "This effect is already claimed, settled or uncertain; inspect its retained outcome.") end
+		if a.retry_loop and a.retry_loop.state ~= nil then
+			return fail("loop_gated", "This action's retry loop is gated or stopped by the owner's loop cap; it cannot be claimed until the owner allows more.")
+		end
 		if event.executor ~= event.origin.window_epoch then return fail("claim_mismatch", "Executor incarnation must match the frozen origin window epoch.") end
 	elseif event.command == "spawn_claimed" then
 		local a = d.actions[event.action_id]
@@ -9900,6 +9903,10 @@ function M.apply(registry: any, event: any, clock: any, reserve: any): (any?, an
 		end
 		-- Only the owner's own retry counts toward or trips the cap; automatic rechecks neither consume it nor open its gate.
 		local owner_retry = event.trigger == "owner"
+		-- An open owner gate holds every resubmission: only the owner's answer (allow more) clears it.
+		if w and not owner_retry and a.retry_loop and a.retry_loop.state ~= nil then
+			return fail("loop_gated", "This action's retry loop is waiting for the owner's answer; it is not resubmitted automatically.")
+		end
 		if w and owner_retry and loops.trips(a.retry_loop, cap) then
 			local loop = a.retry_loop
 			local g, err = loops.open(d, w, loop, "full_retry", event.action_id, "Owner retry of full backpressure reached " .. tostring(loop.count)

@@ -158,24 +158,30 @@ function M.globs_overlap(a: string, b: string): boolean
 	return literal:sub(1, #prefix) == prefix or prefix:sub(1, #literal + 1) == literal .. "/"
 end
 -- `*` and `?` stay within one segment, `**` crosses segments (`**/` also matches none).
-local function glob_match(g: string, s: string, gi: number, si: number): boolean
+-- Failed (gi, si) states are memoized, so matching is bounded by |glob| x |path| states and never backtracks combinatorially.
+local function glob_match(g: string, s: string, gi: number, si: number, failed: { [number]: boolean }): boolean
+	local key = gi * (#s + 2) + si
+	if failed[key] then return false end
 	while gi <= #g do
 		local c = g:sub(gi, gi)
 		if c == "*" then
 			local double = g:sub(gi + 1, gi + 1) == "*"
 			local after = gi + (if double then 2 else 1)
-			if double and g:sub(after, after) == "/" and glob_match(g, s, after + 1, si) then return true end
+			if double and g:sub(after, after) == "/" and glob_match(g, s, after + 1, si, failed) then return true end
 			for k = si, #s + 1 do
-				if glob_match(g, s, after, k) then return true end
+				if glob_match(g, s, after, k, failed) then return true end
 				if not double and s:sub(k, k) == "/" then break end
 			end
+			failed[key] = true
 			return false
 		elseif c == "?" then
-			if si > #s or s:sub(si, si) == "/" then return false end
-		elseif s:sub(si, si) ~= c then return false end
+			if si > #s or s:sub(si, si) == "/" then failed[key] = true; return false end
+		elseif s:sub(si, si) ~= c then failed[key] = true; return false end
 		gi += 1; si += 1
 	end
-	return si > #s
+	if si > #s then return true end
+	failed[key] = true
+	return false
 end
 -- A changed file is in scope when a scope entry names it or an ancestor directory (literal), or a
 -- glob matches it or an ancestor. `[`/`{` classes and globs with more than 8 wildcards are not
@@ -186,9 +192,9 @@ function M.path_in_scope(entry: string, p: string): boolean
 	if not first then return M.path_within(entry, p) end
 	local _, wildcards = entry:gsub("[%*%?]", "")
 	if entry:find("[%[{]") or wildcards > 8 then return false end
-	if glob_match(entry, p, 1, 1) then return true end
+	if glob_match(entry, p, 1, 1, {}) then return true end
 	for index = #p, 1, -1 do
-		if p:sub(index, index) == "/" and glob_match(entry, p:sub(1, index - 1), 1, 1) then return true end
+		if p:sub(index, index) == "/" and glob_match(entry, p:sub(1, index - 1), 1, 1, {}) then return true end
 	end
 	return false
 end

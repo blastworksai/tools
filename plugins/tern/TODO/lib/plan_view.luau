@@ -14,11 +14,25 @@ local function known(entity, allowed)
     for key in entity do if not allowed[key] then return false end end
     return true
 end
+-- Code points Python's str.strip() removes (str.isspace), so schema-1 text length agrees with
+-- bin/todo.py: the Lua %s class is ASCII-only and would count a U+00A0 edge as content.
+local function isSpace(cp: number): boolean
+    return (cp >= 9 and cp <= 13) or (cp >= 0x1C and cp <= 0x20) or cp == 0x85 or cp == 0xA0 or cp == 0x1680
+        or (cp >= 0x2000 and cp <= 0x200A) or cp == 0x2028 or cp == 0x2029 or cp == 0x202F or cp == 0x205F or cp == 0x3000
+end
 local function text(value, limit)
-    if type(value) ~= "string" then return false end
-    local trimmed = value:match("^%s*(.-)%s*$")
-    local length = utf8.len(trimmed)
-    return length ~= nil and length >= 1 and length <= limit
+    if type(value) ~= "string" or utf8.len(value) == nil then return false end
+    local first, last, count = nil, nil, 0
+    for _, cp in utf8.codes(value) do
+        count += 1
+        if not isSpace(cp) then
+            if first == nil then first = count end
+            last = count
+        end
+    end
+    if first == nil then return false end
+    local length = last - first + 1
+    return length >= 1 and length <= limit
 end
 local function entity(item, label, extra, ids, active)
     if type(item) ~= "table" or type(item.id) ~= "string" or not item.id:match("^[a-z][a-z0-9_%-]*$") or #item.id > 40 or ids.seen[item.id] ~= nil then

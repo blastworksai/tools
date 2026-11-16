@@ -94,8 +94,14 @@ local function attached(cx: any, s: any): any
     return nil
 end
 
+-- Counts settings changes. A delayed replacement is stamped with the count at scheduling time and
+-- dropped when a later change (another session, or the mode turned off) has superseded it.
+local changeGen = 0
+
 -- One settings change: revalidate against the panes as they are now, then act.
 local function changed(cx: any, before: any, after: any, act: string)
+    changeGen += 1
+    local gen = changeGen
     local target = attached(cx, after)
     if act == "attach" and not target and after.attach == nil then
         cx:toast("error", "That session is no longer eligible. Pick another.")
@@ -107,7 +113,12 @@ local function changed(cx: any, before: any, after: any, act: string)
     if (mode == "glitch" or mode == "glitch-sync") and view == "other" and panel then
         -- The tab's plan view belongs to another session. Replace it, never keep showing it.
         cx.layout:close(panel)
-        tern.timer(300, function(fresh: WindowCx?) if fresh then controller.start(fresh, false, target.pane) end end)
+        tern.timer(300, function(fresh: WindowCx?)
+            if not fresh or gen ~= changeGen then return end
+            local now = settings.load(tern.kv)
+            local m = settings.mode(now)
+            if (m == "glitch" or m == "glitch-sync") and now.attach == target.pane then controller.start(fresh, false, target.pane) end
+        end)
     elseif (mode == "glitch" or mode == "glitch-sync") and view == "none" then
         controller.start(cx, false, target.pane)
     elseif mode == "native-board" and (act == "attach" or act == "board" or act == "glitch") then

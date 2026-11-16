@@ -394,6 +394,8 @@ function M.new(api: any): any
 		for source, reader in display_reads do
 			if not reader.abandoned then continue end
 			local node, bytes = surface(cx, reader.pane, "usage.display", "usage-display-response", "usage-display-response", 65536)
+			-- The helper restarted: the old incarnation's reply can never arrive, so the retained read is released.
+			if type(reader.pane) == "table" and reader.pane.peer_changed then display_reads[source] = nil; continue end
 			if not node or type(bytes) ~= "string" or #bytes > 65536 then continue end
 			local ok, response = pcall(tern.json.decode, bytes)
 			if ok and type(response) == "table" and response.version == 1 and response.display_only == true

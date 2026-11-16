@@ -28,7 +28,8 @@ local started = false
 -- kv.json is rewritten whole by every VM, so a concurrent write from a VM holding an older copy can drop the flag
 -- after the host's short re-assert window, and a later host restart would then ask a second time. A marker file
 -- in the data directory is a separate, never-rewritten record that the question was granted; it is only ever read
--- as "already asked" and never carries the grant token.
+-- as "already asked". It names the token it granted, so the one waiting winner window can still recover its grant
+-- when a stale kv write drops the flag before that window polls; every other window only sees "already asked".
 local function marker_path(): string
 	return tern.plugin.data .. "/status_prompt.v1.done"
 end
@@ -38,9 +39,15 @@ local function marker_set(): boolean
 	return ok and exists == true
 end
 
-local function marker_write()
+local function marker_write(token: string)
 	pcall(tern.fs.mkdir, tern.plugin.data)
-	pcall(tern.fs.write, marker_path(), "1\n")
+	pcall(tern.fs.write, marker_path(), token .. "\n")
+end
+
+local function marker_token(): string?
+	local ok, text = pcall(tern.fs.read, marker_path())
+	if not ok or type(text) ~= "string" then return nil end
+	return (text:gsub("%s+$", ""))
 end
 
 local function asked(): boolean
@@ -63,7 +70,7 @@ function status_prompt.host_claim(): string?
 		return nil
 	end
 	tern.kv.set(FLAG, { state = "granted", token = token, at = os.time() })
-	marker_write()
+	marker_write(token)
 	return token
 end
 
@@ -117,7 +124,11 @@ function status_prompt.ensure(cx: any, plugin_id: string)
 			if type(flag) == "table" and flag.token == token then ask(live) end
 			return
 		end
-		if marker_set() then return end
+		if marker_set() then
+			-- The grant is on disk even though a stale kv write dropped the flag: the named window still asks, once.
+			if marker_token() == token then ask(live) end
+			return
+		end
 		if tern.now() >= deadline then
 			-- Give up cleanly: a request left behind would be granted to a window that is no longer waiting.
 			local pending = tern.kv.get(REQUEST)

@@ -30,10 +30,15 @@ local function fakeBoard()
         for _, l in b.lanes do for i, c in l.cards do if c.id == id then return l, i, c end end end
     end
     function b.user(title, text, card) local l = lane(title); table.insert(l.cards, { id = newId(), text = text, done = false, tags = {} }) end
-    function b:read() local out = {}
+    -- Enforces the real read limit (tern.d.luau BoardCx.read: rows default 25, max 500): rows is
+    -- clamped to 500, cards past it come back as the lane's `more`, and a lane cannot be paged.
+    b.maxRows = 500
+    function b:read(_, opts) local out, left = {}, math.min((opts and opts.rows) or 25, self.maxRows)
         for _, l in self.lanes do local cards = {}
-            for _, c in l.cards do table.insert(cards, { id = c.id, text = c.text, done = c.done, tags = table.clone(c.tags) }) end
-            table.insert(out, { id = l.id, title = l.title, complete = false, more = 0, cards = cards }) end
+            for _, c in l.cards do
+                if left > 0 then left -= 1; table.insert(cards, { id = c.id, text = c.text, done = c.done, tags = table.clone(c.tags) }) end
+            end
+            table.insert(out, { id = l.id, title = l.title, complete = false, more = #l.cards - #cards, cards = cards }) end
         return ready({ path = "x", lanes = out }) end
     local function guard()
         if b.onFirstWrite then local hook = b.onFirstWrite; b.onFirstWrite = nil; hook() end
@@ -215,6 +220,39 @@ return {
         local n = 0
         for id, count in b.managed() do assert(count == 1, "duplicate " .. id); n += 1 end
         assert(n == total(plan()))
+    end},
+    {"a 300-entity plan raced by two windows (600 cards, past the 500-row read) still converges to one card per id", function()
+        local function big() return plan(nil, function(p)
+            p.checkpoints = {}
+            for i = 1, 300 do table.insert(p.checkpoints, { id = "c" .. i, text = "Checkpoint " .. i, state = "pending" }) end
+        end) end
+        local b = fakeBoard()
+        local bp = big()
+        assert(#sync.desired(bp) == 300)
+        -- both windows read the empty board and each queue every add, interleaved
+        for _, d in sync.desired(bp) do
+            b:add("x", { lane = d.lane, text = d.text, tags = d.tags }); b:add("x", { lane = d.lane, text = d.text, tags = d.tags })
+        end
+        local total = 0
+        for _, l in b.lanes do total += #l.cards end
+        assert(total == 600, total)
+        local r = run(b, bp)
+        assert(r.ok, r.problem)
+        local n = 0
+        for id, count in b.managed() do assert(count == 1, "duplicate " .. id); n += 1 end
+        assert(n == 300, n)
+    end},
+    {"a truncated read never adds or creates lanes, but still removes duplicates it can see", function()
+        local d = sync.desired(plan())
+        local dupTags = table.clone(d[1].tags)
+        local ops, why, truncated = sync.diff(d, { lanes = { { title = "Pending", more = 5, cards = {
+            { id = "a", text = "x", done = false, tags = table.clone(dupTags) },
+            { id = "b", text = "x", done = false, tags = table.clone(dupTags) } } } } })
+        assert(ops and truncated and not why)
+        for _, op in ops do assert(op.op ~= "add" and op.op ~= "add_lane", op.op) end
+        local removed = false
+        for _, op in ops do if op.op == "remove" and op.card == "b" then removed = true end end
+        assert(removed)
     end},
     {"turning sync off stops a pass that is already running", function()
         local b = fakeBoard()

@@ -671,8 +671,9 @@ end
 -- A retained `backpressure` action is SPAWN's definitive pre-effect refusal. It is rechecked with the
 -- capacity backoff by the owner's exact `retry`, one per lane, at most CAPACITY_RETRIES times.
 local recheck_waits: any = {}
-local function recheck_hold(source: number, action_id: string)
-	local wait = recheck_waits[action_id] or { attempts = 0 }
+-- `carried` is the replacement chain's retry count, so the bound survives each fresh action id.
+local function recheck_hold(source: number, action_id: string, carried: number?)
+	local wait = recheck_waits[action_id] or { attempts = carried or 0 }
 	wait.next_at = awake_now() + CAPACITY_RETRY_MS; wait.source = source
 	recheck_waits[action_id] = wait
 end
@@ -1513,7 +1514,7 @@ local function advance(cx: WindowCx, driver: any)
 		if a and a.phase == "ready" and outcome.ok == false and outcome.code == "full" then
 			capacity_hold(driver.source, a.action_id, outcome.request_id, data) -- Pre-effect capacity refusal: resume when slots free.
 		elseif a and a.phase == "backpressure" and outcome.code == "backpressure" then
-			recheck_hold(driver.source, a.action_id) -- Definitive pre-effect refusal: bounded automatic recheck.
+			recheck_hold(driver.source, a.action_id, a.retry_count) -- Definitive pre-effect refusal: bounded automatic recheck.
 		elseif a then held_actions[a.action_id] = true; watch_settle(driver.source, a.action_id, nil, a.request, data) end
 		drop(driver); return
 	end
@@ -2597,7 +2598,7 @@ local function schedule(cx: WindowCx)
 						if due then drivers[key] = { key = key, source = source, origin = origin, scope = worker.active_action_id, worker_id = worker.worker_id, stale_result = stale } end
 					elseif scoped and scoped.action then
 						if scoped.action.phase == "backpressure" and not held_actions[worker.active_action_id] and not recheck_waits[worker.active_action_id] then
-							recheck_hold(source, worker.active_action_id)
+							recheck_hold(source, worker.active_action_id, scoped.action.retry_count)
 						end
 						auto_reconcile_due(cx, source, origin, scoped, key, worker.worker_id)
 					end
@@ -2610,7 +2611,7 @@ local function schedule(cx: WindowCx)
 			if due then drivers[source] = { source = source, origin = origin, scope = data.action.action_id, stale_result = stale } end
 		end
 		if data.action and not data.action.worker_id and data.action.phase == "backpressure" and not held_actions[data.action.action_id] and not recheck_waits[data.action.action_id] then
-			recheck_hold(source, data.action.action_id)
+			recheck_hold(source, data.action.action_id, data.action.retry_count)
 		end
 		-- Capacity-refused (still ready, never granted) actions resume once their backoff is due,
 		-- whether or not they are selected; anything no longer ready leaves the wait.
@@ -2639,7 +2640,7 @@ local function schedule(cx: WindowCx)
 					-- START publication retries belong only to the scoped immutable grant.
 					recheck_waits[action_id] = nil; held_actions[action_id] = true
 					watch_settle(source, action_id, if a.claim then a.claim.grant_id else nil, a.request, scoped)
-				elseif a.phase == "backpressure" and wait.attempts >= CAPACITY_RETRIES then
+				elseif a.phase == "backpressure" and (wait.attempts >= CAPACITY_RETRIES or (a.retry_loop ~= nil and a.retry_loop.state ~= nil)) then
 					recheck_waits[action_id] = nil; held_actions[action_id] = true; watch_settle(source, action_id, if a.claim then a.claim.grant_id else nil, a.request, scoped)
 				-- Its operator answer would replace an owner command's still-unread answer: wait for that first.
 				elseif a.phase == "backpressure" and not lane_busy(source, a.worker_id) and not (a.worker_id == nil and drivers[source] ~= nil)

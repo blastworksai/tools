@@ -61,12 +61,17 @@ local function sameTags(a: { string }, b: { string }): boolean
 end
 
 -- Operations that turn `snapshot` (a BoardSnapshot) into the desired cards. Same plan and
--- same board -> no operations. Returns ops, or nil plus a reason when the board cannot be
--- reconciled faithfully (a lane holds more cards than one read returned).
-function sync.diff(desired: { any }, snapshot: any): ({ any }?, string?)
-    local lanes, managed, extras = {}, {}, {}
+-- same board -> no operations. When a lane holds more cards than one read returned (the board
+-- API reads at most 500 and cannot page inside a lane) the unseen cards might already be the
+-- ones we would add, so a truncated read only yields operations that are safe on what was seen:
+-- removals (duplicates, retired entities), moves, checks and edits; never an add or a new lane.
+-- Each removal shrinks the board until a later read sees it whole. Returns ops and whether the
+-- read was truncated, or nil plus a reason when nothing safe can be done on a truncated board.
+local TRUNCATED = "The board holds more cards than one read returns; TODO will not sync it."
+function sync.diff(desired: { any }, snapshot: any): ({ any }?, string?, boolean?)
+    local lanes, managed, extras, truncated = {}, {}, {}, false
     for _, lane in snapshot.lanes or {} do
-        if (lane.more or 0) > 0 then return nil, "The board holds more cards than one read returns; TODO will not sync it." end
+        if (lane.more or 0) > 0 then truncated = true end
         if lane.title then lanes[lane.title] = true end
         for _, card in lane.cards do
             local id = managedId(card)
@@ -77,7 +82,7 @@ function sync.diff(desired: { any }, snapshot: any): ({ any }?, string?)
     end
     local ops, wanted = {}, {}
     for _, lane in sync.LANE_ORDER do
-        if not lanes[lane] then
+        if not lanes[lane] and not truncated then
             local used = false
             for _, d in desired do if d.lane == lane then used = true end end
             if used then table.insert(ops, { op = "add_lane", title = lane }) end
@@ -87,7 +92,7 @@ function sync.diff(desired: { any }, snapshot: any): ({ any }?, string?)
         wanted[d.id] = true
         local current = managed[d.id]
         if not current then
-            table.insert(ops, { op = "add", id = d.id, card = { lane = d.lane, text = d.text, tags = d.tags } })
+            if not truncated then table.insert(ops, { op = "add", id = d.id, card = { lane = d.lane, text = d.text, tags = d.tags } }) end
         else
             local card = current.card
             if current.lane ~= d.lane then
@@ -104,7 +109,8 @@ function sync.diff(desired: { any }, snapshot: any): ({ any }?, string?)
         if not wanted[id] then table.insert(ops, { op = "remove", id = id, card = current.card.id }) end
     end
     for _, card in extras do table.insert(ops, { op = "remove", id = managedId(card), card = card.id }) end
-    return ops, nil
+    if truncated and #ops == 0 then return nil, TRUNCATED end
+    return ops, nil, truncated
 end
 
 local function call(board: any, spec: any, op: any): any
@@ -117,6 +123,7 @@ local function call(board: any, spec: any, op: any): any
 end
 
 local RETRIES = 3
+local MAX_SHRINK_PASSES = 8 -- passes that only shrink a truncated board; each one removed or fixed cards
 local active: { [any]: boolean } = {}
 
 -- Reads the board, applies the operations one at a time, and reads again: when a write fails
@@ -130,6 +137,7 @@ local active: { [any]: boolean } = {}
 -- receives (tern.d.luau Awaitable.next). `enabled` is asked before each read and write, so
 -- turning sync off stops a pass that is already running. done(ok, problem, operations)
 function sync.apply(cx: any, spec: any, plan: any, done: (ok: boolean, problem: string?, count: number) -> (), enabled: (() -> boolean)?)
+    local shrinks = 0
     if active[spec] then done(false, "A board sync is already running.", 0); return end
     active[spec] = true
     local desired = sync.desired(plan)
@@ -151,11 +159,17 @@ function sync.apply(cx: any, spec: any, plan: any, done: (ok: boolean, problem: 
         reading:next(function(snapshot, err, fresh)
             local now = fresh or live
             if err or type(snapshot) ~= "table" then finish(false, "Could not read the board: " .. tostring(err)); return end
-            local ops, why = sync.diff(desired, snapshot)
+            local ops, why, truncated = sync.diff(desired, snapshot)
             if not ops then finish(false, why); return end
             if #ops == 0 then finish(true, nil); return end
             local function step(current: any, index: number)
                 if index > #ops then
+                    if truncated then
+                        shrinks += 1
+                        if shrinks > MAX_SHRINK_PASSES then finish(false, TRUNCATED); return end
+                        pass(current, attempt)
+                        return
+                    end
                     if attempt >= RETRIES then finish(false, "The board kept changing while TODO synced it; it will retry."); return end
                     pass(current, attempt + 1)
                     return

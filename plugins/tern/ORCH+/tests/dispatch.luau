@@ -7426,7 +7426,7 @@ if section == nil or section == "policy_keys" then
 
 		{ "checkout_roots", { { "relative/root" }, { "/" .. string.rep("r", 512) }, { "/a", "/b", "/c", "/d", "/e", "/f", "/g", "/h", "/i" } },
 			{ { "/" .. string.rep("r", 511) }, { "/a", "/b", "/c", "/d", "/e", "/f", "/g", "/h" }, {} } },
-		{ "board_path", { "../escape", runtime.json.null }, { "ORCH+ Board.tern", "/srv/board.md", "" } },
+		{ "board_path", { "../escape", runtime.json.null, "/" .. string.rep("b", 512) }, { "ORCH+ Board.tern", "/srv/board.md", "", "/" .. string.rep("b", 511) } },
 		{ "inbox_folder", { "../escape", runtime.json.null }, { "inbox", "/srv/inbox", "" } },
 		{ "board_lanes", { { queued = "Todo", running = "Doing", review = "Review" }, { queued = "Todo", running = "Doing", review = "Review", done = string.rep("d", 65) },
 			{ queued = "Todo", running = "Doing", review = "Review", done = "Done", extra = "X" } },
@@ -7673,8 +7673,11 @@ if section == nil or section == "loop_caps_retry" then
 		check(over.code == "loop_capped" and g and g.kind == "loop_cap" and f:action(launch).phase == "backpressure" and f:action(launch).retry_loop.count == cap,
 			"cap " .. cap .. ": the next owner retry opens a loop_cap gate and the action stays in backpressure")
 		check(starts(g.question, "Owner retry of full backpressure reached " .. cap .. " attempts; last error: full:window_authorization."), "the retry loop gate names the loop and the last error")
-		local automatic = f:apply("retry", { action_id = launch }); assert(automatic.ok); launch = automatic.action_id
-		check(f:action(launch).retry_loop.count == cap, "automatic recheck uses a fresh identity without counting or bypassing the live owner loop decision")
+		local gated_before = runtime.json.encode(f.authority.registry)
+		local automatic = f:apply("retry", { action_id = launch })
+		check(not automatic.ok and automatic.code == "loop_gated" and f:action(launch).phase == "backpressure"
+			and f:action(launch).retry_loop.count == cap and runtime.json.encode(f.authority.registry) == gated_before,
+			"an automatic recheck cannot bypass the open owner gate: it is refused and creates no replacement action")
 		assert(f:control("reconcile_session").ok)
 		check(state.rehydrate(clone(f.authority.registry)) ~= nil, "a gated retry loop restores")
 		if cap == 1 then
@@ -7712,6 +7715,16 @@ if section == nil or section == "loop_caps_retry" then
 	end
 	local owner = f:apply("retry", { action_id = launch, trigger = "owner" })
 	check(owner.ok and open_loop_gates(f, "full_retry") == 0, "the first owner retry still runs after automatic rechecks")
+	-- A ready action carrying a gated or stopped retry loop can never be claimed.
+	assert(owner.ok)
+	local action = f.authority.registry.dispatch.actions[owner.action_id]
+	for _, state in { "gated", "stopped" } do
+		action.retry_loop = action.retry_loop or { count = 1 }
+		action.retry_loop.state = state
+		local claimed = f:apply("claim", { action_id = owner.action_id, executor = f.origin.window_epoch })
+		check(not claimed.ok and claimed.code == "loop_gated" and f:action(owner.action_id).phase == "ready",
+			"a ready action whose retry loop is " .. state .. " cannot be claimed before the owner answers")
+	end
 end
 if section == nil or section == "loop_caps_reports" then
 	-- Automatic report requests without a new report, at cap 1 and cap 10.

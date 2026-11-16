@@ -33,6 +33,7 @@ local function world(preset)
 			fs = {
 				exists = function(path) return w.files[path] ~= nil end,
 				write = function(path, text) w.files[path] = text end,
+				read = function(path) return assert(w.files[path], "no such file") end,
 				mkdir = function() end,
 			},
 		}
@@ -262,6 +263,26 @@ do
 	w.load("w2").ensure(w.window("w2", false), "spawn")
 	w.run(30000)
 	check(#w.picks == 1 and w.kv["status_prompt.v1"] == nil, "a lost kv flag plus a host restart does not ask again")
+end
+
+-- 14. The host grants and writes the marker, a stale kv write drops the flag AND the request before the winning
+-- window polls: that window still gets its prompt once, and later windows never prompt.
+do
+	local w = world()
+	local host = w.load("host")
+	local winner = w.window("w1", false)
+	w.load("w1").ensure(winner, "spawn")
+	check(host.host_claim() ~= nil, "host grants the pending request")
+	w.kv["status_prompt.v1"] = nil
+	w.kv["status_prompt.v1.request"] = nil
+	w.run(500)
+	check(#w.picks == 1 and w.picks[1].window == "w1", "the winner still gets its prompt after a stale kv write")
+	w.run(5000)
+	check(#w.picks == 1, "the winner is asked exactly once")
+	w.load("w2").ensure(w.window("w2", false), "spawn")
+	w.load("w3").ensure(w.window("w3", false), "spawn")
+	w.run(20000)
+	check(#w.picks == 1, "later windows do not prompt")
 end
 
 -- Each plugin keeps its own flag: two plugins (separate kv stores) each ask once.

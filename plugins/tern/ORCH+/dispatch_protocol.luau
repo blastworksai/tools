@@ -7,6 +7,7 @@ M.NATIVE_COMMAND_BYTES = 65536 -- Existing native setup-event budget; SPAWN's br
 M.SOURCE_INPUT_BYTES = 2048
 M.MANAGED_GENERATION_BUDGET = 16 -- Shared SPAWN mailbox allocation domain, not a logical-task or per-account limit.
 M.DESKTOP_BOARD_PATH_BYTES = 4096
+M.BOARD_SETTING_PATH_BYTES = 512 -- The configured Board location; board opening and sync reject longer paths, so settings must too.
 M.NATIVE_BOARD_ID_BYTES = 6 * M.DESKTOP_BOARD_PATH_BYTES + 128 -- Opaque native JSON identity, including escaped full path and bounded model/row framing.
 
 -- No native or mailbox-file effect; SPAWN only records these operations' own outcome.

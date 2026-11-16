@@ -131,6 +131,12 @@ return {
     end},
     {"validate counts characters, not bytes, and caps total entities",function()
         assert(view.validate(detailed(function(p) p.checkpoints[3].text=string.rep("\u{1F600}",240) end))==nil)
+        -- Python str.strip() removes Unicode whitespace: edge U+00A0/U+3000/U+2003 must not count as content.
+        local nb="\u{00A0}"
+        assert(view.validate(detailed(function(p) p.checkpoints[3].text=nb..string.rep("a",240)..nb end))==nil)
+        assert(view.validate(detailed(function(p) p.checkpoints[3].text="\u{3000}\u{2003}"..string.rep("a",240).."\u{2028}" end))==nil)
+        assert(view.validate(detailed(function(p) p.checkpoints[3].text=nb..string.rep("a",241)..nb end))~=nil)
+        assert(view.validate(detailed(function(p) p.checkpoints[3].text=nb..nb end))~=nil)
         assert(view.validate(detailed(function(p) p.checkpoints[3].text=string.rep("\u{1F600}",241) end))~=nil)
         local p=detailed(function(p) p.checkpoints={} for c=1,30 do local t={} for i=1,20 do t[i]={id="t"..c.."x"..i,text="t",state="pending"} end p.checkpoints[c]={id="c"..c,text="c",state="pending",tasks=t} end p.current=nil end)
         assert(view.validate(p)~=nil)

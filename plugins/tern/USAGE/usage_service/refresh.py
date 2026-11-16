@@ -379,7 +379,8 @@ class Refresh:
         for item in definitions:
             spec = item.get("spec")
             # source_uid already fixes the OS user; the user spelling must not split one context.
-            key = ((spec["kind"], spec["source_uid"], encode(spec["selectors"]))
+            # The executable path is part of the context: two SPAWN entries naming different binaries must each run their own.
+            key = ((spec["kind"], spec["source_uid"], encode(spec["selectors"]), spec.get("command"))
                    if spec is not None else (item["scope_id"], item["id"]))
             contexts.setdefault(key, []).append(item)
         pending = iter(contexts.values())

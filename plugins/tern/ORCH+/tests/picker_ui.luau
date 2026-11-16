@@ -50,7 +50,7 @@ local function fixture(options)
 		end,
 		catalog = function(_, _, _, cursor) local id = next_id(); table.insert(f.requests, { id = id, cursor = cursor }); return id end,
 		snapshot = function(_, _, action) return if action then f.outcomes[action] else { command_result = f.receipt, driver_result = f.unrelated } end,
-		transport = function() return if f.no_usage then nil else 30 end,
+		transport = function() return if f.no_usage then nil elseif f.pane_table then f.pane_table else 30 end,
 		surface = function() return { id = "display" }, if f.response then runtime.json.encode(f.response) else nil end,
 		event = function(_, _, event) table.insert(f.events, runtime.json.decode(event.value)); return true end,
 		ack = function() f.acks = (f.acks or 0) + 1; return true end,
@@ -236,6 +236,17 @@ do
 	f.current = false; f:tick(); check(not f.ui.active() and #f.selected == 0, "lost controller cancels without selection")
 end
 
+do
+	-- A USAGE restart between display pages must not leave an abandoned reader blocking later reads.
+	local f = fixture(); f.pane_table = {}; f:open(); f:settle(page({ record("a") }))
+	local rows = { f:reading("a") }; for n = 2, 16 do table.insert(rows, f:reading("other-" .. n)) end
+	f:usage(rows, false, 16); f:tick()
+	check(#f.events == 2 and f.events[2].op == "page", "second display page is in flight")
+	f.response = nil; f.pane_table.peer_changed = true; f:tick()
+	f:tick() -- the restarted helper keeps the old read's identity; the drain must release it.
+	f.pane_table.peer_changed = nil; f:tick(); f:tick()
+	check(#f.events >= 3 and f.events[#f.events].op == "snapshot", "after a helper restart a fresh usage snapshot read starts")
+end
 do
 	local f = fixture(); local loaded, selected, full
 	f.ui.load(f.cx, 1, {}, function(_, value) loaded = value end)

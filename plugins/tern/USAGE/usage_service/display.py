@@ -192,7 +192,12 @@ class Display:
                     if session["authority"] != authority:
                         raise ServiceError("forbidden", 403)
                     # Copy through JSON so callers cannot mutate the frozen revision.
-                    return decode(session["pages"][cursor])
+                    page = decode(session["pages"][cursor])
+                    if page.get("complete"):
+                        # The final page ends the read: free the session now. A retried final page
+                        # answers 410 "expired"; the window restarts from the first page on any failed read.
+                        self.sessions = {key: value for key, value in self.sessions.items() if value is not session}
+                    return page
             raise ServiceError("expired", 410)
         limits = self.store.settings()
         tokens, pages = self._freeze(authority, limits)
