@@ -36,8 +36,8 @@ For stages 3, 4, 5 and 7 it shapes what goes into those skills.
   Name real models only in the mapping.
   The first mapping goes in file 00.
   The final mapping goes in file 06.
-  `/glitch-execute` runs every builder at the one builder level its plan names.
-  The tier per part guides that choice.
+  There is one plan, and `/glitch-execute` runs every builder at the one level it names.
+  The tier per part guides the brief's task wording and the critic.
 - Ask the user every decision through the structured question tool your host offers.
   Put your recommendation first.
 - Say plainly what you did not check.
@@ -47,17 +47,16 @@ For stages 3, 4, 5 and 7 it shapes what goes into those skills.
 Run this first, every time.
 
 1. List the `studio/` folder at the root of the project.
-2. If it is missing, this is a cold start.
-   Begin at stage 0.
+2. If it is missing, begin at stage 0.
 3. If it exists, read every file.
    A file without the three ending lines is unfinished.
    Finish it first.
    A `pending` value does not make a file unfinished.
    Stage 7 must replace it.
-4. If files 03, 04 and 05 say `Plan: not yet made`, continue the `/glitch-plan` hand-off.
+4. If any of files 03, 04 and 05 says `Plan: not yet made`, continue the `/glitch-plan` hand-off.
    Give the user the brief again.
    When the plan exists, replace the placeholder in all three files before stage 6.
-5. If file 07 says `Picked: pending`, STOP until the build has run.
+5. If file 07 says `Picked: pending`, STOP until the build and every fix task have run.
    Then update file 07 first.
    Then do the stage 7 resume steps.
 6. Otherwise continue at the first missing number.
@@ -82,10 +81,8 @@ Write `studio/00-frame.md`.
    If the idea is new or unclear, suggest `/glitch-idea` to the user and wait.
    If the user already has an idea record or a clear brief, use it.
 4. Ask the user who the product is for and what "done" looks like.
-5. Name the hard parts.
-   Stage 1 reads them.
-6. Name the outside platforms or APIs.
-   Stage 2 reads them.
+5. Name the hard parts (stage 1 reads them).
+6. Name the outside platforms or APIs (stage 2 reads them).
 7. Note whether the product has a visual part.
    Note whether it calls a model while it runs.
 8. Read [model-tiers.md](references/model-tiers.md).
@@ -139,9 +136,10 @@ These three stages are one hand-off to `/glitch-plan`.
    See [runtime-models.md](references/runtime-models.md).
    If there is one part and nothing shared, the brief has no contracts checkpoint.
    The freeze point is then the base commit before the first lane.
-   `/glitch-execute` runs all builders at one level.
-   If parts need clearly different tiers, split them into separate plans.
-   Each plan has its own brief and its own level.
+   There is one plan, and `/glitch-execute` runs every builder at the one level that plan names.
+   The user chooses that level at the stop of `/glitch-plan`.
+   If any part is deep tier, tell the user to ask `/glitch-plan` for a higher builder level at that stop.
+   If no part is deep tier, the default level is fine.
 5. Write `studio/03-parts-and-specs.md`.
    It lists the parts and holds the filled brief.
    For a visual part it holds the art-direction path and the screenshot sizes.
@@ -149,7 +147,7 @@ These three stages are one hand-off to `/glitch-plan`.
    It records the exact contract text, which contracts there are, where they live, and the rule that only the studio orchestrator changes them.
    The first checkpoint's builder writes that text into the contracts place.
    The `/glitch-execute` orchestrator checks that the file equals the text and commits it as the freeze commit.
-   Before the build, write `pending` for the freeze commit and for "Changes after freeze".
+   Before the build, write `pending` for the freeze commit and "Changes after freeze".
    With no contracts, record the base commit and write `Picked: none` with the reason.
 7. Write `studio/05-lanes.md`.
    It records the lanes the brief asks for: one per part, each with one folder scope and a tier from the latest mapping.
@@ -162,7 +160,6 @@ These three stages are one hand-off to `/glitch-plan`.
 
 The plan is the source of truth for the tasks.
 Files 04 and 05 record what was asked and where the plan is.
-They do not replace the plan.
 
 ## Stage 6 — Model per job
 
@@ -179,7 +176,7 @@ Stage 7 resume records what happened.
    Use only models this session can actually reach.
 4. Name the model family of each one.
    The critic needs a different family from the author.
-5. Record the intended tiers and the one builder level each plan names.
+5. Record the intended tiers and the builder level you expect the plan to name.
    Write `pending` for "Tiers actually used".
 
 ## Stage 7 — Review and integrate
@@ -201,7 +198,7 @@ On resume after the build, do these steps in order:
 2. Fill in file 05: "Stops raised".
    A lane that needed a contract change stopped and asked.
    Record each stop in file 07 too.
-3. Fill in file 06: "Tiers actually used", and any revision the build drove.
+3. Fill in file 06: "Tiers actually used", the builder level the plan actually names, and any revision the build drove.
 4. Record the plan's archived path (under `plans/archive/`) in files 03, 04 and 05, beside the original path.
 5. Read the lane commits in order from git history.
    On this road, lanes commit in order on the same branch, one commit per lane, scoped to its folder.
@@ -215,9 +212,13 @@ On resume after the build, do these steps in order:
 7. A defect goes back as a fix task through `/glitch-plan`.
    Give the user the task text to paste after `/glitch-plan` in a fresh window.
    Then give the `/glitch-execute` line it prints.
-8. File 07 records for each lane: the review result, the findings, the critic's model and family (or "same-family"), the critic's result, the lane commit and the test result after that commit.
+   File 07 stays `Picked: pending` until every fix task found at this stage has run.
+8. Every repair commit, from stage 7, 8 or 9, gets the same read-only cross-family review.
+   Rerun the tests after it.
+   Record both in file 07 under its lane, before the stage 8 proof or the finish.
+9. File 07 records for each lane: the review result, the findings, the critic's model and family (or "same-family"), the critic's result, the lane commit and the test result after that commit.
    It also records the commit order and the user's decision when a review was same-family.
-   Replace `Picked: pending`.
+   Replace `Picked: pending` only when every fix task has run.
 
 ## Stage 8 — Prove it
 
@@ -232,7 +233,8 @@ This stage is never `none`.
    You do not fix product code yourself.
    Give the user the task text to paste after `/glitch-plan` in a fresh window.
    Then give the `/glitch-execute` line it prints.
-   After the fix is committed, prove the part again.
+   Review the repair commit as in stage 7 resume step 8.
+   After that, prove the part again.
 
 ## Stage 9 — Models inside the product
 
@@ -248,7 +250,10 @@ Read [runtime-models.md](references/runtime-models.md) and follow it.
 3. If a check fails, write a fix task for the owning lane.
    Give the user the task text to paste after `/glitch-plan` in a fresh window.
    Then give the `/glitch-execute` line it prints.
-   After the fix is committed, refresh the stage 8 proof for that part.
+   After the repair commit, review it as in stage 7 resume step 8.
+   Rerun every failed stage 9 check.
+   Record the new result and evidence in file 09.
+   Then refresh the stage 8 proof for that part.
 
 ## Finish
 

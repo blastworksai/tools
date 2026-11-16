@@ -17,7 +17,8 @@ A part is visual if a person looks at it.
    You do not fix product code yourself.
    Give the user the task text to paste after `/glitch-plan` in a fresh window.
    Then give the `/glitch-execute` line it prints.
-   After the fix is committed, take new screenshots.
+   Review the repair commit as in stage 7 resume step 8 of the skill.
+   After that, take new screenshots.
    Repeat until the screenshots match.
 6. Check that each image file has the size you named.
 7. Save the images in the project and list their paths.
@@ -32,7 +33,8 @@ A part is visual if a person looks at it.
 5. Send each defect back to the owning lane as a fix task.
    Give the user the task text to paste after `/glitch-plan` in a fresh window.
    Then give the `/glitch-execute` line it prints.
-   After the fix is committed, run the part again.
+   Review the repair commit as in stage 7 resume step 8 of the skill.
+   After that, run the part again.
 
 ## The evidence file
 
@@ -43,5 +45,6 @@ It holds one block per part:
 - `Proof:` screenshot paths with sizes, or the command and result.
 - `Judged against:` the art direction path, or the expected output.
 - `Result:` pass or fail, in plain words.
+- `What is wrong:` each defect still open, or `nothing`.
 
 Then the ending lines.

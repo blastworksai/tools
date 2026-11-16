@@ -43,7 +43,10 @@ Record one audit line for each, with its result and evidence.
 If a check fails, write a fix task for the owning lane.
 Give the user the task text to paste after `/glitch-plan` in a fresh window.
 Then give the `/glitch-execute` line it prints.
-After the fix is committed, refresh the stage 8 proof for that part.
+After the repair commit, review it as in stage 7 resume step 8 of the skill.
+Rerun every failed stage 9 check.
+Record the new result and evidence in `studio/09-runtime-models.md`.
+Then refresh the stage 8 proof for that part.
 
 ## The evidence file
 
@@ -57,6 +60,6 @@ After the fix is committed, refresh the stage 8 proof for that part.
 
 It also holds one audit line per rule, with its result and evidence.
 It holds one audit line each for least access, reply validation and the fail-closed fallback, with result and evidence.
-It lists any fix task and the refreshed stage 8 proof.
+It lists any fix task, the rerun result and evidence of each failed check, and the refreshed stage 8 proof.
 
 Then the ending lines.

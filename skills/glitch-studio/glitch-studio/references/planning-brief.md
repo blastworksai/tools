@@ -31,10 +31,10 @@ List them in the plan's context references as mandatory reading:
 
 The tier mapping is: <list: tier, model, from the latest mapping>.
 Each part has one tier: <list: part, tier>.
-The tier guides the builder level.
-`/glitch-execute` runs every builder at the one level this plan names.
-Choose that level for the hardest part in this plan.
-This plan covers only parts that fit one level: <list of parts>.
+The tier guides the task wording and the critic.
+There is one plan.
+`/glitch-execute` runs every builder at the one builder level this plan names.
+The builder level is chosen at the stop of `/glitch-plan`.
 
 ## Runtime models
 

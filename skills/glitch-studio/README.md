@@ -37,9 +37,10 @@ Each stage writes one evidence file in a `studio/` folder in your project.
 6. **Model per job (6).** Four tiers (deep, standard, bulk, light) mapped to the models your session can reach.
    The first mapping is made at stage 0, before the scouts start.
    Stage 6 records the intended mapping before the build, and the tiers actually used are filled in after it.
-   `/glitch-execute` runs every builder at one level, so parts with very different tiers go in separate plans.
+   There is one plan, and `/glitch-execute` runs every builder at the one level it names.
+   You choose that level at the stop of `/glitch-plan`, and the skill tells you when a deep part needs a higher one.
 7. **Review and integrate (7).** `/glitch-execute` with Glitch orchestration runs the lanes.
-   A reviewer of another model family reads every lane.
+   A reviewer of another model family reads every lane and every repair commit.
    Lanes commit in order, one commit each, and the tests run after each.
 8. **Prove (8).** Visual parts get screenshots at fixed sizes.
    Every other part gets a real run.
@@ -48,7 +49,7 @@ Each stage writes one evidence file in a `studio/` folder in your project.
 
 If the `studio/` folder already holds files, the skill reads them all.
 It finishes any file that lacks the three ending lines first.
-It finishes an open plan hand-off, and it stops while the build has not run.
+It finishes an open plan hand-off, and it stops while the build or any fix task has not run.
 Then it resumes at the first missing number.
 
 ## How to use it
