@@ -1,5 +1,8 @@
 # Stage 6. Model per job
 
+You choose the mapping in stage 5, before the first lane starts, because each lane needs a tier.
+Stage 6 writes it down.
+
 Different jobs need different amounts of thinking.
 Pay for deep thinking only where a mistake is costly.
 Use cheaper work for volume.
@@ -15,7 +18,7 @@ Use cheaper work for volume.
 
 1. List the models you can actually reach in this session. Do not assume. Try them if you must.
 2. For each tier, pick the model and the effort setting that fits. If you reach only one model, map every tier to it and vary only the effort.
-3. Write the mapping table in `studio/06-model-tiers.md`.
+3. Write the mapping table in `studio/06-model-tiers.md` (in stage 6, from the mapping you used in stage 5).
 4. If a tier has no fitting model, say so. Use the nearest and record the gap.
 
 The mapping belongs to this build.
@@ -42,6 +45,7 @@ Contains:
 
 - The mapping table: tier, model, effort, reachable (yes or no).
 - A tier for every part, with one line why.
+- The tiers the lanes actually used, one per lane.
 - The critic line: model and family, or "none reachable".
 
 End with the three lines.

@@ -26,8 +26,11 @@ The wording here is ours.
 
 At the start, read the `studio/` folder.
 If it does not exist, begin at stage 0.
-If it exists, continue at the first missing number.
-Never redo a stage whose file exists unless the user asks.
+If it exists, read every file.
+A file without the three ending lines is unfinished.
+Finish it first.
+Otherwise continue at the first missing number.
+Never redo a finished stage unless the user asks.
 Tell the user in one line where you are: "stage 5 of 9 next".
 
 Each evidence file ends with three lines: `Picked: ...`, `Left out: ...`, `Why: ...`.
@@ -39,8 +42,9 @@ You are an orchestrator, not a typist.
 Spend your context on contracts, review and integration.
 Give typing work to lanes.
 Ask the user for the product in one paragraph, who it is for and what "done" looks like.
-Note whether the product has a visual part, calls outside platforms, or calls a model at runtime.
-Write `studio/00-frame.md` with: role, product, the three notes above, and the project's git state.
+Name the hard parts (stage 1 reads them) and the outside platforms or APIs (stage 2 reads them).
+Note whether the product has a visual part and whether it calls a model at runtime.
+Write `studio/00-frame.md` with: role, product, who it is for, what "done" means, the hard parts, the outside platforms, the visual and runtime-model notes, and the project's git state.
 STOP if the project is not in git. Ask the user to start a repository.
 
 ## Stage 1. Study reference
@@ -63,6 +67,7 @@ With no outside platform, write it with `Picked: none`.
 Read [references/specs-and-contracts.md](references/specs-and-contracts.md).
 Split the product into separable parts.
 Write one spec per part, each with a task list where one task is one check and one commit.
+If a part calls a model at runtime, write the five runtime-model rules into its spec as tasks (see [references/runtime-models.md](references/runtime-models.md)).
 Write `studio/03-parts-and-specs.md`.
 STOP and show the user the list of parts. Continue on their yes.
 
@@ -71,6 +76,7 @@ STOP and show the user the list of parts. Continue on their yes.
 Read the same file, section on contracts.
 Write every shared type and interface in one contracts place.
 Commit it before any lane starts.
+With one part and nothing shared, skip the contracts: record the base commit as the freeze point and write `Picked: none`.
 Only you change it from now on.
 Write `studio/04-contracts.md`.
 
@@ -78,20 +84,21 @@ Write `studio/04-contracts.md`.
 
 Read [references/lanes.md](references/lanes.md).
 Give each spec its own worktree and one folder scope.
-Before you start a lane, choose its tier with [references/model-tiers.md](references/model-tiers.md).
+Before you start any lane, read [references/model-tiers.md](references/model-tiers.md).
+Check which models you can reach, map the four tiers to them and pick a tier for each lane.
 Start one fresh lane per spec.
 A lane follows the loop: take the next task, write its check, see it fail, make it pass, commit, repeat.
 A lane never edits outside its scope.
 A lane that needs a contract change stops and asks you.
-Write `studio/05-lanes.md`: lane, branch, folder scope, task count.
+Write `studio/05-lanes.md`: lane, branch, folder scope, task count, tier chosen.
 
 ## Stage 6. Model per job
 
 Read [references/model-tiers.md](references/model-tiers.md).
 Use four tiers: deep, standard, bulk, light.
-Check which models you can actually reach.
-Write the mapping, tier to model, in `studio/06-model-tiers.md`, and a tier for every part.
-Record the tiers the lanes in stage 5 actually used.
+The mapping and the lane tiers were chosen in stage 5, before the lanes started.
+Write that mapping, tier to model, in `studio/06-model-tiers.md`, and a tier for every part.
+Record the tiers the lanes actually used.
 
 ## Stage 7. Review and integrate
 
@@ -116,7 +123,10 @@ Write `studio/08-proof.md`.
 Read [references/runtime-models.md](references/runtime-models.md).
 Do this only if the product itself calls a model.
 If not, write `studio/09-runtime-models.md` with `Picked: none` and the reason.
-Otherwise design the typed grammar, the deterministic builder, the double read, the call budget and the code-based scoring.
+Otherwise audit every runtime model call against all five rules: typed grammar, deterministic builder, two independent reads before a refusal, call budget, code-based scoring.
+The rules were written into the specs in stage 3.
+Record one check per rule, with its result.
+If any check fails, send a fix task to the owning lane and refresh the stage 8 proof for that part.
 
 ## When you finish
 

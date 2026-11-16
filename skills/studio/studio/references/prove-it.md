@@ -16,7 +16,7 @@ A visual part is anything a person looks at: a page, a panel, a scene, an image,
 4. Take a screenshot of the part at each size. Save it in the project, for example `proof/<part>-<width>x<height>.png`.
 5. Check the real image size is the size you meant. Read the file header, do not trust the tool.
 6. Judge each screenshot against the art direction. Write what matches and what does not.
-7. Fix what is wrong. Take new screenshots. Repeat.
+7. Send each defect back to the owning lane as a new task. After the lane's fix is merged, take new screenshots. Repeat.
 8. Check for overlap, clipped text and anything that crosses another element.
 
 ## Every other part
@@ -25,7 +25,7 @@ A part with no visual output still needs a real run.
 
 1. Run the real code, with real input, as a user would. Not only unit tests.
 2. Keep the command and its real output in `proof/<part>-run.md`.
-3. Include one case that should fail and show that it fails the right way.
+3. Include one case that should fail and show that it fails the right way. If the real run shows a defect, send it back to the owning lane as a new task, then run again after the fix is merged.
 4. For a part that calls an outside platform, use a safe sandbox or fixture if one exists. Do not use real money or real user data.
 
 ## Rules

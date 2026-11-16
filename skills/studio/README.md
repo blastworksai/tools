@@ -35,15 +35,17 @@ Each stage writes one evidence file, so you can see where a build stands and a s
 
 ## How to use it
 
-**An agent that loads skills:** copy the inner [`studio/`](studio/) folder into your agent's skills folder (for example `~/.claude/skills/`), then say "build this the studio way" and describe the product.
+**An agent that loads skills:** copy the inner [`studio/`](studio/) folder into the folder your agent loads skills from, then say "build this the studio way" and describe the product.
 
 **Any other agent:** the prompts are in [`prompts.md`](prompts.md).
 Paste them one stage at a time, in order, and let the agent finish each stage before the next.
 
 Each stage writes a file into a `studio/` folder at the root of your project, from `studio/00-frame.md` to `studio/09-runtime-models.md`.
 To resume, start the skill again in the same project.
-It reads that folder and continues at the first missing number.
-It never redoes a stage whose file exists unless you ask.
+It reads that folder.
+A file without the three ending lines is unfinished, so it finishes that file first.
+Otherwise it continues at the first missing number.
+It never redoes a finished stage unless you ask.
 The file format is in [`studio/references/evidence.md`](studio/references/evidence.md).
 
 ## You need

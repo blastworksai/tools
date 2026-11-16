@@ -6,10 +6,11 @@ A lane is one fresh agent session working one spec.
 
 For each spec:
 
+0. Before the first lane, check which models you can reach, map the four tiers to them and pick a tier for each lane. Use [model-tiers.md](model-tiers.md). Write down the lane tiers; stage 6 records them.
 1. Make a git worktree on its own branch, cut from the commit that froze the contracts.
 2. Give the lane the spec path and tell it its folder scope.
 3. Tell the lane to read the domain skills and study notes the spec names.
-4. Start a fresh sub-agent or fresh session. It must not inherit your conversation.
+4. Start a fresh sub-agent or fresh session at the lane's tier. It must not inherit your conversation.
 
 Run lanes in parallel only when their folder scopes do not overlap.
 Run them one after another when they do.
@@ -47,7 +48,7 @@ The lane repeats this until the task list is done:
 
 ## Evidence file: `studio/05-lanes.md`
 
-One row per lane: lane name, spec, branch, worktree path, folder scope, task count, commit count, stops raised.
+One row per lane: lane name, spec, branch, worktree path, folder scope, task count, commit count, tier chosen, stops raised.
 End with the three lines.
 `Picked:` the lanes started, each by name.
 `Left out:` specs you did not start, and why.

@@ -24,7 +24,8 @@ If no part qualifies, write the evidence file with `Picked: none`.
 
 ## Rules
 
-- Never fetch anything without the user's yes.
+- Never download, clone or install anything without the user's yes.
+- Reading a project page in a browser needs no yes.
 - Never copy code whose licence you did not read.
 - Ideas and designs need credit too. Name the source in the code and in the notices file.
 - If a licence is unclear, write that, and treat the code as not reusable.

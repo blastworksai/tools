@@ -5,6 +5,11 @@ A model that only helped build the product does not count.
 
 If the product calls no model at runtime, write `studio/09-runtime-models.md` with `Picked: none` and the reason in `Why:`.
 
+The five rules are decided early.
+In stage 3, every part that calls a model at runtime gets the five rules written into its spec as tasks.
+The lane builds them with the rest of the part.
+Stage 9 does not design them. It audits them.
+
 ## Five rules
 
 ### 1. The model chooses from a typed grammar
@@ -42,6 +47,13 @@ Do not ask a model to grade its own output.
 Score with code: size limits, valid shape, rule checks, measured features.
 Reject and retry within the budget when the score is low.
 
+## The stage 9 audit
+
+After build and proof, check every runtime model call against all five rules.
+Record one check per rule, with its result (pass or fail and the evidence).
+If any check fails, send a fix task to the owning lane.
+After the lane's fix is merged, refresh the stage 8 proof for that part.
+
 ## Extra points
 
 - Use the cheapest tier that does the job at runtime. Write which tier each call uses.
@@ -51,8 +63,9 @@ Reject and retry within the budget when the score is low.
 
 ## Evidence file: `studio/09-runtime-models.md`
 
-Contains: each runtime model call, its tier, its grammar, the builder that uses the result, the two-read rule, the budget number and the scoring checks.
+Contains: each runtime model call, its tier, its grammar, the builder that uses the result, the budget number and the scoring checks.
+It also holds one line per rule with its audit result, and any fix task sent back with the refreshed proof.
 End with the three lines.
-`Picked:` the design choices made.
+`Picked:` the runtime calls audited, each by name, or `none`.
 `Left out:` runtime uses of a model you rejected.
 `Why:` one sentence.

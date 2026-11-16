@@ -23,6 +23,7 @@ Each spec holds:
 - Study notes it must read: from stage 1.
 - Art direction, if the part is visual.
 - A task list.
+- For a part that calls a model at runtime: one task for each of the five rules in [runtime-models.md](runtime-models.md).
 
 Write each spec so that a fresh session can pick it up cold.
 It has no memory of your conversation.
@@ -38,7 +39,7 @@ A task that edits outside the spec's folder is wrong. Move it or change the spec
 
 ### Evidence file: `studio/03-parts-and-specs.md`
 
-One row per part: part, spec path, folder scope, task count, contracts used.
+One row per part: part, spec path, folder scope, task count, contracts used, calls a model at runtime (yes or no).
 End with the three lines.
 `Picked:` the parts, each by name.
 `Left out:` what you decided not to build.
@@ -58,6 +59,8 @@ Put all contracts in one place, for example a `contracts/` folder or one shared 
 Write them yourself, as the orchestrator.
 Commit them before any lane starts.
 That commit must come before every lane's first commit.
+With one part and nothing shared, there is no contract file.
+Record the base commit before the first lane as the freeze point, skip writing and committing contracts, and write `Picked: none` with the reason.
 
 ### Freeze them
 
@@ -85,4 +88,4 @@ End with the three lines.
 `Picked:` the contracts, each by name.
 `Left out:` shared things you decided stay local to one part.
 `Why:` one sentence.
-With one part only and no sharing, write `Picked: none` and the reason.
+With one part only and no sharing, write the base commit as the freeze point, then `Picked: none` and the reason.
