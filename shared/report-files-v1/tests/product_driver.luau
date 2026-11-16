@@ -3,6 +3,11 @@
 local directory = tern.plugin.data
 pcall(tern.fs.mkdir, directory)
 local last
+local focus_revisions = {}
+tern.on("focus", function(_event, cx)
+	local key = cx:window_key()
+	focus_revisions[key] = (focus_revisions[key] or 0) + 1
+end)
 local function text(node)
 	local p = node.p or {}
 	if type(p.text) == "string" then return p.text end
@@ -14,6 +19,17 @@ local function buttons(node, label, found)
 	if type(node) ~= "table" then return end
 	if node.p and node.p.actions and node.p.actions.click and text(node) == label then table.insert(found, node) end
 	for _, child in node.c or {} do buttons(child, label, found) end
+end
+local function command_buttons(node, command, found)
+	if type(node) ~= "table" then return end
+	local p = node.p or {}
+	local attrs = p.attrs or {}
+	if p.actions and p.actions.click and not p.disabled and not attrs.disabled
+		and attrs["data-orchplus-command"] == command.command
+		and (command.worker_id == nil or attrs["data-orchplus-worker"] == command.worker_id) then
+		table.insert(found, node)
+	end
+	for _, child in node.c or {} do command_buttons(child, command, found) end
 end
 local function gate_button(node, gate, label)
 	if type(node) ~= "table" then return nil, false end
@@ -34,8 +50,9 @@ local function preferences(node, found)
 	if node.p and node.p.sections and node.p.pages then table.insert(found, node) end
 	for _, child in node.c or {} do preferences(child, found) end
 end
-local FOCUS_INPUT = { open=true, focus=true, close=true, click=true, click_gate=true, preference=true, event=true }
-local function operation(command, cx)
+local ASYNC = {}
+local FOCUS_INPUT = { open=true, focus=true, close=true, click=true, click_gate=true, click_command=true, preference=true, event=true }
+local function operation(command, cx, done)
 	if command.pane and FOCUS_INPUT[command.op] then cx.layout:focus(command.pane) end
 	if command.op == "open" then
 		local args = command.args or {}
@@ -44,21 +61,27 @@ local function operation(command, cx)
 	elseif command.op == "focus" then return true
 	elseif command.op == "close" then cx.layout:close(command.pane); return true
 	elseif command.op == "surface" then
-		return cx.session:surface(command.pane, { root = command.root, nodes = 1000, depth = 20, max_chars = 64000 })
-	elseif command.op == "click" or command.op == "click_gate" then
+		return cx.session:surface(command.pane, { root = command.root, nodes = command.nodes or 1000,
+			depth = command.depth or 20, max_chars = command.max_chars or 64000 })
+	elseif command.op == "click" or command.op == "click_gate" or command.op == "click_command" then
 		local tree = cx.session:surface(command.pane, { nodes = 1000, depth = 20, max_chars = 64000 })
 		assert(type(tree) == "table", "native surface unavailable")
 		local found = {}
 		if command.op == "click_gate" then
 			local button = gate_button(tree.main, command.gate_id, command.label)
 			if button then table.insert(found, button) end
-		else buttons(tree.main, command.label, found) end
-		assert(#found == 1, "expected exactly one native button: " .. command.label .. "; found " .. #found)
+		elseif command.op == "click_command" then command_buttons(tree.main, command, found)
+		else
+			-- Canvas pickers expose their actual visible controls in the dock.
+			buttons(tree.main, command.label, found)
+			buttons(tree.dock, command.label, found)
+		end
+		assert(#found == 1, "expected exactly one enabled native control: " .. tostring(command.label or command.command) .. "; found " .. #found)
 		local node = found[1]
 		local action = node.p.actions.click
 		local act, value = action:match("^([^=]+)=(.*)$")
 		cx.session:event(command.pane, { ev = "action", id = node.id, act = act or action, value = value })
-		return { label = command.label, event = action, node = node.id }
+		return { label = text(node), event = action, node = node.id, command = command.command }
 	elseif command.op == "preferences" or command.op == "preference" then
 		local tree = cx.session:surface(command.pane, { nodes = 1000, depth = 20, max_chars = 64000 })
 		if type(tree)~="table" then
@@ -112,6 +135,14 @@ local function operation(command, cx)
 		cx.session:event(command.pane, command.event); return true
 	elseif command.op == "settings" then return cx.settings:set_many(command.values)
 	elseif command.op == "panes" then return cx.session:panes()
+	elseif command.op == "pane_read" then return cx.session:read(command.pane)
+	elseif command.op == "doc_open" then return cx.docs:open(command.path, { how = "tab" })
+	elseif command.op == "doc_read" then
+		cx.docs:read(command.path):next(done)
+		return ASYNC
+	elseif command.op == "doc_edit" then
+		cx.docs:edit(command.path, command.spec):next(done)
+		return ASYNC
 	elseif command.op == "agents" then
 		local result = {}
 		for _, agent in cx.agents:list() do
@@ -119,7 +150,13 @@ local function operation(command, cx)
 				state = agent.state, delivery_error = agent.delivery_error })
 		end
 		return result
-	elseif command.op == "context" then return { host = cx.hosts:current(), session = cx.sessions:current(), window = cx:window_key() }
+	elseif command.op == "session_create" then
+		return cx.sessions:create({ name = command.name, cwd = command.cwd })
+	elseif command.op == "session_switch" then
+		assert(type(command.session) == "number", "session_switch requires an observed exact numeric session id")
+		cx.sessions:switch(command.session)
+		return cx.sessions:current()
+	elseif command.op == "context" then return { host = cx.hosts:current(), session = cx.sessions:current(), window = cx:window_key(), focused = cx.session:focused(), focus_revision = focus_revisions[cx:window_key()] or 0 }
 	else error("unknown product UI operation " .. tostring(command.op)) end
 end
 local announced = false
@@ -136,8 +173,15 @@ local function tick(cx)
 		local decoded, command = pcall(tern.json.decode, bytes)
 		if decoded and command.id ~= last and (command.window_key == nil or command.window_key == cx:window_key()) then
 			last = command.id
-			local ok, result = pcall(operation, command, cx)
-			tern.fs.write(directory .. "/response.json", tern.json.encode({ id = last, ok = ok, result = if ok then result else nil, error = if ok then nil else tostring(result) }))
+			local function respond(value, failure)
+				tern.fs.write(directory .. "/response.json", tern.json.encode({
+					id = command.id, ok = failure == nil, result = if failure == nil then value else nil,
+					error = if failure == nil then nil else tostring(failure),
+				}))
+			end
+			local ok, result = pcall(operation, command, cx, respond)
+			if not ok then respond(nil, result)
+			elseif result ~= ASYNC then respond(result, nil) end
 		end
 	end
 	tern.timer(25, tick)

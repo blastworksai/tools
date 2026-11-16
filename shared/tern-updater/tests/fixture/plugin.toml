@@ -4,3 +4,9 @@ name = "Updater Fixture"
 version = "0.1.0"
 host = "host.luau"
 window = "window.luau"
+
+[[blocks]]
+id = "updater-recovery"
+title = "Updater legacy recovery"
+icon = "download"
+palette = false

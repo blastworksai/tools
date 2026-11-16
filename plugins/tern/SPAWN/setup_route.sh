@@ -6,6 +6,7 @@ output=$1 nonce=$2 value=$3
 case "$nonce" in ''|*[!a-z0-9_-]*) exit 1;; esac
 [ "$#" = 3 ] && [ ! -e "$output" ] && [ ! -L "$output" ] || exit 1
 case "$output" in /*) ;; *) exit 1;; esac
+case "$output" in *'/../'*|*'/./'*|*'//'*) exit 1;; esac
 parent=${output%/*}
 while [ -n "$parent" ] && [ "$parent" != / ]; do
  [ ! -L "$parent" ] && [ -d "$parent" ] || exit 1

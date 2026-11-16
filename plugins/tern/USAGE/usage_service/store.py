@@ -52,7 +52,7 @@ def _retain_muse_observations(reading: dict[str, Any], previous: dict[str, Any] 
 
 SCHEMA = 1
 DEFAULTS = {
-    "role": "standalone", "export_enabled": False, "metadata_enabled": False, "capacity_enabled": False,
+    "role": "standalone", "export_enabled": False, "metadata_enabled": False, "capacity_enabled": False, "display_enabled": False,
     "sharing_bind": None, "sharing_port": 0, "paused": False,
     "max_sources": 128, "max_publishers": 2048, "max_total_bytes": 32 * MAX_BODY,
     "max_inventory": 100_000, "max_page_bytes": MAX_BODY,
@@ -120,10 +120,14 @@ _DDL = (
 
 
 class Store:
-    def __init__(self, root: Path, clock=time.time):
+    def __init__(self, root: Path, clock=time.time, monotonic=time.monotonic):
         self.root = Path(root).absolute()
         self.path = self.root / "state.sqlite3"
         self.clock = clock
+        self.monotonic = monotonic
+        # Persist the public wall-clock TTL as before; an in-process monotonic
+        # bound prevents clock rollback from retaining an abandoned client.
+        self._client_deadlines = {}
         self._lock = threading.RLock()
         self._depth = 0
         try:
@@ -278,7 +282,7 @@ class Store:
         for key, value in changes.items():
             if key in LIMITS:
                 value = integer(value, *LIMITS[key])
-            elif key in ("export_enabled", "metadata_enabled", "paused", "capacity_enabled"):
+            elif key in ("export_enabled", "metadata_enabled", "paused", "capacity_enabled", "display_enabled"):
                 if not isinstance(value, bool):
                     raise ServiceError("invalid_request")
             elif key == "role":
@@ -317,7 +321,8 @@ class Store:
                 self._bump(db, True)
             elif cleaned:
                 self._bump(db, (old["export_enabled"] and not updated["export_enabled"])
-                           or old["capacity_enabled"] != updated["capacity_enabled"])
+                           or old["capacity_enabled"] != updated["capacity_enabled"]
+                           or old["display_enabled"] != updated["display_enabled"])
             return updated
 
     def local_state(self, key: str) -> Any:
@@ -657,15 +662,43 @@ class Store:
             db.execute("INSERT INTO local_clients VALUES (?,?,?) ON CONFLICT(client_id) DO UPDATE SET kind=excluded.kind,expires_ms=excluded.expires_ms", (client_id, kind, expires))
             if db.execute("SELECT count(*) FROM local_clients").fetchone()[0] > 4096:
                 raise ServiceError("capacity", 413)
+            self._client_deadlines[client_id] = self.monotonic() + ttl_seconds
             return {"client_id": client_id, "expires_at_ms": expires, "duration_ms": ttl_seconds * 1000}
+
+    def unregister_client(self, client_id: str) -> bool:
+        client_id = _opaque(client_id)
+        with self.transaction() as db:
+            removed = db.execute("DELETE FROM local_clients WHERE client_id=?", (client_id,)).rowcount
+            self._client_deadlines.pop(client_id, None)
+            return bool(removed)
+
+    def _expired_clients(self, db: sqlite3.Connection) -> list[str]:
+        now, mono = self._now(), self.monotonic()
+        rows = db.execute("SELECT client_id,expires_ms FROM local_clients").fetchall()
+        present = {row[0] for row in rows}
+        for client in self._client_deadlines.keys() - present:
+            del self._client_deadlines[client]
+        expired = []
+        for client, expires in rows:
+            # A restored lease gets no more than one normal lease lifetime.
+            deadline = self._client_deadlines.setdefault(
+                client, mono + min(CLIENT_LEASE_SECONDS, max(0, (expires - now) / 1000)))
+            if expires <= now or deadline <= mono:
+                expired.append(client)
+        return expired
 
     def expire_clients(self) -> int:
         with self.transaction() as db:
-            return db.execute("DELETE FROM local_clients WHERE expires_ms<=?", (self._now(),)).rowcount
+            expired = self._expired_clients(db)
+            db.executemany("DELETE FROM local_clients WHERE client_id=?", ((client,) for client in expired))
+            for client in expired:
+                self._client_deadlines.pop(client, None)
+            return len(expired)
 
     def has_live_clients(self) -> bool:
         with self.transaction() as db:
-            return db.execute("SELECT 1 FROM local_clients WHERE expires_ms>? LIMIT 1", (self._now(),)).fetchone() is not None
+            expired = self._expired_clients(db)
+            return db.execute("SELECT count(*) FROM local_clients").fetchone()[0] > len(expired)
 
     def create_invitation(self, token_hash: str, expires_ms: int, group_id: str) -> None:
         token_hash, group_id, expires_ms = _hash(token_hash), _opaque(group_id, 128), integer(expires_ms)

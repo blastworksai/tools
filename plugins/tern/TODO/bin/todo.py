@@ -83,6 +83,19 @@ def read_plan(path):
     return validate(json.loads(block[len('```json\n'):-len('\n```')]))
 
 
+def _source_envelope(plan):
+    return json.dumps({'ok': True, 'plan': plan}, ensure_ascii=True, separators=(',', ':'))
+
+
+# read_plan bounds the entire UTF-8 canonical input by LIMIT bytes. Validation
+# preserves accepted leading/trailing whitespace, so stripped field limits are
+# not wire-size limits. ensure_ascii emits at most six bytes per input byte
+# (including JSON escapes); schema validation admits only the existing plan
+# fields and bounded numeric/enum values. The only added success-envelope
+# bytes are the fixed wrapper and newline. Errors face the same receive cap.
+SSH_RESPONSE_LIMIT = 6 * LIMIT + len('{"ok":true,"plan":') + len('}\n')
+
+
 def read_ssh(destination, path):
     if not re.fullmatch(r'(?:[A-Za-z0-9][A-Za-z0-9._-]*@)?[A-Za-z0-9][A-Za-z0-9._-]{0,252}', destination):
         raise ValueError('use a reviewed SSH config alias or user@host, with no shell options')
@@ -98,14 +111,14 @@ def read_ssh(destination, path):
                             input=Path(__file__).read_bytes(),
                             capture_output=True, timeout=4)
     unavailable = 'SSH source unavailable; verify the reviewed destination, existing trust/authentication and Python 3'
-    if len(result.stdout) > 65536:
+    if len(result.stdout) > SSH_RESPONSE_LIMIT:
         raise ValueError(unavailable)
     try:
         envelope = json.loads(result.stdout)
     except ValueError:
         raise ValueError(unavailable) from None
     if isinstance(envelope, dict) and envelope.get('ok') is False and isinstance(envelope.get('error'), str) and envelope['error'].strip():
-        raise ValueError('Remote PLAN: ' + envelope['error'][:400])
+        raise ValueError('Remote PLAN: ' + envelope['error'])
     if result.returncode or not isinstance(envelope, dict) or envelope.get('ok') is not True:
         raise ValueError(unavailable)
     return validate(envelope.get('plan'))
@@ -151,7 +164,7 @@ def main(argv=None):
             print(START+'\n```json\n'+json.dumps(plan, indent=2, ensure_ascii=False)+'\n```\n'+END)
         else:
             plan = read_ssh(args.ssh, args.plan) if args.ssh else read_plan(Path(args.plan))
-            print(json.dumps({'ok': True, 'plan': plan}, ensure_ascii=True, separators=(',', ':')))
+            print(_source_envelope(plan))
         return 0
     except (ValueError, OSError, KeyError, TypeError, subprocess.TimeoutExpired) as error:
         envelope={'ok':False,'error':str(error)}
@@ -161,4 +174,7 @@ def main(argv=None):
 
 
 if __name__ == '__main__':
+    # Native readers and every CLI shim share this entrypoint. Imports must not
+    # modify the installed plugin, including when -I ignores Python env flags.
+    sys.dont_write_bytecode = True
     sys.exit(main())

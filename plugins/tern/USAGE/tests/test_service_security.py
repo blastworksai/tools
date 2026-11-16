@@ -367,6 +367,18 @@ class PrivateFileTests(unittest.TestCase):
         with self.assertRaises(ServiceError):
             write_private(target, b"must not leak")
 
+    @unittest.skipUnless(os.name == "nt", "Windows SID DACL enforcement")
+    def test_windows_acl_rejects_added_deny_access(self):
+        target = private_staging_directory(self.root, ".stage-") / "capability"
+        write_private(target, b"private")
+        executable = Path(os.environ["SystemRoot"]) / "System32/icacls.exe"
+        subprocess.run([str(executable), str(target), "/deny", "*S-1-1-0:(R)"],
+                       capture_output=True, check=True, creationflags=subprocess.CREATE_NO_WINDOW)
+        with self.assertRaises(ServiceError):
+            check_private(target)
+        with self.assertRaises(ServiceError):
+            write_private(target, b"must not leak")
+
 
 class CertificateTests(unittest.TestCase):
     def setUp(self):

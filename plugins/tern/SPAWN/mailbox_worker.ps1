@@ -1,7 +1,8 @@
+# Generated from shared/report-files-v1 by sync.py; edit the canonical source.
 # Existing-PowerShell work-tool helper, not a service. Invoke at work checkpoints
 # and during wait via -Mode wait. This is transport/journal machinery, not proof
 # that a configured CLI actually invokes it. Installation/evidence remains gated.
-param([string]$Root,[string]$Handle,[string]$Owner,[ValidateSet('init','report','replay','receipts','consume','wait','claim','resolve','retire-local','retire-authorized','run-checks','checkout')][string]$Mode,[string]$MessageId,[ValidateRange(1000,60000)][int]$PollMs=5000,[ValidateRange(1,30)][int]$WaitSeconds=30,[string]$ReportFloor='-1',[string]$ReplyFloor='-1',[string]$ReceiptChain='',[string]$ExpectedBinding='',[string]$CheckId='')
+param([string]$Root,[string]$Handle,[string]$Owner,[ValidateSet('init','report','replay','receipts','consume','wait','claim','resolve','retire-local','retire-authorized','run-checks','checkout')][string]$Mode,[string]$MessageId,[ValidateRange(1000,60000)][int]$PollMs=5000,[ValidateRange(1,30)][int]$WaitSeconds=30,[string]$ReportFloor='-1',[string]$ReplyFloor='-1',[string]$ReceiptChain='',[string]$ExpectedBinding='',[string]$CheckId='',[string]$WithdrawnStarts='')
 $ErrorActionPreference='Stop'
 $utf8=New-Object Text.UTF8Encoding($false,$true)
 function Fail([string]$Code) { throw $Code }
@@ -245,6 +246,20 @@ function ValueType($Value,[string]$Type) {
  }
  if (-not $valid) { Fail 'invalid_schema' }
 }
+function ContextMeasurement($p) {
+ if ($p.ContainsKey('context_used_pct') -and $p.ContainsKey('context_snapshot')) { Fail 'invalid_schema' }
+ if ($p.ContainsKey('context_used_pct')) { ValueType $p.context_used_pct 'percent' }
+ if ($p.ContainsKey('context_snapshot')) {
+  $s=$p.context_snapshot
+  ObjectFields $s @('current_tokens','window_tokens','observed_at_ms') @('first_turn_tokens')
+  ValueType $s.current_tokens 'nonnegative'; ValueType $s.window_tokens 'positive'; ValueType $s.observed_at_ms 'nonnegative'
+  if ($s.current_tokens -gt $s.window_tokens) { Fail 'invalid_schema' }
+  if ($s.ContainsKey('first_turn_tokens')) {
+   ValueType $s.first_turn_tokens 'nonnegative'
+   if ($s.first_turn_tokens -gt $s.window_tokens) { Fail 'invalid_schema' }
+  }
+ }
+}
 function Values($Value,[string]$Type,[int]$Minimum=0,[int]$Maximum=256) {
  if ($Value -isnot [array] -or $Value.Count -lt $Minimum -or $Value.Count -gt $Maximum) { Fail 'invalid_schema' }
  foreach ($entry in $Value) { ValueType $entry $Type }
@@ -267,6 +282,66 @@ function Findings($Value) {
   if ($finding.ContainsKey('line')) { ValueType $finding.line 'positive' }
  }
  Unique $Value 'finding_id'
+}
+function BoundedText($Value,[int]$Maximum,[bool]$Nonblank=$false) {
+ if ($Value -isnot [string] -or $utf8.GetByteCount($Value) -lt 1 -or $utf8.GetByteCount($Value) -gt $Maximum -or $Value.Contains([string][char]0)) { Fail 'invalid_schema' }
+ # Match the canonical Luau ASCII whitespace class, not .NET's Unicode \s.
+ if ($Nonblank -and $Value -cnotmatch '[^ \t\r\n\x0b\x0c]') { Fail 'invalid_schema' }
+}
+function ProposedWork($p) {
+ $required=@('owner_id','owner_generation','activation_token','proposal_id','kind')
+ $optional=@('orch_project_id','new_project_name')
+ if ($p.kind -ceq 'new_work') {
+  ObjectFields $p ($required+@('record_id','record_revision','prompt','scope','checks')) ($optional+@('base_ref','repository_id','target_ref','target_revision'))
+  ValueType $p.record_id 'short'; ValueType $p.record_revision 'nonnegative'; BoundedText $p.prompt 32768 $true
+  ObjectFields $p.scope @('paths','systems')
+  foreach ($key in @('paths','systems')) {
+   $maximum=64; $bytes=256; if ($key -ceq 'systems') { $maximum=16; $bytes=80 }
+   $items=$p.scope[$key]
+   if ($items -isnot [array] -or $items.Count -gt $maximum) { Fail 'invalid_schema' }
+   foreach ($item in $items) { BoundedText $item $bytes }
+  }
+  if ($p.checks -isnot [array] -or $p.checks.Count -gt 16) { Fail 'invalid_schema' }
+  foreach ($check in $p.checks) {
+   ObjectFields $check @('check_id','argv'); ValueType $check.check_id 'id'
+   if ($check.argv -isnot [array] -or $check.argv.Count -lt 1 -or $check.argv.Count -gt 16) { Fail 'invalid_schema' }
+   foreach ($arg in $check.argv) { BoundedText $arg 512 }
+  }
+  Unique $p.checks 'check_id'
+  foreach ($key in @('base_ref','target_ref')) { if ($p.ContainsKey($key)) { BoundedText $p[$key] 256 } }
+  if ($p.ContainsKey('repository_id')) { ValueType $p.repository_id 'id' }
+  if ($p.ContainsKey('target_revision')) { ValueType $p.target_revision 'revision' }
+  if ($p.ContainsKey('target_ref') -ne $p.ContainsKey('target_revision') -or ($p.ContainsKey('target_ref') -and -not $p.ContainsKey('repository_id'))) { Fail 'invalid_schema' }
+ } else {
+  ObjectFields $p ($required+@('source')) $optional
+  $source=$p.source
+  if ($source -isnot [hashtable]) { Fail 'invalid_schema' }
+  Choice $source.kind @('plan_file','board','template')
+  if ($source.kind -ceq 'template') {
+   ObjectFields $source @('kind','template_id','revision','input') @('custom_fields')
+   ValueType $source.template_id 'id'; BoundedText $source.input 32768 $true
+   if ($source.ContainsKey('custom_fields')) {
+    $custom=$source.custom_fields
+    if ($custom -isnot [hashtable] -or $custom.Count -gt 16) { Fail 'invalid_schema' }
+    foreach ($name in $custom.Keys) {
+     if ($name -isnot [string] -or $name.Length -gt 32 -or $name -ceq 'input' -or $name -cnotmatch '^[a-z][a-z0-9-]*$') { Fail 'invalid_schema' }
+     $value=$custom[$name]
+     if ($value -isnot [string] -or $utf8.GetByteCount($value) -gt 2048 -or $value.Contains([string][char]0)) { Fail 'invalid_schema' }
+    }
+   }
+  } else {
+   ObjectFields $source @('kind','path','revision'); ValueType $source.path 'absolute'
+  }
+  BoundedText $source.revision 1024 $true
+ }
+ if ($p.ContainsKey('orch_project_id') -eq $p.ContainsKey('new_project_name')) { Fail 'invalid_schema' }
+ if ($p.ContainsKey('orch_project_id')) { ValueType $p.orch_project_id 'id' }
+ if ($p.ContainsKey('new_project_name')) { BoundedText $p.new_project_name 160 $true }
+}
+function ProjectStart($p) {
+ ObjectFields $p @('owner_id','owner_generation','activation_token','orch_project_id','project_revision','decision_context')
+ ValueType $p.owner_id 'id'; ValueType $p.owner_generation 'positive'; ValueType $p.activation_token 'digest'
+ ValueType $p.orch_project_id 'id'; ValueType $p.project_revision 'positive'; ValueType $p.decision_context 'digest'
 }
 # A rollover successor's provision.json carries the issued handover ID and
 # sha256(handover_id:handover_token), never the token. ACCEPTED must match it before any
@@ -292,9 +367,9 @@ function HandoverCheck($Report) {
 }
 function ReportInput($Report) {
  ObjectFields $Report @('kind','payload') @('action_id','action_revision','handover_id','handover_token')
- Choice $Report.kind @('REGISTER','READY','ACCEPTED','HEARTBEAT','WAITING','BLOCKED','ASK','CHECKPOINT','REVIEW_READY','REVIEW_RESULT','DONE','ROLLOVER_REQUEST','LANDING_REQUEST','LANDING_RESULT','reply_ack','COORDINATOR_RELEASE','COORDINATOR_PROPOSAL','CHECK_RESULT','CHECKOUT','LABEL','DEPLOY_RESULT')
+ Choice $Report.kind @('REGISTER','READY','ACCEPTED','HEARTBEAT','WAITING','BLOCKED','ASK','CHECKPOINT','REVIEW_READY','REVIEW_RESULT','DONE','ROLLOVER_REQUEST','LANDING_REQUEST','LANDING_RESULT','reply_ack','COORDINATOR_RELEASE','COORDINATOR_PROPOSAL','PROJECT_START_CLAIM','CHECK_RESULT','CHECKOUT','LABEL','DEPLOY_RESULT')
  $action=$Report.ContainsKey('action_id'); $handover=$Report.ContainsKey('handover_id')
- $required=$Report.kind -cin @('REVIEW_RESULT','LANDING_RESULT','reply_ack','COORDINATOR_RELEASE','LABEL','DEPLOY_RESULT')
+ $required=$Report.kind -cin @('REVIEW_RESULT','LANDING_RESULT','reply_ack','COORDINATOR_RELEASE','PROJECT_START_CLAIM','LABEL','DEPLOY_RESULT')
  $optional=$Report.kind -cin @('CHECKPOINT','DONE','WAITING','BLOCKED')
  if ($action -ne $Report.ContainsKey('action_revision') -or ($required -and -not $action) -or ($action -and -not ($required -or $optional))) { Fail 'invalid_schema' }
  if ($handover -ne $Report.ContainsKey('handover_token') -or ($handover -and $Report.kind -cne 'ACCEPTED')) { Fail 'invalid_schema' }
@@ -306,21 +381,21 @@ function ReportInput($Report) {
  switch -CaseSensitive ($Report.kind) {
   'REGISTER' {
    ObjectFields $p @('capabilities')
-   Values $p.capabilities 'short' 1 7
+   Values $p.capabilities 'short' 1 8
    $seen=[Collections.Hashtable]::new([StringComparer]::Ordinal)
    foreach ($cap in $p.capabilities) {
-    Choice $cap @('report-files-v1','native-ask-v1','worker-poll-v1','argv-v1','coordinator-control-v1','check-runner-v1','release-manager-v1')
+    Choice $cap @('report-files-v1','native-ask-v1','worker-poll-v1','argv-v1','coordinator-control-v1','check-runner-v1','release-manager-v1','project-start-v1')
     if ($seen.ContainsKey($cap)) { Fail 'invalid_schema' }; $seen[$cap]=$true
     if ($binding.ContainsKey('capabilities') -and $cap -cnotin $binding.capabilities) { Fail 'binding_mismatch' }
    }
    if (-not $seen.ContainsKey('report-files-v1')) { Fail 'invalid_schema' }
   }
-  'READY' { ObjectFields $p @('state') @('summary','context_used_pct'); Choice $p.state @('idle'); if ($p.ContainsKey('context_used_pct')) { ValueType $p.context_used_pct 'percent' } }
+  'READY' { ObjectFields $p @('state') @('summary','context_used_pct','context_snapshot'); Choice $p.state @('idle'); ContextMeasurement $p }
   'ACCEPTED' {
    ObjectFields $p @('assignment_sha256'); ValueType $p.assignment_sha256 'digest'
    HandoverCheck $Report
   }
-  'HEARTBEAT' { ObjectFields $p @('state') @('summary','request_id','context_used_pct'); Choice $p.state @('working','idle','waiting','blocked'); if ($p.ContainsKey('request_id')) { ValueType $p.request_id 'id' }; if ($p.ContainsKey('context_used_pct')) { ValueType $p.context_used_pct 'percent' } }
+  'HEARTBEAT' { ObjectFields $p @('state') @('summary','request_id','context_used_pct','context_snapshot'); Choice $p.state @('working','idle','waiting','blocked'); if ($p.ContainsKey('request_id')) { ValueType $p.request_id 'id' }; ContextMeasurement $p }
   'WAITING' { ObjectFields $p @('reason') @('request_id'); ValueType $p.reason 'short'; if ($p.ContainsKey('request_id')) { ValueType $p.request_id 'id' } }
   'BLOCKED' { ObjectFields $p @('reason') @('evidence'); ValueType $p.reason 'long' }
   'ASK' {
@@ -333,7 +408,8 @@ function ReportInput($Report) {
    }
   }
   'CHECKPOINT' {
-   ObjectFields $p @('checkpoint_id','task_ref','project_id','worktree_ref','artifact_revision','completed','remaining','holds','checks') @('plan_ref','plan_revision','request_id')
+   ObjectFields $p @('checkpoint_id','task_ref','project_id','worktree_ref','artifact_revision','completed','remaining','holds','checks') @('plan_ref','plan_revision','request_id','context_used_pct','context_snapshot')
+   ContextMeasurement $p
    if ($p.ContainsKey('request_id')) { ValueType $p.request_id 'id' }
    foreach ($key in @('checkpoint_id','project_id')) { ValueType $p[$key] 'id' }
    foreach ($key in @('task_ref','worktree_ref','artifact_revision')) { ValueType $p[$key] 'short' }
@@ -395,10 +471,15 @@ function ReportInput($Report) {
    if ($p.outcome -cin @('rejected','uncertain') -and -not $p.ContainsKey('reason')) { Fail 'invalid_schema' }
   }
   'COORDINATOR_PROPOSAL' {
-   ObjectFields $p @('owner_id','owner_generation','activation_token','proposal_id','kind','work_id','project_id') @('checkpoint_id','record_id','record_revision','prompt')
-   foreach ($key in @('owner_id','proposal_id','work_id','project_id')) { ValueType $p[$key] 'id' }
+   if ($p -isnot [hashtable]) { Fail 'invalid_schema' }
+   foreach ($key in @('owner_id','proposal_id')) { ValueType $p[$key] 'id' }
    ValueType $p.owner_generation 'positive'; ValueType $p.activation_token 'digest'
-   Choice $p.kind @('dispatch','report','review','rollover','landing')
+   Choice $p.kind @('dispatch','report','review','rollover','landing','new_work','add_source')
+   if ($p.kind -cin @('new_work','add_source')) {
+    ProposedWork $p
+   } else {
+    ObjectFields $p @('owner_id','owner_generation','activation_token','proposal_id','kind','work_id','project_id') @('checkpoint_id','record_id','record_revision','prompt')
+    foreach ($key in @('work_id','project_id')) { ValueType $p[$key] 'id' }
    if ($p.kind -ceq 'dispatch') {
     if ($p.ContainsKey('checkpoint_id')) { Fail 'invalid_schema' }
     ValueType $p.record_id 'short'; ValueType $p.prompt 'long'
@@ -408,7 +489,9 @@ function ReportInput($Report) {
     if ($p.kind -ceq 'report') { if ($p.ContainsKey('checkpoint_id')) { Fail 'invalid_schema' } }
     else { ValueType $p.checkpoint_id 'id' }
    }
+   }
   }
+  'PROJECT_START_CLAIM' { ProjectStart $p }
   'COORDINATOR_RELEASE' {
    ObjectFields $p @('owner_id','owner_generation','activation_token','quiescent')
    ValueType $p.owner_id 'id'; ValueType $p.owner_generation 'positive'; ValueType $p.activation_token 'digest'
@@ -424,6 +507,7 @@ function ReportInput($Report) {
 }
 function PublishPending($Pending,[bool]$Drain=$false) {
  $bytes=[Convert]::FromBase64String($Pending.bytes); if ((Hash $bytes) -cne $Pending.sha256) { Fail 'journal_corrupt' }
+ if ($Pending.kind -ceq 'PROJECT_START_CLAIM' -and (-not (Capable 'coordinator-control-v1') -or -not (Capable 'project-start-v1'))) { Fail 'unsupported_capability' }
  $count=[int][Math]::Ceiling($bytes.Length/2048.0)
  for ($i=1;$i -le $count;$i++) {
   $length=[Math]::Min(2048,$bytes.Length-($i-1)*2048); $part=New-Object byte[] $length; [Array]::Copy($bytes,($i-1)*2048,$part,0,$length)
@@ -436,6 +520,7 @@ function PublishPending($Pending,[bool]$Drain=$false) {
 function Allocate($InputReport,$Consumption=$null) {
  # Closed payload/envelope validation precedes reading or advancing next_seq.
  ReportInput $InputReport
+ if ($InputReport.kind -ceq 'PROJECT_START_CLAIM' -and (-not (Capable 'coordinator-control-v1') -or -not (Capable 'project-start-v1'))) { Fail 'unsupported_capability' }
  $control=$InputReport.kind -eq 'reply_ack'; $count=0; [long]$total=0
  foreach ($p in $script:journal.pending) { if (($p.kind -eq 'reply_ack') -eq $control) { $count++; $total+=$p.length } }
  if ($count -ge 8) { $resource='pending_reports'; if ($control) { $resource='pending_reply_ack' }; Full $resource ($count+1) 8 }
@@ -508,6 +593,9 @@ function Receive {
  if ($unclaimed.Count -gt 0) {
   $fact=$unclaimed[0]; $saved=[Convert]::FromBase64String($fact.bytes)
   if ($saved.Length -gt 65536 -or (Hash $saved) -cne $fact.sha256) { Fail 'journal_corrupt' }
+  $savedReply=Decode $saved
+  if ($savedReply.kind -ceq 'record_ruling' -and -not (Capable 'coordinator-control-v1')) { Fail 'unsupported_capability' }
+  if ($savedReply.kind -ceq 'project_start' -and (-not (Capable 'coordinator-control-v1') -or -not (Capable 'project-start-v1'))) { Fail 'unsupported_capability' }
   if ($fact.ack_seq -eq 0) {
    $null=Allocate @{kind='reply_ack';action_id=$fact.action_id;action_revision=$fact.action_revision;payload=@{message_id=$fact.message_id;reply_seq=$fact.reply_seq;reply_sha256=$fact.sha256;status='recorded'}} $fact
   } elseif (-not $fact.acknowledged) {
@@ -540,9 +628,9 @@ function Receive {
  } finally { $memory.Dispose() }
  if ($bytes.Length -ne $manifest.message_bytes -or (Hash $bytes) -cne $manifest.message_sha256) { Fail 'content_conflict' }
  $reply=Decode $bytes; MatchBinding $reply
- if ($reply.version -ne 1 -or $reply.reply_seq -ne $seq -or $reply.message_id -cne $manifest.message_id -or $reply.action_id -notmatch '^[A-Za-z0-9_-]{1,96}$' -or $reply.action_revision -lt 1 -or $reply.action_revision%1 -ne 0 -or $reply.action_revision -gt 9007199254740991 -or $reply.kind -cnotin @('assignment','report_request','owner_decision','landing_grant','landing_refresh','coordinator_activation','coordinator_retirement','review_request','rework','deploy_grant','label_request')) { Fail 'binding_mismatch' }
+ if ($reply.version -ne 1 -or $reply.reply_seq -ne $seq -or $reply.message_id -cne $manifest.message_id -or $reply.action_id -notmatch '^[A-Za-z0-9_-]{1,96}$' -or $reply.action_revision -lt 1 -or $reply.action_revision%1 -ne 0 -or $reply.action_revision -gt 9007199254740991 -or $reply.kind -cnotin @('assignment','report_request','owner_decision','landing_grant','landing_refresh','coordinator_activation','coordinator_retirement','project_start','review_request','rework','deploy_grant','label_request','record_ruling')) { Fail 'binding_mismatch' }
  $fields=@('version','logical_session_id','worker_id','worker_generation','launch_request_id','work_id','message_id','reply_seq','action_id','action_revision','kind','payload')
- if ($reply.kind -eq 'owner_decision') { $fields+=@('gate_id','gate_revision') }
+ if ($reply.kind -cin @('owner_decision','record_ruling')) { $fields+=@('gate_id','gate_revision') }
  Fields $reply $fields
  if ($reply.message_id -notmatch '^[A-Za-z0-9_-]{1,96}$') { Fail 'invalid_schema' }
  $p=$reply.payload
@@ -560,6 +648,18 @@ function Receive {
    Fields $p @('choice_id','answer')
    if ($reply.gate_id -notmatch '^[A-Za-z0-9_-]{1,96}$' -or $reply.gate_revision -lt 1 -or $reply.gate_revision -gt 9007199254740991 -or $reply.gate_revision%1 -ne 0 -or $p.choice_id -notmatch '^[A-Za-z0-9_-]{1,96}$' -or $p.answer -isnot [string] -or $utf8.GetByteCount($p.answer) -lt 1) { Fail 'invalid_schema' }
    ValueType $p.answer 'long'
+  }
+  'record_ruling' {
+   ObjectFields $p @('path','marker','entry','expected_document_sha256','expected_non_rulings_sha256')
+   ValueType $reply.gate_id 'id'; ValueType $reply.gate_revision 'positive'
+   ValueType $reply.action_id 'id'; ValueType $reply.action_revision 'positive'
+   ValueType $p.path 'absolute'
+   ValueType $p.expected_document_sha256 'digest'; ValueType $p.expected_non_rulings_sha256 'digest'
+   if ($p.marker -isnot [string] -or $utf8.GetByteCount($p.marker) -gt 256 -or $p.marker -cnotmatch '^orchplus-ruling:[A-Za-z0-9_-]+:[A-Za-z0-9_-]+\z' -or ($p.marker.Split(':')[-1] -cne $reply.gate_id)) { Fail 'invalid_schema' }
+   if ($p.entry -isnot [string] -or $utf8.GetByteCount($p.entry) -lt 1 -or $utf8.GetByteCount($p.entry) -gt 8192 -or $p.entry -cmatch '[\x00\r]' -or $p.entry.EndsWith("`n")) { Fail 'invalid_schema' }
+   foreach ($line in $p.entry.Split([char]10)) {
+    if (-not $line.StartsWith('> ') -or $line.Substring(2) -cmatch '[<>`]') { Fail 'invalid_schema' }
+   }
   }
   'landing_grant' {
    ObjectFields $p @('landing_id','grant_id','project_id','checkpoint_id','repo_ref','target_ref','target_revision','source_ref','source_revision','builder_work_id','proof') @('review_id','reviewer_family')
@@ -606,6 +706,10 @@ function Receive {
    foreach ($key in @('landing_id','project_id')) { ValueType $p[$key] 'id' }
    foreach ($key in @('repo_ref','target_ref','expected_revision','current_revision','reason')) { ValueType $p[$key] 'short' }
   }
+  'project_start' {
+   ProjectStart $p
+   ValueType $reply.action_id 'id'; ValueType $reply.action_revision 'positive'
+  }
   'coordinator_activation' {
    ObjectFields $p @('owner_id','owner_generation','activation_token','instructions')
    ValueType $p.owner_id 'id'; ValueType $p.owner_generation 'positive'; ValueType $p.activation_token 'digest'; ValueType $p.instructions 'long'
@@ -620,6 +724,9 @@ function Receive {
  # Grants authorize merging/deploying; only a release-manager-v1 generation consumes them,
  # refused before any receipt or journal change.
  if ($reply.kind -cin @('landing_grant','deploy_grant') -and -not (Capable 'release-manager-v1')) { Fail 'unsupported_capability' }
+ # Deliver only to an already provisioned writer. ACK records receipt, not a document write.
+ if ($reply.kind -ceq 'record_ruling' -and -not (Capable 'coordinator-control-v1')) { Fail 'unsupported_capability' }
+ if ($reply.kind -ceq 'project_start' -and (-not (Capable 'coordinator-control-v1') -or -not (Capable 'project-start-v1'))) { Fail 'unsupported_capability' }
  if ($reply.kind -eq 'report_request' -and $bytes.Length -gt 2048) { Fail 'oversize' }
  CompactJournal
  $retained=0L; foreach ($fact in $script:journal.consumed) { $retained+=[Convert]::FromBase64String($fact.bytes).Length }
@@ -648,25 +755,178 @@ function AuthorizedFloor([string]$Value) {
  if ($Value -cnotmatch '^(0|[1-9][0-9]*)\z' -or -not [long]::TryParse($Value,[ref]$floor) -or $floor -gt 9007199254740991) { Fail 'invalid_schema' }
  return $floor
 }
-function RetireAuthorized {
- $report=AuthorizedFloor $ReportFloor; $reply=AuthorizedFloor $ReplyFloor
- ValueType $ReceiptChain 'digest'
- Fields $script:journal @('version','owner','binding','next_seq','pending','receipt_seq','receipt_chain','reply_next','consumed','consumed_reply_floor')
+function RetirementBinding {
  $keys=@('logical_session_id','worker_id','worker_generation','launch_request_id','work_id','enrolment_token','mailbox_handle')
  if ($ExpectedBinding.Length -eq 0 -or $ExpectedBinding.Length -gt 2732 -or $ExpectedBinding -cnotmatch '^[A-Za-z0-9+/]*={0,2}\z') { Fail 'invalid_schema' }
  $expectedBytes=[Convert]::FromBase64String($ExpectedBinding)
  if ([Convert]::ToBase64String($expectedBytes) -cne $ExpectedBinding) { Fail 'invalid_schema' }
  $expected=Decode $expectedBytes 2048
- Fields $expected $keys; Fields $binding $keys; Fields $script:journal.binding $keys
+ Fields $expected $keys; Fields $binding $keys
  foreach ($key in $keys) {
   $type='id'; if ($key -ceq 'worker_generation') { $type='positive' } elseif ($key -ceq 'enrolment_token') { $type='token' }
-  ValueType $expected[$key] $type; ValueType $binding[$key] $type; ValueType $script:journal.binding[$key] $type
-  if ($script:journal.binding[$key] -cne $expected[$key] -or $binding[$key] -cne $expected[$key]) { Fail 'binding_mismatch' }
+  ValueType $expected[$key] $type; ValueType $binding[$key] $type
+  if ($binding[$key] -cne $expected[$key]) { Fail 'binding_mismatch' }
  }
- if ($binding.enrolment_token -cne $Owner -or $script:journal.owner -cne $Owner) { Fail 'binding_mismatch' }
+ if ($binding.enrolment_token -cne $Owner) { Fail 'binding_mismatch' }
+}
+# Read-only authorization: never consumes a reply, advances a cursor, or emits ACK.
+function WithdrawnTail([long]$Floor) {
+ if ($WithdrawnStarts.Length -eq 0) { return }
+ if ($WithdrawnStarts.Length -gt 5464 -or $WithdrawnStarts -cnotmatch '^[A-Za-z0-9+/]*={0,2}\z') { Fail 'invalid_schema' }
+ $encoded=[Convert]::FromBase64String($WithdrawnStarts)
+ if ([Convert]::ToBase64String($encoded) -cne $WithdrawnStarts) { Fail 'invalid_schema' }
+ $entries=Decode $encoded 4096
+ if ($entries -isnot [array] -or $entries.Count -lt 1 -or $entries.Count -gt 8) { Fail 'invalid_schema' }
+ if ($descriptor.capabilities -isnot [array] -or $descriptor.capabilities.Count -lt 1 -or $descriptor.capabilities.Count -gt 8 -or 'coordinator-control-v1' -cnotin $descriptor.capabilities -or 'project-start-v1' -cnotin $descriptor.capabilities) { Fail 'unsupported_capability' }
+ $capSeen=[Collections.Hashtable]::new([StringComparer]::Ordinal)
+ foreach ($cap in $descriptor.capabilities) {
+  if ($cap -isnot [string] -or $cap -cnotin @('report-files-v1','native-ask-v1','worker-poll-v1','argv-v1','coordinator-control-v1','check-runner-v1','release-manager-v1','project-start-v1') -or $capSeen.ContainsKey($cap)) { Fail 'invalid_schema' }
+  $capSeen[$cap]=$true
+ }
+ $expected=@{}; $previous=$Floor
+ foreach ($entry in $entries) {
+  Fields $entry @('reply_seq','message_id','message_sha256')
+  ValueType $entry.reply_seq 'positive'; ValueType $entry.message_id 'id'; ValueType $entry.message_sha256 'digest'
+  if ($entry.reply_seq -ne $previous+1) { Fail 'incomplete' }; $previous=$entry.reply_seq
+  $expected[[string]$entry.reply_seq]=$entry
+ }
+ $seen=0; $directory=Join-Path $box 'replies'; DirectorySafe $directory
+ foreach ($path in [IO.Directory]::EnumerateFileSystemEntries($directory)) {
+  $leaf=[IO.Path]::GetFileName($path)
+  if ($leaf -cnotmatch '^[1-9][0-9]{0,15}\z') { Fail 'binding_mismatch' }
+  DirectorySafe $path
+  if ([long]$leaf -le $Floor) {
+   foreach ($file in [IO.Directory]::EnumerateFileSystemEntries($path)) {
+    $name=[IO.Path]::GetFileName($file)
+    if ($name -cnotmatch '^(manifest|chunk-([1-9]|[12][0-9]|3[0-2]))\.json\z') { Fail 'binding_mismatch' }
+    $null=ReadFile $file 4096
+   }
+   continue
+  }
+  if (-not $expected.ContainsKey($leaf)) { Fail 'incomplete' }
+  $entry=$expected[$leaf]; $seen++
+  $manifest=Decode (ReadFile (Join-Path $path 'manifest.json') 2048) 2048
+  Fields $manifest @('transport','version','type','mailbox_handle','direction','slot','message_id','message_sha256','message_bytes','count')
+  foreach ($key in @('version','slot','message_bytes','count')) { ValueType $manifest[$key] 'positive' }
+  ValueType $manifest.message_id 'id'; ValueType $manifest.message_sha256 'digest'
+  if ($manifest.transport -cne 'report-files-v1' -or $manifest.version -ne 1 -or $manifest.type -cne 'manifest' -or $manifest.direction -cne 'reply' -or $manifest.mailbox_handle -cne $Handle -or $manifest.slot -ne $entry.reply_seq -or $manifest.message_id -cne $entry.message_id -or $manifest.message_sha256 -cne $entry.message_sha256 -or $manifest.message_bytes -gt 65536 -or $manifest.count -ne [Math]::Ceiling($manifest.message_bytes/2048.0)) { Fail 'binding_mismatch' }
+  $files=@([IO.Directory]::EnumerateFileSystemEntries($path))
+  if ($files.Count -ne $manifest.count+1) { Fail 'incomplete' }
+  foreach ($file in $files) {
+   $name=[IO.Path]::GetFileName($file)
+   if ($name -ceq 'manifest.json') { continue }
+   if ($name -cnotmatch '^chunk-([1-9]|[12][0-9]|3[0-2])\.json\z' -or [int]$Matches[1] -gt $manifest.count) { Fail 'binding_mismatch' }
+  }
+  $memory=New-Object IO.MemoryStream
+  try {
+   for ($i=1;$i -le $manifest.count;$i++) {
+    $chunk=Decode (ReadFile (Join-Path $path ('chunk-'+$i+'.json')) 4096) 4096
+    Fields $chunk @('transport','version','type','mailbox_handle','direction','slot','message_id','message_sha256','index','count','data_b64')
+    foreach ($key in @('version','slot','index','count')) { ValueType $chunk[$key] 'positive' }
+    foreach ($key in @('transport','version','mailbox_handle','direction','slot','message_id','message_sha256','count')) { if ($chunk[$key] -cne $manifest[$key]) { Fail 'content_conflict' } }
+    if ($chunk.type -cne 'chunk' -or $chunk.index -ne $i -or $chunk.data_b64 -isnot [string] -or $chunk.data_b64.Length -eq 0 -or $chunk.data_b64.Length -gt 2732 -or $chunk.data_b64 -cnotmatch '^[A-Za-z0-9+/]*={0,2}\z') { Fail 'invalid_schema' }
+    $part=[Convert]::FromBase64String($chunk.data_b64)
+    if ([Convert]::ToBase64String($part) -cne $chunk.data_b64 -or $part.Length -ne [Math]::Min(2048,$manifest.message_bytes-($i-1)*2048)) { Fail 'incomplete' }
+    $memory.Write($part,0,$part.Length)
+   }
+   $bytes=$memory.ToArray()
+  } finally { $memory.Dispose() }
+  if ($bytes.Length -ne $manifest.message_bytes -or (Hash $bytes) -cne $entry.message_sha256) { Fail 'content_conflict' }
+  $reply=Decode $bytes
+  Fields $reply @('version','logical_session_id','worker_id','worker_generation','launch_request_id','work_id','message_id','reply_seq','action_id','action_revision','kind','payload')
+  foreach ($key in @('version','worker_generation','reply_seq','action_revision')) { ValueType $reply[$key] 'positive' }
+  foreach ($key in @('logical_session_id','worker_id','launch_request_id','work_id','message_id','action_id')) { ValueType $reply[$key] 'id' }
+  foreach ($key in @('logical_session_id','worker_id','worker_generation','launch_request_id','work_id')) { if ($reply[$key] -cne $binding[$key]) { Fail 'binding_mismatch' } }
+  if ($reply.version -ne 1 -or $reply.kind -cne 'project_start' -or $reply.reply_seq -ne $entry.reply_seq -or $reply.message_id -cne $entry.message_id) { Fail 'binding_mismatch' }
+  ProjectStart $reply.payload
+ }
+ if ($seen -ne $entries.Count) { Fail 'incomplete' }
+}
+function RetireAbsent {
+ $report=AuthorizedFloor $ReportFloor; $reply=AuthorizedFloor $ReplyFloor
+ ValueType $ReceiptChain 'digest'; RetirementBinding
+ if ($WithdrawnStarts.Length -gt 0) { Fail 'producer_unsettled' }
+ EnterCapacity
+ try {
+  Capacity 0 0 $true
+  if (Test-Path -LiteralPath $journalPath) { Fail 'producer_unsettled' }
+  if ($report -ne 0 -or $reply -ne 0 -or $ReceiptChain -cne (Hash ($utf8.GetBytes("report-files-v1`n"+$Handle+"`n")))) { Fail 'producer_unsettled' }
+  foreach ($lane in @('reports','replies','acks','watermarks')) {
+   $path=Join-Path $box $lane; DirectorySafe $path
+   if (@([IO.Directory]::EnumerateFileSystemEntries($path)).Count -ne 0) { Fail 'producer_unsettled' }
+  }
+ } finally { LeaveCapacity }
+}
+function WithdrawalPhysical([long]$Report) {
+ if ($WithdrawnStarts.Length -eq 0) { return }
+ foreach ($name in @('consumer','staging')) {
+  $path=Join-Path $box $name; DirectorySafe $path
+  if (@([IO.Directory]::EnumerateFileSystemEntries($path)).Count -ne 0) { Fail 'producer_unsettled' }
+ }
+ $producer=Join-Path $box 'producer'; DirectorySafe $producer
+ foreach ($path in [IO.Directory]::EnumerateFileSystemEntries($producer)) {
+  $leaf=[IO.Path]::GetFileName($path)
+  if ($leaf -cnotin @('journal.json','lock')) { Fail 'producer_unsettled' }
+  $limit=128; if ($leaf -ceq 'journal.json') { $limit=1572864 }
+  # The producer lock is exclusively held by this invocation; inspect its metadata
+  # rather than trying to reopen it. Every other file is bounded and read-only.
+  if ($leaf -ceq 'lock') {
+   $item=Get-Item -LiteralPath $path -Force
+   if ($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -or $item.Length -gt 128) { Fail 'binding_mismatch' }
+  } else { $null=ReadFile $path $limit }
+ }
+ foreach ($name in @('reports','acks','watermarks')) {
+  $directory=Join-Path $box $name; DirectorySafe $directory
+  foreach ($path in [IO.Directory]::EnumerateFileSystemEntries($directory)) {
+   $leaf=[IO.Path]::GetFileName($path)
+   if ($name -ceq 'reports') {
+    if ($leaf -cnotmatch '^[1-9][0-9]{0,15}\z') { Fail 'binding_mismatch' }
+    if ([long]$leaf -gt $Report) { Fail 'producer_unsettled' }
+    DirectorySafe $path
+    foreach ($part in [IO.Directory]::EnumerateFileSystemEntries($path)) {
+     $file=[IO.Path]::GetFileName($part)
+     if ($file -cnotmatch '^(manifest|chunk-([1-9]|[12][0-9]|3[0-2]))\.json\z') { Fail 'binding_mismatch' }
+     $null=ReadFile $part 4096
+    }
+   } else {
+    if ($leaf -cnotmatch '^[1-9][0-9]{0,15}\.json\z') { Fail 'binding_mismatch' }
+    if ($name -ceq 'acks' -and [long][IO.Path]::GetFileNameWithoutExtension($path) -gt $Report) { Fail 'producer_unsettled' }
+    $null=ReadFile $path 4096
+   }
+  }
+ }
+ foreach ($path in [IO.Directory]::EnumerateFileSystemEntries($box)) {
+  $leaf=[IO.Path]::GetFileName($path)
+  if ($leaf -cin @('reports','replies','acks','watermarks','producer','consumer','staging','capacity.lock')) { DirectorySafe $path }
+  elseif ($leaf -cin @('provision.json','manifest.json')) { $null=ReadFile $path 4096 }
+  else { Fail 'binding_mismatch' }
+ }
+}
+function RetireAuthorized {
+ $report=AuthorizedFloor $ReportFloor; $reply=AuthorizedFloor $ReplyFloor
+ ValueType $ReceiptChain 'digest'; RetirementBinding
+ Fields $script:journal @('version','owner','binding','next_seq','pending','receipt_seq','receipt_chain','reply_next','consumed','consumed_reply_floor')
+ $keys=@('logical_session_id','worker_id','worker_generation','launch_request_id','work_id','enrolment_token','mailbox_handle')
+ Fields $script:journal.binding $keys
+ foreach ($key in $keys) {
+  $type='id'; if ($key -ceq 'worker_generation') { $type='positive' } elseif ($key -ceq 'enrolment_token') { $type='token' }
+  ValueType $script:journal.binding[$key] $type
+  if ($script:journal.binding[$key] -cne $binding[$key]) { Fail 'binding_mismatch' }
+ }
+ if ($script:journal.owner -cne $Owner) { Fail 'binding_mismatch' }
  foreach ($key in @('receipt_seq','next_seq','consumed_reply_floor','reply_next')) {
   $value=$script:journal[$key]
   if (($value -isnot [long] -and $value -isnot [int]) -or $value -lt 0 -or $value -gt 9007199254740991) { Fail 'journal_corrupt' }
+ }
+ $withdrawalAdmission=$WithdrawnStarts.Length -gt 0
+ if ($withdrawalAdmission) { EnterCapacity }
+ try {
+ if ($withdrawalAdmission) {
+  # Authorize the exact physical exception before receipt ingestion can save or
+  # publish anything. Keep admission through the final settlement and deletion.
+  Capacity 0 0 $true; WithdrawalPhysical $report; WithdrawnTail $reply
+  if ($script:journal.pending -isnot [array] -or $script:journal.consumed -isnot [array]) { Fail 'journal_corrupt' }
+  if ($script:journal.receipt_seq -lt $report -and (Test-Path -LiteralPath (Join-Path $box ('acks/'+($script:journal.receipt_seq+1)+'.json')))) { CollectReceipts }
  }
  # An unsettled journal is refused before anything is removed; the outer handler reports the
  # definite pre-effect outcome on stdout so SPAWN never records it as uncertain.
@@ -677,13 +937,14 @@ function RetireAuthorized {
   if ($fact -isnot [hashtable] -or $fact.acknowledged -isnot [bool] -or -not $fact.acknowledged -or $fact.execution -cne 'resolved') { Fail 'producer_unsettled' }
  }
  EnterCapacity
- try { Capacity 0 0 $true; $null=ReadFile $journalPath 1572864; [IO.File]::Delete($journalPath) } finally { LeaveCapacity }
+ try { Capacity 0 0 $true; WithdrawalPhysical $report; WithdrawnTail $reply; $null=ReadFile $journalPath 1572864; [IO.File]::Delete($journalPath) } finally { LeaveCapacity }
+ } finally { if ($withdrawalAdmission) { LeaveCapacity } }
 }
 # Helper-only modes. The provisioned manifest (sha256 bound into the provision binding)
 # is the only check source; argv runs without a shell, before any gate or producer lock.
 function Capable([string]$Name) {
  if (-not $descriptor.ContainsKey('capabilities')) { return $false }
- Values $descriptor.capabilities 'short' 1 7
+ Values $descriptor.capabilities 'short' 1 8
  return $Name -cin $descriptor.capabilities
 }
 function ProvisionedManifest {
@@ -879,6 +1140,7 @@ function HelperReport {
  }
 }
 try {
+if ($WithdrawnStarts.Length -gt 0 -and $Mode -cne 'retire-authorized') { Fail 'invalid_schema' }
 # init takes no input. A report piped here would otherwise vanish silently, so
 # probe one byte before any mailbox effect; an empty pipe held open settles after 1s.
 if ($Mode -eq 'init' -and [Console]::IsInputRedirected) {
@@ -902,7 +1164,7 @@ try {
  if (Test-Path -LiteralPath $lockPath) { $null=ReadFile $lockPath 128 } else { Capacity 0 1 $true }
  $lock=[IO.File]::Open($lockPath,[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)
 } finally { LeaveCapacity }
-$retire=$false
+$retire=$false; $producerAbsent=$false
 try {
  if ($Mode -eq 'init') {
   if (Test-Path -LiteralPath $journalPath) { Fail 'journal_corrupt' }
@@ -910,6 +1172,8 @@ try {
   $script:journal=@{version=1;owner=$Owner;binding=$binding;next_seq=1;pending=@();receipt_seq=0;receipt_chain=(Hash ($utf8.GetBytes("report-files-v1`n"+$Handle+"`n")));reply_next=1;consumed=@();consumed_reply_floor=0}
   Save $false
   [Console]::Error.Write("journal initialized; next: publish ACCEPTED with mode report`n")
+ } elseif ($Mode -eq 'retire-authorized' -and -not (Test-Path -LiteralPath $journalPath)) {
+  RetireAbsent; $retire=$true; $producerAbsent=$true
  } else {
   $script:journal=Decode (ReadFile $journalPath 1572864) 1572864
   if ($script:journal.owner -cne $Owner -or $script:journal.version -ne 1) { Fail 'journal_corrupt' }; MatchBinding $script:journal.binding $true
@@ -968,7 +1232,10 @@ if ($retire) {
  $script:gateWaitMs=10000; EnterCapacity
  try { [IO.File]::Delete($lockPath) } finally { LeaveCapacity }
 }
-if ($retire -and $Mode -eq 'retire-authorized') { [Console]::Out.Write("producer_retired`n") }
+if ($retire -and $Mode -eq 'retire-authorized') {
+ if ($producerAbsent) { [Console]::Out.Write("producer_absent`n") }
+ else { [Console]::Out.Write("producer_retired`n") }
+}
 } catch {
  if ($_.Exception.Message.StartsWith("full`n")) {
   [Console]::Error.Write($_.Exception.Message+"`n"); exit 1

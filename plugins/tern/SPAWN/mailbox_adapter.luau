@@ -59,6 +59,11 @@ local function process_argv(op,mode,path)
   values={t.root,op.handle,mode,path or '-',op.id,t.worker_identity,string.format('%.0f',op.report_floor or 0),string.format('%.0f',op.reply_floor or 0),t.producer_helper}
   names={'Root','Handle','Mode','Selected','Operation','Identity','ReportFloor','ReplyFloor','ProducerHelper'}
  end
+ if op.request and op.request.withdrawn_starts~=nil then
+  if op.mode~='retire' then return nil,'invalid_schema' end
+  table.insert(values,tern.base64.encode(tern.json.encode(op.request.withdrawn_starts)))
+  table.insert(names,'WithdrawnStarts')
+ end
  local args={helper}
  if t.kind=='powershell' then
   args={'-NoLogo','-NoProfile','-NonInteractive','-File',helper}
@@ -66,6 +71,7 @@ local function process_argv(op,mode,path)
   for index,value in ipairs(values) do table.insert(args,'-'..names[index]..':');table.insert(args,value) end
  elseif producer then
   args={helper,t.root,op.handle,op.binding.enrolment_token,'retire-authorized','','5','30',values[5],values[6],values[7],values[8]}
+  if values[9] then table.insert(args,values[9]) end
  else
   for _,value in ipairs(values) do table.insert(args,value) end
  end
@@ -87,6 +93,33 @@ local function process_argv(op,mode,path)
  local total=0; for _,v in ipairs(argv) do total+=#v+1 end
  if total>(if t.os=='windows' then 7000 else 32768) then return nil,'oversize' end
  return argv,nil
+end
+-- Read-only inventory uses only a retained validated same-user target, never a
+-- caller-selected path or SSH/sudo route. No locks, cleanup or launch effects.
+function M.inventory_capacity() return math.max(0,4-running) end
+function M.inventory(target,handle,stale_ms,callback,budget_ms)
+ if not M.validate_target(target) or target.backend=='ssh-command' or target.user and target.user~='' or type(handle)~='string' or #handle>96 or not handle:match('^[A-Za-z0-9_-]+$') or type(stale_ms)~='number' or stale_ms%1~=0 or stale_ms<1 or stale_ms>315360000000 then callback(nil,'Inventory requires an owned same-user retained mailbox target');return end
+ budget_ms=budget_ms or 15000
+ if type(budget_ms)~='number' or budget_ms%1~=0 or budget_ms<1 or budget_ms>15000 then callback(nil,'Inventory deadline is invalid');return end
+ if running>=4 then callback(nil,'Mailbox executor is busy; inventory was not started');return end
+ local argv,why=process_argv({target=target,handle=handle,id='inventory'},'inventory',string.format('%.0f',stale_ms))
+ if not argv then callback(nil,why or 'Inventory helper arguments are unavailable');return end
+ running+=1
+ local finished=false
+ local function done(value,problem)
+  if finished then return end
+  finished=true;running-=1;callback(value,problem)
+ end
+ local ok,problem=pcall(tern.process.run,argv,{stdin='',timeout_ms=budget_ms},function(result)
+  if result.timed_out or result.status~=0 or type(result.stdout)~='string' or #result.stdout>4096 then done(nil,'Mailbox inventory helper failed or exceeded its bound');return end
+  local value=Codec.strict_decode(result.stdout,4096)
+  local function integer(v,maximum) return type(v)=='number' and v%1==0 and v>=0 and v<=maximum end
+  if type(value)~='table' then done(nil,'Mailbox inventory is not a bounded object');return end
+  for key in pairs(value) do if key~='observed_at_ms' and key~='open_files' and key~='stale_files' then done(nil,'Mailbox inventory has an unsupported field');return end end
+  if not integer(value.observed_at_ms,9007199254740991) or not integer(value.open_files,1000000) or not integer(value.stale_files,value.open_files) then done(nil,'Mailbox inventory counters are invalid');return end
+  done(value,nil)
+ end)
+ if not ok then done(nil,'Could not start read-only mailbox inventory: '..tostring(problem):sub(1,512)) end
 end
 -- One overall deadline, including up to 32 chunk reads before a manifest. The
 -- target helper never emits more than one bounded object; stderr is not exposed.
@@ -177,7 +210,8 @@ function M.execute(op,callback)
      -- The reviewed helper prints producer_unsettled (exit 0) only from its journal-settlement
      -- check, before it removes anything; it is the first child, so no target effect ran either.
      if status=='producer_retired' and payload=='' then receive({status=status})
-     elseif status=='producer_unsettled' and payload=='' then done(rejected('producer_unsettled','The stopped producer journal is not settled at the authorized floors (pending reports, unacknowledged or unresolved control messages); nothing was retired'))
+     elseif status=='producer_absent' and payload=='' and op.cancel_enrolment==true and op.report_floor==0 and op.reply_floor==0 and op.request.report_chain_sha256==Codec.sha256('report-files-v1\n'..op.handle..'\n') then receive({status=status})
+     elseif status=='producer_unsettled' and payload=='' then done(rejected('producer_unsettled','The producer journal is not settled at the authorized floors (pending reports, unacknowledged or unresolved control messages); nothing was retired'))
      else done({status='uncertain'}) end
      return
     end
@@ -248,11 +282,11 @@ function M.execute(op,callback)
    if op.reconcile and result.status=='missing' then done({status='uncertain'}) else done(result) end
   end)
  elseif op.mode=='retire' and op.retire_producer==true and not op.reconcile then
-  -- This private flag is derived by dispatch from committed exact native stop,
-  -- never from public request fields. One operation/deadline spans both children.
+  -- Dispatch derives this flag from exact native stop or zero-floor pending-enrol
+  -- cancellation, never public fields. One operation/deadline spans both children.
   retirement_started=true
   invoke('retire_producer','-',nil,function(result)
-   if result.status~='producer_retired' then done({status='uncertain'});return end
+   if result.status~='producer_retired' and result.status~='producer_absent' then done({status='uncertain'});return end
    invoke('retire','-',nil,function(retired) done(retired) end)
   end)
  else

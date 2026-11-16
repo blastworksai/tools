@@ -5,22 +5,23 @@ helper. Only project_metadata/project_usage output may cross its stdout boundary
 """
 from __future__ import annotations
 
-from contextlib import contextmanager
 from datetime import datetime
+import getpass
+import hashlib
 import json
 import math
 import os
 from pathlib import Path
-import queue
 import re
 import socket
-import subprocess
-import threading
+import sys
 import time
+import unicodedata
 import urllib.request
 import urllib.error
 
 import provider_metadata as helper
+from .process_supervisor import BoundedError, TIMEOUT, interactive_bounded, run_bounded
 
 
 class Unavailable(helper.SafeError):
@@ -233,89 +234,54 @@ def parse_kimi(document, observed):
     return windows
 
 
-def _stop(process):
-    helper.stop_owned_process(process, grace=2)
-    for stream in (process.stdin, process.stdout):
-        if stream is not None:
-            stream.close()
-
-
-@contextmanager
-def child(argv, env):
-    # No project cwd, inherited secret environment, shell, or terminal.
-    process = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                               stderr=subprocess.DEVNULL, cwd=env["HOME"], env=env,
-                               start_new_session=os.name == "posix",
-                               creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-    try:
-        yield process
-    finally:
-        _stop(process)
-
-
-class Lines:
-    def __init__(self, process):
-        self.queue = queue.Queue(maxsize=128)
-        self.failed = threading.Event()
-        self.process = process
-        def read():
-            total = 0
-            try:
-                while True:
-                    line = process.stdout.readline(65537)
-                    total += len(line)
-                    if not line:
-                        self.failed.set()
-                        return
-                    if len(line) > 65536 or total > helper.MAX_BYTES:
-                        self.failed.set()
-                        return
-                    self.queue.put_nowait(line)
-            except (OSError, ValueError, queue.Full):
-                self.failed.set()
-        self.thread = threading.Thread(target=read, daemon=True)
-        self.thread.start()
-
-    def next(self, deadline):
-        while time.monotonic() < deadline:
-            try:
-                return self.queue.get(timeout=min(.1, max(.001, deadline - time.monotonic())))
-            except queue.Empty:
-                if self.failed.is_set():
-                    raise Unavailable()
+def _bounded_stdout(argv, env, timeout, input=None):
+    completed = run_bounded(argv, env, env.get("HOME"), timeout, input)
+    if completed.error == TIMEOUT:
         raise Unavailable("source_timeout")
+    if completed.error is not None:
+        raise Unavailable()
+    return completed.stdout
 
 
 def rpc(argv, env, initialize, calls, *, initialized=False, timeout=35):
     """Return one result per call; a call answered with a JSON-RPC error is None.
 
-    Callers classify those errors: a signed-out or API-key context also answers
-    a quota call with an error, which is not a vendor outage.
+    Each request waits for its response. Server requests are never serviced,
+    including elicitation/tool calls.
     """
-    deadline = time.monotonic() + timeout
-    answers = []
-    with child(argv, env) as process:
-        lines = Lines(process)
-        for identifier, (method, params) in enumerate([("initialize", initialize), *calls], 1):
-            process.stdin.write(json.dumps({"jsonrpc": "2.0", "id": identifier, "method": method, "params": params}).encode() + b"\n")
-            process.stdin.flush()
-            while True:
-                message = obj(json.loads(lines.next(deadline)))
-                if message.get("id") == identifier:
+    try:
+        with interactive_bounded(argv, env, env.get("HOME"), timeout) as session:
+            def send(message):
+                session.write(json.dumps(message, separators=(",", ":")).encode() + b"\n")
+
+            def answer(identifier, during_initialize=False):
+                while True:
+                    line = session.readline(limit=65536)
+                    if not line:
+                        raise Unavailable()
+                    message = obj(json.loads(line))
+                    if "method" in message and "id" in message:
+                        raise Unavailable("unparsed")
+                    if message.get("id") != identifier:
+                        continue
                     if message.get("error") is not None:
-                        if identifier == 1:
+                        if during_initialize:
                             raise Unavailable("vendor_usage_unavailable")
-                        answers.append(None)
-                    else:
-                        answers.append(obj(message.get("result")))
-                    break
-                # Never service server requests, including elicitation/tool calls.
-                if "method" in message and "id" in message:
-                    raise Unavailable("unparsed")
-            if identifier == 1 and initialized:
-                process.stdin.write(b'{"jsonrpc":"2.0","method":"initialized"}\n')
-                process.stdin.flush()
-    return answers[1:]
+                        return None
+                    return obj(message.get("result"))
+
+            send({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": initialize})
+            answer(1, during_initialize=True)
+            if initialized:
+                send({"jsonrpc": "2.0", "method": "initialized"})
+            answers = []
+            for identifier, (method, params) in enumerate(calls, 2):
+                send({"jsonrpc": "2.0", "id": identifier, "method": method, "params": params})
+                answers.append(answer(identifier))
+            session.close_stdin()
+            return answers
+    except BoundedError as exc:
+        raise Unavailable(exc.code) from None
 
 
 def http_json(url, headers, *, method="GET", timeout=8, rejected=None):
@@ -335,34 +301,87 @@ def http_json(url, headers, *, method="GET", timeout=8, rejected=None):
     return obj(json.loads(raw)) if raw else {}
 
 
-def kimi(env):
+def kimi(env, io):
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         port = sock.getsockname()[1]
     env = dict(env, KIMI_CODE_NO_AUTO_UPDATE="1")
-    with child(["kimi", "web", "--no-open", "--port", str(port)], env) as process:
-        lines = Lines(process)
-        key = None
-        deadline = time.monotonic() + 10
-        # The exact chosen loopback address must have been advertised by OUR child.
-        pattern = re.compile(rb"http://127\.0\.0\.1:" + str(port).encode() + rb"/#token=([A-Za-z0-9_.~-]+)")
-        while key is None:
-            match = pattern.search(lines.next(deadline))
-            if match:
-                key = match[1].decode("ascii")
-        headers = {"Authorization": "Bearer " + key, "Accept": "application/json"}
-        base = "http://127.0.0.1:" + str(port)
-        try:
-            account = http_json(base + "/api/v1/oauth/userinfo", headers)
-            quota = http_json(base + "/api/v1/oauth/usage", headers)
-            return account, quota
-        finally:
-            if process.poll() is None:
+    pattern = re.compile(rb"(http://127\.0\.0\.1:" + str(port).encode() +
+                         rb")/#token=([A-Za-z0-9_.~-]+)")
+    try:
+        with interactive_bounded(["kimi", "web", "--no-open", "--port", str(port)],
+                                 env, env.get("HOME"), 40) as session:
+            base = headers = None
+            while base is None:
+                line = session.readline(limit=65536)
+                if not line:
+                    raise Unavailable()
+                match = pattern.search(line)
+                if match:
+                    base = match[1].decode("ascii")
+                    key = match[2].decode("ascii")
+                    io._remember({"server_token": key})
+                    headers = {"Authorization": "Bearer " + key, "Accept": "application/json"}
+            try:
+                account = http_json(base + "/api/v1/oauth/userinfo", headers)
+                quota = http_json(base + "/api/v1/oauth/usage", headers)
+                return account, quota
+            finally:
                 try:
                     http_json(base + "/api/v1/shutdown", headers, method="POST", timeout=2)
                 except Exception:
-                    # Only this owned child is terminated by the context manager.
                     pass
+    except BoundedError as exc:
+        raise Unavailable(exc.code) from None
+
+
+def _claude_config_directory(home, env):
+    value = os.path.expanduser(os.fspath(env.get("CLAUDE_CONFIG_DIR") or home / ".claude"))
+    return unicodedata.normalize("NFC", os.path.normpath(os.path.abspath(value)))
+
+
+def _keychain_account():
+    try:
+        username = getpass.getuser()
+    except (KeyError, OSError):
+        username = ""
+    return username if re.fullmatch(r"[A-Za-z0-9._-]{1,255}", username) else "claude-code-user"
+
+
+def _keychain_credentials(home, env, io):
+    config = _claude_config_directory(home, env)
+    default = _claude_config_directory(home, {})
+    service = "Claude Code-credentials"
+    if config != default:
+        service += "-" + hashlib.sha256(config.encode("utf-8")).hexdigest()[:8]
+    completed = run_bounded(
+        ["/usr/bin/security", "find-generic-password", "-a", _keychain_account(),
+         "-s", service, "-w"], env, env.get("HOME"), 5)
+    if completed.status == 44:
+        return None
+    if completed.error == TIMEOUT:
+        raise Unavailable("source_timeout")
+    if completed.error is not None:
+        # A locked or denied Keychain is not a missing login. Never unlock it,
+        # invoke a GUI, change its ACL, or bypass consent with another item.
+        raise Unavailable("local_login_unavailable")
+    try:
+        document = json.loads(completed.stdout)
+    except (ValueError, UnicodeError):
+        raise helper.SafeError("Source profile JSON is invalid") from None
+    io._remember(document)
+    return document
+
+
+def _claude_credentials(home, env, io):
+    document = _keychain_credentials(home, env, io) if sys.platform == "darwin" else None
+    if document is None:
+        config = _claude_config_directory(home, env)
+        try:
+            document = io.read_json(Path(config) / ".credentials.json")
+        except FileNotFoundError:
+            raise Unavailable("local_login_unavailable") from None
+    return obj(document)
 
 
 def _principal(value, *, plan=None, organization_id=None):
@@ -381,19 +400,16 @@ def collect(provider, home, env, io):
     credit_balance = None
     if provider == "claude":
         # `claude auth status` runs first so a token the CLI renews on the way
-        # is the one read from disk. A signed-out CLI exits nonzero, so its
-        # failure is held until missing and expired credentials have been classified
-        # (a token still expired afterwards is one the CLI could not renew);
-        # unreadable/malformed files and command failures keep their non-auth errors.
+        # is the one read from the selected store. A signed-out CLI exits nonzero,
+        # so its failure is held until missing and expired credentials have been
+        # classified; unreadable/malformed files and command failures keep their
+        # non-auth errors.
         account = status_failure = None
         try:
             account = metadata(provider, home, env, io)
         except Exception as exc:
             status_failure = exc
-        try:
-            credentials = obj(io.read_json(Path(env.get("CLAUDE_CONFIG_DIR", home / ".claude")) / ".credentials.json"))
-        except FileNotFoundError:
-            raise Unavailable("local_login_unavailable") from None
+        credentials = _claude_credentials(home, env, io)
         oauth = obj(credentials.get("claudeAiOauth"))
         token = oauth.get("accessToken")
         if not isinstance(token, str) or not token or not token.isprintable():
@@ -410,14 +426,24 @@ def collect(provider, home, env, io):
                              rejected={401: "web_login_expired", 403: "web_login_forbidden"})
         windows = parse_claude(document, observed)
     elif provider == "openai":
-        login, quota = rpc(["codex", "app-server", "--stdio"], env,
-            {"clientInfo": {"name": "usage", "version": "1"}, "capabilities": {"experimentalApi": True}},
-            [("account/read", {"refreshToken": False}), ("account/rateLimits/read", {"excludeResetCreditDetails": True})], initialized=True)
+        def read_codex(refresh):
+            return rpc(["codex", "app-server", "--stdio"], env,
+                {"clientInfo": {"name": "usage", "version": "1"}, "capabilities": {"experimentalApi": True}},
+                [("account/read", {"refreshToken": refresh}), ("account/rateLimits/read", {"excludeResetCreditDetails": True})], initialized=True)
+        login, quota = read_codex(False)
+        # An expired access token reads as signed out. With a saved login,
+        # Codex gets one chance to renew it through its own refresh flow, the
+        # one the CLI runs on a 401: it reloads auth.json first, so a token
+        # another Codex process just renewed is reused rather than replaced.
+        saved_login = (Path(env.get("CODEX_HOME") or home / ".codex") / "auth.json").is_file()
+        if login is not None and login.get("account") is None and saved_login:
+            login, quota = read_codex(True)
         if login is None:
             raise Unavailable("vendor_usage_unavailable")
         if login.get("account") is None:
-            # Signed out: this context has no subscription login.
-            raise Unavailable("local_login_unavailable")
+            # Still signed out after Codex's own renewal: a saved login it
+            # could not renew has expired; without one there is no login.
+            raise Unavailable("web_login_expired" if saved_login else "local_login_unavailable")
         login = obj(login["account"])
         if login.get("type") != "chatgpt":
             # API-key auth is a login, but it has no ChatGPT subscription allowance.
@@ -434,7 +460,7 @@ def collect(provider, home, env, io):
         windows = parse_codex(quota, observed)
         credit_balance = codex_credit_balance(quota)
     elif provider == "antigravity":
-        raw = helper.bounded_process(["agy", "--print", "/usage", "--print-timeout", "45s"], env, timeout=50)
+        raw = _bounded_stdout(["agy", "--print", "/usage", "--print-timeout", "45s"], env, 50)
         windows = parse_agy(raw.decode("utf-8"), observed)
         account = metadata(provider, home, env, io)
     elif provider == "grok":
@@ -454,7 +480,7 @@ def collect(provider, home, env, io):
             account = _principal(meta["email"], plan=meta.get("subscription_tier"), organization_id=meta.get("team_id"))
         windows = parse_grok(quota, observed)
     elif provider == "kimi":
-        account, quota = kimi(env)
+        account, quota = kimi(env, io)
         data = account.get("data", {})
         candidates = [account.get("userInfo"), account.get("user_info"), data.get("userInfo") if isinstance(data, dict) else None,
                       data.get("user_info") if isinstance(data, dict) else None, data, account]

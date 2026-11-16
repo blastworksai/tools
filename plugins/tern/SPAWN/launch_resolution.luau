@@ -20,6 +20,20 @@ local function command_words(command: string, shell: string): ({string}?, string
 	end
 	return Config.parse_arguments(command)
 end
+-- Setup has no ordinary record or argv reinterpretation. Native agents:start
+-- consumes the effective Tern command verbatim and owns prompt delivery.
+function Resolution.setup_default(command: any, cwd: any, host_os: any): (any?, string?)
+	if not nonblank(command) then return nil, "Set a default agent in Tern settings, then try setup again." end
+	if not text(command,32000) or not text(cwd,8192) or not nonblank(cwd) or cwd:find("%c")
+		or not (cwd:sub(1,1)=="/" or cwd:match("^%a:[/\\]") or cwd:sub(1,2)=="\\\\") then
+		return nil, "Guided setup needs the exact default command and an absolute execution-host working directory"
+	end
+	-- This selects the explicitly named helper interpreter, not the shell or
+	-- provider behind the user-trusted command. ComSpec is not PowerShell proof.
+	local shell=if host_os=="windows" then "powershell" elseif host_os=="linux" or host_os=="macos" then "posix" else nil
+	if shell==nil then return nil, "The execution host platform has no supported explicit setup submission helper" end
+	return {command=command,cwd=cwd,shell=shell},nil
+end
 function Resolution.fresh_available(record: any): boolean
 	if record.fresh_native_default == true then
 		return record.backend == "native-agent" and string.lower(record.provider) == "omp" and record.model == nil and record.profile == nil

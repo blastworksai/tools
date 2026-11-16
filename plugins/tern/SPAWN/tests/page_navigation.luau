@@ -34,9 +34,11 @@ local function fixture()
  end
  return f
 end
-check(N.page({kind='page',page='managed',native_window=''},'managed')~=nil,'empty native window key is valid')
+for _,page in ipairs({'managed','runtime'}) do
+ check(N.page({kind='page',page=page,native_window=''})~=nil,'supported owner page accepts the empty native window key: '..page)
+end
 for _,entry in ipairs({{kind='page',page='other',native_window=''}, {kind='page',page='managed',native_window='',client_config={}}, {kind='page',page='managed'}, {kind='page',page='managed',native_window='bad\nwindow'}}) do
- check(N.page(entry,'managed')==nil,'public page object is closed and cannot carry foreign settings')
+ check(N.page(entry)==nil,'public page object is closed and cannot carry foreign settings')
 end
 local f=fixture()
 check(N.readiness(f.cx,1,f.hooks),'existing appropriate visible ORCH page opens')

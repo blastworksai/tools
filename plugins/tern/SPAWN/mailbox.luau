@@ -79,13 +79,22 @@ local function issued_handover(r)
  if not id(r.handover_id) or not digest(r.handover_sha256) then return nil,false end
  return {handover_id=r.handover_id,handover_sha256=r.handover_sha256},true
 end
--- Worker helpers gate run-checks/checkout and grants on these provisioned capabilities. They are
--- written only for generations holding a 0.4.0 capability, so 0.3.0 descriptors stay byte-identical.
-local GATED={['check-runner-v1']=true,['release-manager-v1']=true}
-local function descriptor(g)
+-- Legacy descriptor bytes are inspection evidence, not permission inferred from
+-- today's config. Every newly provisioned descriptor records the full capability set.
+local function descriptor(g,legacy)
  local d={version=1,handle=g.binding.mailbox_handle,binding_digest=g.binding_digest,binding=g.binding,handover=g.handover,manifest_sha256=g.manifest_sha256}
- for _,capability in ipairs(g.capabilities) do if GATED[capability] then d.capabilities=g.capabilities; break end end
+ if not legacy or table.find(g.capabilities,'check-runner-v1') or table.find(g.capabilities,'release-manager-v1') then d.capabilities=g.capabilities end
  return d
+end
+local function canonical_request(r)
+ local value=r
+ -- Store tables do not retain JSON array tags across native KV serialization.
+ if type(r)=='table' and type(r.consumed)=='table' and next(r.consumed)==nil then
+  value=table.clone(r); value.consumed=tern.json.array()
+ end
+ local ok,bytes=pcall(tern.json.encode,value)
+ if not ok then return nil,{code='invalid_schema'} end
+ return Codec.decode_dispatch_request(bytes)
 end
 -- Absent manifest is valid (nil, true); a present one must decode and yields its exact-bytes digest.
 local function issued_manifest(r)
@@ -97,22 +106,27 @@ end
 local function valid_write(g,key,w)
  if not closed(w,{status=true,request=true,bytes=true,reply_seq=true,logical_bytes=true,result=true}) or type(w.request)~='table' or not bound(w.request,g.binding) then return false end
  local r=w.request
- if not id(r.request_id) or not id(r.action_id) or r.schema~=1 or r.origin~='orchplus' then return false end
- local fields={schema=true,origin=true,op=true,request_id=true,action_id=true,origin_binding=true,controller_pane=true,controller_generation=true}
- for _,name in ipairs(B) do fields[name]=true end
- local specific={
-  mailbox_provision={'record_id','record_revision','capability','handover_id','handover_sha256','manifest'},
-  mailbox_publish_ack={'handle','expected_generation','receipt_revision','ack_b64','ack_sha256'},
-  mailbox_publish_reply={'handle','expected_generation','message_id','reply_seq','action_revision','reply_sha256','part','index','object_b64','object_sha256'},
-  mailbox_retire={'handle','expected_generation','mode','settlement_revision','report_floor','report_chain_sha256','reply_floor','grant_id'},
- }
- if not specific[r.op] then return false end
- for _,name in ipairs(specific[r.op]) do fields[name]=true end
- if not closed(r,fields) then return false end
+ if r.schema==2 then
+  if not canonical_request(r) then return false end
+ elseif r.schema==1 then
+  -- Inspection only: old immutable writes cannot enter prepare under v2.
+  if not id(r.request_id) or not id(r.action_id) or r.origin~='orchplus' then return false end
+  local fields={schema=true,origin=true,op=true,request_id=true,action_id=true,origin_binding=true,controller_pane=true,controller_generation=true}
+  for _,name in ipairs(B) do fields[name]=true end
+  local specific={
+   mailbox_provision={'record_id','record_revision','capability','handover_id','handover_sha256','manifest'},
+   mailbox_publish_ack={'handle','expected_generation','receipt_revision','ack_b64','ack_sha256'},
+   mailbox_publish_reply={'handle','expected_generation','message_id','reply_seq','action_revision','reply_sha256','part','index','object_b64','object_sha256'},
+   mailbox_retire={'handle','expected_generation','mode','settlement_revision','report_floor','report_chain_sha256','reply_floor','grant_id'},
+  }
+  if not specific[r.op] then return false end
+  for _,name in ipairs(specific[r.op]) do fields[name]=true end
+  if not closed(r,fields) then return false end
+ else return false end
  if r.op=='mailbox_provision' then
   local object=Codec.strict_decode(w.bytes,2048)
   local manifest,valid=issued_manifest(r)
-  return key=='provision' and r.capability=='report-files-v1' and r.record_id==g.record_id and r.record_revision==g.record_revision and w.reply_seq==nil and w.logical_bytes==nil and equal(issued_handover(r),g.handover) and valid and manifest==g.manifest_sha256 and equal(object,descriptor(g))
+  return key=='provision' and r.capability=='report-files-v1' and r.record_id==g.record_id and r.record_revision==g.record_revision and w.reply_seq==nil and w.logical_bytes==nil and equal(issued_handover(r),g.handover) and valid and manifest==g.manifest_sha256 and equal(object,descriptor(g,r.schema==1))
  end
  if r.handle~=g.binding.mailbox_handle or r.expected_generation~=g.binding.worker_generation then return false end
  if r.op=='mailbox_publish_ack' then
@@ -127,9 +141,41 @@ local function valid_write(g,key,w)
   local object=Codec.decode_object(w.bytes)
   return object~=nil and object.direction=='reply' and object.mailbox_handle==r.handle and object.slot==r.reply_seq and object.message_id==r.message_id and object.message_sha256==r.reply_sha256 and object.type==r.part and object.index==r.index and key==M.selector({stream='reply',slot=r.reply_seq,part=r.part,index=r.index}) and w.reply_seq==r.reply_seq and w.logical_bytes==(if object.type=='manifest' then object.message_bytes else nil)
  elseif r.op=='mailbox_retire' then
+  if r.withdrawn_starts~=nil and (not table.find(g.capabilities,'coordinator-control-v1') or not table.find(g.capabilities,'project-start-v1')) then return false end
   return key=='grant:'..tostring(r.grant_id) and id(r.grant_id) and (r.mode=='compact' or r.mode=='retire') and integer(r.settlement_revision) and integer(r.report_floor,true) and integer(r.reply_floor,true) and digest(r.report_chain_sha256) and w.bytes==nil and w.reply_seq==nil and w.logical_bytes==nil
  end
  return false
+end
+-- Withdrawal never infers publication from a file's presence: the immutable
+-- SPAWN write ledger must already confirm every original START object.
+local function confirmed_start_tail(g,starts,floor)
+ local expected=copy(g.binding);expected.capabilities=g.capabilities
+ local listed={}
+ for _,entry in ipairs(starts) do
+  listed[entry.reply_seq]=true
+  local prefix='replies/'..string.format('%.0f',entry.reply_seq)..'/'
+  local manifest_write=g.writes[prefix..'manifest.json']
+  local function confirmed(key,w)
+   return w and w.status=='settled' and w.result and (w.result.status=='published' or w.result.status=='already_published')
+    and valid_write(g,key,w)
+  end
+  if not confirmed(prefix..'manifest.json',manifest_write) then return false end
+  local state=Codec.assembly_start(manifest_write.bytes,Codec.sha256(manifest_write.bytes),expected)
+  if not state or state.manifest.direction~='reply' or state.manifest.slot~=entry.reply_seq
+   or state.manifest.message_id~=entry.message_id or state.manifest.message_sha256~=entry.message_sha256 then return false end
+  local complete
+  for index=1,state.manifest.count do
+   local key=prefix..'chunk-'..index..'.json';local chunk=g.writes[key]
+   if not confirmed(key,chunk) then return false end
+   complete=Codec.assembly_push(state,chunk.bytes,Codec.sha256(chunk.bytes),expected)
+   if not complete then return false end
+  end
+  if not complete or not complete.complete or complete.envelope.kind~='project_start' then return false end
+ end
+ for _,w in pairs(g.writes) do
+  if w.request.op=='mailbox_publish_reply' and w.reply_seq>floor and not listed[w.reply_seq] then return false end
+ end
+ return true
 end
 function M.empty() return {version=1,generations={}} end
 function M.location(registry,handle)
@@ -142,6 +188,18 @@ function M.get(registry,handle)
  if not g then return nil end
  local binding={}; for _,key in ipairs(B) do binding[key]=g.binding[key] end
  return {binding=binding,record_id=g.record_id,record_revision=g.record_revision,backend=g.backend,phase=g.status,location=M.location(registry,handle),capabilities=copy(g.capabilities),handover=copy(g.handover)}
+end
+-- Only explicit immutable provision bytes establish helper permissions.
+function M.provisioned_capabilities(registry,handle)
+ local g=registry.generations[handle]
+ local provision=g and g.writes.provision
+ if not provision or g.status~='provisioned' or provision.status~='settled' or not provision.result or provision.result.status~='provisioned' then return nil end
+ local d=Codec.strict_decode(provision.bytes,2048)
+ if not d or not equal(d,descriptor(g,provision.request.schema==1)) or d.capabilities==nil then return nil end
+ return copy(d.capabilities)
+end
+local function provision_payload(handle,g)
+ return {handle=handle,binding_digest=g.binding_digest,limits=copy(M.LIMITS),capabilities=copy(g.capabilities),identity={worker=g.target.worker_identity},manifest_sha256=g.manifest_sha256}
 end
 function M.validate(registry)
  if not closed(registry,{version=true,generations=true}) or registry.version~=1 or type(registry.generations)~='table' then return nil,err('journal_corrupt') end
@@ -171,8 +229,11 @@ function M.validate(registry)
    if w.result then
     local status=w.result.status
     if status~='published' and status~='already_published' and status~='provisioned' and status~='compacted' and status~='retired' and status~='uncertain' and status~='rejected' and status~='missing' and status~='incomplete' and status~='full' then return nil,err('journal_corrupt') end
-    if status=='provisioned' and (w.request.op~='mailbox_provision' or type(w.result.payload)~='table' or w.result.payload.handle~=handle or w.result.payload.binding_digest~=g.binding_digest or not equal(w.result.payload.capabilities,g.capabilities) or w.result.payload.manifest_sha256~=g.manifest_sha256) then return nil,err('journal_corrupt') end
-    if (status=='compacted' or status=='retired') and (w.request.op~='mailbox_retire' or status~= (if w.request.mode=='compact' then 'compacted' else 'retired')) then return nil,err('journal_corrupt') end
+    if status=='provisioned' then
+     if w.request.op~='mailbox_provision' or type(w.result.payload)~='table' or w.result.payload.handle~=handle or w.result.payload.binding_digest~=g.binding_digest or not equal(w.result.payload.capabilities,g.capabilities) or w.result.payload.manifest_sha256~=g.manifest_sha256 then return nil,err('journal_corrupt') end
+    elseif status=='compacted' or status=='retired' then
+     if w.request.op~='mailbox_retire' or status~= (if w.request.mode=='compact' then 'compacted' else 'retired') then return nil,err('journal_corrupt') end
+    end
    end
   end
   if g.status=='provisioned' and (not g.writes.provision or g.writes.provision.status~='settled' or not g.writes.provision.result or g.writes.provision.result.status~='provisioned') then return nil,err('journal_corrupt') end
@@ -180,23 +241,48 @@ function M.validate(registry)
  if live>M.LIMITS.generations or active>4 or #tern.json.encode(registry)>4194304 then return nil,err('journal_corrupt') end
  return registry,nil
 end
+-- Full generation selector contains only a token digest, never a caller path.
+function M.matches_allocation(value,target)
+ return type(value)=='table' and type(target)=='table' and digest(target.enrolment_sha256)
+  and value.logical_session_id==target.logical_session_id and value.worker_id==target.worker_id
+  and value.worker_generation==target.worker_generation and value.launch_request_id==target.launch_request_id
+  and value.work_id==target.work_id and type(value.enrolment_token)=='string'
+  and Codec.sha256(value.enrolment_token)==target.enrolment_sha256
+end
+-- Selected private evidence only; Dispatcher must still bind its original
+-- authority/admission/native scope before projecting any public allocation.
+function M.allocation_generation(registry,target)
+ if type(registry)~='table' or registry.version~=1 or type(registry.generations)~='table'
+  or not closed(target,{logical_session_id=true,worker_id=true,worker_generation=true,launch_request_id=true,work_id=true,enrolment_sha256=true})
+  or not id(target.logical_session_id) or not id(target.worker_id) or not integer(target.worker_generation)
+  or not id(target.launch_request_id) or not id(target.work_id) or not digest(target.enrolment_sha256) then return nil,'Incomplete allocation selector or registry' end
+ local selected,handle=nil,nil
+ for candidate,g in pairs(registry.generations) do
+  if g.binding and g.binding.logical_session_id==target.logical_session_id and g.binding.launch_request_id==target.launch_request_id then
+   if selected then return nil,'Multiple retained generations match this launch' end
+   selected=g;handle=candidate
+  end
+ end
+ if not selected then return nil,'missing' end
+ local g=selected
+ if not M.matches_allocation(g.binding,target) or g.binding.mailbox_handle~=handle then return nil,'Retained generation differs from the full enrolment binding' end
+ if g.status=='retired' then return {phase='retired',handle=handle},nil end
+ if g.active then return nil,'Retained generation still has a pending helper',true end
+ local write=g.writes and g.writes.provision
+ if not write or write.status~='settled' or not write.result
+  or (write.result.status~='rejected' and write.result.status~='provisioned') then return nil,'Provision settlement is incomplete or uncertain' end
+ local request=write.request
+ if not valid_write(g,'provision',write) or not M.matches_allocation(request,target)
+  or not Adapter.validate_target(g.target) or g.binding_digest~=binding_digest(g) then return nil,'Retained provision evidence is incomplete or contradictory' end
+ return {phase='retained',request=request,provision=provision_payload(handle,g)},nil
+end
 function M.prepare(registry,request,record,context)
  local function reject(code) return nil,nil,err(code) end
  if type(registry)~='table' or registry.version~=1 or type(registry.generations)~='table' then return reject('journal_corrupt') end
  if type(request)~='table' or type(context)~='table' or not id(context.operation_id) or not id(request.request_id) then return reject('invalid_schema') end
- if #tern.json.encode(request)>8192 then return reject('oversize') end
- local fields={schema=true,origin=true,op=true,request_id=true,action_id=true,origin_binding=true,controller_pane=true,controller_generation=true}
- for _,k in ipairs(B) do fields[k]=true end
- local specific={
-  mailbox_provision={'record_id','record_revision','capability','handover_id','handover_sha256','manifest'},
-  mailbox_read={'handle','expected_generation','selector'},
-  mailbox_publish_ack={'handle','expected_generation','receipt_revision','ack_b64','ack_sha256'},
-  mailbox_publish_reply={'handle','expected_generation','message_id','reply_seq','action_revision','reply_sha256','part','index','object_b64','object_sha256'},
-  mailbox_retire={'handle','expected_generation','mode','settlement_revision','report_floor','report_chain_sha256','reply_floor','grant_id'},
- }
- if not specific[request.op] then return reject('invalid_schema') end
- for _,k in ipairs(specific[request.op]) do fields[k]=true end
- if not closed(request,fields) then return reject('invalid_schema') end
+ local validated,why=canonical_request(request)
+ if not validated then return reject(why.code) end
+ if request.op~='mailbox_provision' and request.op~='mailbox_read' and request.op~='mailbox_publish_ack' and request.op~='mailbox_publish_reply' and request.op~='mailbox_retire' then return reject('invalid_schema') end
  local next=copy(registry)
  local handle=request.handle
  local g
@@ -239,13 +325,26 @@ function M.prepare(registry,request,record,context)
  end
  if g.status=='retired' then return reject('generation_retired') end
  if g.frozen then return reject('content_conflict') end
+ if request.op~='mailbox_read' then
+  for _,write in pairs(g.writes) do
+   if write.request.schema==1 and (write.status~='settled' or write.result and write.result.status=='uncertain') then
+    return nil,nil,{status='rejected',error={code='migration_blocked',message='An immutable old mailbox operation remains unresolved; settle it with the original build before cutover'}}
+   end
+  end
+ end
+ local provision=g.writes.provision
+ -- A settled provision refusal still owns its exact reserved generation.
+ -- Only guarded retirement may release it; it never becomes usable or ready.
+ local rejected_provision=request.op=='mailbox_retire' and request.mode=='retire' and g.status=='intent'
+  and provision~=nil and provision.status=='settled' and provision.result~=nil and provision.result.status=='rejected'
+  and valid_write(g,'provision',provision)
  local op={id=context.operation_id,request_id=request.request_id,handle=handle,generation=g.binding.worker_generation,target=copy(g.target),binding=copy(g.binding),kind=request.op,request=copy(request)}
  local key,raw,object
  if request.op=='mailbox_provision' then
-  key='provision'; op.mode='provision'; op.bytes=tern.json.encode(descriptor(g)); op.path='provision.json'
+  key='provision'; op.mode='provision'; op.bytes=if g.writes.provision then g.writes.provision.bytes else tern.json.encode(descriptor(g)); op.path='provision.json'
   -- The target helper writes these exact bytes as manifest.json beside provision.json.
   op.manifest=request.manifest
- elseif g.status~='provisioned' then return reject('unsupported_capability')
+ elseif g.status~='provisioned' and not rejected_provision then return reject('unsupported_capability')
  elseif request.op=='mailbox_read' then
   op.path=M.selector(request.selector); if not op.path then return reject('invalid_schema') end
   if (request.selector.stream=='report' or request.selector.stream=='ack') and request.selector.slot<=g.report_floor or request.selector.stream=='reply' and request.selector.slot<=g.reply_floor then return nil,nil,{status='compacted'} end
@@ -289,6 +388,11 @@ function M.prepare(registry,request,record,context)
   local grant=context.settlement
   if type(grant)~='table' then return reject('binding_mismatch') end
   for _,k in ipairs({'handle','expected_generation','mode','settlement_revision','report_floor','report_chain_sha256','reply_floor','grant_id'}) do if grant[k]~=request[k] then return reject('binding_mismatch') end end
+  if not equal(grant.withdrawn_starts,request.withdrawn_starts) then return reject('binding_mismatch') end
+  if request.withdrawn_starts~=nil then
+   if not table.find(g.capabilities,'coordinator-control-v1') or not table.find(g.capabilities,'project-start-v1') then return reject('unsupported_capability') end
+   if not confirmed_start_tail(g,request.withdrawn_starts,request.reply_floor) then return reject('binding_mismatch') end
+  end
   if request.mode=='retire' and grant.settled~=true then return reject('binding_mismatch') end
   if request.report_floor<g.report_floor or request.reply_floor<g.reply_floor or request.settlement_revision<g.settlement_revision then return reject('binding_mismatch') end
   for k,w in pairs(g.writes) do if (w.status=='uncertain' or w.status=='active') and k~='grant:'..request.grant_id then return nil,nil,{status='uncertain'} end end
@@ -338,7 +442,7 @@ function M.settle(registry,op,result)
  if result.status=='provisioned' then
   g.status='provisioned'
   -- manifest_sha256 (absent without a manifest) lets ORCH+ cross-check the digest it stored at queue.
-  result={status='provisioned',payload={handle=op.handle,binding_digest=g.binding_digest,limits=copy(M.LIMITS),capabilities=copy(g.capabilities),identity={worker=g.target.worker_identity},manifest_sha256=g.manifest_sha256}}
+  result={status='provisioned',payload=provision_payload(op.handle,g)}
   g.writes[op.key].result=copy(result)
  elseif result.status=='compacted' or result.status=='retired' then
   g.report_floor=op.report_floor; g.reply_floor=op.reply_floor; g.report_chain_sha256=op.request.report_chain_sha256; g.settlement_revision=op.request.settlement_revision
@@ -353,6 +457,15 @@ function M.settle(registry,op,result)
  end
  if #tern.json.encode(next)>4194304 then return nil,err('oversize') end
  return next,result
+end
+-- Caller supplies the current, authenticated delivery ACK before invoking this.
+-- Helper retirement alone deliberately leaves this live delivery obligation.
+function M.reclaim_retired(registry,handle)
+ local g=registry.generations[handle]
+ if not g or g.status~='retired' or g.active~=nil or next(g.writes)~=nil then return nil,err('binding_mismatch') end
+ local next=copy(registry)
+ next.generations[handle]=nil
+ return next,nil
 end
 function M.recover(registry)
  local next=copy(registry)

@@ -394,6 +394,44 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(self.store.expire_clients(), 1)
         self.assertEqual(self.store.expire_clients(), 0)
 
+    def test_unregister_removes_only_the_exact_incarnation_and_preserves_readings(self):
+        saved = self.store.local_publish("host", snapshot())
+        self.store.register_client("window:old", "window")
+        self.store.register_client("window:new", "window")
+        self.store.register_client("host:live", "host")
+        self.assertTrue(self.store.unregister_client("window:old"))
+        self.assertFalse(self.store.unregister_client("window:old"))
+        self.assertTrue(self.store.has_live_clients())
+        self.assertEqual(self.store.local_records(), [saved])
+        self.assertTrue(self.store.unregister_client("window:new"))
+        self.assertTrue(self.store.has_live_clients())
+        self.assertTrue(self.store.unregister_client("host:live"))
+        self.assertFalse(self.store.has_live_clients())
+        self.assertEqual(self.store.local_records(), [saved])
+
+    def test_client_expiry_remains_bounded_after_wall_clock_rollback(self):
+        self.store.close()
+        mono = Clock()
+        self.store = Store(self.root, clock=self.clock, monotonic=mono)
+        self.store.register_client("window:abandoned", "window")
+        self.clock.advance(-3600)
+        mono.advance(89)
+        self.assertTrue(self.store.has_live_clients())
+        mono.advance(1)
+        self.assertFalse(self.store.has_live_clients())
+        self.assertEqual(self.store.expire_clients(), 1)
+
+    def test_restored_client_has_a_bounded_monotonic_deadline(self):
+        self.store.register_client("host:abandoned", "host")
+        self.store.close()
+        self.clock.advance(-3600)
+        mono = Clock()
+        self.store = Store(self.root, clock=self.clock, monotonic=mono)
+        self.assertTrue(self.store.has_live_clients())
+        mono.advance(90)
+        self.assertFalse(self.store.has_live_clients())
+        self.assertEqual(self.store.expire_clients(), 1)
+
     def remote_source(self, record, entries=None):
         return {"source_id": record["subject_source_id"], "generation": record["generation"], "profile_generation": record["profile_generation"],
                 "status": "stale", "last_received_ms": 30, "inventory": entries or []}

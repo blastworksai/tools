@@ -1,6 +1,7 @@
--- Managed fresh-launch construction and public serializer/mailbox helpers.
+-- Managed fresh-launch/setup construction and canonical serializer/mailbox helpers.
 -- Ordinary launches use host_executor tickets; only resolution is shared.
 local Resolution = require("./launch_resolution")
+local Config = require("./config")
 local Backend = {}
 local POSIX_LIMIT, WINDOWS_LIMIT = 32768, 7000
 
@@ -90,13 +91,95 @@ function Backend.serialize(executable: string, args: {string}, cwd: string?, os:
 	end
 	local data = tern.json.encode({ executable = executable, arguments = table.concat(native, " "), batch = if crt_only then nil else table.concat(batch, " "), cwd = cwd })
 	local wrapper = POWERSHELL_PREFIX .. tern.base64.encode(data) .. (if crt_only then CRT_SUFFIX else POWERSHELL_SUFFIX)
-	local encoded = tern.base64.encode(assert(Backend.utf16le(wrapper)))
+	local utf16 = assert(Backend.utf16le(wrapper))
+	local encoded = tern.base64.encode(utf16)
 	return bounded("powershell.exe -NoLogo -NoProfile -EncodedCommand " .. encoded, os)
+end
+
+-- Preparation adopts only literal same-host account routing, never shell code.
+-- removed counts argv entries through the wrapped executable (for task slots).
+local ROUTE_WRAPPERS={sudo=true,su=true,doas=true,runuser=true,env=true,ssh=true,sh=true,bash=true,dash=true,zsh=true,ksh=true}
+function Backend.same_host_route(executable,arguments,user)
+	user=user or ''
+	local argv=table.clone(arguments);local removed=0
+	if executable:match('([^/]+)$')=='sudo' then
+		local selected=nil;local index=1
+		while index<=#argv do
+			local word=argv[index]
+			if word=='--' then index+=1;break end
+			if word:sub(1,1)~='-' then break end
+			local value=word:match('^%-%-user=(.+)$') or word:match('^%-u(.+)$')
+			if word=='-u' or word=='--user' then index+=1;value=argv[index] end
+			if value then
+				if selected then return nil,'Same-host sudo route has ambiguous OS-user selectors' end
+				selected=value
+			elseif word~='-n' and word~='-H' then return nil,'Review this same-host sudo route explicitly; only literal -n, -H and OS-user selection are supported' end
+			index+=1
+		end
+		if not selected or selected=='' or selected:sub(1,1)=='-' or selected:find('[%s%c:/]') or not argv[index] or argv[index]=='' then return nil,'Same-host sudo route must explicitly select an existing OS account and executable' end
+		if user~='' and user~=selected then return nil,'Configured OS user conflicts with the literal sudo account selector' end
+		user=selected;executable=argv[index];removed=index
+		local remaining={};for i=index+1,#argv do table.insert(remaining,argv[i]) end;argv=remaining
+	end
+	local name=executable:match('([^/]+)$')
+	if executable=='' or executable:find('%c') or executable:sub(1,1)=='-' or executable:find('=',1,true) or ROUTE_WRAPPERS[name] then return nil,'Same-host route requires an actual literal worker executable; nested, shell, environment and remote wrappers require explicit review' end
+	return {executable=executable,arguments=argv,user=user,removed=removed},nil
 end
 
 -- Mailbox adapters use this same identity-fenced SSH transport constructor.
 Backend.ssh_arguments = Resolution.ssh_arguments
+local SETUP_LIMIT = 32000
 
+local function setup_text(value: any, limit: number): boolean
+	return type(value) == "string" and #value <= limit and not value:find("%z")
+end
+-- The packaged skill is provider-neutral. Run authority is appended by the host,
+-- never inferred from assistant text or from a submitted confirmed=true flag.
+function Backend.setup_prompt(records: any, run_id: any, host_key: any, session_key: any, setup: any, skill: any, shell: any): (string?, string?)
+	local canonical, err = Config.validate_records(records)
+	if not canonical then return nil, err end
+	if not setup_text(run_id, 256) or not nonblank(run_id)
+		or not setup_text(host_key, 1024) or not nonblank(host_key)
+		or not setup_text(session_key, 2048) or not nonblank(session_key)
+		or type(setup) ~= "table" or not setup_text(setup.result_path, 8192)
+		or not setup_text(setup.binding, 256) or not setup_text(skill, SETUP_LIMIT)
+		or type(setup.native_session)~="number" or setup.native_session<0 or setup.native_session%1~=0
+		or type(setup.host_config_pane)~="number" or setup.host_config_pane<1 or setup.host_config_pane%1~=0
+		or not setup_text(setup.window,256) or setup.config_dir~=nil and not setup_text(setup.config_dir,8192) then
+		return nil, "Guided setup needs its original run, execution host, binding and skill"
+	end
+	local quote = if shell == "posix" then Backend.posix_quote elseif shell == "powershell" then Backend.powershell_quote else nil
+	if quote == nil then return nil, "The execution host shell is not supported for the explicit setup submission helper" end
+	local envelope = tern.json.encode({schema=1,kind="spawn-setup-result",setup_run_id=run_id,binding=setup.binding,path=setup.result_path})
+	if #envelope>4096 then return nil,"Setup helper envelope exceeds the Config block's 4096-byte input bound; no native effect was admitted" end
+	local words = {"send",string.format("%.0f/%.0f",setup.native_session,setup.host_config_pane),"paste",envelope,"--window",setup.window,"--json"}
+	local helper
+	if shell=="posix" then
+		local command={}
+		for _,word in ipairs(words) do table.insert(command,quote(word)) end
+		helper='TERN_DAEMON_SOCKET="${TERN_PANE_SOCKET:?Native Tern daemon socket is missing}" '
+			..(if setup.config_dir~=nil then "TERN_CONFIG_DIR="..quote(setup.config_dir).." " else "")
+			..'"${TERN_EXE:?Native Tern executable is missing}" '..table.concat(command," ")
+	else
+		local native_arguments={}
+		for _,word in ipairs(words) do table.insert(native_arguments,Backend.windows_argument(word)) end
+		helper="& { if ([string]::IsNullOrWhiteSpace($env:TERN_EXE) -or [string]::IsNullOrWhiteSpace($env:TERN_PANE_SOCKET)) { throw 'Native Tern executable or daemon socket is missing' }; "
+			.."$start=New-Object System.Diagnostics.ProcessStartInfo; $start.UseShellExecute=$false; $start.FileName=$env:TERN_EXE; "
+			.."$start.Arguments="..quote(table.concat(native_arguments," ")).."; $start.EnvironmentVariables['TERN_DAEMON_SOCKET']=$env:TERN_PANE_SOCKET; "
+			..(if setup.config_dir~=nil then "$start.EnvironmentVariables['TERN_CONFIG_DIR']="..quote(setup.config_dir).."; " else "")
+			.."$child=[System.Diagnostics.Process]::Start($start); try { $child.WaitForExit(); if ($child.ExitCode -ne 0) { throw 'SPAWN helper delivery failed; inspect native review before doing anything else' } } finally { $child.Dispose() } }"
+	end
+	local prompt = skill .. "\n\nImmutable SPAWN run context:\n" .. tern.json.encode({
+		setup_run_id=run_id,host_key=host_key,session_key=session_key,binding=setup.binding,
+		result_path=setup.result_path,config_dir=setup.config_dir,existing_records=canonical,
+		glitch_installation=setup.glitch_installation,
+	}) .. "\nHelper interpreter: "..(if shell=="powershell" then "PowerShell (not cmd.exe)" else "POSIX shell")
+		..". Use the native agent process's injected TERN_EXE and TERN_PANE_SOCKET; missing values refuse, never substitute a PATH executable or default daemon."
+		.."\nWrite the complete schema-2 JSON to that exact result_path, then run this exact submission command once:\n"
+		.. helper .. "\nDelivery is not acceptance. SPAWN opens the settings review for approval in the bound setup pane. Follow its visible approval and preparation flow; do not send the user through per-agent resource or verification steps. A durable roster-save receipt confirms only that the exact reviewed settings were committed and read back, not that preparation or provider login passed. Report SPAWN SETUP SUCCESSFUL only after observing completed preparation and saving. Otherwise name the exact remaining action or failed check; never claim success or say NO DECISION NEEDED from delivery alone."
+	if #prompt > SETUP_LIMIT then return nil, "Guided setup context exceeds 32000 bytes; use Advanced manual recovery" end
+	return prompt, nil
+end
 local function windows_fresh_error(record: any, executable: string?): string?
 	if record.argv_contract ~= "windows-crt" then return "Managed Windows launch requires an explicit windows-crt argv contract" end
 	local name = (executable or ""):lower():gsub("\\", "/"):match("([^/]+)$") or ""
@@ -123,6 +206,17 @@ function Backend.build(record: any, host: any, options: any?): (any?, string?)
 	local resolved, err = Resolution.resolve(record, "fresh", host_kind)
 	if resolved == nil then return nil, err end
 	record = resolved.record
+	if host_kind == "posix" and record.backend ~= "ssh-command" and record.mailbox then
+		local execution_user = record.user
+		if resolved.executable:match("([^/]+)$") == "sudo" then
+			local route, route_error = Backend.same_host_route(resolved.executable, resolved.arguments, execution_user)
+			if not route then return nil, route_error end
+			execution_user = route.user
+		end
+		if nonblank(execution_user) and execution_user ~= record.mailbox.worker_identity then
+			return nil, "The launch account differs from the prepared agent connection. Prepare this agent again before starting it."
+		end
+	end
 	if record.host_shell ~= nil then
 		local configured_kind = Backend.shell_kind(host.host_os, record.host_shell)
 		if configured_kind ~= host_kind then return nil, "Configured execution shell does not match the observed host" end

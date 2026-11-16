@@ -8,14 +8,14 @@ end
 local function window(value)
  return type(value)=='string' and #value<=256 and not value:find('%c')
 end
-function M.page(value,expected)
+function M.page(value)
  if type(value)=='string' then
   if #value>2048 then return nil,'Page entry exceeds its bound' end
   local ok,decoded=pcall(tern.json.decode,value);if not ok then return nil,'Invalid page entry JSON' end
   value=decoded
  end
- if not fields(value,{kind=true,page=true,native_window=true}) or value.kind~='page' or value.page~=expected or not window(value.native_window) then return nil,'Invalid owner page entry' end
- return {kind='page',page=expected,native_window=value.native_window},nil
+ if not fields(value,{kind=true,page=true,native_window=true}) or value.kind~='page' or (value.page~='managed' and value.page~='runtime') or not window(value.native_window) then return nil,'Invalid owner page entry' end
+ return {kind='page',page=value.page,native_window=value.native_window},nil
 end
 function M.context(value,expected_window)
  if not fields(value,{kind=true,host=true,native_window=true,client_config=true}) or value.kind~='context' or value.native_window~=expected_window or not window(value.native_window) or not fields(value.host,{id=true,name=true,kind=true,address=true}) then return nil,'Invalid SPAWN owner context' end
@@ -25,7 +25,7 @@ function M.context(value,expected_window)
 end
 function M.request(value)
  if not fields(value,{entry=true,nonce=true}) or type(value.nonce)~='string' or #value.nonce<1 or #value.nonce>96 or value.nonce:find('%c') then return nil end
- local entry=M.page(value.entry,'managed');if not entry then return nil end
+ local entry=M.page(value.entry);if not entry then return nil end
  return {entry=entry,nonce=value.nonce}
 end
 function M.visible(cx,pane,block,origin,hooks,require_view)

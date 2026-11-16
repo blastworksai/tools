@@ -3,9 +3,8 @@
 
 Run only under a descendant-owning supervisor, for example:
   systemd-run --user --scope --collect --property=KillMode=control-group \
-    --property=RuntimeMaxSec=900s python3 updater_smoke.py --evidence /tmp/updater-e2e.json
+    --property=RuntimeMaxSec=900s python3 updater_smoke.py --case git --evidence /tmp/updater-git.json
 """
-import argparse
 import hashlib
 import http.server
 import json
@@ -14,10 +13,7 @@ from pathlib import Path
 import re
 import shutil
 import signal
-import socket
 import subprocess
-import sys
-import tempfile
 import threading
 import time
 
@@ -25,7 +21,7 @@ ROOT = Path(__file__).resolve().parents[1]
 TESTS = ROOT/'tests'
 FIXTURE = TESTS/'fixture'
 TERN = shutil.which('tern')
-MODULES = ['version', 'manifest', 'source', 'requires', 'confirm', 'state', 'cli', 'window']
+MODULES = ['version', 'manifest', 'source', 'requires', 'confirm', 'journal', 'state', 'discovery', 'cli', 'shell', 'observe', 'remote', 'host', 'window']
 FIXTURE_ID = 'updater-fixture'
 PROXY_VARS = ['http_proxy', 'https_proxy', 'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'all_proxy']
 REAL_PLUGINS = Path.home()/'.config/tern/plugins'
@@ -318,10 +314,11 @@ class Tern:
             wait_for(lambda: not self.ctl('state').get('palette'), 'palette closed', 5)
 
     def shows(self, label, query=None):
-        """Whether the palette lists a row with exactly `label`'s words (its match mark splits the text)."""
+        """Match words and punctuation despite the palette splitting highlighted spans."""
         rows = self.palette_rows(query or label)
         self.evidence.setdefault('palette_rows', []).append({'query': query or label, 'rows': rows})
-        return any(sorted(row.split()) == sorted(label.split()) for row in rows)
+        expected = sorted(re.findall(r"\w+|[^\w\s]", label))
+        return any(sorted(re.findall(r"\w+|[^\w\s]", row)) == expected for row in rows)
 
     def picker(self):
         return self.ctl('state').get('picker')
@@ -382,33 +379,6 @@ def build_fixture(dst, version, raw_base=None, install_base=None, suite=False):
     return dst
 
 
-def suite_only(base, evidence, processes, sweep):
-    package = build_fixture(base/'pkg-suite', '0.1.0', suite=True)
-    tern = Tern(base, 'suite', evidence, processes)
-    try:
-        tern.spawn([TERN, 'daemon', '--socket', str(tern.sock)])
-        wait_for(tern.sock.exists, 'private daemon socket', 20)
-        tern.command('plugin', 'link', package)
-        listed = json.loads(tern.command('plugin', 'list', '--json'))
-        mine = [p for p in listed['plugins'] if p['id'] == FIXTURE_ID]
-        assert mine and mine[0]['status'] == 'ready' and not listed['problems'], listed
-        evidence['checks'].append('fixture host plugin loads ready in a real Tern')
-        location = tern.config/'plugin-data'/FIXTURE_ID/'library-tests.json'
-        wait_for(location.exists, 'library-tests.json', 10)
-        library = json.loads(location.read_text())
-        evidence['luau_tests_passed'] = library['passed']
-        evidence['luau_failures'] = library['failures']
-        # tern.json.encode writes an empty Lua table as {}; an empty list either way means none failed.
-        assert library['failures'] in ([], {}) and library['passed'] > 0, library
-        evidence['luau_failures'] = []
-        evidence['checks'].append('pure-module suite: %d passed, failures == []' % library['passed'])
-        sweep.check('suite')
-        evidence['checks'].append('real Tern untouched (suite)')
-    finally:
-        evidence['daemon_log_tail'] = tail(tern.logs/'tern-daemon.log')
-        tern.stop()
-
-
 def tail(path, size=5000):
     try:
         return path.read_text(errors='replace')[-size:]
@@ -416,277 +386,9 @@ def tail(path, size=5000):
         return None
 
 
-def full(base, evidence, processes, sweep):
-    pub = base/'pub'
-    pub.mkdir()
-    server = Server(pub)
-    raw = 'http://127.0.0.1:%d/' % server.port
-    pkg = build_fixture(base/'pkg-0.1.0', '0.1.0', raw, str(pub)+'/')
-    build_fixture(pub/'FIXTURE', '0.2.0', raw, str(pub)+'/')
-    badsrc = build_fixture(base/'pkg-0.1.0-badsrc', '0.1.0', raw, str(base/'missing')+'/')
-    checks = evidence['checks']
-
-    def step(label):
-        sweep.check(label)
-        checks.append(label)
-
-    def notice_after(tern, offset, needle, seconds=20):
-        return wait_for(lambda: next((n for n in tern.notices(offset) if any(needle in part for part in n)), None),
-                        'notice containing '+repr(needle), seconds)
-
-    def no_pending(record):
-        return record is not None and not any(k.startswith('pending_') for k in record)
-
-    def reloaded(tern, offset, seconds=40):
-        wait_for(lambda: tern.plugins_dir_lines(offset), 'fixture window VM (re)load', seconds)
-
-    def picker_text(tern):
-        value = tern.picker()
-        return json.dumps(value, ensure_ascii=False) if value else ''
-
-    try:
-        tern = Tern(base, 'main', evidence, processes)
-        tern.start()
-        # 1. Background tick notices but never installs.
-        offset = tern.log_offset()
-        tern.command('plugin', 'install', pkg)
-        reloaded(tern, offset)
-        tern.assert_scratch_plugins_dir()
-        record = wait_for(lambda: (lambda r: r if r and r.get('remote') == '0.2.0' else None)(tern.kv(FIXTURE_ID)),
-                          'background tick records remote 0.2.0', TICK_WAIT)
-        assert record.get('notified') == '0.2.0' and no_pending(record), record
-        notice_after(tern, offset, 'FIXTURE 0.2.0 is available (you have 0.1.0)')
-        assert tern.version(FIXTURE_ID) == '0.1.0'
-        evidence['after_tick_kv'] = record
-        step('1 background tick: kv remote == notified == 0.2.0, notice logged, still 0.1.0 (never auto-installs)')
-
-        # 2. Explicit check notifies; Update is available.
-        offset = tern.log_offset()
-        tern.run('plugin.%s.check_updates' % FIXTURE_ID)
-        notice_after(tern, offset, 'FIXTURE 0.2.0 is available (you have 0.1.0)')
-        assert tern.shows('FIXTURE Check for updates', 'FIXTURE'), evidence['palette_rows'][-1]
-        assert tern.shows('FIXTURE Update', 'FIXTURE'), evidence['palette_rows'][-1]
-        step('2 check_updates notifies "is available"; install_update available')
-
-        # 3. Update through the confirm picker.
-        offset = tern.log_offset()
-        tern.run('plugin.%s.install_update' % FIXTURE_ID)
-        text = wait_for(lambda: (lambda t: t if 'Update FIXTURE 0.1.0 → 0.2.0' in t else None)(picker_text(tern)),
-                        'confirm picker', 20)
-        evidence['picker_step3'] = json.loads(text)
-        sweep.check('3 before picker enter')
-        tern.assert_scratch_plugins_dir()
-        tern.ctl('picker', 'enter')
-        wait_for(lambda: tern.version(FIXTURE_ID) == '0.2.0', 'installed 0.2.0', 60)
-        wait_for(lambda: no_pending(tern.kv(FIXTURE_ID)), 'pending journal cleared', 30)
-        notice_after(tern, offset, 'FIXTURE updated to 0.2.0', 30)
-        step('3 picker enter installs 0.2.0; pending cleared; "updated to 0.2.0" notice')
-
-        # 4. Reload persistence + cancel.
-        offset = tern.log_offset()
-        tern.command('plugin', 'install', pkg, '--force')
-        wait_for(lambda: tern.version(FIXTURE_ID) == '0.1.0', 'reinstalled 0.1.0', 30)
-        reloaded(tern, offset)
-        assert tern.kv(FIXTURE_ID).get('remote') == '0.2.0', tern.kv(FIXTURE_ID)
-        requests = len(server.requests)
-        idle(1.5)  # the load timer seeds 1 s after load
-        assert tern.shows('FIXTURE Update', 'FIXTURE'), evidence['palette_rows'][-1]
-        assert len(server.requests) == requests, server.requests[requests:]
-        tern.run('plugin.%s.install_update' % FIXTURE_ID)
-        wait_for(lambda: 'Update FIXTURE 0.1.0 → 0.2.0' in picker_text(tern), 'confirm picker (cancel)', 20)
-        tern.ctl('picker', 'esc')
-        wait_for(lambda: not tern.picker(), 'picker closed', 10)
-        idle(2)
-        assert tern.version(FIXTURE_ID) == '0.1.0' and no_pending(tern.kv(FIXTURE_ID)), tern.kv(FIXTURE_ID)
-        step('4 reload keeps remote; Update seeded available without a fetch; picker esc changes nothing')
-
-        # 5. Failure.
-        offset = tern.log_offset()
-        tern.command('plugin', 'install', badsrc, '--force')
-        reloaded(tern, offset)
-        idle(1.5)
-        offset = tern.log_offset()
-        tern.run('plugin.%s.install_update' % FIXTURE_ID)
-        wait_for(lambda: 'Update FIXTURE 0.1.0 → 0.2.0' in picker_text(tern), 'confirm picker (badsrc)', 20)
-        sweep.check('5 before picker enter')
-        tern.assert_scratch_plugins_dir()
-        tern.ctl('picker', 'enter')
-        failed = notice_after(tern, offset, 'Update failed', 60)
-        evidence['failure_notice'] = failed
-        assert failed[0] == 'error' and 'no directory' in failed[2], failed
-        wait_for(lambda: no_pending(tern.kv(FIXTURE_ID)), 'pending cleared after failure', 10)
-        assert tern.version(FIXTURE_ID) == '0.1.0'
-        step('5 failed install: error notice, still 0.1.0, pending cleared')
-
-        # 6. Requirements.
-        requires = pub/'FIXTURE/requires.json'
-        requires.write_text(json.dumps({'schema': 1, 'plugins': {'absent-plugin': '1.0.0'}}))
-        offset = tern.log_offset()
-        tern.run('plugin.%s.install_update' % FIXTURE_ID)
-        refused = notice_after(tern, offset, 'absent-plugin', 30)
-        evidence['requires_notice'] = refused
-        idle(1)
-        assert not tern.picker(), tern.picker()
-        assert tern.version(FIXTURE_ID) == '0.1.0' and no_pending(tern.kv(FIXTURE_ID))
-        requires.unlink()
-        step('6 unmet requirements refuse with the Requires.check message; no picker')
-        evidence['main_window_log_tail'] = tern.window_log()[-4000:]
-        tern.stop()
-
-        # 7. Linked twin in a fresh config.
-        twin = Tern(base, 'twin', evidence, processes)
-        twin.start()
-        linked = base/'linked-0.1.0'
-        shutil.copytree(pkg, linked)
-        requests = len(server.requests)
-        offset = twin.log_offset()
-        twin.command('plugin', 'link', linked)
-        reloaded(twin, offset)
-        twin.assert_scratch_plugins_dir()
-        path_file = twin.plugins_dir/(FIXTURE_ID+'.path')
-        before = (tree_hash(linked), path_file.read_bytes(), path_file.stat().st_mtime_ns, twin.kv(FIXTURE_ID))
-        idle(TICK_WAIT)
-        assert server.requests[requests:] == [], server.requests[requests:]
-        offset = twin.log_offset()
-        twin.run('plugin.%s.check_updates' % FIXTURE_ID)
-        notice_after(twin, offset, 'FIXTURE here is a development copy (linked)')
-        assert twin.shows('FIXTURE Check for updates', 'FIXTURE'), evidence['palette_rows'][-1]
-        assert not twin.shows('FIXTURE Update', 'FIXTURE'), evidence['palette_rows'][-1]
-        offset = twin.log_offset()
-        twin.run('plugin.%s.install_update' % FIXTURE_ID)
-        notice_after(twin, offset, 'development copy')
-        idle(1)
-        assert not twin.picker(), twin.picker()
-        after = (tree_hash(linked), path_file.read_bytes(), path_file.stat().st_mtime_ns, twin.kv(FIXTURE_ID))
-        assert after == before, (before, after)
-        assert server.requests[requests:] == [], server.requests[requests:]
-        step('7 linked twin: no fetch in %d s, "development copy" notice, Update unavailable and refused, kv/tree/.path unchanged' % TICK_WAIT)
-        evidence['twin_window_log_tail'] = twin.window_log()[-3000:]
-        twin.stop()
-    finally:
-        evidence['server_requests'] = server.requests
-        server.close()
-
-
-def plugin_mode(base, evidence, processes, sweep, source):
-    source = source.resolve()
-    dir_name = source.name
-    pub = base/'pub'
-    pub.mkdir()
-    server = Server(pub)
-    raw = 'http://127.0.0.1:%d/' % server.port
-    copy = base/'package'/dir_name  # never inside the Tern env root (its sockets would be copied)
-    shutil.copytree(source, copy, ignore=shutil.ignore_patterns('.git', '__pycache__', '*.local'))
-    original_id = manifest_value(copy/'plugin.toml', 'id')
-    test_id = original_id+'-test'
-    set_manifest(copy/'plugin.toml', id=test_id)
-    rewrite_base(copy/'updater/source.luau', 'RAW_BASE', raw)
-    window_entry = manifest_value(copy/'plugin.toml', 'window') or 'window.luau'
-    # Literal `{ id = "…", title = "…" }` tables: tern.command({...}) and command lists fed to
-    # tern.command in a loop (SPAWN); Files-pane buttons are not palette commands.
-    window_text = (source/window_entry).read_text()
-    titles = [m.group(1) for m in re.finditer(r'\{\s*id\s*=\s*"[^"]+"\s*,\s*title\s*=\s*"([^"]+)"', window_text)
-              if not window_text[max(0, m.start()-20):m.start()].endswith('files.button(')]
-    evidence['plugin_titles'] = titles
-    version = manifest_value(copy/'plugin.toml', 'version')
-    major, minor, patch = re.match(r'^(\d+)\.(\d+)\.(\d+)', version).groups()
-    bumped = '%s.%s.%d' % (major, minor, int(patch)+1)
-    (pub/dir_name).mkdir()
-    published = (copy/'plugin.toml').read_text()
-    (pub/dir_name/'plugin.toml').write_text(re.sub(r'^version = "[^"\n]*"$', 'version = '+json.dumps(bumped), published, count=1, flags=re.M))
-    if (source/'requires.json').exists():
-        shutil.copy2(source/'requires.json', pub/dir_name/'requires.json')
-    checks = evidence['checks']
-    try:
-        tern = Tern(base, 'env', evidence, processes)
-        tern.start()
-        offset = tern.log_offset()
-        tern.command('plugin', 'install', copy)
-        def loaded():
-            for log in (tern.logs/'tern.log', tern.logs/'tern-daemon.log'):
-                text = log.read_text(errors='replace') if log.exists() else ''
-                failed = [line for line in text.splitlines() if 'failed to load plugin="%s"' % test_id in line]
-                if failed:
-                    raise AssertionError('%s failed to load: %s' % (test_id, failed[-1][-600:]))
-            return tern.plugins_dir_lines(offset)
-        wait_for(loaded, 'plugin window VM load', 40)
-        tern.assert_scratch_plugins_dir()
-        idle(1.5)
-        offset = tern.log_offset()
-        tern.run('plugin.%s.check_updates' % test_id)
-        wait_for(lambda: (tern.kv(test_id) or {}).get('remote') == bumped, 'kv remote == bumped', 20)
-        notices = tern.notices(offset)
-        assert not any('different plugin' in part for n in notices for part in n), notices
-        for log in [tern.logs/'tern.log', tern.logs/'tern-daemon.log']:
-            text = log.read_text(errors='replace') if log.exists() else ''
-            bad = [line for line in text.splitlines() if test_id in line and ('ERROR' in line or 'failed' in line.lower())]
-            assert not bad, bad
-        register = re.search(r'require\("\./updater/window"\)\.register\(\{([^}]*)\}\)', window_text)
-        assert register, 'no updater register call in '+window_entry
-        prefix = re.search(r'\btitle_prefix\s*=\s*"([^"]*)"', register.group(1))
-        prefix = prefix.group(1) if prefix else re.search(r'\bname\s*=\s*"([^"]+)"', register.group(1)).group(1)+' '
-        assert tern.shows(prefix+'Check for updates'), evidence['palette_rows'][-1]
-        assert tern.shows(prefix+'Update'), evidence['palette_rows'][-1]
-        missing = [t for t in titles if not tern.shows(t)]
-        evidence['plugin_titles_not_listed'] = missing
-        assert not missing, missing
-        sweep.check('plugin')
-        checks.append('%s as %s: check_updates records remote %s, no different-plugin notice, no load failure, updater and existing commands listed' % (dir_name, test_id, bumped))
-        tern.stop()
-    finally:
-        evidence['server_requests'] = server.requests
-        server.close()
-
-
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--evidence', required=True, type=Path)
-    mode = parser.add_mutually_exclusive_group()
-    mode.add_argument('--suite-only', action='store_true', help='Run the pure-module suite in a real Tern VM only')
-    mode.add_argument('--plugin', type=Path, help='plugins/tern/DIR to check as an integrated plugin')
-    args = parser.parse_args()
-    evidence = {'checks': [], 'mode': 'suite-only' if args.suite_only else ('plugin' if args.plugin else 'full')}
-    processes = []
-    if TERN is None:
-        raise SystemExit('tern is not on PATH')
-    with tempfile.TemporaryDirectory(prefix='updater-smoke-', dir=Path.home()/'.cache') as temporary:
-        base = Path(temporary)
-        sweep = Sweep(base)
-        try:
-            evidence['runtime'] = subprocess.run([TERN, '--version'], capture_output=True, text=True, timeout=10,
-                                                 env={k: v for k, v in os.environ.items() if not k.startswith('TERN_')}).stdout.strip()
-            if args.suite_only:
-                suite_only(base, evidence, processes, sweep)
-            elif args.plugin:
-                plugin_mode(base, evidence, processes, sweep, args.plugin)
-            else:
-                full(base, evidence, processes, sweep)
-            sweep.check('end')
-            evidence['passed'] = True
-        except Exception as error:
-            evidence['passed'] = False
-            evidence['error'] = '%s: %s' % (type(error).__name__, error)
-            evidence['logs'] = {str(p.relative_to(base)): p.read_text(errors='replace')[-6000:] for p in base.rglob('*.log')}
-            evidence['plugin_log_lines'] = {str(p.relative_to(base)): [line for line in p.read_text(errors='replace').splitlines()
-                                                                       if 'tern::plugin' in line or 'ERROR' in line][-200:]
-                                            for p in base.rglob('*.log')}
-        finally:
-            for entry in reversed(processes):
-                stop_entry(entry)
-            evidence['own_processes_reaped'] = all(e['process'].poll() is not None for e in processes)
-            evidence['process_exit_codes'] = [e['process'].poll() for e in processes]
-            try:
-                sweep.check('after cleanup')
-                evidence['real_tern_untouched'] = True
-            except AssertionError as error:
-                evidence['real_tern_untouched'] = False
-                evidence['passed'] = False
-                evidence['error'] = evidence.get('error') or str(error)
-            evidence['source_hashes'] = {name+'.luau': hashlib.sha256((ROOT/(name+'.luau')).read_bytes()).hexdigest() for name in MODULES}
-        args.evidence.parent.mkdir(parents=True, exist_ok=True)
-        args.evidence.write_text(json.dumps(evidence, indent=2, ensure_ascii=False)+'\n')
-    print(json.dumps({k: v for k, v in evidence.items() if k not in ('logs',)}, indent=2, ensure_ascii=False)[:20000])
-    return 0 if evidence.get('passed') and evidence.get('own_processes_reaped') else 1
+    from native_cases import main as selected_case
+    return selected_case()
 
 
 if __name__ == '__main__':

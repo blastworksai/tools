@@ -1,26 +1,84 @@
 -- Run in a disposable Tern host callback. No native launch, filesystem mailbox or production KV.
 local root, section = ...
-local sections = { fixture = true, core = true, receipts = true, callbacks = true, oversize = true, retry = true,
-	chain = true, late = true, reconcile_chain = true, refused_chain = true, ack = true, ack_uncertain = true, ack_terminal = true,
+local sections = { fixture = true, core = true, control_rebind = true, receipts = true, callbacks = true, oversize = true, retry = true,
+	chain = true, late = true, reconcile_chain = true, refused_chain = true, ack = true, ack_uncertain = true, ack_terminal = true, stale_witness = true, scoped_poll = true,
 	suspend = true, auto_reconcile = true, auto_reconcile_bounded = true, auto_reconcile_worker = true, sweep_rules = true, sweep_policy = true,
-	auto_reconcile_all = true, capacity_resume = true, expired_authorization = true, slot_classes = true, duplicate_claim = true, slow_receipt = true,
+	auto_reconcile_all = true, capacity_resume = true, expired_authorization = true, slot_classes = true, duplicate_claim = true, stale_claim = true, slow_receipt = true,
 	retirement_auth = true, retirement_finish = true, retirement_race = true, retirement_uncertain = true, retirement_restore = true, retirement_capability = true, retirement_codec = true, retirement_refused = true,
 	rejected_read = true, finish = true, finish_capacity = true, command_retention = true, continuation = true, wake_separation = true, catalog_join = true, policy = true,
-	rollover = true, rollover_launch_failure = true, rollover_token = true, rollover_stop_uncertain = true, rollover_reload = true, rollover_policy = true,
+	rollover = true, rollover_launch_failure = true, rollover_token = true, rollover_stop_uncertain = true, rollover_reload = true, rollover_policy = true, rollover_context = true, rollover_context_handover = true, rollover_context_roundtrip = true,
 	rollover_coordinator = true, rollover_coordinator_ambiguous = true, rollover_coordinator_reload = true, rollover_coordinator_restored = true, rollover_coordinator_policy = true, rollover_coordinator_successor_rejected = true,
-	rollover_read_path = true, rollover_reload_continuation = true, recheck_report = true, adopt = true,
+	rollover_read_path = true, rollover_reload_continuation = true, recheck_report = true, enrol = true, projects = true, local_v5 = true, project_rollover = true,
 	rollover_coordinator_self_release = true, publication_readback = true, accept_after_owner_recovery = true,
 	quota_normalize = true, quota_assembly = true, quota_routing = true, quota_gate = true, quota_claim = true,
-	quota_rollover = true, quota_ledger = true, quota_selector = true, quota_continuation = true, window_bookkeeping = true, intent_buttons = true,
-	assembly_restore = true, assembly_capacity = true,
-	withdraw_fenced = true, policy_keys = true, loop_caps = true, worker_fields = true }
+	quota_rollover = true, quota_coordinator_rollover = true, quota_ledger = true, quota_selector = true, quota_continuation = true, window_bookkeeping = true, intent_buttons = true,
+	background_settlement = true, foreground_bootstrap = true, background_launch = true, background_adjacent = true, stale_intent = true,
+	assembly_restore = true, assembly_capacity = true, poll_continuation = true,
+	withdraw_fenced = true, policy_keys = true, loop_caps = true, worker_fields = true,
+	current_retention = true, current_ack_holes = true, current_nonce = true, current_close = true, current_handover = true, consumed_scope = true,
+	stale_result = true, stale_result_lost = true, stale_result_unrelated = true, stale_result_kind = true, stale_result_grant = true,
+	stale_result_grant_change = true, held_withdrawal = true, capacity_withdrawal = true,
+	project_observation = true, project_repository_guards = true, migration_start_guards = true, enrol_route_cancel = true,
+	project_history_reuse = true, project_reserve = true, rollover_location = true, project_start_rollover = true,
+	legacy_observation = true, legacy_worker_roles = true, current_observation = true, compaction_retry = true }
 assert(section == nil or sections[section], "unknown dispatch test section: " .. tostring(section))
 local runtime, environment = tern, getfenv()
-local function clone(v) return runtime.json.decode(runtime.json.encode(v)) end
+-- Absence stays absent; explicit JSON null remains available to negative wire tests.
+local function clone(v) return if v == nil then nil else runtime.json.decode(runtime.json.encode(v)) end
+local function keyed_memory(value, marker)
+	local memory = { value = clone(value), marker = clone(marker), writes = 0, marker_writes = 0, fail = false, keys = {} }
+	function memory.get(key)
+		return clone(if key == "authority_state" then memory.value
+			elseif key == "authority_state_initialized" then memory.marker else memory.keys[key])
+	end
+	function memory.set(key, value)
+		if memory.fail then error("injected persistence failure") end
+		if key == "authority_state" then memory.value = clone(value); memory.writes += 1
+		elseif key == "authority_state_initialized" then memory.marker = clone(value); memory.marker_writes += 1
+		else memory.keys[key] = clone(value)
+		end
+	end
+	return memory
+end
 local fake = table.clone(runtime)
+-- Host carrier files are isolated from the native runner and its live plugins.
+local channel_files, channel_dirs = {}, {}
+fake.plugin = table.clone(runtime.plugin); fake.plugin.data = "/fixture/plugins/orchplus-dispatch"
+local function carrier_path(path)
+	return path == fake.plugin.data or path:sub(1, #fake.plugin.data + 1) == fake.plugin.data .. "/"
+end
+fake.fs = table.clone(runtime.fs)
+fake.fs.exists = function(path)
+	return if carrier_path(path) then channel_files[path] ~= nil or channel_dirs[path] == true else runtime.fs.exists(path)
+end
+fake.fs.mkdir = function(path)
+	if carrier_path(path) then channel_dirs[path] = true else runtime.fs.mkdir(path) end
+end
+fake.fs.read = function(path, maximum)
+	if not carrier_path(path) then return if maximum == nil then runtime.fs.read(path) else runtime.fs.read(path, maximum) end
+	local bytes = assert(channel_files[path], "missing fixture carrier file")
+	assert(type(maximum) == "number" and #bytes <= maximum, "carrier reads are bounded"); return bytes
+end
+fake.fs.write = function(path, bytes)
+	if carrier_path(path) then channel_files[path] = bytes else runtime.fs.write(path, bytes) end
+end
+fake.fs.remove = function(path)
+	if carrier_path(path) then channel_files[path] = nil; channel_dirs[path] = nil else runtime.fs.remove(path) end
+end
+fake.fs.list = function(path, ...)
+	assert(not carrier_path(path), "carrier must not list directories")
+	return runtime.fs.list(path, ...)
+end
+fake.pane = { list = function() return {
+	{ pane = 11, program = "orchplus.orchestrator" }, { pane = 12, program = "orchplus.orchestrator" },
+} end }
 local definition, ui_value
-fake.kv = { get = function() return if ui_value then clone(ui_value) else nil end, set = function(_, value) ui_value = clone(value) end }
-fake.block = { define = function(_, value) definition = value end }; fake.on = function() end
+local ui_memory = keyed_memory()
+fake.kv = { get = ui_memory.get, set = function(key, value)
+	ui_memory.set(key, value)
+	if key == "authority_state" then ui_value = ui_memory.value end
+end }
+fake.block = { define = function(id, value) if id == "orchestrator" then definition = value end end }; fake.on = function() end
 fake.timer = function() return { cancel = function() end } end
 local modules = {}
 -- `./x` resolves against the requiring module's directory, as Tern's require does (updater/ modules).
@@ -33,19 +91,42 @@ local function load(name, base)
 	local value = chunk(); modules[name] = value; return value
 end
 local host, state, dispatch, codec, quota = load("host"), load("state"), load("dispatch"), load("wire/codec"), load("quota")
+local protocol = load("dispatch_protocol")
 local checks, serial = 0, 0
 local function check(ok, why) assert(ok, why); checks += 1 end
+local function must(value, diagnostic)
+	assert(value, "fixture refusal: " .. runtime.json.encode(diagnostic))
+	return value
+end
 local function next_id() serial += 1; return "fixture-" .. tostring(serial) end
 local function catalog_setup(revision)
 	return { schema = 1, state = "completed", config_revision = revision,
 		readiness = { state = "not_run", config_revision = revision, summary = "Optional readiness exercise not run" } }
 end
-local function frame(request, status, payload, problem)
-	local body = { schema = 1, op = request.op, request_id = request.request_id, action_id = request.action_id,
-		origin_binding = clone(request.origin_binding), controller_generation = request.controller_generation, status = status, payload = payload, error = problem }
+local function frame(request, status, payload, problem, category, authority_revision)
+	local body = { schema = 2, op = request.op, request_id = request.request_id, action_id = request.action_id,
+		authority_namespace = request.authority_namespace, logical_session_id = request.logical_session_id,
+		admission_seq = request.admission_seq, request_serial = request.request_serial,
+		spawn_namespace = "fixture-spawn", authority_revision = authority_revision or 0,
+		origin_binding = clone(request.origin_binding), controller_generation = request.controller_generation,
+		control_origin = clone(request.control_origin), close_id = request.close_id,
+		category = category or (if status == "already_consumed" then "already_consumed"
+			elseif status == "uncertain" or (status == "missing" and request.op == "status") then "unknown_effect" else "current_result"),
+		status = status, payload = payload, error = problem }
+	if request.setup_origin then body.setup_origin = clone(request.setup_origin); body.spawn_namespace = nil; body.authority_revision = nil end
+	-- Keep framing separate from validation: negative cases deliberately submit malformed bodies.
 	local bytes = runtime.json.encode(body)
-	return "SPAWN_DISPATCH v1 " .. runtime.json.encode({ schema = 1, op = body.op, request_id = body.request_id,
+	return "SPAWN_DISPATCH v2 " .. runtime.json.encode({ schema = 2, op = body.op, request_id = body.request_id,
 		complete = true, body_bytes = #bytes, body_sha256 = codec.sha256(bytes), body_json = bytes })
+end
+local function empty_peer()
+	local normal = { schema = 1, sessions = runtime.json.array(), workers = runtime.json.array() }
+	local source = { version = 2, namespace = "fixture-spawn", revision = 0, sessions = {}, requests = {} }
+	return { source_schema = 2, source_revision = 0, source_namespace = "fixture-spawn",
+		source_sha256 = codec.sha256(codec.dispatch_source_bytes(source)), candidate_namespace = "fixture-spawn",
+		protocol = 2, state = "ready", phase = "stable",
+		managed_sha256 = assert(codec.dispatch_managed_digest(runtime.json.encode(normal))), pending_immutable = 0, blockers = 0 },
+		{ logical_session_ids = runtime.json.array(), mailbox_handles = runtime.json.array() }
 end
 local function role_node(node, role, key)
 	if type(node) ~= "table" then return nil end
@@ -53,27 +134,45 @@ local function role_node(node, role, key)
 	for _, child in node.c or {} do local found = role_node(child, role, key); if found then return found end end
 	return nil
 end
-local function fixture(clock)
-	local memory = { value = nil, writes = 0, fail = false }
-	memory.get = function() return if memory.value then clone(memory.value) else nil end
-	memory.set = function(_, value) if memory.fail then error("injected persistence failure") end; memory.value = clone(value); memory.writes += 1 end
+local function fixture(clock, options)
+	local memory = keyed_memory()
 	local authority = host.new_authority(memory, clock or function() return { now_ms = math.floor(os.time() * 1000) } end)
 	authority:load(); assert(authority:initialize(true).ok)
-	local registered = authority:apply({ kind = "register_session", request_id = next_id(), name = "Dispatch fixture" })
+	local peer, selection = empty_peer()
+	local qualified = authority:qualify({ kind = "qualify_current", request_id = next_id(),
+		authority_namespace = authority.registry.authority_namespace, expected_revision = authority.registry.revision }, peer, selection)
+	assert(qualified.ok, qualified.message)
+	local registered = authority:apply({ kind = "register_session", request_id = next_id(), orch_session_id = next_id(), name = "Dispatch fixture",
+		authority_namespace = authority.registry.authority_namespace, expected_revision = authority.registry.revision })
+	assert(registered.ok, registered.message)
 	local admission = authority:apply({ kind = "admit_controller", request_id = next_id(), orch_session_id = registered.orch_session_id,
+		authority_namespace = authority.registry.authority_namespace, expected_revision = authority.registry.revision,
 		pane_binding = { host_pane_id = "42", alias_nonce = "fixture-controller-nonce" } })
+	assert(admission.ok, admission.message)
 	local origin = { logical_session_id = registered.orch_session_id, owner_id = admission.owner_id, owner_generation = admission.generation,
 		host_pane_id = "42", alias_nonce = "fixture-controller-nonce", window_key = "", window_epoch = "fixture-window", native_session_id = "7", window_host_id = "local" }
-	local f = { authority = authority, memory = memory, origin = origin }
+	local f = { authority = authority, memory = memory, origin = origin, passive = options and options.passive == true }
 	function f:event(command, fields)
+		if command == "queue" and not self.passive and not (fields and fields.orch_project_id)
+			and self.authority.registry.sessions[self.origin.logical_session_id].admitted == true then
+			local project = ((self.authority.registry.dispatch or {}).projects or {})[self.default_project]
+			if not project or project.finished or project.logical_session_id ~= self.origin.logical_session_id then self.default_project = self:project("Explicitly started transport fixture", true) end
+		end
 		local event = { kind = "dispatch", request_id = next_id(), orch_session_id = self.origin.logical_session_id,
+			authority_namespace = self.authority.registry.authority_namespace, expected_revision = self.authority.registry.revision,
 			origin = clone(self.origin), controller_pane = self.controller_pane or "9001", command = command }
-		if command ~= "claim" and command ~= "result" and command ~= "lost" then
+		if command ~= "claim" and command ~= "spawn_claimed" and command ~= "result" and command ~= "lost" and command ~= "observe_allocation" then
 			local cursor = ((self.authority.registry.dispatch or {}).command_cursors or {})[self.origin.logical_session_id]
 			self.command_seq = math.max(self.command_seq or 0, if cursor then cursor.seq else 0) + 1
 			event.command_seq = self.command_seq
 		end
-		for k, v in fields or {} do event[k] = v end; return event
+		for k, v in fields or {} do event[k] = v end
+		if command == "queue" and event.orch_project_id == nil and not self.passive then event.orch_project_id = self.default_project end
+		if table.find({ "answer", "new_project", "project_start", "project_associate", "project_repository", "associate_conversation" }, command)
+			and event.expected_revision == self.authority.registry.revision and event.decision_context == nil then
+			event.decision_context = dispatch.decision_context(self.authority.registry, event)
+		end
+		return event
 	end
 	-- Checkpoint 5 invariant sweep (D8/D9), run after every fixture command in every group: a gate
 	-- answered by policy needs a session that enabled auto_approve_kinds, the matching rule and
@@ -107,29 +206,121 @@ local function fixture(clock)
 		self:autonomy_sweep()
 		return r
 	end
-	function f:action(id) return self.authority.registry.dispatch.actions[id] end
-	function f:finish(id, status, payload)
-		local a = self:action(id)
-		if a.phase == "ready" then assert(self:apply("claim", { action_id = id, executor = self.origin.window_epoch }).ok) end
-		return self:apply("result", { action_id = id, executor = self.origin.window_epoch, grant_id = self:action(id).claim.grant_id, response_bytes = frame(a.request, status, payload) })
+	function f:project(name, started)
+		local added = self:apply("new_project", { name = name }); assert(added.ok, added.message)
+		if started then
+			local p = self.authority.registry.dispatch.projects[added.orch_project_id]
+			local start = self:apply("project_start", { orch_project_id = p.orch_project_id, project_revision = p.revision, checks_reviewed = true })
+			assert(start.ok, start.message)
+		end
+		return added.orch_project_id
 	end
-	function f:catalog(revision, record_id, cwd)
+	function f:action(id) return self.authority.registry.dispatch.actions[id] end
+	function f:tick()
+		return self.authority:apply({ kind = "workflow_tick", authority_namespace = self.authority.registry.authority_namespace,
+			expected_revision = self.authority.registry.revision })
+	end
+	function f:state_event(kind, fields)
+		local event = { kind = kind, request_id = next_id(), orch_session_id = self.origin.logical_session_id,
+			authority_namespace = self.authority.registry.authority_namespace, expected_revision = self.authority.registry.revision }
+		for key, value in fields or {} do event[key] = value end
+		return event
+	end
+	-- Deterministic peer model: operation facts come from the issued request and configured fixture
+	-- record. `frame` above remains the raw boundary for deliberately malformed response tests.
+	function f:peer_payload(a, status, facts)
+		local request, payload = a.request, {}
+		local w = if a.worker_id then self.authority.registry.dispatch.workers[a.worker_id] else nil
+		if status == "provisioned" then
+			payload.limits = { mailbox_bytes = 1048576, mailbox_files = 256, host_bytes = 67108864, host_files = 16384,
+				generations = 16, registry_bytes = 8388608, reserved_bytes = 4096, deadline_ms = 30000, concurrency = 4 }
+			payload.identity = { worker = "fixture-user" }
+			if request.manifest ~= nil then payload.manifest_sha256 = codec.sha256(request.manifest) end
+		elseif (request.op == "launch" or request.op == "adopt" or request.op == "enrol")
+			and table.find({ "resolved", "claimed", "launching", "awaiting_acceptance", "accepted" }, status) then
+			payload.record_id, payload.record_revision = request.record_id, request.record_revision
+			payload.effective_identity = { provider = "omp", identity_status = "configured_not_verified" }
+			payload.capabilities = runtime.json.array(clone(w.capabilities))
+			payload.prompt_delivery = if request.delivery == "clipboard" then "copied_not_accepted" else "submitted_not_accepted"
+		elseif request.op == "accept" and status == "accepted" then
+			payload.target_request_id, payload.pane_binding = request.target_request_id, clone(request.pane_binding)
+		end
+		for key, value in facts or {} do
+			if key == "limits" and payload.limits then for field, limit in value do payload.limits[field] = limit end
+			else payload[key] = clone(value) end
+		end
+		if payload.wake_status ~= nil and payload.wake_effect_started == nil then
+			payload.wake_effect_started = payload.wake_status ~= "awaiting_window"
+		end
+		return if next(payload) ~= nil then payload else nil
+	end
+	function f:finish(id, status, payload, problem)
+		local a = assert(self:action(id), "finish requires a live action")
+		if a.phase == "ready" then
+			local claimed = self:apply("claim", { action_id = id, executor = self.origin.window_epoch })
+			must(claimed.ok, claimed)
+		end
+		a = self:action(id) -- Serial and immutable request bytes are allocated only by claim.
+		if table.find({ "launch", "adopt", "enrol", "stop", "native_wake" }, a.request.op) and status ~= "full" and status ~= "rejected" and not a.claim.spawn_claim then
+			local witnessed = self:apply("spawn_claimed", { action_id = id, grant_id = a.claim.grant_id, spawn_namespace = "fixture-spawn",
+				claim_nonce = "fixture-claim-nonce-" .. next_id() })
+			must(witnessed.ok, witnessed)
+			a = self:action(id)
+		end
+		-- Peer revision is independent of ORCH commits; repeating the same peer observation
+		-- must retain identical bytes rather than inventing a newer SPAWN result revision.
+		return self:apply("result", { action_id = id, executor = self.origin.window_epoch, grant_id = a.claim.grant_id,
+			response_bytes = frame(a.request, status, self:peer_payload(a, status, payload), problem) })
+	end
+	function f:catalog(revision, record_id, cwd, family)
 		local r = self:apply("catalog")
 		assert(self:finish(r.action_id, "catalog", { catalog_version = 2, setup = catalog_setup(revision), namespace = "fixture-spawn", host_key = "fixture-host", config_revision = revision, revision = revision, records = runtime.json.array({ { id = record_id or "native", revision = revision,
-			provider = "omp", account_label = "configured, not verified", backend = "native-agent", enabled = true, eligible = true,
-			capability_evidence = "configured_operator_attestation_not_runtime_proof", effective_identity = { provider = "omp", evidence = "configured" },
-			capabilities = runtime.json.array({ "report-files-v1", "native-ask-v1", "coordinator-control-v1" }), unsupported = runtime.json.array(), cwd = cwd or "/fixture", placement = "split" } }) }).ok)
+			provider = "omp", provider_family = family, account_label = "configured, not verified", backend = "native-agent", enabled = true, eligible = true,
+			capability_evidence = "configured_operator_attestation_not_runtime_proof", effective_identity = { provider = "omp", identity_status = "configured_not_verified" },
+			capabilities = runtime.json.array({ "report-files-v1", "native-ask-v1", "coordinator-control-v1", "project-start-v1" }), unsupported = runtime.json.array(), cwd = cwd or "/fixture", placement = "split" } }) }).ok)
+	end
+	function f:allocation(worker_id, allocation, target_patch)
+		local w, sid = self.authority.registry.dispatch.workers[worker_id], self.origin.logical_session_id
+		local target = { logical_session_id = w.logical_session_id, worker_id = w.worker_id, worker_generation = w.worker_generation,
+			launch_request_id = w.launch_request_id, work_id = w.work_id, enrolment_sha256 = codec.sha256(w.enrolment_token) }
+		for key, value in target_patch or {} do target[key] = value end
+		local query = { schema = 2, origin = "orchplus", op = "mailbox_allocation", request_id = next_id(), action_id = next_id(),
+			authority_namespace = self.authority.registry.authority_namespace, logical_session_id = sid,
+			admission_seq = self.authority.registry.sessions[sid].admission_seq, origin_binding = clone(self.origin),
+			controller_pane = self.controller_pane or "9001", controller_generation = self.origin.owner_generation, target = target }
+		local status = if allocation then "allocation" else "uncertain"
+		local payload = if allocation then { target = clone(target), allocation = clone(allocation) } else nil
+		return self:apply("observe_allocation", { worker_id = worker_id, query_bytes = runtime.json.encode(query),
+			response_bytes = frame(query, status, payload, if allocation then nil else { code = "allocation_pending", message = "The exact provision is still pending." }) })
+	end
+	-- Transport fixtures intentionally share /fixture. Exercise each explicit owner decision;
+	-- collision/refusal tests use raw queue/answer operations instead of this setup helper.
+	function f:allow_shared_fixture(queued)
+		if not queued.ok or queued.code ~= "task_gated" then return queued end
+		local w = self.authority.registry.dispatch.workers[queued.worker_id]
+		local gates = clone(w.launch_gates or {})
+		for _, gate_id in gates do
+			local gate = self.authority.registry.dispatch.gates[gate_id]
+			assert(gate and (gate.kind == "shared_checkout" or gate.kind == "file_overlap"), "unexpected fixture launch gate")
+			queued = self:apply("answer", { gate_id = gate.id, gate_revision = gate.revision, choice_id = "launch_anyway",
+				answer = "The fixture owner intentionally coordinates these shared-checkout workers." })
+			assert(queued.ok, queued.message)
+		end
+		return queued
 	end
 	function f:queue(coordinator)
-		return self:apply("queue", { record_id = "native", record_revision = 0, catalog_revision = 0,
-			prompt = "Complete the explicit fixture assignment, preserving literal $HOME and Unicode café.", cwd = "/fixture", placement = "split", coordinator = coordinator == true })
+		return self:allow_shared_fixture(self:apply("queue", { record_id = "native", record_revision = 0, catalog_revision = 0,
+			prompt = "Complete the explicit fixture assignment, preserving literal $HOME and Unicode café.", cwd = "/fixture", placement = "split", coordinator = coordinator == true }))
 	end
 	function f:launched(coordinator)
 		self:catalog(0)
 		local queued = self:queue(coordinator); assert(queued.ok)
 		assert(self:finish(queued.action_id, "provisioned", { handle = "mailbox-fixture", binding_digest = string.rep("a", 64),
-			capabilities = runtime.json.array({ "report-files-v1", "native-ask-v1", "coordinator-control-v1" }), limits = {} }).ok)
+			capabilities = runtime.json.array({ "report-files-v1", "native-ask-v1", "coordinator-control-v1", "project-start-v1" }), limits = {} }).ok)
 		local worker = self.authority.registry.dispatch.workers[queued.worker_id]
+		local claimed = self:apply("claim", { action_id = worker.launch_action_id, executor = self.origin.window_epoch })
+		must(claimed.ok, claimed)
+		self.last_launch_request = clone(self:action(worker.launch_action_id).request)
 		assert(self:finish(worker.launch_action_id, "awaiting_acceptance", { pane_binding = { pane_id = self.target_pane or "9002",
 			window_key = self.origin.window_key, window_epoch = self.origin.window_epoch,
 			native_session_id = self.origin.native_session_id, window_host_id = self.origin.window_host_id } }).ok)
@@ -156,9 +347,22 @@ local function fixture(clock)
 		local mark = { version = 1, type = "receipt_watermark", mailbox_handle = w.mailbox_handle,
 			through_seq = w.accepted_seq, receipt_chain_sha256 = w.receipt_chain }
 		for _, k in { "logical_session_id", "worker_id", "worker_generation", "launch_request_id", "work_id", "enrolment_token" } do mark[k] = w[k] end
-		local queued = self:apply("poll", { worker_id = worker_id, bytes = "watermark" }); assert(queued.ok, queued.message)
-		local page = assert(codec.project_page(runtime.json.encode(mark), self:action(queued.action_id).request.selector))
-		return self:finish(queued.action_id, "complete", runtime.json.decode(page))
+		while true do
+			local queued = self:apply("poll", { worker_id = worker_id, bytes = "watermark" }); must(queued.ok, queued)
+			local request = self:action(queued.action_id).request
+			if request.op == "mailbox_read" and request.selector.stream == "watermark" then
+				local page = must(codec.project_page(runtime.json.encode(mark), request.selector))
+				return self:finish(queued.action_id, "read", runtime.json.decode(page))
+			end
+			-- Poll deliberately prioritizes known continuation over periodic discovery. Complete
+			-- its real non-native outbox first; never substitute a watermark for another selector.
+			local status = if request.op == "mailbox_publish_ack" or request.op == "mailbox_publish_reply" then "published"
+				elseif request.op == "accept" then "accepted"
+				elseif request.op == "mailbox_retire" and request.mode == "compact" then "compacted" else nil
+			must(status, { code = "unexpected_watermark_continuation", request = request })
+			local settled = self:finish(queued.action_id, status)
+			must(settled.ok, settled)
+		end
 	end
 	function f:read_report(worker_id, bytes)
 		local w = self.authority.registry.dispatch.workers[worker_id]
@@ -169,14 +373,531 @@ local function fixture(clock)
 			local queued = self:apply("poll", { worker_id = worker_id }); assert(queued.ok, queued.message)
 			local request = self:action(queued.action_id).request
 			assert(request.op == "mailbox_read", request.op)
-			local page = assert(codec.project_page(object, request.selector))
-			outcome = self:finish(queued.action_id, "complete", runtime.json.decode(page))
+			local page = must(codec.project_page(object, request.selector))
+			outcome = self:finish(queued.action_id, "read", runtime.json.decode(page))
 		end
 		return outcome
 	end
+	function f:control(operation, outstanding)
+		local queued = self:apply("bridge_control", { operation = operation, compatibility = clone(self.authority.registry.compatibility) })
+		assert(queued.ok, "fixture control enqueue refused: " .. runtime.json.encode(queued))
+		local session = self.authority.registry.sessions[self.origin.logical_session_id]
+		local intent = assert(session.bridge_control)
+		local request = intent.request
+		local payload = { admission_cursor = request.admission_seq, compatibility = clone(request.compatibility) }
+		local category, status = "current_admission", if operation == "admit_session" then "admitted" else "reconciled"
+		if operation == "close_session" then category, status = "admission_absent", "closed"
+		else
+			payload.control = { phase = "open", generation_floor = request.generation_floor, request_floor = request.settled_before,
+				next_request_serial = request.next_request_serial, last_authority_revision = request.authority_revision,
+				binding = clone(request.control_origin.binding) }
+			if operation == "reconcile_session" then payload.outstanding = outstanding or {
+				after_serial = 0, through_serial = 0, next_after_serial = 0, complete = true, entries = runtime.json.array() } end
+		end
+		local response_bytes = frame(request, status, payload, nil, category, request.authority_revision)
+		local response, diagnostic = codec.decode_dispatch_response(response_bytes, request)
+		assert(response, "fixture control response must satisfy the canonical contract: "
+			.. tostring(diagnostic and diagnostic.code):sub(1, 96) .. ": " .. tostring(diagnostic and diagnostic.message):sub(1, 256))
+		local outcome = self:apply("bridge_result", { query_bytes = intent.request_bytes, response_bytes = response_bytes })
+		assert(outcome.ok, "fixture " .. operation .. " result refused: " .. runtime.json.encode(outcome))
+		return outcome
+	end
+	if not (options and options.defer_admission) then
+		local admitted = f:control("admit_session")
+		assert(admitted.ok, "fixture admission refused: " .. runtime.json.encode(admitted))
+	end
+	if not (options and options.default_limits) then assert(f:apply("policy", { policy = { concurrency_limit = 32 } }).ok) end
 	return f
 end
 if section == "fixture" then return { fixture = fixture, clone = clone, codec = codec, state = state, dispatch = dispatch, host = host, quota = quota, frame = frame, load = load } end
+if section == nil or section == "compaction_retry" then
+	-- Exercise the real paired mailbox reducer: a request-ID-only check misses
+	-- the immutable grant key retained after a helper's pre-effect refusal.
+	local Mailbox = load("../SPAWN/mailbox")
+	local f = fixture(); local id = f:accepted(false)
+	assert(f:watermark(id).ok)
+	local queued = f:apply("poll", { worker_id = id }); assert(queued.ok)
+	assert(f:apply("claim", { action_id = queued.action_id, executor = f.origin.window_epoch }).ok)
+	local original = clone(f:action(queued.action_id).request)
+	assert(original.op == "mailbox_retire" and original.mode == "compact")
+	local provision = clone(original)
+	for _, key in { "handle", "expected_generation", "mode", "settlement_revision", "report_floor",
+		"report_chain_sha256", "reply_floor", "grant_id" } do provision[key] = nil end
+	provision.op = "mailbox_provision"; provision.request_id = "paired-provision"; provision.action_id = "paired-provision-action"
+	provision.record_id = "native"; provision.record_revision = 0; provision.capability = "report-files-v1"
+	local record = { id = "native", backend = "local-terminal", mailbox = {
+		permitted_root = "/private/mailboxes", helper_path = "/private/tools/mailbox_target.sh",
+		producer_helper_path = "/private/tools/mailbox_worker.sh", worker_identity = "worker",
+		verified = true, evidence_ref = "fixture-only", wake = "worker-poll-v1",
+		producer = { read = true, write = true, hash = true, journal = true, poll = true },
+		capabilities = { "report-files-v1", "worker-poll-v1", "argv-v1" } } }
+	local provision_op, prepared, problem = Mailbox.prepare(Mailbox.empty(), provision, record,
+		{ operation_id = "paired-provision-op", handle = original.handle, host_os = "linux", host_shell = "sh" })
+	must(provision_op, problem)
+	local transport = must(Mailbox.settle(prepared, provision_op, { status = "provisioned" }))
+	local first, active, refusal = Mailbox.prepare(transport, original, nil,
+		{ operation_id = "paired-first", host_os = "linux", host_shell = "sh", settlement = clone(original) })
+	must(first, refusal)
+	local refused, outcome = Mailbox.settle(active, first,
+		{ status = "full", admission_refused = true, resource = "capacity_admission", current = 1, limit = 1 })
+	must(refused, outcome)
+	assert(f:finish(queued.action_id, outcome.status, outcome.payload).code == "backpressure")
+	local retry = f:apply("retry", { action_id = queued.action_id }); assert(retry.ok)
+	assert(f:apply("claim", { action_id = retry.action_id, executor = f.origin.window_epoch }).ok)
+	local fresh = clone(f:action(retry.action_id).request)
+	local second, executing, rejected = Mailbox.prepare(refused, fresh, nil,
+		{ operation_id = "paired-second", host_os = "linux", host_shell = "sh", settlement = clone(fresh) })
+	check(second ~= nil, "proven pre-effect compaction retry reaches the real mailbox reducer without content_conflict")
+	local compacted = must(Mailbox.settle(executing, second, { status = "compacted" }), rejected)
+	assert(f:finish(retry.action_id, "compacted", {}).ok)
+	local worker = f.authority.registry.dispatch.workers[id]
+	check(worker.phase == "accepted" and worker.compaction_pending == nil
+		and compacted.generations[original.handle].report_floor == original.report_floor
+		and compacted.generations[original.handle].writes["grant:" .. original.grant_id] == nil,
+		"successful fresh compaction settles the worker and reclaims the refused grant without freezing the generation")
+end
+-- Frozen C2 (9768916) v3 source shape: observe has no namespace/revision, and
+-- pre-role workers may omit role. Keep these historical fields explicit rather
+-- than relabelling a current registry as legacy or loading private frozen paths.
+local function legacy_worker_fixture(coordinator)
+	local f = fixture(); local worker_id = f:launched(coordinator)
+	local current = f.authority.registry.dispatch.workers[worker_id]
+	local observed = f:event("observe", { worker_id = worker_id, pane_binding = clone(current.pane_binding),
+		native_state = "idle", observation_seq = 7 })
+	local applied = f.authority:apply(observed); must(applied.ok, applied)
+	local registry = f.authority.registry
+	local worker = clone(registry.dispatch.workers[worker_id])
+	worker.orch_project_id, worker.execution_cwd, worker.presentation, worker.project_held, worker.checks_pending = nil, nil, nil, nil, nil
+	local sid = "orch-1"
+	worker.logical_session_id = sid; worker.origin_binding.logical_session_id = sid
+	local event = worker.workflow.observation_cursor.event
+	event.orch_session_id = sid; event.origin.logical_session_id = sid
+	event.authority_namespace = nil; event.expected_revision = nil
+	local session = registry.sessions[f.origin.logical_session_id]
+	local legacy = { version = 3, revision = registry.revision, next_session_id = 1, next_owner_id = registry.next_owner_id,
+		execution_epoch = registry.execution_epoch, request_outcomes = {}, retired = {},
+		setup = clone(registry.setup), installation_defaults = clone(registry.installation_defaults),
+		sessions = { [sid] = { orch_session_id = sid, name = session.name, created_at_ms = session.created_at_ms,
+			controller_generation = session.controller_generation, orchestrator_generation = session.orchestrator_generation,
+			controller = clone(session.controller), orchestrator = clone(session.orchestrator) } },
+		dispatch = { serial = registry.dispatch.serial, actions = {}, workers = { [worker_id] = worker },
+			catalogs = {}, policies = {}, gates = {}, commands = {},
+			command_cursors = { [sid] = { origin = clone(event.origin), controller_pane = event.controller_pane, seq = event.command_seq } } } }
+	local selection = dispatch.migration_selection(legacy)
+	local normal, problem, pending, blockers = dispatch.migration_identity(legacy, selection)
+	must(normal, problem)
+	assert(pending == 0 and blockers == 0, "legacy fixture has no unresolved effects or deliveries")
+	-- Module-level peer evidence, not a claim of actual native paired qualification.
+	local peer = { source_schema = 1, source_revision = 0, source_namespace = "fixture-spawn", source_sha256 = string.rep("a", 64),
+		candidate_namespace = "fixture-spawn", protocol = 1, state = "ready", phase = "stable",
+		managed_sha256 = must(codec.dispatch_managed_digest(runtime.json.encode(normal))), pending_immutable = 0, blockers = 0 }
+	return legacy, worker_id, selection, peer
+end
+if section == nil or section == "legacy_observation" then
+	local legacy, id, selection, peer = legacy_worker_fixture(false)
+	for _, sequenced in { false, true } do
+		local source = clone(legacy)
+		if not sequenced then
+			source.dispatch.workers[id].workflow.observation_cursor.event.command_seq = nil
+			source.dispatch.workers[id].role = nil
+		end
+		local before = runtime.json.encode(source)
+		check(state.valid_legacy(source) and state.migration_source(source) ~= nil,
+			"exact C2 observation cursor enters the legacy boundary with optional command sequence and absent role")
+		local prepared, problem = state.prepare_migration(source, "legacy-observation-cutover", peer, selection)
+		must(prepared, problem)
+		local worker = prepared.dispatch.workers[id]
+		check(worker.workflow.observation_cursor == nil and worker.role == "builder"
+			and runtime.json.encode(worker.workflow.native) == runtime.json.encode(source.dispatch.workers[id].workflow.native)
+			and worker.accepted_seq == source.dispatch.workers[id].accepted_seq
+			and worker.enrolment_token == source.dispatch.workers[id].enrolment_token,
+			"cutover discards the old delivery cursor without rewriting native evidence, report progress or enrolment")
+		check(runtime.json.encode(source) == before and prepared.dispatch.commands == nil and next(prepared.dispatch.actions) == nil,
+			"paired preparation leaves source evidence untouched and creates no executable request or command history")
+		check(prepared.sessions["orch-1"].admitted == nil and prepared.sessions["orch-1"].controller.phase == "uncertain"
+			and state.rehydrate(clone(prepared)) ~= nil, "prepared migration reloads without admitting the old controller")
+		local proof, proof_problem = state.migration_proof(prepared, selection); must(proof, proof_problem)
+		local stable_peer = clone(peer); stable_peer.source_schema = 2; stable_peer.protocol = 2
+		local stable, stable_problem = state.finish_migration(prepared,
+			{ schema = 1, kind = "migration", orch = proof, spawn = stable_peer }, selection)
+		must(stable, stable_problem)
+		check(stable.migration == nil and stable.dispatch.workers[id].workflow.observation_cursor == nil
+			and state.rehydrate(clone(stable)) ~= nil, "completed cutover retains no legacy delivery cursor")
+		local replay = clone(source.dispatch.workers[id].workflow.observation_cursor.event)
+		local stable_before = runtime.json.encode(stable)
+		local changed, refused = state.apply(stable, replay)
+		check(changed == nil and refused.code == "invalid_event" and runtime.json.encode(stable) == stable_before,
+			"completed cutover still rejects the unfenced old observation without changing current state")
+	end
+	for name, mutate in {
+		namespace_only = function(e) e.authority_namespace = "legacy-observation-cutover" end,
+		revision_only = function(e) e.expected_revision = 0 end,
+		both_current_fields = function(e) e.authority_namespace = "legacy-observation-cutover"; e.expected_revision = 0 end,
+		false_namespace = function(e) e.authority_namespace = false end,
+		false_revision = function(e) e.expected_revision = false end,
+		unknown_field = function(e) e.extra = true end,
+		sequence_mismatch = function(e) e.observation_seq += 1 end,
+		foreign_worker = function(e) e.worker_id = "other-worker" end,
+		foreign_origin = function(e) e.origin.window_epoch = "other-window" end,
+		foreign_pane = function(e) e.pane_binding.pane_id = "9999" end,
+		future_command = function(e) e.command_seq += 1 end,
+	} do
+		local broken = clone(legacy); mutate(broken.dispatch.workers[id].workflow.observation_cursor.event)
+		local before = runtime.json.encode(broken)
+		local prepared, problem = state.prepare_migration(broken, "legacy-observation-cutover", peer, selection)
+		check(not state.valid_legacy(broken) and state.migration_source(broken) == nil and prepared == nil and problem.code == "state_corrupt"
+			and runtime.json.encode(broken) == before, name .. ": malformed or hybrid legacy cursor is rejected before migration without changing input")
+	end
+end
+if section == nil or section == "legacy_worker_roles" then
+	for _, coordinator in { false, true } do
+		local legacy, id, selection, peer = legacy_worker_fixture(coordinator)
+		local expected = if coordinator then "coordinator" else "builder"
+		-- Test missing-role admission independently of the observation-cursor exception.
+		legacy.dispatch.workers[id].workflow.observation_cursor = nil
+		for _, missing in { false, true } do
+			local source = clone(legacy)
+			if missing then source.dispatch.workers[id].role = nil end
+			local before = runtime.json.encode(source)
+			check(state.valid_legacy(source), expected .. ": exact old role form is valid before migration")
+			local prepared, problem = state.prepare_migration(source, "legacy-role-cutover", peer, selection)
+			must(prepared, problem)
+			check(prepared.dispatch.workers[id].role == expected and prepared.dispatch.workers[id].family == source.dispatch.workers[id].family
+				and runtime.json.encode(source) == before and state.rehydrate(clone(prepared)) ~= nil,
+				expected .. ": cutover infers only an absent legacy role and preserves the source and family")
+			local corrupt = clone(prepared); corrupt.dispatch.workers[id].role = nil
+			check(not dispatch.valid(corrupt.dispatch, corrupt) and state.rehydrate(corrupt) == nil,
+				expected .. ": prepared current state cannot reuse legacy permission to omit role")
+		end
+		for _, role in { false, "", "admin", 1, runtime.json.null } do
+			local broken = clone(legacy); broken.dispatch.workers[id].role = role
+			check(not state.valid_legacy(broken) and state.prepare_migration(broken, "legacy-role-cutover", peer, selection) == nil,
+				expected .. ": a present malformed legacy role is never defaulted")
+		end
+	end
+end
+if section == nil or section == "current_observation" then
+	local f = fixture(); local id = f:launched(false)
+	local w = f.authority.registry.dispatch.workers[id]
+	local observed = f:event("observe", { worker_id = id, pane_binding = clone(w.pane_binding), native_state = "idle", observation_seq = 1 })
+	local applied = f.authority:apply(observed); must(applied.ok, applied)
+	local saved = clone(f.authority.registry)
+	check(dispatch.valid(saved.dispatch, saved) and state.rehydrate(clone(saved)) ~= nil,
+		"current fenced observation restores with its original namespace and earlier revision")
+	for name, mutate in {
+		missing_namespace = function(e) e.authority_namespace = nil end,
+		missing_revision = function(e) e.expected_revision = nil end,
+		legacy_shape = function(e) e.authority_namespace = nil; e.expected_revision = nil end,
+		foreign_namespace = function(e) e.authority_namespace = "other-authority" end,
+		negative_revision = function(e) e.expected_revision = -1 end,
+		fractional_revision = function(e) e.expected_revision = 0.5 end,
+		string_revision = function(e) e.expected_revision = "0" end,
+		uncommitted_revision = function(e) e.expected_revision = saved.revision end,
+		future_revision = function(e) e.expected_revision = saved.revision + 1 end,
+	} do
+		local corrupt = clone(saved); mutate(corrupt.dispatch.workers[id].workflow.observation_cursor.event)
+		check(not dispatch.valid(corrupt.dispatch, corrupt) and state.rehydrate(corrupt) == nil,
+			name .. ": current observation cannot enter through the legacy boundary")
+	end
+	for _, field in { "authority_namespace", "expected_revision" } do
+		local unfenced = f:event("observe", { worker_id = id, pane_binding = clone(w.pane_binding), native_state = "working", observation_seq = 2 })
+		unfenced[field] = nil
+		local before, writes = runtime.json.encode(f.authority.registry), f.memory.writes
+		check(not f.authority:apply(unfenced).ok and f.memory.writes == writes and runtime.json.encode(f.authority.registry) == before,
+			field .. ": live observe still requires its captured authority fence and refuses without a write")
+	end
+end
+if section == nil or section == "current_retention" then
+	local f = fixture(); local sid = f.origin.logical_session_id
+	local first = f.authority.registry.sessions[sid].next_request_serial
+	for index = 1, 4097 do
+		f:catalog(0)
+		local d = f.authority.registry.dispatch
+		check(next(d.actions) == nil and d.commands == nil and f.authority.registry.request_outcomes == nil
+			and f.authority.registry.retired == nil, "each completed catalog leaves only current state, beyond former history capacity")
+	end
+	check(f.authority.registry.sessions[sid].next_request_serial == first + 4097, "all 4097 results were actually issued and consumed")
+	check(state.rehydrate(clone(f.authority.registry)) ~= nil, "bounded current state restores after former lifetime bound")
+end
+if section == nil or section == "current_ack_holes" then
+	do
+		local current = fixture(); local sid = current.origin.logical_session_id
+		local confirmed = current.authority.registry.sessions[sid].request_floor
+		current:catalog(0)
+		local queued = current:apply("bridge_control", { operation = "reconcile_session",
+			compatibility = clone(current.authority.registry.compatibility) }); must(queued.ok, queued)
+		local projected = dispatch.project(current.authority.registry, sid, current.origin.alias_nonce)
+		local request = projected.control.request
+		check(request.settled_before > confirmed
+			and projected.sessions[sid].control.request_floor == request.settled_before
+			and projected.sessions[sid].control.next_request_serial == request.next_request_serial
+			and projected.session_control.request_floor == confirmed,
+			"native control advertises derived ACK progress matching its exact request, without claiming peer-confirmed coverage")
+	end
+	local f = fixture(); f:catalog(0)
+	local low = f:queue(false); assert(low.ok)
+	assert(f:apply("claim", { action_id = low.action_id, executor = f.origin.window_epoch }).ok)
+	local low_request = clone(f:action(low.action_id).request)
+	local high = f:apply("catalog"); assert(high.ok)
+	assert(f:apply("claim", { action_id = high.action_id, executor = f.origin.window_epoch }).ok)
+	local high_request = clone(f:action(high.action_id).request)
+	assert(f:finish(high.action_id, "catalog", { catalog_version = 2, setup = catalog_setup(0), namespace = "fixture-spawn",
+		host_key = "fixture-host", config_revision = 0, revision = 0, records = runtime.json.array() }).ok)
+	local page = { after_serial = 0, through_serial = high_request.request_serial, next_after_serial = high_request.request_serial,
+		complete = true, entries = runtime.json.array({
+			{ request_serial = low_request.request_serial, request_id = low_request.request_id, action_id = low_request.action_id, op = low_request.op, phase = "claimed" },
+			{ request_serial = high_request.request_serial, request_id = high_request.request_id, action_id = high_request.action_id, op = high_request.op, phase = "current_result" },
+		}) }
+	assert(f:control("reconcile_session", page).ok)
+	local floor, consumed = dispatch.ack_progress(f.authority.registry, f.origin.logical_session_id)
+	check(floor == low_request.request_serial and #consumed == 1 and consumed[1] == high_request.request_serial,
+		"lost ACK for a completed hole is reconstructed above a still-live lower serial")
+	check(f:action(low.action_id).phase == "claimed" and f:action(high.action_id) == nil, "ACK derivation neither consumes the lower effect nor retains the higher result")
+	local saved = clone(f.authority.registry)
+	local restored = assert(state.rehydrate(saved))
+	local restored_floor, restored_consumed = dispatch.ack_progress(restored, f.origin.logical_session_id)
+	check(restored_floor == floor and restored_consumed[1] == high_request.request_serial
+		and restored.dispatch.actions[low.action_id].phase == "uncertain", "reload preserves unresolved low effect and reconstructible consumed hole")
+end
+if section == nil or section == "current_nonce" then
+	local function witness_case(f, action_id, op)
+		check(f:action(action_id).request.op == op, op .. ": fixture reaches the actual native operation")
+		local unissued = assert(state.rehydrate(clone(f.authority.registry)))
+		check(unissued.dispatch.actions[action_id].phase == "held_ready" and unissued.dispatch.actions[action_id].request_bytes == nil,
+			op .. ": restoring before issue never silently schedules the native operation")
+		assert(f:apply("claim", { action_id = action_id, executor = f.origin.window_epoch }).ok)
+		local original = clone(f:action(action_id))
+		local before_witness = assert(state.rehydrate(clone(f.authority.registry)))
+		check(before_witness.dispatch.actions[action_id].phase == "uncertain" and before_witness.dispatch.actions[action_id].claim.spawn_claim == nil,
+			op .. ": ORCH-only rollback before peer claim retains uncertainty rather than proving no effect")
+		local witness = { action_id = action_id, grant_id = original.claim.grant_id, spawn_namespace = "fixture-spawn",
+			claim_nonce = "independent-" .. op .. "-first-claim" }
+		assert(f:apply("spawn_claimed", witness).ok)
+		local first = clone(f:action(action_id).claim.spawn_claim)
+		local writes = f.memory.writes
+		check(f:apply("spawn_claimed", witness).ok and f.memory.writes == writes, op .. ": same native claim is a read-only current observation")
+		for _, field in { "claim_nonce", "spawn_namespace" } do
+			local changed = clone(witness); changed[field] = "different-independent-" .. field
+			check(f:apply("spawn_claimed", changed).code == "claim_mismatch" and f:action(action_id).phase == "uncertain"
+				and f:action(action_id).claim.spawn_claim.claim_nonce == first.claim_nonce
+				and f:action(action_id).claim.spawn_claim.spawn_namespace == first.spawn_namespace,
+				op .. ": peer rollback cannot replace the first namespace/nonce witness or authorize a second effect")
+		end
+		writes = f.memory.writes
+		check(f:apply("spawn_claimed", witness).code == "spawn_claim_observed" and f.memory.writes == writes
+			and f:action(action_id).phase == "uncertain",
+			op .. ": reobserving the first witness cannot clear retained uncertainty or grant execution")
+		check(f:action(action_id).request_bytes == original.request_bytes, op .. ": uncertainty preserves original immutable request and serial")
+		local restored = assert(state.rehydrate(clone(f.authority.registry)))
+		check(restored.dispatch.actions[action_id].phase == "uncertain"
+			and restored.dispatch.actions[action_id].claim.spawn_claim.claim_nonce == first.claim_nonce, op .. ": both-side restoration retains uncertainty and first witness")
+	end
+	for _, op in { "launch", "enrol" } do
+		local f = fixture(); f:catalog(0)
+		local queued
+		if op == "launch" then queued = f:queue(false)
+		else
+			queued = f:apply("enrol", { record_id = "native", record_revision = 0, catalog_revision = 0,
+				orch_project_id = f:project("Nonce-bound existing conversation", false), delivery = "native_ask",
+				pane_binding = { pane_id = "9020", window_key = f.origin.window_key, window_epoch = f.origin.window_epoch,
+					native_session_id = f.origin.native_session_id, window_host_id = f.origin.window_host_id } })
+		end
+		assert(queued.ok)
+		assert(f:finish(queued.action_id, "provisioned", { handle = "nonce-mailbox", binding_digest = string.rep("a", 64),
+			capabilities = runtime.json.array({ "report-files-v1", "native-ask-v1", "coordinator-control-v1", "project-start-v1" }) }).ok)
+		witness_case(f, f.authority.registry.dispatch.workers[queued.worker_id].launch_action_id, op)
+	end
+	do
+		local f = fixture(); local id = f:accepted(false)
+		assert(f:apply("finish", { worker_id = id }).ok)
+		for _ = 1, 16 do
+			local publish = false
+			for _, receipt in f.authority.registry.dispatch.workers[id].receipts do if receipt.publish then publish = true end end
+			if not publish then break end
+			local pending = f:apply("poll", { worker_id = id }); assert(pending.ok)
+			assert(f:action(pending.action_id).request.op == "mailbox_publish_ack")
+			assert(f:finish(pending.action_id, "published").ok)
+		end
+		assert(f:watermark(id).ok)
+		local stop = f:apply("poll", { worker_id = id }); assert(stop.ok)
+		witness_case(f, stop.action_id, "stop")
+	end
+	do
+		local f = fixture(function() return { now_ms = 1000, mono_ms = 1000, epoch = "nonce-wake-host" } end)
+		local id = f:accepted(false)
+		local worker = f.authority.registry.dispatch.workers[id]
+		assert(f:apply("observe", { worker_id = id, pane_binding = worker.pane_binding, native_state = "working" }).ok)
+		assert(f:apply("intake", { worker_id = id, bytes = f:report(id, 2, "HEARTBEAT", { state = "working" }) }).ok)
+		local publication = f:apply("poll", { worker_id = id }); assert(publication.ok)
+		local request = f:action(publication.action_id).request
+		assert(f:finish(publication.action_id, "published", { wake_status = "awaiting_window", wake_effect_started = false,
+			wake_target_request_id = request.request_id, wake_target_action_id = request.action_id }).ok)
+		assert(f:apply("observe", { worker_id = id, pane_binding = worker.pane_binding, native_state = "idle" }).ok)
+		local wake = f:apply("poll", { worker_id = id }); assert(wake.ok)
+		witness_case(f, wake.action_id, "native_wake")
+	end
+end
+if section == nil or section == "current_close" then
+	local f = fixture(); f:catalog(0)
+	local closing_sid = f.origin.logical_session_id
+	local old_origin = clone(f.origin)
+	assert(f:apply("policy", { policy = { automatic_reports = false } }).ok)
+	local other = f:state_event("register_session", { orch_session_id = next_id(), name = "Unaffected live session" })
+	local registered = f.authority:apply(other); assert(registered.ok, registered.message)
+	local other_before = runtime.json.encode(f.authority.registry.sessions[registered.orch_session_id])
+	local close_id = next_id()
+	local begun = f.authority:apply(f:state_event("begin_close", { close_id = close_id,
+		control_origin = { kind = "closing", binding = old_origin, controller_pane = "9001", close_id = close_id } }))
+	assert(begun.ok, begun.message)
+	check(f:apply("catalog").code == "session_closing", "closing fences new enqueue before peer closure")
+	check(state.rehydrate(clone(f.authority.registry)) ~= nil, "closing with retained exact control origin restores")
+	assert(f.authority:apply(f:state_event("release_controller", { expected_owner_id = old_origin.owner_id,
+		expected_generation = old_origin.owner_generation })).ok)
+	check(not f.authority:apply(f:state_event("confirm_close", { close_id = close_id })).ok, "owner release alone cannot reclaim an admitted session")
+	assert(f:control("close_session").ok)
+	local before = f.memory.writes
+	local confirm = f:state_event("confirm_close", { close_id = close_id })
+	local snapshot = runtime.json.encode(f.authority.registry)
+	f.memory.fail = true
+	check(f.authority:apply(confirm).code == "persistence_failed" and f.memory.writes == before
+		and runtime.json.encode(f.authority.registry) == snapshot and runtime.json.encode(f.memory.value) == snapshot,
+		"failed final close commit preserves every live and terminal table atomically")
+	f.memory.fail = false
+	assert(f.authority:apply(confirm).ok)
+	local d = f.authority.registry.dispatch
+	check(f.memory.writes == before + 1 and f.authority.registry.sessions[closing_sid] == nil
+		and d.catalogs[closing_sid] == nil and d.policies[closing_sid] == nil and d.command_cursors[closing_sid] == nil,
+		"one confirmed close commit reclaims session and every populated terminal scoped table")
+	check(runtime.json.encode(f.authority.registry.sessions[registered.orch_session_id]) == other_before,
+		"atomic close preserves the other live session byte-for-byte")
+	check(f.authority:apply(other).code == "already_registered", "a matching still-active registration is observed without reopening a closed session")
+	check(state.rehydrate(clone(f.authority.registry)) ~= nil, "closed/absent graph restores with no dangling references")
+	-- Exercise the pure graph cut for every scope, separately from the validated authority/store
+	-- transaction above. Sentinel rows deliberately test routing keys, not fabricated valid work.
+	local graph = { dispatch = { actions = {}, landing = { items = {}, queues = {} } } }
+	local other_sid = registered.orch_session_id
+	for _, field in { "catalogs", "sweeps", "policies", "command_cursors", "capacity" } do
+		graph.dispatch[field] = { [closing_sid] = { token = "remove-" .. field }, [other_sid] = { token = "keep-" .. field } }
+	end
+	for _, field in { "workers", "gates", "rollovers", "reviews", "deploys", "plans", "intakes", "chains" } do
+		graph.dispatch[field] = { gone = { logical_session_id = closing_sid }, kept = { logical_session_id = other_sid, token = field } }
+	end
+	graph.dispatch.actions = { gone = { request = { origin_binding = { logical_session_id = closing_sid } } },
+		kept = { request = { origin_binding = { logical_session_id = other_sid } } } }
+	for _, field in { "items", "queues" } do
+		graph.dispatch.landing[field] = { gone = { logical_session_id = closing_sid }, kept = { logical_session_id = other_sid, token = field } }
+	end
+	local original = graph.dispatch
+	dispatch.reclaim_session(graph, closing_sid)
+	check(graph.dispatch ~= original and original.workers.gone ~= nil, "graph reclaim copies before deleting and leaves the input snapshot untouched")
+	for _, field in { "catalogs", "sweeps", "policies", "command_cursors", "capacity" } do
+		check(graph.dispatch[field][closing_sid] == nil and graph.dispatch[field][other_sid].token == "keep-" .. field, field .. ": removes only the closing session")
+	end
+	for _, field in { "actions", "workers", "gates", "rollovers", "reviews", "deploys", "plans", "intakes", "chains" } do
+		check(graph.dispatch[field].gone == nil and runtime.json.encode(graph.dispatch[field].kept) == runtime.json.encode(original[field].kept),
+			field .. ": terminal scoped graph disappears while other session remains identical")
+	end
+	for _, field in { "items", "queues" } do
+		check(graph.dispatch.landing[field].gone == nil and graph.dispatch.landing[field].kept.token == field, "landing " .. field .. ": reclaims only closing graph")
+	end
+end
+if section == nil or section == "poll_continuation" then
+	local clock = { now_ms = 1000, mono_ms = 1000, epoch = "continuation-host" }
+	local f = fixture(function() return clone(clock) end); local id = f:launched(false)
+	local function worker() return f.authority.registry.dispatch.workers[id] end
+	local function projected()
+		for _, shown in dispatch.project(f.authority.registry, f.origin.logical_session_id, f.origin.alias_nonce).workflow.workers do
+			if shown.worker_id == id then return shown end
+		end
+		error("missing continuation worker")
+	end
+	local function due(label)
+		local shown = projected()
+		check(shown.poll_continuation == true and shown.due_poll and worker().workflow.last_poll.mono_ms == clock.mono_ms,
+			label .. " is immediately runnable without advancing the idle poll clock")
+		check(worker().workflow.poll_continuation == nil, "continuation readiness is derived, not a persisted workflow field")
+	end
+	local function poll(op, periodic)
+		local queued = f:apply("poll", { worker_id = id, bytes = if periodic then "watermark" else nil })
+		assert(queued.ok, queued.message)
+		check(f:action(queued.action_id).request.op == op, "poll selects " .. op .. " without adding an operation")
+		check(not projected().poll_continuation and not projected().due_poll, "a ready action suppresses duplicate continuation scheduling")
+		return queued.action_id
+	end
+	local logical = f:report(id, 1, "ACCEPTED", { assignment_sha256 = worker().assignment_sha256 }) .. string.rep(" ", 5000)
+	local frames = assert(codec.frame(logical, "report", worker()))
+	check(#frames.chunks > 1, "continuation fixture exercises a partial multi-chunk report")
+	local manifest = poll("mailbox_read", false)
+	local page = assert(codec.project_page(frames.manifest, f:action(manifest).request.selector))
+	assert(f:finish(manifest, "read", runtime.json.decode(page)).ok)
+	for index, chunk in frames.chunks do
+		due(if index == 1 then "manifest continuation" else "partial chunk continuation")
+		local part = poll("mailbox_read", true)
+		local request = f:action(part).request
+		check(request.selector.stream == "report" and request.selector.part == "chunk" and request.selector.index == index,
+			"periodic watermark yields to the exact next report chunk")
+		assert(f:apply("claim", { action_id = part, executor = f.origin.window_epoch }).ok)
+		local bytes, grant, writes = f:action(part).request_bytes, f:action(part).claim.grant_id, f.memory.writes
+		check(not projected().poll_continuation and not projected().due_poll
+			and f:apply("poll", { worker_id = id, bytes = "watermark" }).code == "operation_pending"
+			and f.memory.writes == writes and f:action(part).request_bytes == bytes and f:action(part).claim.grant_id == grant,
+			"claimed partial read blocks duplicate continuation and preserves its immutable grant")
+		page = assert(codec.project_page(chunk, request.selector))
+		assert(f:finish(part, "read", runtime.json.decode(page)).ok)
+	end
+	check(worker().accepted_seq == 1 and worker().assembly == nil and worker().accept_pending, "complete assembly commits acceptance before settlement")
+	due("ACK continuation")
+	local ack = poll("mailbox_publish_ack", true)
+	assert(f:finish(ack, "published", {}).ok)
+	due("accept continuation")
+	local accepted = poll("accept", true)
+	assert(f:finish(accepted, "accepted", {}).ok)
+	check(not projected().poll_continuation and not projected().due_poll, "settled acceptance returns to paced discovery")
+
+	assert(f:apply("observe", { worker_id = id, pane_binding = worker().pane_binding, native_state = "idle" }).ok)
+	assert(f:apply("reply", { worker_id = id }).ok)
+	local reply_bytes = worker().replies["1"].bytes
+	due("reply chunk continuation")
+	local publication = poll("mailbox_publish_reply", true)
+	check(f:action(publication).request.part == "chunk", "reply chunk still precedes its manifest")
+	assert(f:finish(publication, "full", { resource = "active_transport", current = 4, limit = 4, retryable = true, effect_started = false }).code == "backpressure")
+	local retained, writes = f:action(publication).request_bytes, f.memory.writes
+	check(not projected().poll_continuation and not projected().due_poll
+		and f:apply("poll", { worker_id = id, bytes = "watermark" }).code == "operation_pending"
+		and f.memory.writes == writes and f:action(publication).request_bytes == retained and worker().replies["1"].part == 1,
+		"switching a periodic watermark to continuation cannot use the watermark backpressure exception to duplicate publication")
+	local retried = f:apply("retry", { action_id = publication }); assert(retried.ok, retried.message)
+	assert(f:finish(retried.action_id, "published", {}).ok)
+	while worker().replies["1"].part <= #worker().replies["1"].frames.chunks + 1 do
+		due("reply part continuation")
+		local part = worker().replies["1"].part
+		local next_part = poll("mailbox_publish_reply", true)
+		local request = f:action(next_part).request
+		check(request.part == (if part > #worker().replies["1"].frames.chunks then "manifest" else "chunk")
+			and worker().replies["1"].bytes == reply_bytes, "reply parts and final manifest retain the original immutable reply")
+		assert(f:finish(next_part, "published", {}).ok)
+	end
+	check(not projected().poll_continuation, "fully published reply awaiting acknowledgement is not runnable continuation")
+	assert(f:watermark(id).ok)
+	due("compaction continuation")
+	local compact = poll("mailbox_retire", true)
+	check(f:action(compact).request.mode == "compact", "periodic watermark yields to already-authorized compaction")
+	assert(f:finish(compact, "compacted", {}).ok)
+	assert(f:apply("observe", { worker_id = id, pane_binding = worker().pane_binding, native_state = "idle" }).ok)
+	check(not projected().poll_continuation and not projected().due_poll, "idle worker without known work is still paced")
+	local poll_ms = dispatch.policy(f.authority.registry, f.origin.logical_session_id).poll_ms
+	clock.mono_ms += poll_ms - 1; clock.now_ms += poll_ms - 1
+	assert(f:tick().ok)
+	check(not projected().poll_continuation and not projected().due_poll, "plain discovery waits until the full poll_ms interval")
+	clock.mono_ms += 1; clock.now_ms += 1
+	assert(f:tick().ok)
+	check(not projected().poll_continuation and projected().due_poll, "plain discovery becomes due at poll_ms without becoming continuation")
+	local discovery = poll("mailbox_read", false)
+	check(f:action(discovery).request.selector.stream == "report" and f:action(discovery).request.selector.part == "manifest",
+		"idle discovery still reads the next report manifest")
+	assert(f:finish(discovery, "missing", {}).ok)
+	check(not projected().poll_continuation and not projected().due_poll, "missing discovery starts another idle interval, not a hot loop")
+end
 if section == nil or section == "assembly_restore" then
 	local f = fixture(); local id = f:accepted(false)
 	local function worker() return f.authority.registry.dispatch.workers[id] end
@@ -185,7 +906,7 @@ if section == nil or section == "assembly_restore" then
 	local function deliver(object)
 		local queued = f:apply("poll", { worker_id = id }); assert(queued.ok, queued.message)
 		local page = assert(codec.project_page(object, f:action(queued.action_id).request.selector))
-		return f:finish(queued.action_id, "complete", runtime.json.decode(page))
+		return f:finish(queued.action_id, "read", runtime.json.decode(page))
 	end
 	assert(deliver(framed.manifest).ok)
 	check(state.rehydrate(clone(f.authority.registry)) ~= nil, "manifest-only incremental state restores")
@@ -214,11 +935,8 @@ if section == nil or section == "assembly_restore" then
 	local legacy = clone(saved)
 	legacy.dispatch.workers[id].assembly = { manifest = framed.manifest, sha256 = codec.sha256(framed.manifest),
 		chunks = { { bytes = framed.chunks[1], sha256 = codec.sha256(framed.chunks[1]) } } }
-	check(not dispatch.valid(legacy.dispatch, legacy), "legacy assembly is accepted only at the restore boundary")
-	local migrated = assert(state.rehydrate(clone(legacy)))
-	local ma = migrated.dispatch.workers[id].assembly
-	check(ma.version == 1 and ma.next_index == 2 and ma.slices[1] == a.slices[1] and ma.object_digests[1] == a.object_digests[1]
-		and migrated.dispatch.workers[id].accepted_seq == 1, "old encoded-chunk prefix migrates without accepting a report")
+	check(not dispatch.valid(legacy.dispatch, legacy) and state.rehydrate(clone(legacy)) == nil,
+		"current stores cannot inject an old encoded-chunk assembly and silently invoke legacy migration")
 	for _, mutate in {
 		function(old) old.chunks[1].sha256 = string.rep("0", 64) end,
 		function(old) old.chunks[1] = { bytes = framed.chunks[2], sha256 = codec.sha256(framed.chunks[2]) } end,
@@ -233,6 +951,7 @@ if section == nil or section == "assembly_restore" then
 	f.origin.window_epoch = "assembly-replacement-window"; f.controller_pane = "9010"
 	check(not f:apply("poll", { worker_id = id }).ok, "reloaded partial report grants no automatic read authority")
 	assert(f:apply("continue_controller", { expected_revision = f.authority.registry.revision, operator_verified = true }).ok)
+	assert(f:control("reconcile_session").ok) -- Fresh peer observation restores admission, never the old revision fence.
 	local pane = { pane_id = "9013", window_key = "", window_epoch = f.origin.window_epoch, native_session_id = "7", window_host_id = "local" }
 	local attached = f:apply("continue_worker", { worker_id = id, pane_binding = pane,
 		continuation_proof = dispatch.continuation_proof(f.authority.registry, worker()), operator_verified = true })
@@ -259,12 +978,12 @@ if section == nil or section == "assembly_capacity" then
 	for index, id in ids do
 		local queued = f:apply("poll", { worker_id = id }); assert(queued.ok, queued.message)
 		local page = assert(codec.project_page(frames[index].manifest, f:action(queued.action_id).request.selector))
-		local result = f:finish(queued.action_id, "complete", runtime.json.decode(page))
+		local result = f:finish(queued.action_id, "read", runtime.json.decode(page))
 		check(result.ok and (index < 5 or result.code == "intake_backpressure"), "only four active report assemblies are admitted")
 		if index < 5 then
 			local chunk = f:apply("poll", { worker_id = id }); assert(chunk.ok, chunk.message)
 			local part = assert(codec.project_page(frames[index].chunks[1], f:action(chunk.action_id).request.selector))
-			assert(f:finish(chunk.action_id, "complete", runtime.json.decode(part)).ok)
+			assert(f:finish(chunk.action_id, "read", runtime.json.decode(part)).ok)
 		end
 	end
 	local total, active = 0, 0
@@ -283,7 +1002,144 @@ if section == nil or section == "assembly_capacity" then
 	fifth.read_selector = { stream = "report", slot = 2, part = "chunk", index = 1 }
 	check(state.rehydrate(corrupt) == nil, "restore cannot bypass the four-active-state limit")
 end
+if section == nil or section == "control_rebind" then
+	for _, scenario in { "previous_window", "repeated_windows", "retained_other_host", "other_owner", "other_host", "other_session", "other_pane", "other_alias",
+		"future_serial", "future_generation", "future_revision", "missing_control", "admission_control" } do
+		local f = fixture(nil, { defer_admission = scenario == "admission_control" })
+		local sid, previous = f.origin.logical_session_id, clone(f.origin)
+		local healthy = scenario == "previous_window" or scenario == "repeated_windows"
+		local held = if healthy then f:project("Held project", false) else nil
+		local repeated = scenario == "repeated_windows" or scenario == "retained_other_host"
+		local initial_peer_revision = f.authority.registry.sessions[sid].last_authority_revision
+		if repeated then
+			f.origin.window_epoch = "intermediate-window"
+			if scenario == "retained_other_host" then f.origin.window_host_id = "intermediate-host" end
+			assert(f:apply("continue_controller", { operator_verified = true }).ok)
+		end
+		local retained
+		if scenario ~= "missing_control" then
+			local operation = if scenario == "admission_control" then "admit_session" else "reconcile_session"
+			assert(f:apply("bridge_control", { operation = operation, compatibility = clone(f.authority.registry.compatibility) }).ok)
+			retained = clone(f.authority.registry.sessions[sid].bridge_control)
+		end
+		local session = f.authority.registry.sessions[sid]
+		local peer = { phase = "open", generation_floor = session.generation_floor,
+			request_floor = session.request_floor, next_request_serial = session.next_request_serial,
+			last_authority_revision = if repeated then initial_peer_revision elseif retained then retained.request.authority_revision else f.authority.registry.revision,
+			binding = clone(previous) }
+		f.origin = clone(previous)
+		f.origin.window_epoch = "verified-replacement-window"
+		assert(f:apply("continue_controller", { operator_verified = true }).ok)
+		if scenario == "other_owner" then peer.binding.owner_id = "other-owner"
+		elseif scenario == "other_host" then peer.binding.window_host_id = "other-host"
+		elseif scenario == "other_session" then peer.binding.native_session_id = "other-session"
+		elseif scenario == "other_pane" then peer.binding.host_pane_id = "other-pane"
+		elseif scenario == "other_alias" then peer.binding.alias_nonce = "other-alias"
+		elseif scenario == "future_serial" then peer.next_request_serial += 1
+		elseif scenario == "future_generation" then peer.generation_floor += 1
+		elseif scenario == "future_revision" then peer.last_authority_revision = f.authority.registry.revision + 1 end
+		session = f.authority.registry.sessions[sid]
+		local query = { schema = 2, origin = "orchplus", op = "owner_status", request_id = next_id(), action_id = next_id(),
+			authority_namespace = f.authority.registry.authority_namespace, logical_session_id = sid,
+			admission_seq = session.admission_seq, origin_binding = clone(f.origin),
+			controller_pane = f.controller_pane or "9001", controller_generation = f.origin.owner_generation }
+		local bytes = frame(query, "owner_status", { admission_cursor = session.admission_seq,
+			compatibility = clone(f.authority.registry.compatibility), control = peer }, nil, "current_admission",
+			math.max(session.last_authority_revision, f.authority.registry.revision))
+		local before, writes = runtime.json.encode(f.authority.registry), f.memory.writes
+		local observed = f:apply("bridge_observe", { query_bytes = runtime.json.encode(query), response_bytes = bytes })
+		if healthy then
+			check(observed.ok and f.authority.registry.sessions[sid].bridge_control == nil
+				and f.authority.registry.sessions[sid].admitted ~= true,
+				"exact old-window reconciliation settles without transferring admission to the replacement")
+			check(f:apply("catalog").code == "admission_required" and next(f.authority.registry.dispatch.workers) == nil,
+				"settled old route cannot authorize a catalog or agent startup")
+			assert(f:control("reconcile_session").ok)
+			check(f.authority.registry.sessions[sid].admitted == true and f:apply("catalog").ok
+				and not f.authority.registry.dispatch.projects[held].started and next(f.authority.registry.dispatch.workers) == nil,
+				"fresh current-route reconciliation restores navigation without starting held project work")
+		else
+			check(not observed.ok and f.memory.writes == writes and runtime.json.encode(f.authority.registry) == before,
+				scenario .. ": observation cannot discard a retained control or grant admission")
+		end
+	end
+end
 if section == nil or section == "core" then
+do
+	local f = fixture(); local sid = f.origin.logical_session_id
+	local queued = f:apply("bridge_control", { operation = "reconcile_session", compatibility = clone(f.authority.registry.compatibility) })
+	assert(queued.ok, runtime.json.encode(queued))
+	local intent = f.authority.registry.sessions[sid].bridge_control
+	local control_bytes, request = intent.request_bytes, clone(intent.request)
+	assert(f:apply("pause").ok) -- An unrelated real candidate must retain the immutable control.
+	local function retained_control(registry, label)
+		local retained = registry.sessions[sid].bridge_control
+		local decoded, problem = codec.decode_dispatch_request(runtime.json.encode(retained.request))
+		check(retained.request_bytes == control_bytes and decoded ~= nil
+			and runtime.json.encode(retained.request.consumed) == "[]",
+			label .. ": immutable control bytes and empty consumed-array shape survive: " .. runtime.json.encode(problem))
+	end
+	retained_control(f.authority.registry, "dispatch candidate through state.checked")
+	local restored, diagnostic = state.rehydrate(clone(f.memory.value))
+	assert(restored, runtime.json.encode(diagnostic))
+	retained_control(restored, "state.rehydrate")
+	local response = frame(request, "reconciled", { admission_cursor = request.admission_seq,
+		compatibility = clone(request.compatibility), control = { phase = "open",
+			generation_floor = request.generation_floor, request_floor = request.settled_before,
+			next_request_serial = request.next_request_serial, last_authority_revision = request.authority_revision,
+			binding = clone(request.control_origin.binding) },
+		outstanding = { after_serial = 0, through_serial = 0, next_after_serial = 0, complete = true, entries = runtime.json.array() } },
+		nil, "current_admission", request.authority_revision)
+	check(codec.decode_dispatch_response(response, restored.sessions[sid].bridge_control.request) ~= nil,
+		"restored immutable control remains a canonical response-decoder request")
+	local observed = f:apply("bridge_result", { query_bytes = control_bytes, response_bytes = response })
+	check(observed.ok and f.authority.registry.sessions[sid].bridge_control == nil,
+		"actual candidate consumes the exact retained canonical control response: " .. runtime.json.encode(observed))
+	assert(f:apply("resume").ok)
+	local catalog = f:apply("catalog"); assert(catalog.ok)
+	assert(f:apply("claim", { action_id = catalog.action_id, executor = f.origin.window_epoch }).ok)
+	local issued_bytes = f:action(catalog.action_id).request_bytes
+	assert(f:apply("pause").ok)
+	local reloaded, problem = state.rehydrate(clone(f.memory.value)); assert(reloaded, runtime.json.encode(problem))
+	for _, registry in { f.authority.registry, reloaded } do
+		local retained = registry.dispatch.actions[catalog.action_id]
+		check(retained.request_bytes == issued_bytes
+			and codec.decode_dispatch_request(runtime.json.encode(retained.request)) ~= nil
+			and runtime.json.encode(retained.request.consumed) == "[]",
+			"issued action survives candidate and reload without rewriting canonical request bytes or array shape")
+	end
+	local settled = f:finish(catalog.action_id, "rejected", nil, { code = "storage_error", message = "Fixture read refusal" })
+	check(settled.ok and f:action(catalog.action_id) == nil,
+		"actual response settles copied issued request without schema relaxation: " .. runtime.json.encode(settled))
+end
+do
+	local reads = fixture(); reads:catalog(0)
+	local captured = reads:event("catalog")
+	captured.decision_context = assert(dispatch.decision_context(reads.authority.registry, captured))
+	reads:project("Unrelated bookkeeping", false)
+	captured.command_seq = reads.command_seq + 1; reads.command_seq = captured.command_seq
+	local accepted = reads.authority:apply(captured)
+	check(accepted.ok and reads:action(accepted.action_id).request.op == "catalog",
+		"the same captured catalog subject survives unrelated project bookkeeping without refreshing or replaying intent")
+	local writes = reads.memory.writes
+	check(reads.authority:apply(clone(captured)).code == "stale_command" and reads.memory.writes == writes,
+		"subject-scoped catalog reads still obey the single-execution command sequence")
+	for _, change in { "cursor", "window", "authority", "policy", "missing_context" } do
+		local f = fixture(); f:catalog(0)
+		local request = f:event("catalog", { bytes = { revision = 0, index = 2 } })
+		request.decision_context = assert(dispatch.decision_context(f.authority.registry, request))
+		if change == "cursor" then request.bytes.index = 3
+		elseif change == "window" then request.origin.window_epoch = "different-window"
+		elseif change == "authority" then request.authority_namespace = "different-authority"
+		elseif change == "policy" then assert(f:apply("pause").ok)
+		else request.decision_context = nil; f:project("Another update", false) end
+		request.command_seq = f.command_seq + 1; f.command_seq = request.command_seq
+		local before, writes = runtime.json.encode(f.authority.registry), f.memory.writes
+		check(not f.authority:apply(request).ok and f.memory.writes == writes
+			and runtime.json.encode(f.authority.registry) == before,
+			"catalog " .. change .. " cannot borrow a captured context or issue a read")
+	end
+end
 local opaque = fixture()
 local configured_id, configured_cwd = "Configured worker / one", "/" .. string.rep("a", 1200)
 opaque:catalog(0, configured_id, configured_cwd)
@@ -310,7 +1166,7 @@ check(slot ~= nil and slot.pane_binding == nil and slot.work_id == queued.work_i
 check(f:queue(true).code == "orchestrator_slot_occupied", "distinct concurrent coordinator start refuses even without a pane")
 local writes = f.memory.writes
 local replay = f.authority:apply(clone(queue))
-check(replay.work_id == queued.work_id and f.memory.writes == writes, "same queue request replays same work without another reservation")
+check(replay.code == "stale_revision" and f.memory.writes == writes, "lost queue response is reconciled from current work, never replayed under a refreshed revision")
 local claim = f:event("claim", { action_id = queued.action_id, executor = "fixture-window" })
 f.memory.fail = true
 check(f.authority:apply(claim).code == "persistence_failed" and f:action(queued.action_id).phase == "ready", "failed claim persistence grants no execution")
@@ -330,21 +1186,42 @@ check(claimed_machine.action.action_id == queued.action_id and claimed_machine.a
 	and claimed_request.action_id == queued.action_id, "queueing another task cannot hide the live provisioning grant or substitute its immutable request")
 check(f:apply("lost", { action_id = queued.action_id, executor = "fixture-window", grant_id = f:action(queued.action_id).claim.grant_id }).ok, "lost native outcome becomes uncertain")
 check(f:action(queued.action_id).phase == "uncertain" and dispatch.unresolved(f.authority.registry, f.origin.logical_session_id, slot.owner_id), "uncertain claim occupies actual executor ledger and coordinator")
-local late = f:event("result", { action_id = queued.action_id, executor = "fixture-window", grant_id = f:action(queued.action_id).claim.grant_id, response_bytes = frame(f:action(queued.action_id).request, "provisioned", {
-	handle = "box", binding_digest = string.rep("a", 64), capabilities = runtime.json.array({ "report-files-v1", "native-ask-v1" }) }) })
+local late = f:event("result", { action_id = queued.action_id, executor = "fixture-window", grant_id = f:action(queued.action_id).claim.grant_id,
+	response_bytes = frame(f:action(queued.action_id).request, "provisioned", f:peer_payload(f:action(queued.action_id), "provisioned", {
+		handle = "box", binding_digest = string.rep("a", 64), capabilities = runtime.json.array({ "report-files-v1", "native-ask-v1" }) })) })
+check(codec.decode_dispatch_response(late.response_bytes, f:action(queued.action_id).request) ~= nil,
+	"late callback carries a valid canonical provision response before testing its captured fence")
 local restored = host.new_authority(f.memory)
 check(restored:load().ok, "dispatch ledger validates/restores through sole-host store")
 check(restored.registry.dispatch.actions[queued.action_id].phase == "uncertain", "restore retains ambiguous operation")
-check(not restored:apply(late).ok and restored.registry.sessions[f.origin.logical_session_id].orchestrator ~= nil, "stale callback cannot bind or clear a restored coordinator")
+do
+	local retained, durable, intent, writes = runtime.json.encode(restored.registry), runtime.json.encode(f.memory.value), runtime.json.encode(late), f.memory.writes
+	local refused = restored:apply(late)
+	check(refused.ok == false and restored.registry.sessions[f.origin.logical_session_id].orchestrator.owner_id == slot.owner_id
+		and runtime.json.encode(restored.registry) == retained and runtime.json.encode(f.memory.value) == durable and f.memory.writes == writes
+		and runtime.json.encode(late) == intent, "stale callback preserves its captured fence and cannot bind, clear or mutate a restored coordinator")
+end
 local codec_request = f:action(queued.action_id).request
-check(dispatch.decode_response("SPAWN_DISPATCH v0 {}", codec_request) == nil, "incompatible bridge cannot fall back")
+do
+	check(clone(nil) == nil and runtime.json.encode(clone(runtime.json.null)) == "null",
+		"fixture copying distinguishes absent fields from deliberate JSON null")
+	check(codec.decode_dispatch_response(frame(codec_request, "pending"), codec_request) ~= nil,
+		"fixture framing omits absent control origin and payload without inventing fields")
+	local null_request = clone(codec_request); null_request.control_origin = clone(runtime.json.null)
+	local decoded, diagnostic = codec.decode_dispatch_response(frame(null_request, "pending"), codec_request)
+	check(decoded == nil and diagnostic.code == "invalid_schema", "deliberate null survives fixture framing and remains forbidden")
+	decoded, diagnostic = codec.decode_dispatch_response(frame(codec_request, "pending", {}), codec_request)
+	check(decoded == nil and diagnostic.code == "invalid_schema", "raw fixture framing preserves deliberately invalid empty payloads")
+end
+check(protocol.decode_response("SPAWN_DISPATCH v0 {}", codec_request) == nil, "incompatible bridge cannot fall back")
 local forged = clone(codec_request); forged.action_id = "another-action"
-check(dispatch.decode_response(frame(forged, "provisioned", {}), codec_request) == nil, "mismatched exact action response rejects")
+check(protocol.decode_response(frame(forged, "provisioned", {}), codec_request) == nil, "mismatched exact action response rejects")
 
-local g = fixture(); local worker_id = g:launched(false)
+local g = fixture(function() return { now_ms = 1000, mono_ms = 1000, epoch = "core-wake-host" } end)
+local worker_id = g:launched(false)
 local worker = g.authority.registry.dispatch.workers[worker_id]
 check(worker.pane_binding.pane_id == "9002" and worker.phase == "awaiting_acceptance", "only correlated SPAWN outcome binds actual window-local pane")
-local launch = g:action(worker.launch_action_id).request
+local launch = g.last_launch_request
 check(launch.fresh == true and launch.prompt == worker.prompt and launch.enrolment.handover_id == nil and launch.enrolment.handover_token == nil, "initial launch is explicit/fresh and has no fabricated handover")
 local accepted = g:report(worker_id, 1, "ACCEPTED", { assignment_sha256 = worker.assignment_sha256 })
 check(g:apply("intake", { worker_id = worker_id, bytes = accepted }).code == "report_committed", "initial exact ACCEPTED commits")
@@ -362,36 +1239,28 @@ check(g:apply("intake", { worker_id = worker_id, bytes = runtime.json.encode(sta
 local publish = g:apply("poll", { worker_id = worker_id })
 check(g:action(publish.action_id).request.op == "mailbox_publish_ack", "settlement publishes committed ACK first")
 check(runtime.base64.decode(g:action(publish.action_id).request.ack_b64) == ack, "SPAWN receives exact saved ACK bytes")
-for _, wake in { "awaiting_window", "claimed", "launching" } do
-	check(g:finish(publish.action_id, "published", { wake_status = wake }).code == "wake_pending", "ACK retains native wake: " .. wake)
-	local action = g:action(publish.action_id)
-	local pending_worker = g.authority.registry.dispatch.workers[worker_id]
-	check(action.phase == "claimed" and pending_worker.receipts["1"].publish and pending_worker.accept_pending
-		and pending_worker.compacted_floor == 0, "ACK wake precedes separate SPAWN accept without clearing outbox or receipt")
-	local prior_writes, grant = g.memory.writes, action.claim.grant_id
-	check(g:finish(publish.action_id, "published", { wake_status = wake }).code == "wake_pending"
-		and g.memory.writes == prior_writes, "duplicate ACK wake result is read-only")
-	check(g:apply("poll", { worker_id = worker_id }).code == "operation_pending"
-		and g:apply("retry", { action_id = publish.action_id }).code == "retry_refused"
-		and g:action(publish.action_id).claim.grant_id == grant, "pending ACK cannot allocate another effect or retry grant")
-	local reload_value = clone(g.memory.value)
-	local retained = host.new_authority({
-		get = function() return clone(reload_value) end,
-		set = function(_, value) reload_value = clone(value) end,
-	})
-	check(retained:load().ok and retained.registry.dispatch.actions[publish.action_id].claim.grant_id == grant
-		and retained.registry.dispatch.actions[publish.action_id].phase == "uncertain"
-		and retained.registry.dispatch.workers[worker_id].receipts["1"].publish, "reload retains ACK bytes and original unresolved grant without replay permission")
-end
-check(g:finish(publish.action_id, "published", { wake_status = "submitted" }).ok
-	and g:action(publish.action_id).phase == "complete"
-	and not g.authority.registry.dispatch.workers[worker_id].receipts["1"].publish, "queued ACK notification settles publication, not consumption")
+local ack_request = clone(g:action(publish.action_id).request)
+check(g:finish(publish.action_id, "published", { wake_status = "awaiting_window", wake_effect_started = false,
+	wake_target_request_id = ack_request.request_id, wake_target_action_id = ack_request.action_id }).ok
+	and g:action(publish.action_id) == nil
+	and not g.authority.registry.dispatch.workers[worker_id].receipts["1"].publish,
+	"known ACK publication releases its action and retains only the separate unstarted native notification")
+local ack_reload = host.new_authority(keyed_memory(g.memory.value, g.memory.marker))
+check(ack_reload:load().ok and ack_reload.registry.dispatch.actions[publish.action_id] == nil
+	and ack_reload.registry.dispatch.workers[worker_id].wakes[ack_request.action_id] ~= nil,
+	"reload retains the native notification without reviving a completed publication grant")
 check(g.authority.registry.dispatch.workers[worker_id].compacted_floor == 0, "ACK publication does not prove worker receipt")
 local accept_op = g:apply("poll", { worker_id = worker_id })
 local accept_request = g:action(accept_op.action_id).request
 check(accept_request.op == "accept" and accept_request.target_request_id == worker.launch_request_id and accept_request.event_sha256 == codec.sha256(accepted), "SPAWN acceptance is correlated to durably accepted exact report")
 check(accept_request.handover_id == nil and accept_request.handover_token == nil and accept_request.pane_binding.pane_id == "9002", "initial accept callback needs no handover fields")
 check(g:finish(accept_op.action_id, "accepted", {}).ok and not g.authority.registry.dispatch.workers[worker_id].accept_pending, "accept outbox settles only on SPAWN accepted outcome")
+assert(g:apply("observe", { worker_id = worker_id, pane_binding = worker.pane_binding, native_state = "idle" }).ok)
+local ack_wake = g:apply("poll", { worker_id = worker_id }); must(ack_wake.ok, ack_wake)
+check(g:action(ack_wake.action_id).request.op == "native_wake"
+	and g:action(ack_wake.action_id).request.target_action_id == ack_request.action_id,
+	"fresh idle observation grants the separate notification of the consumed ACK publication")
+assert(g:finish(ack_wake.action_id, "submitted", { wake_status = "submitted", wake_effect_started = true }).ok)
 local reply = g:apply("reply", { worker_id = worker_id })
 check(reply.ok, "immutable host progress reply commits")
 worker = g.authority.registry.dispatch.workers[worker_id]
@@ -403,8 +1272,12 @@ check(g:apply("claim", { action_id = reply_part.action_id, executor = "fixture-w
 local refused_reply_request = g:action(reply_part.action_id).request_bytes
 check(g:finish(reply_part.action_id, "full", { resource = "active_transport", current = 4, limit = 4, retryable = true, effect_started = false }).code == "backpressure", "definitively unexecuted reply publication has explicit retryable backpressure")
 check(g.authority.registry.dispatch.workers[worker_id].phase == "accepted", "transport capacity never demotes durable acceptance")
-check(g:apply("retry", { action_id = reply_part.action_id }).ok and g:action(reply_part.action_id).request_bytes == refused_reply_request, "reply retry preserves exact immutable request/action")
-check(g:apply("claim", { action_id = reply_part.action_id, executor = "fixture-window" }).ok, "capacity recheck requires another durable grant")
+local refused_reply_id = reply_part.action_id
+reply_part = g:apply("retry", { action_id = refused_reply_id })
+check(reply_part.ok and reply_part.action_id ~= refused_reply_id and g:action(refused_reply_id) == nil
+	and g:action(reply_part.action_id).request_bytes == nil, "reply retry consumes old issuance and allocates a fresh unissued action")
+check(g:apply("claim", { action_id = reply_part.action_id, executor = "fixture-window" }).ok
+	and g:action(reply_part.action_id).request_bytes ~= refused_reply_request, "capacity recheck gets another durable grant and serial without changing reply bytes")
 check(g:apply("lost", { action_id = reply_part.action_id, executor = "fixture-window", grant_id = g:action(reply_part.action_id).claim.grant_id }).ok, "lost reply publication remains uncertain")
 check(g:apply("claim", { action_id = reply_part.action_id, executor = "fixture-window" }).code == "effect_already_claimed"
 	and g.authority.registry.dispatch.workers[worker_id].replies["1"].bytes == reply_bytes, "lost reply cannot obtain another execution grant or lose its immutable bytes")
@@ -412,23 +1285,30 @@ check(g:finish(reply_part.action_id, "published", {}).ok, "first reply chunk pub
 local manifest = g:apply("poll", { worker_id = worker_id })
 check(g:action(manifest.action_id).request.part == "manifest", "reply manifest is the last immutable part")
 local manifest_part = g.authority.registry.dispatch.workers[worker_id].replies["1"].part
-for _, wake in { "awaiting_window", "claimed", "launching" } do
-	check(g:finish(manifest.action_id, "already_published", { wake_status = wake }).code == "wake_pending", "publication retains the original pending native wake grant: " .. wake)
-	check(g:action(manifest.action_id).phase == "claimed" and g.authority.registry.dispatch.workers[worker_id].replies["1"].part == manifest_part
-		and dispatch.unresolved(g.authority.registry, g.origin.logical_session_id, g.origin.owner_id), "pending wake cannot clear executor occupancy or advance publication")
-	local prior_writes = g.memory.writes
-	check(g:finish(manifest.action_id, "already_published", { wake_status = wake }).code == "wake_pending" and g.memory.writes == prior_writes, "identical pending wake status is a read-only replay")
-end
-local visible_wake = dispatch.project(g.authority.registry, g.origin.logical_session_id, g.origin.alias_nonce).actions[manifest.action_id]
-check(visible_wake.wake_pending and visible_wake.claim.grant_id == g:action(manifest.action_id).claim.grant_id, "consumer projection retains exact original wake authorization")
+local manifest_request = clone(g:action(manifest.action_id).request)
+check(g:finish(manifest.action_id, "already_published", { wake_status = "awaiting_window", wake_effect_started = false,
+	wake_target_request_id = manifest_request.request_id, wake_target_action_id = manifest_request.action_id }).ok
+	and g:action(manifest.action_id) == nil
+	and g.authority.registry.dispatch.workers[worker_id].replies["1"].part == manifest_part + 1,
+	"confirmed manifest advances publication and retains a separately identified native notification")
+local notification = g:apply("poll", { worker_id = worker_id }); must(notification.ok, notification)
+check(g:action(notification.action_id).request.op == "native_wake", "notification receives its own immutable native request")
+check(g:finish(notification.action_id, "pending").code == "pending"
+	and g:action(notification.action_id).phase == "claimed", "pending native response cannot settle its separate grant")
+local notification_grant = g:action(notification.action_id).claim.grant_id
+local visible_wake = dispatch.project(g.authority.registry, g.origin.logical_session_id, g.origin.alias_nonce).actions[notification.action_id]
+check(visible_wake.claim.grant_id == notification_grant and g:action(manifest.action_id) == nil,
+	"consumer projection retains only the exact separate native grant")
 local other_action = g:apply("catalog")
 local wake_view = { pane = 42, alias_nonce = g.origin.alias_nonce, orch_session_id = g.origin.logical_session_id, action_serial = 0, dispatch_action = other_action.action_id }
 local wake_projection = state.project(g.authority.registry)
 wake_projection.dispatch = dispatch.project(g.authority.registry, g.origin.logical_session_id, g.origin.alias_nonce, other_action.action_id)
 local rendered_wake = assert(role_node(load("views").render(wake_view, wake_projection, "ready"), "orchplus.dispatch")).p.spans[1]
 local wake_machine = runtime.json.decode(if type(rendered_wake) == "string" then rendered_wake else rendered_wake.t)
-check(wake_machine.action.action_id == manifest.action_id and wake_machine.action.claim.grant_id == visible_wake.claim.grant_id, "another selected queued task cannot hide the still-pending original native wake grant")
-check(g:finish(manifest.action_id, "already_published", { wake_status = "submitted" }).ok and g:action(manifest.action_id).phase == "complete", "only terminal queued-ask evidence settles native wake, not a worker receipt")
+check(wake_machine.action.action_id == notification.action_id and wake_machine.action.claim.grant_id == visible_wake.claim.grant_id,
+	"another selected queued task cannot hide the separately claimed native notification")
+check(g:finish(notification.action_id, "submitted", { wake_status = "submitted", wake_effect_started = true }).ok
+	and g:action(notification.action_id) == nil, "only terminal submitted evidence settles native wake, not a worker receipt")
 check(g.authority.registry.dispatch.workers[worker_id].replies["1"].bytes == reply_bytes and g.authority.registry.dispatch.workers[worker_id].reply_floor == 0, "transport publication cannot settle or rewrite a reply")
 local reply_ack = g:report(worker_id, 2, "reply_ack", { message_id = message.message_id, reply_seq = 1, reply_sha256 = message.sha256, status = "recorded" }, { action_id = message.action_id, action_revision = message.action_revision })
 check(g:apply("intake", { worker_id = worker_id, bytes = reply_ack }).ok, "matching worker receipt settles reply atomically with report ACK")
@@ -458,14 +1338,14 @@ local logical = t:report(framed_worker, 1, "ACCEPTED", { assignment_sha256 = tw.
 local framed = assert(codec.frame(logical, "report", tw))
 local manifest_read = t:apply("poll", { worker_id = framed_worker })
 local selector = t:action(manifest_read.action_id).request.selector
-local projected = assert(codec.project_page(framed.manifest, selector))
-check(t:finish(manifest_read.action_id, "complete", runtime.json.decode(projected)).ok, "validated manifest page commits bounded assembly but no receipt")
+local projected = must(codec.project_page(framed.manifest, selector))
+check(t:finish(manifest_read.action_id, "read", runtime.json.decode(projected)).ok, "validated manifest page commits bounded assembly but no receipt")
 check(t.authority.registry.dispatch.workers[framed_worker].accepted_seq == 0, "manifest alone cannot apply acceptance")
 for _, chunk in framed.chunks do
 	local part = t:apply("poll", { worker_id = framed_worker })
 	local selected = t:action(part.action_id).request.selector
-	local page = assert(codec.project_page(chunk, selected))
-	check(t:finish(part.action_id, "complete", runtime.json.decode(page)).ok, "correlated complete chunk flows through host intake")
+	local page = must(codec.project_page(chunk, selected))
+	check(t:finish(part.action_id, "read", runtime.json.decode(page)).ok, "correlated complete chunk flows through host intake")
 end
 tw = t.authority.registry.dispatch.workers[framed_worker]
 check(tw.accepted_seq == 1 and tw.accept_pending and tw.receipts["1"].publish and tw.assembly == nil, "last verified chunk atomically creates receipt and both acceptance outboxes")
@@ -473,11 +1353,12 @@ local ack_publish = t:apply("poll", { worker_id = framed_worker })
 assert(t:finish(ack_publish.action_id, "published", {}).ok)
 local accepted_callback = t:apply("poll", { worker_id = framed_worker })
 assert(t:finish(accepted_callback.action_id, "accepted", {}).ok)
-local watermark = { version = 1, type = "receipt_watermark", mailbox_handle = tw.mailbox_handle, through_seq = 1, receipt_chain_sha256 = tw.receipt_chain }
-for _, key in { "logical_session_id", "worker_id", "worker_generation", "launch_request_id", "work_id", "enrolment_token" } do watermark[key] = tw[key] end
-local watermark_read = t:apply("poll", { worker_id = framed_worker, bytes = "watermark" })
-local watermark_page = assert(codec.project_page(runtime.json.encode(watermark), t:action(watermark_read.action_id).request.selector))
-check(t:finish(watermark_read.action_id, "complete", runtime.json.decode(watermark_page)).ok, "independent cumulative watermark commits through SPAWN read boundary")
+-- Semantic coordinator acceptance creates a typed activation reply. Publication of that
+-- real outbox precedes watermark discovery; publishing it never fabricates its reply_ack.
+local watermark_result = t:watermark(framed_worker)
+must(watermark_result.ok, watermark_result)
+check(t.authority.registry.dispatch.workers[framed_worker].activation.acknowledged == false,
+	"watermark reads drain the activation publication without granting coordinator acknowledgment")
 tw = t.authority.registry.dispatch.workers[framed_worker]
 check(tw.compacted_floor == 1 and tw.receipts["1"] == nil and tw.accepted_seq == 1, "worker-confirmed prefix compacts receipts without forgetting acceptance fence")
 local cleanup = t:apply("poll", { worker_id = framed_worker })
@@ -488,37 +1369,46 @@ local reload = host.new_authority(t.memory)
 check(reload:load().ok and reload.registry.dispatch.workers[framed_worker].compacted_floor == 1, "accepted mailbox/reply fences survive actual host restoration")
 
 local unavailable = { kind = "observe_owner", request_id = next_id(), orch_session_id = f.origin.logical_session_id,
+	authority_namespace = restored.registry.authority_namespace, expected_revision = restored.registry.revision,
 	target = "controller", expected_owner_id = f.origin.owner_id, expected_generation = f.origin.owner_generation, status = "unavailable", evidence = "observed" }
 check(restored:apply(unavailable).ok, "fresh unavailable observation permits exact executor inspection after reload")
 local reset = clone(unavailable); reset.request_id = next_id(); reset.status = "operator checked"; reset.evidence = "operator_attested"
+reset.expected_revision = restored.registry.revision
 reset.owner_active = false; reset.pending_executors = 0; reset.operator_verified = true; reset.executors_verified = true
 check(restored:apply(reset).code == "dispatch_executor_unresolved", "blind inspection-count reset cannot erase a retained actual action claim")
 local inert_projection = dispatch.project(restored.registry, f.origin.logical_session_id, "new-inert-panel")
 check(inert_projection.actions[queued.action_id] ~= nil, "replacement inert recovery panel can inspect the old exact executor ledger")
 local reconcile = { kind = "dispatch_reconcile", request_id = next_id(), orch_session_id = f.origin.logical_session_id, action_id = queued.action_id,
+	authority_namespace = restored.registry.authority_namespace,
 	executor = "fixture-window", expected_revision = restored.registry.revision - 1, operator_verified = true, reason = "Independently stopped retained native executor and any delayed launch." }
-check(restored:apply(reconcile).code == "stale_recovery", "executor recovery rejects changed display revision")
+local stale_before, stale_writes = runtime.json.encode(restored.registry), f.memory.writes
+check(restored:apply(reconcile).ok == false and runtime.json.encode(restored.registry) == stale_before and f.memory.writes == stale_writes,
+	"executor recovery with a changed display revision cannot change authority or release its executor")
 reconcile.expected_revision = restored.registry.revision
-check(restored:apply(reconcile).ok and restored.registry.dispatch.actions[queued.action_id].phase == "resolved", "exact explicit executor reconciliation is durable")
+check(restored:apply(reconcile).ok and restored.registry.dispatch.actions[queued.action_id].phase == "uncertain"
+	and restored.registry.dispatch.actions[queued.action_id].executor_stopped == true, "executor-stopped attestation releases occupancy but never settles the unknown effect")
 check(restored.registry.sessions[f.origin.logical_session_id].orchestrator ~= nil, "executor reconciliation does not clear coordinator or start a replacement")
 local reconcile_writes = f.memory.writes
 local replayed_reconcile = restored:apply(reconcile)
-check(replayed_reconcile.ok and replayed_reconcile.replayed and f.memory.writes == reconcile_writes, "lost reconciliation response replays exact saved outcome before stale revision guards")
-local changed_reconcile = clone(reconcile); changed_reconcile.reason = "Different claimed evidence"
-check(restored:apply(changed_reconcile).code == "request_conflict", "reconciliation request ID cannot silently name changed operator evidence")
+check(replayed_reconcile.ok == false and f.memory.writes == reconcile_writes, "old reconciliation intent cannot write again after its captured revision changed")
 local reconciled_reload = host.new_authority(f.memory)
-check(reconciled_reload:load().ok and reconciled_reload:apply(reconcile).replayed, "exact reconciliation replay survives host restoration")
+check(reconciled_reload:load().ok, "reconciled current authority reloads")
+local reloaded_before, reloaded_writes = runtime.json.encode(reconciled_reload.registry), f.memory.writes
+check(reconciled_reload:apply(reconcile).ok == false and f.memory.writes == reloaded_writes
+	and runtime.json.encode(reconciled_reload.registry) == reloaded_before, "reload does not revive a historical reconciliation intent or change authority")
 
 -- Corrupt accepted state is rejected as data, never a nil-concatenation exception.
 local malformed = clone(t.memory.value)
 malformed.dispatch.workers[framed_worker].mailbox_handle = nil
-local corrupt_authority = host.new_authority({ get = function() return malformed end, set = function() error("must not write corrupt input") end })
+local corrupt_memory = keyed_memory(malformed, true); corrupt_memory.fail = true
+local corrupt_authority = host.new_authority(corrupt_memory)
 local corrupt_ok, corrupt_result = pcall(function() return corrupt_authority:load() end)
 check(corrupt_ok and corrupt_result.code == "state_corrupt", "accepted event without mailbox handle fails closed without throwing")
 
 -- A pre-effect provision refusal retains the startup reservation and exact retry identity.
 local capacity = fixture(); capacity:catalog(0)
 local reserved = capacity:queue(true)
+assert(capacity:apply("claim", { action_id = reserved.action_id, executor = capacity.origin.window_epoch }).ok)
 local provision_request = capacity:action(reserved.action_id).request_bytes
 for _, malformed_full in {
 	{ retryable = true, effect_started = false },
@@ -529,10 +1419,10 @@ for _, malformed_full in {
 	{ resource = "active transport", current = 4, limit = 4, retryable = true, effect_started = false },
 	{ resource = "active_transport", current = 0, limit = 0, retryable = true, effect_started = false },
 } do
-	local body, problem = dispatch.decode_response(frame(capacity:action(reserved.action_id).request, "full", malformed_full), capacity:action(reserved.action_id).request)
-	check(body == nil and problem.code == "invalid_schema" and capacity:action(reserved.action_id).phase == "ready", "malformed full accounting/proof cannot create retry permission")
+	local body, problem = protocol.decode_response(frame(capacity:action(reserved.action_id).request, "full", malformed_full), capacity:action(reserved.action_id).request)
+	check(body == nil and problem.code == "invalid_schema" and capacity:action(reserved.action_id).phase == "claimed", "malformed full accounting/proof cannot create retry permission")
 end
-local projected_full = dispatch.decode_response(frame(capacity:action(reserved.action_id).request, "full",
+local projected_full = protocol.decode_response(frame(capacity:action(reserved.action_id).request, "full",
 	{ resource = "mailboxes", current = 0, limit = 32, retryable = true, effect_started = false }), capacity:action(reserved.action_id).request)
 check(projected_full ~= nil, "full may account for projected/staging admission cost without requiring current at limit")
 check(capacity:finish(reserved.action_id, "full", { resource = "mailboxes", current = 32, limit = 32, retryable = true, effect_started = false }).code == "backpressure", "provision capacity refusal is explicitly recheckable")
@@ -543,29 +1433,35 @@ do
 	local retained = malformed_backpressure.dispatch.actions[reserved.action_id]
 	retained.response.payload.resource = nil
 	retained.response_bytes = frame(retained.request, "full", retained.response.payload)
-	local malformed_store = host.new_authority({ get = function() return malformed_backpressure end, set = function() error("must quarantine malformed capacity proof") end })
+	local malformed_memory = keyed_memory(malformed_backpressure, true); malformed_memory.fail = true
+	local malformed_store = host.new_authority(malformed_memory)
 	local valid_call, rejected = pcall(function() return malformed_store:load() end)
 	check(valid_call and rejected.code == "state_corrupt", "restored backpressure requires full accounting as well as proof flags")
 end
 check(capacity:queue(true).code == "orchestrator_slot_occupied" and capacity.authority.registry.dispatch.workers[reserved.worker_id].mailbox_handle == nil, "unbound backpressure retains exclusive coordinator reservation")
-check(capacity:apply("retry", { action_id = reserved.action_id }).ok, "operator explicitly rechecks unexecuted provision")
+local refused_provision_id = reserved.action_id
+local retry_provision = capacity:apply("retry", { action_id = refused_provision_id })
+check(retry_provision.ok and retry_provision.action_id ~= refused_provision_id and capacity:action(refused_provision_id) == nil, "explicit pre-effect recheck consumes the old issued identity")
+reserved.action_id = retry_provision.action_id
 check(capacity:apply("claim", { action_id = reserved.action_id, executor = "fixture-window" }).ok
-	and capacity:action(reserved.action_id).claim.grant_id ~= old_grant and capacity:action(reserved.action_id).request_bytes == provision_request, "retry gets fresh durable grant without new native request/action")
+	and capacity:action(reserved.action_id).claim.grant_id ~= old_grant and capacity:action(reserved.action_id).request_bytes ~= provision_request, "retry gets a fresh grant, request and serial")
 check(capacity:apply("result", { action_id = reserved.action_id, executor = "fixture-window", grant_id = old_grant, response_bytes = old_outcome }).code == "stale_claim", "late old full outcome cannot settle successor retry grant")
 check(capacity:finish(reserved.action_id, "provisioned", { handle = "capacity-mailbox", binding_digest = string.rep("a", 64),
-	capabilities = runtime.json.array({ "report-files-v1", "native-ask-v1", "coordinator-control-v1" }) }).ok, "exact provision recheck can bind after capacity clears")
+	capabilities = runtime.json.array({ "report-files-v1", "native-ask-v1", "coordinator-control-v1", "project-start-v1" }) }).ok, "exact provision recheck can bind after capacity clears")
 local provisioned = capacity.authority.registry.dispatch.workers[reserved.worker_id]
 check(capacity:finish(provisioned.launch_action_id, "awaiting_acceptance", { pane_binding = {
 	pane_id = "9002", window_key = "", window_epoch = "fixture-window", native_session_id = "7", window_host_id = "local" } }).ok, "startup continues to actual correlated launch after provision retry")
 do
 	local forged_acceptance = clone(capacity.memory.value)
 	forged_acceptance.dispatch.workers[reserved.worker_id].phase = "accepted"
-	local forged_store = host.new_authority({ get = function() return forged_acceptance end, set = function() error("must quarantine forged acceptance") end })
+	local forged_memory = keyed_memory(forged_acceptance, true); forged_memory.fail = true
+	local forged_store = host.new_authority(forged_memory)
 	local valid_call, rejected = pcall(function() return forged_store:load() end)
 	check(valid_call and rejected.code == "state_corrupt", "phase-only accepted worker without exact ACCEPTED evidence is quarantined")
 	local missing_event = clone(t.memory.value)
 	missing_event.dispatch.workers[framed_worker].accepted_event = nil
-	local missing_store = host.new_authority({ get = function() return missing_event end, set = function() error("must quarantine missing acceptance") end })
+	local missing_memory = keyed_memory(missing_event, true); missing_memory.fail = true
+	local missing_store = host.new_authority(missing_memory)
 	local event_call, event_rejection = pcall(function() return missing_store:load() end)
 	check(event_call and event_rejection.code == "state_corrupt", "positive receipt sequence and valid pane/mailbox cannot replace exact accepted event evidence")
 end
@@ -621,12 +1517,12 @@ local function consume_pages(fx, id, logical_bytes)
 		local read = fx:apply("poll", { worker_id = id }); assert(read.ok)
 		action_id = read.action_id
 		local page = assert(codec.project_page(bytes, fx:action(action_id).request.selector))
-		outcome = fx:finish(action_id, "complete", runtime.json.decode(page)); assert(outcome.ok)
+		outcome = fx:finish(action_id, "read", runtime.json.decode(page)); assert(outcome.ok)
 	end
 	return outcome, action_id
 end
 local blocked_report, completed_read = consume_pages(lane, lane_worker, ninth)
-check(blocked_report.code == "intake_backpressure" and lane:action(completed_read).phase == "complete"
+check(blocked_report.code == "intake_backpressure" and lane:action(completed_read) == nil
 	and lane.authority.registry.dispatch.workers[lane_worker].accepted_seq == 8 and lane.authority.registry.dispatch.workers[lane_worker].receipts["9"] == nil, "ninth report retains durable read outcome without applying or ACKing past full receipt lane")
 local lw = lane.authority.registry.dispatch.workers[lane_worker]
 local lane_watermark = { version = 1, type = "receipt_watermark", mailbox_handle = lw.mailbox_handle, through_seq = 8, receipt_chain_sha256 = lw.receipt_chain }
@@ -634,15 +1530,14 @@ for _, key in { "logical_session_id", "worker_id", "worker_generation", "launch_
 local drain = lane:apply("poll", { worker_id = lane_worker, bytes = "watermark" })
 check(drain.ok and lane:action(drain.action_id).request.selector.stream == "watermark", "independent watermark settlement remains available after receipt lane backpressure")
 local drain_page = assert(codec.project_page(runtime.json.encode(lane_watermark), lane:action(drain.action_id).request.selector))
-assert(lane:finish(drain.action_id, "complete", runtime.json.decode(drain_page)).ok)
+assert(lane:finish(drain.action_id, "read", runtime.json.decode(drain_page)).ok)
 assert(lane:finish(lane:apply("poll", { worker_id = lane_worker }).action_id, "compacted", {}).ok)
 check(consume_pages(lane, lane_worker, ninth).code == "bridge_committed"
 	and lane.authority.registry.dispatch.workers[lane_worker].accepted_seq == 9, "same unacknowledged ninth report commits after worker watermark frees receipt lane")
-local priority_watermark = lane:apply("poll", { worker_id = lane_worker, bytes = "watermark" })
-check(priority_watermark.ok and lane:action(priority_watermark.action_id).request.selector.stream == "watermark"
-	and lane.authority.registry.dispatch.workers[lane_worker].receipts["9"].publish, "watermark control lane is not blocked by an unpublished data ACK")
-assert(lane:finish(priority_watermark.action_id, "missing", {}).ok)
-assert(lane:finish(lane:apply("poll", { worker_id = lane_worker }).action_id, "published", {}).ok)
+local priority_ack = lane:apply("poll", { worker_id = lane_worker, bytes = "watermark" })
+check(priority_ack.ok and lane:action(priority_ack.action_id).request.op == "mailbox_publish_ack"
+	and lane.authority.registry.dispatch.workers[lane_worker].receipts["9"].publish, "periodic watermark yields to the known unpublished data ACK")
+assert(lane:finish(priority_ack.action_id, "published", {}).ok)
 local short_read = lane:apply("poll", { worker_id = lane_worker })
 check(lane:finish(short_read.action_id, "incomplete", {}).code == "transport_backpressure"
 	and lane.authority.registry.dispatch.workers[lane_worker].phase == "accepted", "incomplete read remains recoverable without demoting acceptance")
@@ -655,13 +1550,13 @@ do
 	local frames = assert(codec.frame(logical_bytes, "report", binding))
 	local manifest_request = commit:apply("poll", { worker_id = id })
 	local manifest_page = assert(codec.project_page(frames.manifest, commit:action(manifest_request.action_id).request.selector))
-	assert(commit:finish(manifest_request.action_id, "complete", runtime.json.decode(manifest_page)).ok)
+	assert(commit:finish(manifest_request.action_id, "read", runtime.json.decode(manifest_page)).ok)
 	for index, chunk in frames.chunks do
 		local part = commit:apply("poll", { worker_id = id })
 		assert(commit:apply("claim", { action_id = part.action_id, executor = "fixture-window" }).ok)
 		local page = assert(codec.project_page(chunk, commit:action(part.action_id).request.selector))
 		if index == #frames.chunks then commit.memory.fail = true end
-		local committed = commit:finish(part.action_id, "complete", runtime.json.decode(page))
+		local committed = commit:finish(part.action_id, "read", runtime.json.decode(page))
 		if index == #frames.chunks then
 			local retained = commit.memory.value.dispatch.workers[id]
 			check(committed.code == "persistence_failed" and retained.accepted_seq == 0 and next(retained.receipts) == nil
@@ -673,7 +1568,7 @@ end
 end
 
 if section == nil or section == "callbacks" then
--- Actual duplicate-block callbacks: preserve the losing rendered token across the winner's rerender.
+-- Actual duplicate-block callbacks: a losing rendered intent must refuse without recapture.
 local views, contexts = {}, {}
 for _, pane in { 11, 12 } do
 	contexts[pane] = { pane = pane, render = function() if views[pane] then definition.view(views[pane], contexts[pane]) end end }
@@ -687,18 +1582,87 @@ end
 local function click(pane, kind)
 	definition.event(views[pane], { ev = "action", act = "control", value = token(pane, kind) }, contexts[pane])
 end
-click(11, "initialize-arm"); click(11, "initialize-confirm")
-click(11, "register-arm"); click(11, "register-confirm")
+local function refused_click(pane, old_token, entry, label)
+	local view = views[pane]
+	local before, captured = runtime.json.encode(ui_value), runtime.json.encode(entry)
+	local writes, marker_writes = ui_memory.writes, ui_memory.marker_writes
+	local intent, action = runtime.json.encode(view.operator_intent), view.dispatch_action
+	definition.event(view, { ev = "action", act = "control", value = old_token }, contexts[pane])
+	check(view.refusal ~= nil and view.refusal.ok == false, label .. ": actual host callback refuses")
+	check(runtime.json.encode(ui_value) == before and ui_memory.writes == writes and ui_memory.marker_writes == marker_writes
+		and runtime.json.encode(view.operator_intent) == intent and view.dispatch_action == action
+		and runtime.json.encode(entry) == captured,
+		label .. ": no durable mutation, new intent/effect, or refreshed captured authority fence")
+end
+local function create_orchestration(pane, name)
+	local view = views[pane]
+	definition.event(view, { ev = "action", act = "orchestration-create", value = runtime.json.encode({
+		source_nonce = view.alias_nonce, request_id = next_id(), name = name,
+		authority_namespace = if ui_value then ui_value.authority_namespace else nil,
+		expected_revision = if ui_value then ui_value.revision else nil }) }, contexts[pane])
+	assert(view.orchestration_result.ok, runtime.json.encode(view.orchestration_result))
+end
+create_orchestration(11, "Native callback authority")
+do
+	local sid = views[11].orch_session_id
+	local owner = ui_value.sessions[sid].controller
+	definition.event(views[11], { ev = "action", act = "authority-operator-command", value = runtime.json.encode({
+		source_nonce = views[11].alias_nonce,
+		origin = { logical_session_id = sid, owner_id = owner.owner_id, owner_generation = owner.generation,
+			host_pane_id = "11", alias_nonce = views[11].alias_nonce, window_key = "", window_epoch = "callback-owner",
+			native_session_id = "7", window_host_id = "local" },
+		event = { kind = "release_controller", request_id = next_id(), orch_session_id = sid,
+			authority_namespace = ui_value.authority_namespace, expected_revision = ui_value.revision,
+			expected_owner_id = owner.owner_id, expected_generation = owner.generation } }) }, contexts[11])
+	assert(ui_value.sessions[sid].controller == nil, "explicit retirement opens the guarded reconnect slot")
+end
 views[12].orch_session_id = views[11].orch_session_id
+click(11, "advanced-toggle"); click(12, "advanced-toggle")
 views[12].notice = "old successful registration outcome"
 local losing_token = token(12, "admit")
-click(11, "admit") -- render_all replaces both action maps.
+local losing_entry = views[12].actions[losing_token]
+local captured_namespace, captured_revision = losing_entry.authority_namespace, losing_entry.expected_revision
+local admission_token = token(11, "admit")
+local admission_entry = views[11].actions[admission_token]
+local admission_revision, admission_writes = ui_value.revision, ui_memory.writes
+definition.view(views[11], contexts[11]); definition.view(views[11], contexts[11])
+check(views[11].actions[admission_token] ~= nil and admission_entry.expected_revision == admission_revision,
+	"identical real host redraws retain the current admission control and its original authority fence")
+definition.event(views[11], { ev = "action", act = "control", value = admission_token }, contexts[11])
+check(ui_value.revision == admission_revision + 1 and ui_memory.writes == admission_writes + 1
+	and ui_value.sessions[views[11].orch_session_id].controller.pane_binding.alias_nonce == views[11].alias_nonce,
+	"ONE actual host click after identical redraw admits the controller without recapture or automatic reclick")
 local current_owner = ui_value.sessions[views[11].orch_session_id].controller
-local revision = ui_value.revision
-definition.event(views[12], { ev = "action", act = "control", value = losing_token }, contexts[12])
-check(views[12].refusal ~= nil and views[12].refusal.ok == false and views[12].refusal.code == "controller_slot_occupied", "stale losing admission visibly reports semantic occupied refusal")
-check(views[12].refusal.owner_id == current_owner.owner_id and views[12].refusal.generation == current_owner.generation, "stale refusal identifies the actual current owner")
-check(views[12].notice ~= "old successful registration outcome" and ui_value.revision == revision, "stale losing click replaces old success without mutation or retry")
+local revision, committed_store = ui_value.revision, runtime.json.encode(ui_value)
+refused_click(12, losing_token, losing_entry, "changed current owner")
+check(views[12].refusal ~= nil and views[12].refusal.ok == false
+	and losing_entry.authority_namespace == captured_namespace and losing_entry.expected_revision == captured_revision
+	and captured_revision < revision, "losing admission visibly refuses without refreshing its captured intent")
+check(ui_value.sessions[views[11].orch_session_id].controller.owner_id == current_owner.owner_id, "stale admission never replaces the current owner")
+check(views[12].notice ~= "old successful registration outcome" and type(views[12].notice) == "string" and #views[12].notice > 0
+	and views[12].operator_intent == nil and views[12].dispatch_action == nil
+	and ui_value.revision == revision and runtime.json.encode(ui_value) == committed_store,
+	"stale losing click replaces old success without a new intent, effect, durable mutation or retry")
+do
+	local old_token = token(11, "assist-intent")
+	local entry = views[11].actions[old_token]
+	create_orchestration(12, "Unrelated native callback orchestration")
+	check(ui_value.sessions[views[11].orch_session_id].controller.owner_id == current_owner.owner_id
+		and ui_value.revision > entry.expected_revision, "unrelated registration changes only the authority fence of the retained owner control")
+	refused_click(11, old_token, entry, "stale revision")
+	local alias = views[11].alias_nonce
+	old_token = token(11, "assist-intent"); entry = views[11].actions[old_token]
+	views[11].alias_nonce = alias .. "-replacement"
+	definition.view(views[11], contexts[11])
+	refused_click(11, old_token, entry, "changed alias incarnation")
+	views[11].alias_nonce = alias
+	definition.view(views[11], contexts[11])
+	refused_click(11, old_token, entry, "alias ABA cannot resurrect an old control")
+	old_token = token(11, "config-open"); entry = views[11].actions[old_token]
+	click(11, "config-open"); click(11, "config-close")
+	check(token(11, "config-open") ~= old_token, "removed control returning with the same descriptor gets a new token")
+	refused_click(11, old_token, entry, "control removal ABA")
+end
 
 -- Real host callbacks publish dispatch metadata and receipts only after the matching commit.
 do
@@ -709,25 +1673,48 @@ do
 	end
 	local origin = { logical_session_id = views[11].orch_session_id, owner_id = current_owner.owner_id, owner_generation = current_owner.generation,
 		host_pane_id = "11", alias_nonce = views[11].alias_nonce, window_key = "", window_epoch = "fixture-window", native_session_id = "7", window_host_id = "local" }
+	local proof, selection = empty_peer()
+	definition.event(views[11], { ev = "action", act = "qualify-current", value = runtime.json.encode({
+		source_nonce = views[11].alias_nonce, origin = origin,
+		event = { kind = "qualify_current", request_id = next_id(), authority_namespace = ui_value.authority_namespace, expected_revision = ui_value.revision },
+		peer = { proof = proof, selection = selection } }) }, contexts[11])
+	assert(ui_value.compatibility ~= nil, "native qualification callback must persist current pair: "
+		.. runtime.json.encode(views[11].dispatch_command_result or { notice = views[11].notice, refusal = views[11].refusal }))
 	local function command(kind, fields, operator)
-		local input = { kind = "dispatch", request_id = next_id(), orch_session_id = origin.logical_session_id, origin = origin, controller_pane = "9001", command = kind }
-		if kind ~= "claim" and kind ~= "result" and kind ~= "lost" then
+		local input = { kind = "dispatch", request_id = next_id(), orch_session_id = origin.logical_session_id,
+			authority_namespace = ui_value.authority_namespace, expected_revision = ui_value.revision,
+			origin = origin, controller_pane = "9001", command = kind }
+		if kind ~= "claim" and kind ~= "spawn_claimed" and kind ~= "result" and kind ~= "lost" then
 			local cursor = ((ui_value.dispatch or {}).command_cursors or {})[origin.logical_session_id]
 			input.command_seq = (if cursor then cursor.seq else 0) + 1
 		end
 		for key, value in fields or {} do input[key] = value end
 		definition.event(views[11], { ev = "action", act = if operator then "dispatch-operator-command" else "dispatch-command", value = runtime.json.encode(input) }, contexts[11])
-		return if operator then views[11].dispatch_command_result else views[11].dispatch_result
+		return if operator then views[11].dispatch_command_result
+			elseif table.find({ "bridge_control", "bridge_result", "bridge_observe" }, kind) then views[11].dispatch_control_result
+			elseif kind == "poll" then views[11].dispatch_poll_result
+			else views[11].dispatch_result
 	end
+	local function observed(bytes)
+		return runtime.json.encode({ authority_namespace = ui_value.authority_namespace, expected_revision = ui_value.revision, response_bytes = bytes })
+	end
+	assert(command("bridge_control", { operation = "admit_session", compatibility = clone(ui_value.compatibility) }).ok)
+	local admission = ui_value.sessions[origin.logical_session_id].bridge_control
+	local control_request = admission.request
+	local control_bytes = frame(control_request, "admitted", { admission_cursor = control_request.admission_seq,
+		compatibility = clone(ui_value.compatibility), control = { phase = "open", generation_floor = control_request.generation_floor,
+			request_floor = control_request.settled_before, next_request_serial = control_request.next_request_serial,
+			last_authority_revision = control_request.authority_revision, binding = clone(origin) } }, nil, "current_admission", control_request.authority_revision)
+	assert(command("bridge_result", { query_bytes = admission.request_bytes, response_bytes = control_bytes }).ok)
 	local queued_catalog = command("catalog")
 	check(displayed.result.action_id == queued_catalog.action_id and displayed.action.phase == "ready", "rendered dispatch result and selected action come from the same completed host transition")
 	local granted_catalog = command("claim", { action_id = queued_catalog.action_id, executor = "fixture-window" })
 	local retained = ui_value.dispatch.actions[queued_catalog.action_id]
 	local response_bytes = frame(retained.request, "catalog", { catalog_version = 2, setup = catalog_setup(0), namespace = "fixture-spawn", host_key = "fixture-host", config_revision = 0, revision = 0, records = runtime.json.array() })
-	local event = { ev = "action", act = "dispatch-result/" .. granted_catalog.claim.grant_id .. "/" .. origin.window_epoch, value = response_bytes }
+	local event = { ev = "action", act = "dispatch-result/" .. granted_catalog.claim.grant_id .. "/" .. origin.window_epoch, value = observed(response_bytes) }
 	definition.event(views[11], event, contexts[11])
 	check(displayed.receipt.action_id == queued_catalog.action_id and displayed.receipt.grant_id == granted_catalog.claim.grant_id
-		and displayed.receipt.response_sha256 == codec.sha256(response_bytes) and ui_value.dispatch.actions[queued_catalog.action_id].phase == "complete", "host receipt names exact committed response and grant")
+		and displayed.receipt.response_sha256 == codec.sha256(response_bytes) and ui_value.dispatch.actions[queued_catalog.action_id] == nil, "host receipt names exact committed response and grant without durable completed action")
 	local committed_revision = ui_value.revision
 	definition.event(views[11], event, contexts[11])
 	check(displayed.result.ok and ui_value.revision == committed_revision, "lost host receipt replays the same observation outcome instead of failing stale claim or writing again")
@@ -739,8 +1726,8 @@ do
 	local captured_node = assert(role_node(definition.view(views[11], contexts[11]).main, "orchplus.dispatch", scope_key))
 	local captured_span = captured_node.p.spans[1]
 	local captured = runtime.json.decode(if type(captured_span) == "string" then captured_span else captured_span.t)
-	check(captured.action.phase == "complete" and captured.receipt.response_sha256 == codec.sha256(response_bytes),
-		"exact completed scope keeps captured commit receipt available after another action compacts its durable read")
+	check(captured.action == nil and captured.receipt.response_sha256 == codec.sha256(response_bytes),
+		"ephemeral delivery scope carries the receipt only, never a completed runnable action")
 	local release = { source_nonce = origin.alias_nonce, action_id = queued_catalog.action_id,
 		grant_id = granted_catalog.claim.grant_id, response_sha256 = string.rep("0", 64) }
 	local release_revision = ui_value.revision
@@ -753,7 +1740,7 @@ do
 		"exact window consumption releases only ephemeral completed scope without mutating authority or granting an effect")
 	local configured_grant = command("claim", { action_id = configured_action.action_id, executor = "fixture-window" }).claim.grant_id
 	local configured_bytes = frame(ui_value.dispatch.actions[configured_action.action_id].request, "catalog", configured)
-	definition.event(views[11], { ev = "action", act = "dispatch-result/" .. configured_grant .. "/" .. origin.window_epoch, value = configured_bytes }, contexts[11])
+	definition.event(views[11], { ev = "action", act = "dispatch-result/" .. configured_grant .. "/" .. origin.window_epoch, value = observed(configured_bytes) }, contexts[11])
 	local queue_fields = { record_id = "native", record_revision = 0, catalog_revision = 0, prompt = "Explicit callback task",
 		cwd = "/fixture", placement = "split", coordinator = true }
 	local first = command("queue", queue_fields, true)
@@ -764,12 +1751,13 @@ do
 		"failed second start exposes correlated operator refusal independently of first worker action")
 	local stale_ack = token(11, "dispatch-acknowledge")
 	local provision_request = ui_value.dispatch.actions[first.action_id].request
-	local provision_result = frame(provision_request, "provisioned", { handle = "callback-mailbox", binding_digest = string.rep("a", 64),
-		capabilities = runtime.json.array({ "report-files-v1", "native-ask-v1", "coordinator-control-v1" }) })
-	definition.event(views[11], { ev = "action", act = "dispatch-result/" .. first_grant .. "/" .. origin.window_epoch, value = provision_result }, contexts[11])
+	local provision_result = frame(provision_request, "provisioned", catalog_fixture:peer_payload({ request = provision_request }, "provisioned", {
+		handle = "callback-mailbox", binding_digest = string.rep("a", 64),
+		capabilities = runtime.json.array({ "report-files-v1", "native-ask-v1", "coordinator-control-v1", "project-start-v1" }) }))
+	definition.event(views[11], { ev = "action", act = "dispatch-result/" .. first_grant .. "/" .. origin.window_epoch, value = observed(provision_result) }, contexts[11])
 	command("poll", { worker_id = first.worker_id })
 	check(displayed.command_result.request_id == failed_start.request_id and not displayed.command_result.acknowledged
-		and ui_value.dispatch.actions[first.action_id].phase == "complete",
+		and ui_value.dispatch.actions[first.action_id] == nil,
 		"background result and poll preserve visible refusal while original worker progresses")
 	local newer_failure = command("queue", queue_fields, true)
 	definition.event(views[11], { ev = "action", act = "control", value = stale_ack }, contexts[11])
@@ -785,13 +1773,69 @@ do
 		"fresh explicit operator command supersedes prior refusal without changing ownership")
 	check(ui_value.sessions[origin.logical_session_id].orchestrator.work_id == first.work_id,
 		"refusal acknowledgement and supersession never create a second coordinator")
+	do
+		local worker = ui_value.dispatch.workers[first.worker_id]
+		local launch_id = worker.launch_action_id
+		local grant = command("claim", { action_id = launch_id, executor = origin.window_epoch })
+		assert(grant.ok, runtime.json.encode(grant))
+		local witness = command("spawn_claimed", { action_id = launch_id, grant_id = grant.claim.grant_id,
+			spawn_namespace = "fixture-spawn", claim_nonce = "callback-launch-claim" })
+		assert(witness.ok, runtime.json.encode(witness))
+		local request = ui_value.dispatch.actions[launch_id].request
+		local binding = { pane_id = "9002", window_key = origin.window_key, window_epoch = origin.window_epoch,
+			native_session_id = origin.native_session_id, window_host_id = origin.window_host_id }
+		local bytes = frame(request, "awaiting_acceptance", { record_id = request.record_id, record_revision = request.record_revision,
+			effective_identity = { provider = "omp", identity_status = "configured_not_verified" },
+			capabilities = runtime.json.array(clone(worker.capabilities)), prompt_delivery = "submitted_not_accepted", pane_binding = binding })
+		definition.event(views[11], { ev = "action", act = "dispatch-result/" .. grant.claim.grant_id .. "/" .. origin.window_epoch,
+			value = observed(bytes) }, contexts[11])
+		assert(ui_value.dispatch.workers[first.worker_id].pane_binding ~= nil, runtime.json.encode(displayed.result))
+		local function observe(native_state)
+			local before = ui_memory.writes
+			command("observe", { worker_id = first.worker_id, pane_binding = binding, native_state = native_state })
+			local native = ui_value.dispatch.workers[first.worker_id].workflow.native
+			assert(ui_memory.writes == before + 1 and native and native.state == native_state,
+				"native gate observation was not committed: " .. tostring(views[11].notice))
+		end
+		observe("waiting-input")
+		local function gate_control()
+			definition.view(views[11], contexts[11])
+			for id, entry in views[11].actions do
+				if entry.kind == "operator-intent" and entry.request.command == "recheck_gate"
+					and entry.request.worker_id == first.worker_id then return id, entry end
+			end
+			error("missing actual native-input gate control")
+		end
+		local gate_token, entry = gate_control()
+		local captured = runtime.json.encode(entry)
+		local durable, writes = runtime.json.encode(ui_value), ui_memory.writes
+		definition.view(views[11], contexts[11]); definition.view(views[11], contexts[11])
+		definition.event(views[11], { ev = "action", act = "control", value = gate_token }, contexts[11])
+		local intent = views[11].operator_intent
+		check(intent ~= nil and intent.request.gate_id == entry.request.gate_id
+			and intent.request.gate_revision == entry.request.gate_revision
+			and intent.request.expected_revision == entry.expected_revision and runtime.json.encode(entry) == captured
+			and runtime.json.encode(ui_value) == durable and ui_memory.writes == writes,
+			"ONE actual gate click after identical redraw publishes only the exact originally fenced window intent")
+		definition.event(views[11], { ev = "action", act = "operator-intent-done",
+			value = runtime.json.encode({ source_nonce = intent.source_nonce, serial = intent.serial }) }, contexts[11])
+		check(views[11].operator_intent == nil, "exact consuming-window acknowledgement clears the one-shot gate intent")
+		local rechecked = command("recheck_gate", { gate_id = entry.request.gate_id, gate_revision = entry.request.gate_revision }, true)
+		assert(rechecked.ok, runtime.json.encode(rechecked))
+		observe("idle")
+		refused_click(11, gate_token, entry, "changed native gate revision/removal")
+		observe("waiting-input")
+		local replacement = gate_control()
+		check(replacement ~= gate_token, "reappearing native-input gate allocates a new current control")
+		refused_click(11, gate_token, entry, "native gate ABA")
+	end
 	local previous_receipt = clone(displayed.receipt)
 	local pending_catalog = command("catalog")
 	local pending_grant = command("claim", { action_id = pending_catalog.action_id, executor = "fixture-window" })
 	local failed_bytes = frame(ui_value.dispatch.actions[pending_catalog.action_id].request, "catalog", { catalog_version = 2, setup = catalog_setup(0), namespace = "fixture-spawn", host_key = "fixture-host", config_revision = 0, revision = 0, records = runtime.json.array() })
 	local original_set = fake.kv.set
 	fake.kv.set = function() error("injected native observation commit failure") end
-	definition.event(views[11], { ev = "action", act = "dispatch-result/" .. pending_grant.claim.grant_id .. "/" .. origin.window_epoch, value = failed_bytes }, contexts[11])
+	definition.event(views[11], { ev = "action", act = "dispatch-result/" .. pending_grant.claim.grant_id .. "/" .. origin.window_epoch, value = observed(failed_bytes) }, contexts[11])
 	fake.kv.set = original_set
 	check(displayed.result.code == "persistence_failed" and displayed.receipt.response_sha256 == previous_receipt.response_sha256
 		and ui_value.dispatch.actions[pending_catalog.action_id].phase == "claimed", "failed host observation persistence exposes no new commit receipt")
@@ -803,10 +1847,14 @@ if section == nil or section == "intent_buttons" then
 -- owning window consumes. Isolated real host block plus two real window VMs.
 local store_value, idef, now = nil, nil, 1000
 local itern = table.clone(fake)
-itern.kv = { get = function() return if store_value then clone(store_value) else nil end, set = function(_, value) store_value = clone(value) end }
-itern.block = { define = function(_, value) idef = value end }
+local intent_memory = keyed_memory()
+itern.kv = { get = intent_memory.get, set = function(key, value)
+	intent_memory.set(key, value)
+	if key == "authority_state" then store_value = intent_memory.value end
+end }
+itern.block = { define = function(id, value) if id == "orchestrator" then idef = value end end }
 itern.now = function() return now end
-itern.pane = { list = function() return { { pane = 11 } } end }
+itern.pane = { list = function() return { { pane = 11, program = "orchplus.orchestrator" } } end }
 local host_timers = {}
 itern.timer = function(_, fn) table.insert(host_timers, fn); return { cancel = function() end } end
 local imodules = {}
@@ -830,9 +1878,10 @@ local function press(match, label)
 end
 local function kind(name) return function(entry) return entry.kind == name end end
 local function operator(command) return function(entry) return entry.kind == "operator-intent" and entry.request.command == command end end
-press(kind("initialize-arm"), "initialize"); press(kind("initialize-confirm"), "confirm initialize")
-press(kind("register-arm"), "register"); press(kind("register-confirm"), "confirm register")
-press(kind("admit"), "claim controller")
+idef.event(view, { ev = "action", act = "orchestration-create", value = runtime.json.encode({
+	source_nonce = view.alias_nonce, request_id = "native-intent-orchestration", name = "Native intent fixture" }) }, ctx)
+assert(view.orchestration_result.ok, runtime.json.encode(view.orchestration_result))
+press(kind("advanced-toggle"), "Advanced owner controls")
 local sid = view.orch_session_id
 local function saved_policy() return dispatch.policy(store_value, sid) end
 local function keyed(node, key)
@@ -841,12 +1890,13 @@ local function keyed(node, key)
 	for _, child in node.c or {} do local found = keyed(child, key); if found then return found end end
 	return nil
 end
-local sent, toasts, picks, drop_acks = {}, {}, {}, false
+local sent, toasts, picks, drop_acks, picker_steps = {}, {}, {}, false, {}
 local host_row = { id = "local", state = "connected", panes = { 11 } }
 local controller_row = { pane = 11, block = "orchplus.orchestrator", tab = 1 }
 local function window_cx(key)
 	local session = {}
 	function session:pane(id) return if id == 11 then controller_row else nil end
+	function session:view(id) return if id == 11 then {} else nil end
 	function session:panes() return { controller_row } end
 	function session:sessions() return { { id = 7, tabs = { 1 } } } end
 	function session:surface(pane, options)
@@ -862,10 +1912,22 @@ local function window_cx(key)
 		if ev.act == "operator-intent-done" and drop_acks then return end
 		idef.event(view, ev, ctx)
 	end
-	return { session = session, sessions = { current = function() return { id = 7, host = "local" } end },
+	local context
+	context = { session = session, sessions = { current = function() return { id = 7, host = "local" } end },
 		hosts = { current = function() return host_row end, list = function() return { host_row } end },
 		window_key = function() return key end, toast = function(_, _, _, message) table.insert(toasts, { window = key, message = message }) end,
-		pick = function(_, options) table.insert(picks, { window = key, placeholder = options.placeholder }); return { next = function() end } end }
+		pick = function(_, options)
+			table.insert(picks, { window = key, placeholder = options.placeholder })
+			local step = table.remove(picker_steps, 1)
+			return { next = function(_, callback)
+				if not step then return end
+				local choice
+				for _, item in options.items do if step(item) then choice = item; break end end
+				assert(choice, "native settings picker did not offer the expected operation")
+				callback(choice, nil, table.clone(context))
+			end }
+		end }
+	return context
 end
 local palette = {}
 local function window_vm()
@@ -873,7 +1935,7 @@ local function window_vm()
 	local registered = {}
 	wtern.timer = function() return { cancel = function() end } end
 	wtern.command = function(def) registered[def.id] = def end; wtern.files = { button = function() end }; wtern.on = function() end
-	wtern.route = { link = function() error("ORCH+ must not claim links; controls are native buttons") end }
+	wtern.route = { link = function() end }
 	local chunk = assert(loadstring(runtime.fs.read(root .. "/window.luau"), "intent-window"))
 	setfenv(chunk, setmetatable({ tern = wtern, require = iload }, { __index = environment }))
 	local api = chunk()
@@ -882,6 +1944,9 @@ local function window_vm()
 end
 local first_api, second_api = window_vm(), window_vm()
 local first, second = window_cx(""), window_cx("second-window")
+picker_steps = { function(item) return item.continue_controller == true end }
+palette[first_api].continue_controller.run(first)
+table.clear(sent); table.clear(picks); table.clear(toasts)
 local function commands(window, name)
 	local n = 0
 	for _, row in sent do
@@ -890,11 +1955,6 @@ local function commands(window, name)
 	return n
 end
 local function sent_by(window) local n = 0; for _, row in sent do if row.window == window then n += 1 end end; return n end
-local function no_links()
-	local encoded = runtime.json.encode(idef.view(view, ctx).main)
-	return encoded:find("orchplus://", 1, true) == nil
-end
-check(no_links(), "the controller view renders no orchplus:// link")
 
 -- A clicked button publishes one bounded intent; the owning window runs it and settles it.
 press(operator("pause"), "Pause new work")
@@ -917,6 +1977,7 @@ end
 local seeded = { initial_dispatch_records = ids("i", 24), worker_rollover_records = ids("w", 24), coordinator_rollover_records = ids("c", 8) }
 local cursor = store_value.dispatch.command_cursors[sid]
 idef.event(view, { ev = "action", act = "dispatch-operator-command", value = runtime.json.encode({ kind = "dispatch", request_id = "intent-seed-policy",
+	authority_namespace = store_value.authority_namespace, expected_revision = store_value.revision,
 	orch_session_id = sid, origin = origin, controller_pane = "11", command = "policy", command_seq = cursor.seq + 1, policy = seeded }) }, ctx)
 check(#saved_policy().initial_dispatch_records == 24 and #saved_policy().coordinator_rollover_records == 8, "large routing allowlists are saved")
 
@@ -929,52 +1990,31 @@ first_api.intents(first)
 check(not saved_policy().paused and commands("", "resume") == 1 and view.operator_intent == nil and sent_by("second-window") == 0,
 	"only the owning window runs the intent")
 
--- Save session settings over a large saved policy runs once across ticks and re-renders.
-press(kind("config-open"), "Config")
-idef.event(view, { ev = "change", name = "auto_rollover", checked = true }, ctx)
-check(no_links(), "Config renders no orchplus:// link")
-drop_acks = true -- The host never sees the settlement: the intent stays published.
-local save = press(function(entry) return entry.kind == "operator-intent" and entry.request.command == "policy" and entry.request.field == nil end, "Save session settings")
-check(type(save.request.expected_sha256) == "string" and #save.request.expected_sha256 == 64 and save.request.expected == nil,
-	"the Save control fences the saved policy by its digest, never a full copy")
+-- A retained, unsettled native control is consumed once, even across repeated scans.
+press(operator("pause"), "Pause before retained-intent check"); first_api.intents(first)
+check(saved_policy().paused, "the explicit scheduling pause commits")
+drop_acks = true -- The host never sees settlement: the intent stays published.
+press(operator("resume"), "Resume scheduling")
 for _ = 1, 4 do first_api.intents(first); second_api.intents(second); idef.view(view, ctx) end
-local after = saved_policy()
-check(after.auto_rollover == true and #after.initial_dispatch_records == 24 and #after.worker_rollover_records == 24
-	and commands("", "policy") == 1 and sent_by("second-window") == 0 and view.operator_intent ~= nil,
-	"the large policy save commits exactly once although its unsettled intent stays rendered across ticks")
+check(not saved_policy().paused and commands("", "resume") == 2 and sent_by("second-window") == 0 and view.operator_intent ~= nil,
+	"the owning native window consumes a retained scheduling intent once without replay")
 
 -- An intent no window settles expires visibly on the host and never runs later.
 drop_acks = false
 now += 31000
-host_timers[#host_timers]()
-check(view.operator_intent == nil and type(view.notice) == "string" and view.notice:find("will not run later", 1, true) ~= nil,
-	"an unsettled intent expires after its bound with a visible notice")
+for _, callback in table.clone(host_timers) do callback() end
+	check(view.operator_intent == nil, "an unsettled intent expires after its bound")
 first_api.intents(first)
-check(commands("", "policy") == 1, "an expired intent never runs")
+check(commands("", "resume") == 2, "an expired intent never runs")
 
 -- Continuation and the recovery guide: a host-block click names no window (clients of one window key
 -- also share its shown session and focus), so a window that is not the continued origin leaves these
 -- intents silently too; the palette commands run in the window that invoked them.
 local function since(window, start) local n = 0; for i = start + 1, #sent do if sent[i].window == window then n += 1 end end; return n end
-press(kind("config-close"), "Open ORCH+ controller")
-for _, command in { "continue_controller", "recovery_guide" } do
-	local start, picked, toasted = #sent, #picks, #toasts
-	press(operator(command), command)
-	second_api.intents(second); second_api.intents(second)
-	check(since("second-window", start) == 0 and #picks == picked and #toasts == toasted and view.operator_intent ~= nil,
-		command .. ": a window that is not the continued origin never takes, settles, prompts or toasts")
-	first_api.intents(first)
-	check(view.operator_intent == nil and since("", start) == 1 and since("second-window", start) == 0
-		and #picks == picked + (if command == "continue_controller" then 1 else 0) and (picks[#picks] == nil or picks[#picks].window == ""),
-		command .. ": the window that already is the continued origin runs the clicked button once")
-end
 local start, picked = #sent, #picks
 palette[second_api].continue_controller.run(second)
-check(#picks == picked + 1 and picks[#picks].window == "second-window" and picks[#picks].placeholder:find("Continue controller", 1, true) == 1
-	and #sent == start, "ORCH+ Continue controller in this window opens its attested picker only in the invoking window")
-local toasted = #toasts
-palette[second_api].recovery_guide.run(second)
-check(#toasts == toasted and #sent == start and #picks == picked + 1, "ORCH+ Reload recovery guide starts in the invoking window without acting elsewhere")
+	check(#picks == picked + 1 and picks[#picks].window == "second-window"
+		and #sent == start, "ORCH+ Continue controller in this window opens its attested picker only in the invoking window")
 
 -- Assistance after first use: the host names the continued origin's window, so another window showing
 -- the same controller leaves Inspect, Recheck, Reveal owner and Stop assistance silently too.
@@ -998,88 +2038,302 @@ end
 -- Exercise the real WindowCx timer/operator-intent consumer, including a bounded nested-status
 -- overflow and the fresh status fence needed after rechecking pre-effect capacity.
 local function window_consumer(mode)
-	local wf = fixture()
+	local clock = 1000
+	local stale_result_mode = mode:match("^stale_result") ~= nil
+	local ack_mode = mode == "ack" or mode == "ack_uncertain" or mode == "ack_terminal" or mode == "stale_witness" or mode == "scoped_poll" or stale_result_mode
+	local launch_mode = mode == "background_launch" or mode == "background_adjacent"
+	local fresh_mode = mode == "foreground_bootstrap"
+	local wf = fixture(if ack_mode then function()
+		return { now_ms = clock, mono_ms = clock, epoch = "driver-wake-host" }
+	end else nil, { defer_admission = true, default_limits = fresh_mode, passive = launch_mode })
 	local timers, events = {}, {}
-	local selected, last_result, last_receipt, bridge_bytes, deferred_outcome, command_result, driver_result
+	local selected, last_result, last_receipt, bridge_bytes, deferred_outcome, command_result, driver_result, control_result, poll_result
+	-- Native peer-store revisions are independent of ORCH authority observation fences.
+	local peer_revision = 1000000
 	-- The controller block's published one-shot operator intent (host.luau publishes it on click).
 	local intent, intent_serial = nil, 0
+	local intent_completions = {}
 	local notice
 	local notices, commands_seen = {}, {}
 	-- Held modes keep SPAWN's retained outcome pending until the test releases it.
-	local held = mode == "suspend" or mode == "auto_reconcile" or mode == "auto_reconcile_bounded" or mode == "auto_reconcile_all" or mode == "window_bookkeeping"
+	local held = mode == "suspend" or mode == "auto_reconcile" or mode == "auto_reconcile_bounded" or mode == "auto_reconcile_all" or mode == "window_bookkeeping" or mode == "background_settlement"
 	local held_success, dropped_delivery
 	-- auto_reconcile_all keeps one retained SPAWN outcome per request, as SPAWN's registry does.
 	local retained_outcomes, successes = {}, {}
+	local peer_session, peer_requests = nil, {}
+	local function session_progress()
+		if not peer_session then return nil end
+		local entries = {}
+		for request_id, entry in peer_requests do
+			local request = entry.request
+			if request.logical_session_id ~= wf.origin.logical_session_id or request.admission_seq ~= peer_session.admission_seq then continue end
+			local outcome = retained_outcomes[request_id]
+				or (if deferred_outcome and deferred_outcome.request_id == request_id then deferred_outcome else nil)
+			table.insert(entries, string.format("%.0f", request.request_serial) .. ":" .. request_id .. ":"
+				.. request.action_id .. ":" .. request.op .. ":" .. (if outcome then outcome.status else entry.status))
+		end
+		table.sort(entries)
+		local control = table.clone(peer_session.control)
+		control.last_authority_revision = nil -- Another observation is not delivery progress.
+		return codec.sha256(string.format("%.0f", peer_session.admission_seq) .. "\n"
+			.. codec.dispatch_source_bytes(control) .. "\n" .. table.concat(entries, "\n"))
+	end
 	local scoped_results = {}
 	-- duplicate_claim queues claims like a lagging host; slow_receipt withholds host commit receipts.
 	local lag_claims, lagged, hold_results, held_results = false, {}, false, 0
-	local clock, catalog_sends, launch_deliveries = 1000, 0, 0
+	local claim_attempts = {}
+	local catalog_sends, launch_deliveries = 0, 0
 	local provision_bytes, rejected_bytes, queued_worker
-	local ack_mode = mode == "ack" or mode == "ack_uncertain" or mode == "ack_terminal"
+	local fresh_launch_read = false
+	local status_observations = runtime.json.array()
 	local ack_sends, ack_id = 0, nil
+	local wake_id, wake_request, wake_sends, native_state = nil, nil, 0, "working"
+	local scoped_commit, host_deliveries = nil, 0
+	local late_launch_event, pending_poll, refused_poll, poll_projection_fault
+	local refused_delivery, delivery_fault, result_deliveries = nil, nil, {}
+	local hide_scope = false
+	local settlement_fault = mode == "consumed_scope"
+	local poll_commands = {}
 	local chained = mode == "chain" or mode == "late" or mode == "reconcile_chain" or mode == "refused_chain" or mode == "auto_reconcile_worker" or ack_mode
-	if chained then wf:catalog(0) end
 	local window_tern = table.clone(fake)
 	window_tern.now = function() return clock end
 	local palette_commands = {}
 	window_tern.command = function(def) palette_commands[def.id] = def end; window_tern.files = { button = function() end }
-	window_tern.route = { link = function() error("ORCH+ must not claim links; controls are native buttons") end }
+	window_tern.route = { link = function() end }
 	window_tern.timer = function(_, fn) table.insert(timers, fn); return {} end
-	local local_host = { id = "local", state = "connected", panes = { 9001, 9003 } }
-	local panes = { [9001] = { pane = 9001, block = "orchplus.orchestrator", tab = 1 }, [9003] = { pane = 9003, block = "spawn.dispatch", tab = 1 } }
+	local local_host = { id = "local", state = "connected", panes = { 9001 } }
+	local panes = { [9001] = { pane = 9001, block = "orchplus.orchestrator", tab = 1 } }
+	local native_session, native_focus, focus_changes = 7, 9001, 0
+	local delayed_pick
+	local moves = 0
+	if mode == "background_settlement" or launch_mode or fresh_mode then
+		table.insert(local_host.panes, 9003)
+		panes[9003] = { pane = 9003, kind = "terminal", tab = 3 }
+	end
+	local control_bytes, control_responses, lane_bytes = {}, {}, {}
+	local relay_lanes, relay_frames, relay_releases, relay_serial, bind_serial = {}, {}, {}, 0, 0
+	local relay_endpoint, relay_boot, peer_boot = "dispatch-fixture-relay", "dispatch-orch-boot", "dispatch-spawn-boot"
+	local bridge_lane, observed_panes
+	local function relay_render(lane_id)
+		local lane = assert(relay_lanes[lane_id])
+		lane.peer_boot = peer_boot
+		relay_frames[lane_id] = {
+			current = runtime.json.encode({ protocol = 2, phase = "stable", spawn_namespace = "fixture-spawn",
+				authority_namespace = wf.authority.registry.authority_namespace, authority_revision = peer_revision,
+				compatibility = clone(wf.authority.registry.compatibility), session_progress = session_progress(),
+				control_response = control_responses[lane_id] }),
+			response = control_bytes[lane_id] or (if bridge_lane == lane_id then bridge_bytes else lane_bytes[lane_id]),
+		}
+		for kind, bytes in relay_frames[lane_id] do
+			local old = lane.messages[kind]
+			if not old or old.bytes ~= bytes then
+				relay_serial += 1
+				lane.messages[kind] = { id = "dispatch-relay-" .. tostring(relay_serial), incarnation = peer_boot,
+					route = "spawn." .. kind, binding = relay_endpoint .. ":" .. lane_id, bytes = bytes }
+			end
+		end
+	end
+	local function relay_metadata()
+		local lanes, releases = {}, {}
+		for lane_id, lane in relay_lanes do
+			relay_render(lane_id)
+			local messages = {}
+			for kind, proof in lane.messages do local public = clone(proof); public.bytes = nil; messages[kind] = public end
+			table.insert(lanes, { lane_id = lane_id, bind_id = lane.bind_id, peer_boot = lane.peer_boot, messages = messages })
+		end
+		for _, proof in relay_releases do table.insert(releases, clone(proof)) end
+		return { schema = 1, peer = "spawn", host_pane_id = "42", source_nonce = wf.origin.alias_nonce,
+			relay_endpoint = relay_endpoint, relay_boot = relay_boot, lanes = lanes, releases = releases }
+	end
+	local function keyed_surface(node, key)
+		if type(node) ~= "table" then return nil end
+		if node.p and node.p.key == key then return node end
+		for _, child in node.c or {} do local found = keyed_surface(child, key); if found then return found end end
+		return nil
+	end
+	if ack_mode or launch_mode then
+		table.insert(local_host.panes, 9002)
+		panes[9002] = { pane = 9002, kind = "agent", block = if launch_mode then nil else "agent", tab = if mode == "background_adjacent" then 2 else 1 }
+	end
 	local session = {}
 	function session:pane(id) return panes[id] end
 	function session:panes() local rows = {}; for _, pane in panes do table.insert(rows, pane) end; return rows end
-	function session:sessions() return { { id = 7, tabs = { 1 } } } end
+	function session:sessions() return { { id = 7, tabs = { 1, 2 } }, { id = 8, tabs = { 3 } } } end
+	function session:focused() return native_focus end
 	function session:surface(pane, options)
 		local block, role, bytes
+		if hide_scope and pane == 9001 then return nil end
 		if pane == 9001 and options.root == "main.operator-intent" and intent == nil then return nil end
-		if pane == 9003 then block = "spawn.dispatch"; role = "spawn.dispatch.response"; bytes = bridge_bytes or ""
-		else
+		if pane ~= 9001 then return nil end
+		do
 			block = "orchplus.orchestrator"
-			role = if options.root:match("^main%.dispatch%-request") then "orchplus.request"
-				elseif options.root == "main.workflow-index" then "orchplus.workflow"
-				elseif options.root:sub(1, 21) == "main.workflow-worker-" then "orchplus.worker"
-				elseif options.root == "main.operator-intent" then "orchplus.intent"
-				else "orchplus.dispatch"
 			local projection = state.project(wf.authority.registry)
 			local scope = options.root:match("^main%.dispatch%-action%-(.+)$") or options.root:match("^main%.dispatch%-request%-(.+)$")
+				or options.root:match("^main%.dispatch%-draft%-(.+)$")
 			projection.dispatch = dispatch.project(wf.authority.registry, wf.origin.logical_session_id, wf.origin.alias_nonce, scope or selected, scoped_results)
 			local view = { pane = 42, alias_nonce = wf.origin.alias_nonce, orch_session_id = wf.origin.logical_session_id,
 				action_serial = 0, dispatch_action = selected, dispatch_result = last_result, dispatch_receipt = last_receipt,
-				dispatch_command_result = command_result, dispatch_driver_result = driver_result, scoped_results = scoped_results, notice = notice,
+				dispatch_command_result = command_result, dispatch_driver_result = driver_result, dispatch_control_result = control_result,
+				dispatch_poll_result = poll_result,
+				spawn_relay = relay_metadata(), spawn_relay_frames = relay_frames, session_panes = observed_panes,
+				scoped_results = scoped_results, notice = notice,
 				operator_intent = intent }
-			local rendered = assert(role_node(load("views").render(view, projection, "ready"), role, options.root:sub(6)))
+			local rendered = keyed_surface(load("views").render(view, projection, "ready"), options.root:sub(6))
+			if not rendered then return nil end
+			role = rendered.p.role
 			local span = rendered.p.spans[1]; bytes = if type(span) == "string" then span else span.t
+			if settlement_fault and scoped_commit and role == "orchplus.dispatch" then
+				local projected = runtime.json.decode(bytes)
+				projected.authority_namespace = "unrelated-authority"
+				if projected.control then
+					local request = runtime.json.decode(projected.control.request_bytes)
+					request.authority_namespace = "unrelated-authority"
+					projected.control.request_bytes = runtime.json.encode(request)
+				end
+				bytes = runtime.json.encode(projected)
+			end
+			if delivery_fault and role == "orchplus.dispatch" then
+				local projected = runtime.json.decode(bytes)
+				if projected.result and projected.result.action_id == ack_id then
+					if delivery_fault == "lost" then projected.result = nil
+					elseif delivery_fault == "unrelated" then projected.result.request_id = "unrelated-result"
+					elseif delivery_fault == "kind" then projected.result.command = "spawn_claimed"
+					elseif delivery_fault == "grant" then projected.result.grant_id = "unrelated-grant" end
+				end
+				if delivery_fault == "grant_change" and projected.action and projected.action.action_id == ack_id then
+					projected.action.claim.grant_id = "replacement-grant"
+				end
+				if delivery_fault == "withdrawal" and projected.receipt and projected.receipt.withdrawal_request_id then
+					projected.receipt.worker_id = "unrelated-worker"
+				end
+				bytes = runtime.json.encode(projected)
+			end
+			if poll_projection_fault and poll_result and role == "orchplus.dispatch" then
+				-- Negative consumer-boundary cases corrupt only this rendered copy; the
+				-- reducer's state and genuine single volatile poll receipt remain untouched.
+				local projected = runtime.json.decode(bytes)
+				if poll_projection_fault == "request" then
+					projected.poll_result.request_id = "unrelated-" .. poll_result.request_id
+				else projected.poll_result.worker_id = "unrelated-worker" end
+				bytes = runtime.json.encode(projected)
+			end
 		end
 		return { surface = { role = "plugin." .. block }, main = { id = options.root, k = "text", p = { role = role, spans = { bytes } } } }
 	end
 	function session:event(pane, ev)
+		if ev.act == "spawn_relay" then
+			assert(pane == 9001, "peer traffic uses the actual ORCH pane")
+			local outer = runtime.json.decode(ev.value)
+			assert(outer.schema == 1 and outer.source_nonce == wf.origin.alias_nonce
+				and outer.relay_endpoint == relay_endpoint and outer.relay_boot == relay_boot, "exact relay source binding")
+			if outer.act == "bind" then
+				assert(relay_lanes[outer.lane_id] == nil, "one bind per logical lane")
+				bind_serial += 1
+				relay_lanes[outer.lane_id] = { origin = runtime.json.decode(outer.bytes),
+					bind_id = "dispatch-bind-" .. tostring(bind_serial), messages = {} }
+				relay_render(outer.lane_id); return
+			elseif outer.act == "ack" then
+				assert(relay_lanes[outer.lane_id] and outer.peer_boot == peer_boot, "read ACK retains its lane incarnation"); return
+			elseif outer.act == "release" then
+				local lane = assert(relay_lanes[outer.lane_id])
+				assert(outer.peer_boot == lane.peer_boot and outer.bytes == "{}", "release targets the exact peer incarnation")
+				relay_releases[outer.lane_id] = { lane_id = outer.lane_id, peer_boot = peer_boot }
+				relay_lanes[outer.lane_id], relay_frames[outer.lane_id] = nil, nil
+				control_bytes[outer.lane_id], control_responses[outer.lane_id], lane_bytes[outer.lane_id] = nil, nil, nil
+				return
+			elseif outer.act == "release_ack" then
+				local proof = assert(relay_releases[outer.lane_id])
+				assert(outer.peer_boot == proof.peer_boot and outer.bytes == "{}", "release ACK consumes only positive proof")
+				relay_releases[outer.lane_id] = nil; return
+			elseif outer.act == "rebind" then
+				local lane = assert(relay_lanes[outer.lane_id])
+				assert(quota.digest(runtime.json.decode(outer.bytes)) == quota.digest(lane.origin), "rebind retains the original lane origin")
+				bind_serial += 1; lane.bind_id = "dispatch-bind-" .. tostring(bind_serial); lane.messages = {}
+				control_bytes[outer.lane_id], control_responses[outer.lane_id], lane_bytes[outer.lane_id] = nil, nil, nil
+				relay_render(outer.lane_id); return
+			end
+			assert(relay_lanes[outer.lane_id] and outer.peer_boot == peer_boot, "peer operation retains the live logical lane")
+			pane, ev = outer.lane_id, { ev = "action", act = outer.act, value = outer.bytes }
+		end
 		if pane == 9001 then
 			if ev.act == "operator-intent-done" then
 				local input = runtime.json.decode(ev.value)
 				check(ev.id == "main.operator-intent" and intent ~= nil and input.serial == intent.serial, "window settles exactly the consumed intent")
+				local key = input.source_nonce .. "|" .. input.serial
+				intent_completions[key] = (intent_completions[key] or 0) + 1
 				intent = nil
 			elseif ev.act == "dispatch-command" or ev.act == "dispatch-operator-command" then
 				local command = runtime.json.decode(ev.value)
 				if lag_claims and command.command == "claim" then table.insert(lagged, ev); return end
+				if mode == "stale_claim" and command.command == "claim" then
+					table.insert(claim_attempts, { request = clone(command), revision = wf.authority.registry.revision })
+				end
 				table.insert(commands_seen, { command = command.command, action_id = command.action_id })
 				wf.origin = clone(command.origin)
+				local refuse_poll = mode == "scoped_poll" and command.command == "poll" and refused_poll == nil and late_launch_event ~= nil
+				if mode == "scoped_poll" and command.command == "poll" then table.insert(poll_commands, clone(command)) end
+				if refuse_poll then
+					must(wf:apply("pause").ok)
+					must(wf:apply("resume").ok) -- Real owner commits after the immutable background poll was captured.
+				end
+				local withdrawal_ids = {}
+				if command.command == "cancel_work" then
+					for id, a in wf.authority.registry.dispatch.actions do
+						if a.worker_id == command.worker_id and a.claim == nil then withdrawal_ids[id] = true end
+					end
+				end
+				if mode == "held_withdrawal" and command.command == "claim" then wf.memory.fail = true end
+				local writes = wf.memory.writes
 				local response = table.clone(wf.authority:apply(command))
+				wf.memory.fail = false
 				response.request_id = command.request_id; response.command = command.command
 				response.action_id = response.action_id or command.action_id
 				response.grant_id = command.grant_id or (if response.claim then response.claim.grant_id else nil)
+				if command.command == "poll" and ev.act == "dispatch-command" then
+					response.worker_id = command.worker_id
+					poll_result = response -- One replaceable live-view receipt, including actionless refusals/no-ops.
+				end
+				if ev.act == "dispatch-command" and response.ok and response.code == "mailbox_idle" and response.action_id == nil then return end
 				local workflow_only = table.find({ "observe", "policy", "pause", "resume", "answer", "cancel_gate", "recheck_gate", "sweep" }, command.command) ~= nil
+				local control_only = table.find({ "bridge_control", "bridge_result", "bridge_observe" }, command.command) ~= nil
+				if control_only then control_result = response end
 				if ev.act == "dispatch-operator-command" then
 					command_result = response
-					if not workflow_only then driver_result = response end
+					if not workflow_only and not control_only then driver_result = response end
 				end
-				if (ev.act == "dispatch-command" or response.ok) and not workflow_only then last_result = response end
+				if (ev.act == "dispatch-command" or response.ok) and not workflow_only and not control_only then last_result = response end
 				if response.ok and response.action_id then selected = response.action_id end
 				if response.worker_id then queued_worker = response.worker_id end
 				if response.action_id then
 					local retained = scoped_results[response.action_id] or {}
 					retained.result = response; scoped_results[response.action_id] = retained
+				end
+				if response.ok and command.command == "cancel_work" then
+					for id in withdrawal_ids do
+						if scoped_results[id] and wf:action(id) == nil then
+							scoped_results[id] = { result = response, receipt = { action_id = id, worker_id = command.worker_id,
+								withdrawal_request_id = command.request_id, authority_namespace = command.authority_namespace,
+								logical_session_id = command.orch_session_id } }
+						end
+					end
+				end
+				if refuse_poll then
+					check(response.code == "stale_revision" and response.action_id == nil and wf.memory.writes == writes,
+						"an actually stale background poll is refused without an invented action or registry write")
+					refused_poll = response; poll_projection_fault = "request"
+					session:event(9001, late_launch_event)
+				end
+				if mode == "scoped_poll" and command.command == "poll" and response.ok and response.action_id and pending_poll == nil then
+					local pending = wf:action(response.action_id)
+					if pending and pending.request.op == "mailbox_publish_ack" then
+						assert(late_launch_event and pending.worker_id == command.worker_id)
+						pending_poll = { action_id = response.action_id, worker_id = command.worker_id,
+							request_id = command.request_id, result = response }
+						poll_projection_fault = "request"
+						-- A real completed launch delivery arrives after the poll queued its next
+						-- action, replacing only the shared result before the new driver sees it.
+						session:event(9001, late_launch_event)
+					end
 				end
 			elseif ev.act == "dispatch-select" then
 				local input = runtime.json.decode(ev.value); selected = input.action_id; last_result = nil; command_result = nil
@@ -1087,15 +2341,33 @@ local function window_consumer(mode)
 			elseif ev.act == "dispatch-release-scope" then
 				scoped_results[runtime.json.decode(ev.value).action_id] = nil
 			elseif ev.act:sub(1, 16) == "dispatch-result/" then
+				host_deliveries += 1
 				if hold_results then held_results += 1; return end -- The host has not processed it yet.
-				local outer = runtime.json.decode(ev.value:sub(#"SPAWN_DISPATCH v1 " + 1))
+				local delivery = runtime.json.decode(ev.value)
+				local response_bytes = delivery.response_bytes
+				assert(delivery.authority_namespace == wf.authority.registry.authority_namespace and type(delivery.expected_revision) == "number",
+					"native driver delivers its original captured authority fence alongside exact peer bytes")
+				local outer = runtime.json.decode(response_bytes:sub(#codec.DISPATCH.prefix + 1))
 				local a
 				for _, candidate in wf.authority.registry.dispatch.actions do
 					if candidate.request.request_id == outer.request_id and candidate.claim
 						and candidate.claim.grant_id == ev.act:match("^dispatch%-result/([^/]+)/")
 						and ev.act:match("/([^/]+)$") == wf.origin.window_epoch then a = candidate; break end
 				end
-				assert(a, "result must identify its original action and exact grant")
+				if not a then
+					if mode == "consumed_scope" or mode == "auto_reconcile_all" then return end -- Lose ephemeral receipts, never the durable result commit.
+					local body = runtime.json.decode(outer.body_json)
+					local current = wf.authority.registry.sessions[wf.origin.logical_session_id]
+					assert(current and current.admitted and body.authority_namespace == wf.authority.registry.authority_namespace
+						and body.logical_session_id == wf.origin.logical_session_id and body.admission_seq == current.admission_seq
+						and body.request_serial < current.next_request_serial and wf:action(body.action_id) == nil,
+						"absent callback must prove a current consumed issued identity")
+					last_result = { ok = true, code = "already_consumed", action_id = body.action_id }
+					last_receipt = { action_id = body.action_id, grant_id = ev.act:match("^dispatch%-result/([^/]+)/"),
+						response_sha256 = codec.sha256(response_bytes) }
+					scoped_results[body.action_id] = { result = last_result, receipt = last_receipt }
+					return
+				end
 				if mode == "suspend" and not dropped_delivery then
 					dropped_delivery = true
 					return -- Lose the first host event; only the captured observation may replay.
@@ -1106,19 +2378,43 @@ local function window_consumer(mode)
 						rejected_bytes = ev.value; bridge_bytes = provision_bytes
 						return -- Lose the first host event, and replace the bridge's visible response.
 					end
-					if mode == "chain" or mode == "refused_chain" then check(ev.value == rejected_bytes, "lost host event replays captured rejection bytes, not a new native request") end
+					if mode == "chain" or mode == "refused_chain" then
+						if fresh_launch_read then
+							check(response_bytes == runtime.json.decode(rejected_bytes).response_bytes,
+								"fresh owner observation retains the exact rejected launch outcome, not a repeated effect")
+						else check(ev.value == rejected_bytes, "lost host event replays captured rejection bytes, not a new native request") end
+					end
 				end
-				local response_hash = codec.sha256(ev.value)
-				local input = wf:event("result", { action_id = a.request.action_id, executor = a.claim.executor, grant_id = a.claim.grant_id, response_bytes = ev.value })
-				input.request_id = "result-" .. codec.sha256(a.claim.grant_id .. ":" .. wf.origin.window_epoch .. ":" .. response_hash)
+				if stale_result_mode and a.request.op == "mailbox_publish_ack" and refused_delivery == nil then
+					assert(wf:apply("pause").ok) -- A real intervening authority commit, not a fabricated refusal.
+					refused_delivery = { event = clone(ev), grant_id = a.claim.grant_id, request_bytes = a.request_bytes }
+					delivery_fault = mode:match("^stale_result_(.+)$")
+				end
+				local input = wf:event("result", { action_id = a.request.action_id, executor = a.claim.executor, grant_id = a.claim.grant_id,
+					response_bytes = response_bytes, authority_namespace = delivery.authority_namespace, expected_revision = delivery.expected_revision })
+				input.request_id = protocol.result_request_id(a.claim.grant_id, wf.origin.window_epoch, delivery)
+				local writes = wf.memory.writes
 				last_result = table.clone(wf.authority:apply(input))
+				if last_result.code == "stale_revision" then
+					check(wf.memory.writes == writes and wf:action(a.request.action_id) ~= nil,
+						"a stale immutable observation writes nothing and cannot consume its live grant")
+				end
 				-- As host.luau action(): a committed result carries its deterministic observation request ID.
-				last_result.request_id = input.request_id; last_result.action_id = a.request.action_id; last_result.grant_id = a.claim.grant_id
+				last_result.request_id = input.request_id; last_result.action_id = a.request.action_id; last_result.grant_id = a.claim.grant_id; last_result.command = "result"
+				if stale_result_mode and a.request.op == "mailbox_publish_ack" then
+					table.insert(result_deliveries, { event = clone(ev), result = clone(last_result) })
+				end
 				if last_result.ok then last_receipt = { action_id = a.request.action_id, grant_id = a.claim.grant_id, response_sha256 = response_hash } end
 				local retained = scoped_results[a.request.action_id] or {}
 				retained.result = last_result
 				if last_result.ok then retained.receipt = last_receipt end
 				scoped_results[a.request.action_id] = retained
+				if mode == "scoped_poll" and a.request.op == "launch" and last_result.ok then late_launch_event = clone(ev) end
+				if (mode == "consumed_scope" or mode == "auto_reconcile_all") and last_result.ok and wf:action(a.request.action_id) == nil then
+					scoped_commit = clone(a.request)
+					last_result, last_receipt = nil, nil
+					scoped_results[a.request.action_id] = nil
+				end
 				if ack_mode and a.request.op == "launch" and last_result.ok then
 					local w = wf.authority.registry.dispatch.workers[queued_worker]
 					assert(wf:apply("intake", { worker_id = queued_worker,
@@ -1130,92 +2426,197 @@ local function window_consumer(mode)
 				local input = runtime.json.decode(ev.value)
 				assert(input.source_nonce == wf.origin.alias_nonce and type(input.message) == "string" and #input.message <= 1024)
 				notice = input.message; table.insert(notices, input.message)
+			elseif ev.act == "config-panes" then observed_panes = runtime.json.decode(ev.value)
+			elseif ev.act == "upgrade-window-readback" then
+				local readback = runtime.json.decode(ev.value)
+				assert(readback.version == 5 and readback.source_nonce == wf.origin.alias_nonce, "window observes the actual v5 source")
 			else error("Unexpected ORCH+ callback " .. tostring(ev.act)) end
 			return
 		end
-		check(pane == 9003 and ev.id == "main.spawn-dispatch-response", "window targets current role-keyed SPAWN response node")
+		assert(relay_lanes[pane], "peer commands target a logical lane, never a transport pane")
+		if bridge_lane then lane_bytes[bridge_lane] = bridge_bytes end
 		local request = runtime.json.decode(ev.value)
-		-- The guided-recovery owner probe is read-only; this fixture leaves it unanswered (state unknown).
-		if ev.act == "owner_status" then return end
+		control_responses[pane] = nil
+		if ev.act ~= "status" and ev.act ~= "owner_status" then peer_revision += 1 end
+		if ev.act == "owner_status" or ev.act == "admit_session" or ev.act == "reconcile_session" then
+			local control = wf.authority.registry.sessions[wf.origin.logical_session_id]
+			local payload = { admission_cursor = control.admission_seq, compatibility = clone(wf.authority.registry.compatibility),
+				control = { phase = "open", generation_floor = request.generation_floor or control.generation_floor,
+					request_floor = request.settled_before or control.request_floor,
+					next_request_serial = request.next_request_serial or control.next_request_serial,
+					last_authority_revision = request.authority_revision or control.last_authority_revision,
+					binding = clone(if request.control_origin then request.control_origin.binding else wf.origin) } }
+			if ev.act == "reconcile_session" then
+				payload.control.request_floor = request.settled_before
+				payload.outstanding = { after_serial = 0, through_serial = 0, next_after_serial = 0, complete = true, entries = runtime.json.array() }
+			end
+			control_bytes[pane] = frame(request, if ev.act == "owner_status" then "owner_status" elseif ev.act == "admit_session" then "admitted" else "reconciled",
+				payload, nil, "current_admission", request.authority_revision or control.last_authority_revision)
+			if ev.act ~= "owner_status" then
+				peer_session = { admission_seq = request.admission_seq, control = clone(payload.control) }
+				for request_id, entry in peer_requests do
+					if entry.request.request_serial < request.settled_before
+						or table.find(request.consumed, entry.request.request_serial) then peer_requests[request_id] = nil end
+				end
+				control_responses[pane] = { request_id = request.request_id, action_id = request.action_id,
+					spawn_namespace = "fixture-spawn", session_progress = session_progress() }
+			end
+			relay_render(pane)
+			return
+		end
+		control_bytes[pane] = nil
 		table.insert(events, { op = ev.act, bytes = ev.value })
 		if ev.act == "catalog" then
 			catalog_sends += 1
 			local success = frame(request, "catalog", { catalog_version = 2, setup = catalog_setup(0), namespace = "fixture-spawn", host_key = "fixture-host", config_revision = 0, revision = 0, records = runtime.json.array() })
 			if held then
-				held_success = dispatch.decode_response(success, request)
-				bridge_bytes = frame(request, "pending", {})
-				deferred_outcome = dispatch.decode_response(bridge_bytes, request)
+				held_success = protocol.decode_response(success, request)
+				bridge_bytes = frame(request, "pending")
+				deferred_outcome = protocol.decode_response(bridge_bytes, request)
 				if mode == "auto_reconcile_all" then retained_outcomes[request.request_id] = deferred_outcome; successes[request.request_id] = held_success end
 			elseif mode == "expired_authorization" then
 				-- SPAWN stages the first send behind a window challenge; the rechecked send succeeds.
 				bridge_bytes = if catalog_sends == 1 then frame(request, "pending", { authorization_required = true }) else success
-				deferred_outcome = dispatch.decode_response(bridge_bytes, request)
-			elseif mode == "capacity_resume" or mode == "duplicate_claim" or mode == "slow_receipt" then bridge_bytes = success
-			elseif mode == "oversize" then bridge_bytes = if catalog_sends == 1 then frame(request, "pending", {}) else success
+				deferred_outcome = protocol.decode_response(bridge_bytes, request)
+			elseif mode == "capacity_resume" or mode == "duplicate_claim" or mode == "stale_claim" or mode == "slow_receipt" or mode == "consumed_scope" then
+				bridge_bytes = success; deferred_outcome = assert(protocol.decode_response(success, request))
+			elseif mode == "oversize" then bridge_bytes = if catalog_sends == 1 then frame(request, "pending") else success
 			elseif catalog_sends == 1 then bridge_bytes = frame(request, "full", { resource = "catalog_capacity", current = 1, limit = 1, retryable = true, effect_started = false })
-			else deferred_outcome = dispatch.decode_response(success, request) end -- Leave old full visible until the ordered status fence.
+			else deferred_outcome = protocol.decode_response(success, request) end -- Leave old full visible until the ordered status fence.
+		elseif ev.act == "mailbox_inventory" then
+			-- This transport fixture owns framed outcomes, not SPAWN's mailbox filesystem.
+			-- An unreadable inventory is uncertainty, never a fabricated zero-file cleanup.
+			bridge_bytes = frame(request, "uncertain", nil, { code = "inventory_unavailable",
+				message = "The fixture peer has no mailbox-filesystem observation." })
 		elseif ev.act == "mailbox_provision" then
-			bridge_bytes = frame(request, "provisioned", { handle = "mailbox-fixture", binding_digest = string.rep("a", 64),
-				capabilities = runtime.json.array({ "report-files-v1", if mode == "ack_terminal" then "worker-poll-v1" else "native-ask-v1", "coordinator-control-v1" }) })
+			bridge_bytes = frame(request, "provisioned", wf:peer_payload(wf:action(request.action_id), "provisioned", {
+				handle = "mailbox-fixture", binding_digest = string.rep("a", 64),
+				capabilities = runtime.json.array({ "report-files-v1", if mode == "ack_terminal" or stale_result_mode then "worker-poll-v1" else "native-ask-v1", "coordinator-control-v1", "project-start-v1" }) }))
 			provision_bytes = bridge_bytes
+			deferred_outcome = assert(protocol.decode_response(provision_bytes, request))
 			if mode == "late" then
-				deferred_outcome = dispatch.decode_response(provision_bytes, request)
+				deferred_outcome = protocol.decode_response(provision_bytes, request)
 				bridge_bytes = frame(request, "pending", { authorization_required = true })
 			elseif mode == "auto_reconcile_worker" then
-				held_success = dispatch.decode_response(provision_bytes, request)
+				held_success = protocol.decode_response(provision_bytes, request)
 				bridge_bytes = frame(request, "pending", { authorization_required = true })
-				deferred_outcome = dispatch.decode_response(bridge_bytes, request)
+				deferred_outcome = protocol.decode_response(bridge_bytes, request)
 			end
 		elseif ev.act == "launch" then
-			bridge_bytes = if ack_mode then frame(request, "awaiting_acceptance", { pane_binding = {
-				pane_id = "9002", window_key = "", window_epoch = request.origin_binding.window_epoch, native_session_id = "7", window_host_id = "local" } })
-				else frame(request, "rejected", nil, { code = "binding_mismatch", message = "Exact fresh SPAWN authorization challenge required" })
+			if mode == "stale_witness" then
+				bridge_bytes = frame(request, "pending", { authorization_required = true })
+				deferred_outcome = assert(protocol.decode_response(bridge_bytes, request))
+			elseif ack_mode or launch_mode then
+				local a = wf:action(request.action_id)
+				assert(wf:apply("spawn_claimed", { action_id = request.action_id, grant_id = a.claim.grant_id,
+					spawn_namespace = "fixture-spawn", claim_nonce = "native-window-claim-" .. next_id() }).ok)
+				bridge_bytes = frame(request, "awaiting_acceptance", wf:peer_payload(a, "awaiting_acceptance", { pane_binding = {
+					pane_id = "9002", window_key = "", window_epoch = request.origin_binding.window_epoch, native_session_id = "7", window_host_id = "local" } }))
+			else bridge_bytes = frame(request, "rejected", nil, { code = "binding_mismatch", message = "Exact fresh SPAWN authorization challenge required" }) end
+			retained_outcomes[request.request_id] = assert(protocol.decode_response(bridge_bytes, request))
 		elseif ev.act == "mailbox_publish_ack" then
 			ack_sends += 1; ack_id = request.action_id
-			bridge_bytes = frame(request, "published", if mode == "ack_terminal" then {} else { wake_status = "awaiting_window" })
-			deferred_outcome = dispatch.decode_response(bridge_bytes, request)
+			bridge_bytes = frame(request, "published", if mode == "ack_terminal" or stale_result_mode then nil else { wake_status = "awaiting_window",
+				wake_effect_started = false, wake_target_request_id = request.request_id, wake_target_action_id = request.action_id })
+			deferred_outcome = protocol.decode_response(bridge_bytes, request)
+		elseif ev.act == "accept" then
+			bridge_bytes = frame(request, "accepted", wf:peer_payload(wf:action(request.action_id), "accepted"))
+		elseif ev.act == "native_wake" then
+			wake_sends += 1; wake_id = request.action_id; wake_request = clone(request)
+			local action = wf:action(wake_id)
+			assert(wf:apply("spawn_claimed", { action_id = wake_id, grant_id = action.claim.grant_id, spawn_namespace = "fixture-spawn",
+				claim_nonce = "separate-native-wake-" .. next_id() }).ok)
+			bridge_bytes = frame(request, "pending")
+			deferred_outcome = assert(protocol.decode_response(bridge_bytes, request))
 		elseif ev.act == "status" then
-			if ack_mode then
-				check(request.target_request_id == wf:action(ack_id).request.request_id, "ACK wake status queries original publication identity")
+			if mode == "chain" or mode == "refused_chain" then fresh_launch_read = true end
+			if ack_mode and wake_request then
+				check(request.target_request_id == wake_request.request_id and request.target_request_serial == wake_request.request_serial,
+					"notification reconciliation queries the separately issued native-wake identity, never the consumed publication")
 			end
 			bridge_bytes = if mode == "oversize" then frame(request, "rejected", nil, { code = "oversize" })
 				else frame(request, "found", { outcome = retained_outcomes[request.target_request_id] or deferred_outcome })
+			local observed = retained_outcomes[request.target_request_id] or deferred_outcome
+			table.insert(status_observations, runtime.json.array({ clock, if observed then observed.status else "-" }))
 		else error("Unexpected SPAWN operation " .. tostring(ev.act)) end
+		if request.request_serial ~= nil then
+			local outcome = protocol.decode_response(bridge_bytes, request)
+			if not outcome and deferred_outcome and deferred_outcome.request_id == request.request_id then outcome = deferred_outcome end
+			peer_requests[request.request_id] = { request = clone(request), status = if outcome then outcome.status else "pending" }
+		end
+		bridge_lane = pane; lane_bytes[pane] = bridge_bytes
+		relay_render(pane)
 	end
-	local cx = { session = session, sessions = { current = function() return { id = 7, host = "local" } end },
-		agents = { list = function() return {} end },
+	local cx = { session = session, sessions = { current = function() return { id = native_session, host = "local" } end,
+		switch = function() error("background settlement must never switch sessions") end },
+		agents = { list = function() return if ack_mode or launch_mode then { { pane = 9002, state = native_state } } else {} end },
 		hosts = { list = function() return { local_host } end, current = function() return local_host end },
 		window_key = function() return "" end, toast = function(_cx, _level, _title, detail) notice = detail end,
-		new_block = function(_cx, block, _config, placement, options)
-			-- The controller shares tab 1 with 9003, so no bridge-only tab exists: the bridge opens its own tab.
-			check(block == "spawn.dispatch" and placement == "tab" and options.focus == false and options.target == nil,
-				"native bridge creation opens the bridge tab, never splits the controller and never steals focus")
-			return 9003
+		new_block = function() error("dispatch carrier must not create a native transport pane") end }
+	cx.layout = {
+		focus = function() focus_changes += 1; error("background settlement must never change focus") end,
+		move = function(_, target, source, direction, reveal)
+			assert(launch_mode and target == 9002 and source == 9001 and direction == "left", "only compose the exact returned coordinator")
+			moves += 1
+			if reveal.focus then focus_changes += 1; native_focus = target end
+			panes[target].tab = panes[source].tab
+			return true
+		end,
+		resize = function() end,
+	}
+	cx.prompt = function() error("effect-pipeline fixture does not invoke the conversation composer") end
+	cx.pick = function(_, options)
+		local chosen
+		for _, item in options.items do
+			if item.continue_controller == true
+				or ((mode == "held_withdrawal" or mode == "capacity_withdrawal" or mode == "background_settlement") and item.confirm == true) then
+				chosen = item; break
+			end
+		end
+		return { next = function(_promise, callback)
+			if mode == "background_settlement" and chosen and chosen.confirm then delayed_pick = { callback = callback, choice = chosen }; return end
+			callback(chosen, nil, table.clone(cx))
 		end }
-	-- The assignment text first; the CP2 declared files/checks/base ref prompts are left empty.
-	cx.prompt = function(_cx, options)
-		local text = if options and options.action == "next: declared files" then "Explicit chained fixture task" else ""
-		return { next = function(_promise, callback) callback(text, nil, table.clone(cx)) end }
-	end
-	cx.pick = function()
-		return { next = function(_promise, callback) callback({ continue_controller = true }, nil, table.clone(cx)) end }
 	end
 	local window_chunk = assert(loadstring(runtime.fs.read(root .. "/window.luau"), "dispatch-window-consumer"))
-	setfenv(window_chunk, setmetatable({ tern = window_tern, require = load }, { __index = environment })); local api = window_chunk()
+	local native_api
+	local function window_require(name)
+		local module = load(name)
+		if name:gsub("^%./", "") ~= "conversation_window" then return module end
+		-- Observe the real creation adapter without mocking control/connect behavior.
+		local adapter = table.clone(module)
+		adapter.new = function(api) native_api = api; return module.new(api) end
+		return adapter
+	end
+	setfenv(window_chunk, setmetatable({ tern = window_tern, require = window_require }, { __index = environment })); local api = window_chunk()
 	-- The owner clicks a dispatch button: its host block publishes the exact request as a one-shot
 	-- intent, which this window's observation consumer runs once.
-	local function click(command)
+	local function click(command, fields)
 		local request = { command = command, source_nonce = wf.origin.alias_nonce, orch_session_id = wf.origin.logical_session_id, action_id = selected }
+		request.authority_namespace = wf.authority.registry.authority_namespace; request.expected_revision = wf.authority.registry.revision
 		if command == "queue" then
-			request.record_id = "native"; request.record_revision = 0; request.catalog_revision = 0
-			request.cwd = "/fixture"; request.placement = "split"; request.coordinator = true
+			local event = wf:event("queue", { record_id = "native", record_revision = 0, catalog_revision = 0,
+				cwd = "/fixture", placement = "split", prompt = "Explicit native effect-pipeline fixture task",
+				coordinator = if fields and fields.coordinator ~= nil then fields.coordinator else not ack_mode,
+				presentation = if fields then fields.presentation else nil })
+			local queued = table.clone(wf.authority:apply(event))
+			queued.request_id, queued.command = event.request_id, event.command
+			if not queued.ok then command_result = queued; return end
+			assert(queued.action_id and queued.worker_id, runtime.json.encode(queued))
+			selected, queued_worker = queued.action_id, queued.worker_id
+			last_result, command_result, driver_result = queued, queued, queued
+			scoped_results[selected] = { result = queued }
+			request.command, request.action_id = "execute", selected
+			request.expected_revision = wf.authority.registry.revision
 		end
+		if command == "poll" then request.worker_id = queued_worker end
+		for key, value in fields or {} do request[key] = value end
 		intent_serial += 1
 		intent = { version = 1, source_nonce = wf.origin.alias_nonce, serial = "fixture-intent-" .. tostring(intent_serial), kind = "dispatch", request = request }
 		api.intents(table.clone(cx))
 	end
-	local function tick()
-		clock += 500; local callback = assert(table.remove(timers, 1), "native timer must remain scheduled")
+	local function tick(elapsed)
+		clock += elapsed or 500; local callback = assert(table.remove(timers, 1), "native timer must remain scheduled")
 		callback(table.clone(cx)) -- Fresh callback context, never a captured click context.
 	end
 	local function count_events(op) local n = 0; for _, e in events do if e.op == op then n += 1 end end; return n end
@@ -1224,50 +2625,357 @@ local function window_consumer(mode)
 		for _, c in commands_seen do if c.command == name and (action_id == nil or c.action_id == action_id) then n += 1 end end
 		return n
 	end
+	local function check_window(ok, why)
+		if not ok then
+			local action = wf:action(selected)
+			local worker = if queued_worker then wf.authority.registry.dispatch.workers[queued_worker] else nil
+			local grant = if action and action.claim then action.claim.grant_id elseif last_result then last_result.grant_id else nil
+			-- Compact prefix survives the native runner's existing failure-text bound.
+			-- a=operation/phase/response; ack=action/grant match; o=operator code/correlation;
+			-- r=result code/action match; rev=current/captured; w=worker phase/reason.
+			why = "state=" .. runtime.json.encode({
+				a = runtime.json.array({ if action then action.request.op else "-", if action then action.phase else "-",
+					if action and action.response then action.response.status else "-" }),
+				ack = runtime.json.array({ last_receipt ~= nil and last_receipt.action_id == selected,
+					last_receipt ~= nil and grant ~= nil and last_receipt.grant_id == grant }),
+				d = if deferred_outcome then deferred_outcome.status else "-", ld = launch_deliveries,
+				clock = clock, reads = status_observations,
+				n = { catalog = catalog_sends, provision = count_events("mailbox_provision"), launch = count_events("launch"), status = count_events("status") },
+				o = runtime.json.array({ if command_result then command_result.code else "-",
+					command_result ~= nil and driver_result ~= nil and command_result.request_id == driver_result.request_id }),
+				r = runtime.json.array({ if last_result then last_result.code else "-", last_result ~= nil and last_result.action_id == selected }),
+				rev = runtime.json.array({ wf.authority.registry.revision,
+					if rejected_bytes then runtime.json.decode(rejected_bytes).expected_revision else -1 }),
+				w = runtime.json.array({ if worker then worker.phase else "-", if worker and worker.reason then worker.reason.code else "-" }),
+			}) .. " " .. why
+		end
+		check(ok, why)
+	end
+	if fresh_mode then
+		check(wf.authority.registry.dispatch.command_cursors[wf.origin.logical_session_id] == nil
+			and native_api.snapshot(cx, 9001).command_cursor == nil,
+			"fresh host-created controller has no cursor in either durable registry or actual native window projection")
+		native_session, native_focus = 8, 9003
+		local refused = wf.origin.alias_nonce .. "|fixture-intent-" .. tostring(intent_serial + 1)
+		click("bridge_admit")
+		check(intent == nil and intent_completions[refused] == 1 and count_commands("bridge_control") == 0
+			and wf.authority.registry.dispatch.command_cursors[wf.origin.logical_session_id] == nil,
+			"displaced unbound human admission is durably refused exactly once instead of becoming background authority")
+		native_session, native_focus = 7, 9001
+		api.intents(cx); api.intents(cx)
+		check(intent_completions[refused] == 1 and count_commands("bridge_control") == 0
+			and native_api.snapshot(cx, 9001).command_cursor == nil,
+			"repeated native intent-consumer passes after returning never replay or re-complete the unbound intent")
+		local captured = native_api.origin(cx, 9001)
+		assert(captured, "fresh creation captures the actual foreground origin")
+		native_api.control(cx, 9001, "bridge_admit", captured)
+		local cursor = native_api.snapshot(cx, 9001).command_cursor
+		check(cursor and cursor.controller_pane == "9001" and quota.digest(cursor.origin) == quota.digest(captured),
+			"real creation control adapter commits its first admission cursor with the exact captured source/origin")
+		native_session, native_focus = 8, 9003
+		for _ = 1, 12 do
+			tick()
+			if wf.authority.registry.sessions[wf.origin.logical_session_id].admitted then break end
+		end
+		check_window(count_commands("bridge_control") == 1
+			and wf.authority.registry.sessions[wf.origin.logical_session_id].admitted == true
+			and api.owned_origin(cx, 9001, captured),
+			"first creation admission settles through strict captured background ownership after user selection changes")
+		check(focus_changes == 0 and native_session == 8 and native_focus == 9003,
+			"fresh creation admission, background settlement and unbound refusal do not mutate native selection or focus")
+		return
+	end
+	assert(palette_commands.continue_controller).run(table.clone(cx))
+	assert(command_result and command_result.ok, "initial continuation failed: " .. tostring(notice) .. "; result=" .. runtime.json.encode(command_result))
+	click("pause")
+	assert(command_result and command_result.ok, "initial pause failed: " .. tostring(notice) .. "; result=" .. runtime.json.encode(command_result))
+	must(wf:control("admit_session").ok)
+	local admitted = wf.authority.registry.sessions[wf.origin.logical_session_id]
+	peer_session = { admission_seq = admitted.admission_seq, control = { phase = "open",
+		generation_floor = admitted.generation_floor, request_floor = admitted.request_floor,
+		next_request_serial = admitted.next_request_serial, last_authority_revision = admitted.last_authority_revision,
+		binding = clone(wf.origin) } }
+	click("resume")
+	assert(command_result and command_result.ok, "initial resume failed: " .. tostring(notice) .. "; result=" .. runtime.json.encode(command_result))
+	-- Let the production controller confirm its baseline peer state before the scenario creates
+	-- deliberately delayed commands. This is real control I/O, not a refreshed action fence.
+	for _ = 1, 8 do tick() end
+	assert(wf.authority.registry.sessions[wf.origin.logical_session_id].bridge_control == nil,
+		"baseline connection did not settle: " .. tostring(notice) .. "; result=" .. runtime.json.encode(control_result))
+	if mode == "stale_intent" then
+		local function stamp(origin)
+			return { window_key = origin.window_key, window_epoch = origin.window_epoch,
+				native_session_id = origin.native_session_id, window_host_id = origin.window_host_id }
+		end
+		local function publish(window, source_nonce)
+			intent_serial += 1
+			local nonce = source_nonce or wf.origin.alias_nonce
+			intent = { version = 1, source_nonce = nonce, serial = "fixture-intent-" .. tostring(intent_serial), kind = "dispatch",
+				window = window, request = { command = "pause", source_nonce = nonce, orch_session_id = wf.origin.logical_session_id,
+					authority_namespace = wf.authority.registry.authority_namespace, expected_revision = wf.authority.registry.revision } }
+			return nonce .. "|" .. intent.serial
+		end
+		local pauses = count_commands("pause")
+		local refused = publish(stamp(wf.origin))
+		-- Recreate the real window VM, preserving the host's exact cursor and intent.
+		table.clear(timers); api = window_chunk()
+		check(native_api.snapshot(cx, 9001).command_cursor.origin.window_epoch == intent.window.window_epoch,
+			"reload fixture preserves the source's actual obsolete cursor/stamped input")
+		api.intents(cx); api.intents(cx)
+		check(intent == nil and intent_completions[refused] == 1 and count_commands("pause") == pauses,
+			"current-session stale-origin input is durably refused exactly once, not just remembered by its VM")
+		table.clear(timers); api = window_chunk()
+		palette_commands.continue_controller.run(cx)
+		must(command_result and command_result.ok, command_result)
+		api.intents(cx); api.intents(cx); tick()
+		check(intent_completions[refused] == 1 and count_commands("pause") == pauses,
+			"another reload and explicit Continue cannot execute a human intent already refused in its old origin")
+		for _, fault in { "window", "epoch", "alias" } do
+			local window = stamp(wf.origin)
+			if fault == "window" then window.window_key = "another-window"
+			elseif fault == "epoch" then window.window_epoch = "unrelated-incarnation" end
+			local key = publish(window, if fault == "alias" then "different-source-alias" else nil)
+			api.intents(cx); api.intents(cx)
+			check(intent ~= nil and intent_completions[key] == nil and count_commands("pause") == pauses,
+				"refusal cannot consume or execute an input with an unrelated native " .. fault .. " stamp")
+		end
+		return
+	end
+	if launch_mode then
+		wf:catalog(0)
+		click("queue", { coordinator = true, presentation = if mode == "background_adjacent" then "coordinator_adjacent" else "background" })
+		assert(queued_worker ~= nil and selected ~= nil and wf:action(selected) ~= nil,
+			"native launch fixture did not queue a real worker/action: " .. runtime.json.encode(command_result))
+		local launch_id
+		for _ = 1, 12 do
+			tick()
+			local worker = wf.authority.registry.dispatch.workers[queued_worker]
+			launch_id = worker and worker.launch_action_id
+			if launch_id and wf:action(launch_id) and wf:action(launch_id).phase == "ready" then break end
+		end
+		check_window(launch_id ~= nil and wf:action(launch_id).phase == "ready" and wf:action(launch_id).claim == nil,
+			"provisioning creates a real unissued native-agent launch before its first claim")
+		if mode == "background_launch" then
+			native_session, native_focus = 8, 9003
+			for _ = 1, 10 do tick(5000) end
+			check_window(wf:action(launch_id).phase == "ready" and wf:action(launch_id).claim == nil
+				and count_commands("claim", launch_id) == 0 and count_commands("lost", launch_id) == 0 and count_events("launch") == 0,
+				"unsupported inactive native creation stays truly unissued beyond 30 seconds without claim, relay or manufactured uncertainty")
+			check(notice and notice:find("targeted native agent API", 1, true), "unissued launch exposes its genuine targeted-creation prerequisite")
+			native_session = 7
+		end
+		for _ = 1, 12 do tick(); if count_events("launch") == 1 then break end end
+		check_window(count_events("launch") == 1 and count_commands("claim", launch_id) == 1,
+			"returning to the exact source session starts its original authorization once")
+		native_session, native_focus = 8, 9003
+		for _ = 1, 12 do tick(); if wf:action(launch_id) == nil then break end end
+		check_window(wf:action(launch_id) == nil and count_events("launch") == 1 and count_commands("lost", launch_id) == 0,
+			"late foreground launch result settles in the background without replay or an immediately expired deadline")
+		check(focus_changes == 0 and native_focus == 9003
+			and (mode ~= "background_adjacent" or moves == 1),
+			"late coordinator-adjacent composition preserves the selected session's actual focus")
+		return
+	end
+	if mode == "held_withdrawal" or mode == "capacity_withdrawal" then
+		wf:catalog(0)
+		local occupied = {}
+		if mode == "capacity_withdrawal" then
+			for _ = 1, 4 do
+				local queued = wf:apply("catalog"); assert(queued.ok)
+				assert(wf:apply("claim", { action_id = queued.action_id, executor = wf.origin.window_epoch }).ok)
+				table.insert(occupied, queued.action_id)
+			end
+		end
+		click("queue", { coordinator = false })
+		local worker, waiting = queued_worker, selected
+		-- Five seconds is an awake callback interval, not a suspension. Exercise the full
+		-- bounded retry policy without ten idle renders for every capacity retry.
+		for _ = 1, (if mode == "capacity_withdrawal" then 512 else 8) do
+			tick(if mode == "capacity_withdrawal" then 5000 else 500); if api.bookkeeping().held_actions == 1 then break end
+		end
+		check(api.bookkeeping().held_actions == 1 and api.bookkeeping().watched == 1
+			and wf:action(waiting).claim == nil and wf:action(waiting).request_bytes == nil and count_events("mailbox_provision") == 0,
+			mode .. ": real refused unissued work is held without native execution")
+		if mode == "capacity_withdrawal" then
+			check(count_commands("claim", waiting) == 121, "capacity hold follows all bounded real claim refusals, without skipping retries or issuing an effect")
+		end
+		hide_scope = true
+		for _ = 1, 4 do tick() end
+		check(api.bookkeeping().held_actions == 1 and api.bookkeeping().watched == 1, mode .. ": unreadable surface never proves withdrawal")
+		hide_scope = false
+		click("cancel_work", { worker_id = worker })
+		check(command_result.ok and wf:action(waiting) == nil and wf.authority.registry.dispatch.workers[worker] == nil,
+			mode .. ": the exact explicit cancellation really removes unissued ready work; " .. runtime.json.encode({
+				response = command_result, action_present = wf:action(waiting) ~= nil,
+				worker_present = wf.authority.registry.dispatch.workers[worker] ~= nil,
+				cancel_commands = count_commands("cancel_work"), notices = notices,
+			}))
+		delivery_fault = "withdrawal"
+		for _ = 1, 4 do tick() end
+		check(api.bookkeeping().held_actions == 1 and api.bookkeeping().watched == 1,
+			mode .. ": another worker's withdrawal receipt cannot reclaim the held action")
+		delivery_fault = nil
+		for _ = 1, 8 do tick() end
+		check(api.bookkeeping().held_actions == 0 and api.bookkeeping().watched == 0 and scoped_results[waiting] == nil
+			and count_events("mailbox_provision") == 0, mode .. ": correlated withdrawal reclaims held/watch/receipt bookkeeping without an effect")
+		return
+	end
+	if chained then wf:catalog(0) end
 	if chained then
-		palette_commands.continue_controller.run(table.clone(cx)) -- A fresh incarnation continues from its own palette.
 		click("queue")
-		check(wf.authority.registry.sessions[wf.origin.logical_session_id].orchestrator ~= nil and #events == 0, "chained startup reserves coordinator before native provisioning")
+		local startup_driver_result = runtime.json.encode(driver_result)
+		check((ack_mode or wf.authority.registry.sessions[wf.origin.logical_session_id].orchestrator ~= nil) and #events == 0,
+			"chained startup commits its worker and any coordinator reservation before native provisioning")
+		if stale_result_mode then
+			for _ = 1, 30 do tick(); if refused_delivery then break end end
+			check_window(refused_delivery ~= nil and result_deliveries[1].result.code == "stale_revision"
+				and wf:action(ack_id).phase == "claimed" and ack_sends == 1,
+				mode .. ": the actual native ACK publication is refused only at its captured host commit fence")
+			local reads = count_events("status")
+			if delivery_fault then
+				for _ = 1, 8 do tick() end
+				check(wf:action(ack_id).phase == "claimed" and ack_sends == 1 and count_events("status") == reads
+					and count_commands("lost", ack_id) == 0, mode .. ": lost, unrelated, wrong-kind or changed-grant evidence stays held")
+				for _, delivery in result_deliveries do
+					check(delivery.event.value == refused_delivery.event.value, mode .. ": no unconfirmed observation refreshes the original envelope")
+				end
+				delivery_fault = nil
+			end
+			for _ = 1, 24 do tick(); if wf:action(ack_id) == nil then break end end
+			local completed = result_deliveries[#result_deliveries]
+			check_window(wf:action(ack_id) == nil and completed.result.ok and ack_sends == 1
+				and count_commands("claim", ack_id) == 1 and count_commands("lost", ack_id) == 0
+				and count_events("status") > reads and not wf.authority.registry.dispatch.workers[queued_worker].receipts["1"].publish,
+				mode .. ": exact stale refusal starts a fresh retained read and drains the original ACK without another native effect")
+			check(completed.result.request_id ~= result_deliveries[1].result.request_id
+				and runtime.json.decode(completed.event.value).expected_revision > runtime.json.decode(refused_delivery.event.value).expected_revision
+				and runtime.json.decode(completed.event.value).response_bytes == runtime.json.decode(refused_delivery.event.value).response_bytes
+				and completed.event.act == refused_delivery.event.act,
+				mode .. ": fresh read produces a distinct current host observation while preserving outcome, grant and incarnation")
+			return
+		end
+		if mode == "stale_witness" then
+			for _ = 1, 12 do
+				tick()
+				if count_events("launch") == 1 then break end
+			end
+			local launch_id = selected
+			local launch = wf:action(launch_id)
+			check_window(launch ~= nil and launch.request.op == "launch" and launch.phase == "claimed"
+				and count_events("launch") == 1, "native worker launch waits for its exact SPAWN witness")
+			local grant, request = launch.claim.grant_id, clone(launch.request)
+			local witness_fields = { action_id = launch_id, grant_id = grant, spawn_namespace = "fixture-spawn",
+				claim_nonce = "native-window-stale-witness-" .. next_id() }
+			local stale = wf:event("spawn_claimed", witness_fields)
+			click("pause"); click("resume") -- Real authority progress after capture, before witness delivery.
+			local writes = wf.memory.writes
+			session:event(9001, { ev = "action", id = "main.dispatch", act = "dispatch-command", value = runtime.json.encode(stale) })
+			check(last_result.command == "spawn_claimed" and last_result.code == "stale_revision"
+				and last_result.request_id == stale.request_id and last_result.action_id == launch_id and last_result.grant_id == grant
+				and wf.memory.writes == writes and wf:action(launch_id).claim.grant_id == grant,
+				"typed exact stale witness is a positive no-write refusal, not result consumption or a replacement grant")
+			tick(); tick() -- The original driver observes the refusal before a fresh witness exists.
+			check_window(wf:action(launch_id).phase == "claimed" and wf:action(launch_id).claim.grant_id == grant
+				and count_events("launch") == 1 and count_commands("claim", launch_id) == 1 and count_commands("lost", launch_id) == 0,
+				"stale witness observation does not abandon or reissue the original native worker effect")
+			local fresh = wf:event("spawn_claimed", witness_fields)
+			check(fresh.request_id ~= stale.request_id and fresh.expected_revision > stale.expected_revision,
+				"positive refusal permits a distinct fresh witness observation, never mutation of the stale request")
+			session:event(9001, { ev = "action", id = "main.dispatch", act = "dispatch-command", value = runtime.json.encode(fresh) })
+			must(last_result.ok, last_result)
+			bridge_bytes = frame(request, "awaiting_acceptance", wf:peer_payload(wf:action(launch_id), "awaiting_acceptance", { pane_binding = {
+				pane_id = "9002", window_key = "", window_epoch = request.origin_binding.window_epoch, native_session_id = "7", window_host_id = "local" } }))
+			retained_outcomes[request.request_id] = assert(protocol.decode_response(bridge_bytes, request))
+			peer_revision += 1
+			for _ = 1, 12 do
+				tick()
+				if wf:action(launch_id) == nil then break end
+			end
+			check_window(wf:action(launch_id) == nil and last_receipt.action_id == launch_id and last_receipt.grant_id == grant
+				and launch_deliveries == 1 and count_events("launch") == 1 and count_events("mailbox_provision") == 1
+				and count_commands("claim", launch_id) == 1 and count_commands("lost", launch_id) == 0,
+				"fresh witness lets the original native launch outcome settle once without another effect, claim or lost command")
+			return
+		end
+		if mode == "scoped_poll" then
+			for _ = 1, 20 do tick(); if refused_poll then break end end
+			check_window(refused_poll ~= nil and refused_poll.action_id == nil and poll_result == refused_poll
+				and last_result.action_id ~= nil and runtime.json.encode(driver_result) == startup_driver_result,
+				"actionless refused poll survives a late completed effect in its independent volatile receipt slot")
+			for _ = 1, 4 do tick() end
+			check(#poll_commands == 1 and pending_poll == nil and ack_sends == 0,
+				"wrong request ID cannot release an actionless pending poll")
+			poll_projection_fault = "worker"
+			for _ = 1, 4 do tick() end
+			check(#poll_commands == 1 and pending_poll == nil and ack_sends == 0,
+				"wrong worker cannot release an actionless pending poll")
+			poll_projection_fault = nil
+			for _ = 1, 20 do tick(); if pending_poll then break end end
+			check_window(pending_poll ~= nil and #poll_commands == 2
+				and pending_poll.request_id ~= refused_poll.request_id and poll_commands[2].expected_revision > poll_commands[1].expected_revision
+				and last_result.action_id ~= pending_poll.action_id and poll_result == pending_poll.result
+				and runtime.json.encode(driver_result) == startup_driver_result and driver_result.request_id ~= pending_poll.request_id,
+				"consuming the exact actionless refusal releases scheduling for a distinct fresh poll, never replaying the old command")
+			local action_id, worker_id = pending_poll.action_id, pending_poll.worker_id
+			for _ = 1, 4 do tick() end
+			check(wf:action(action_id).phase == "ready" and count_commands("claim", action_id) == 0 and ack_sends == 0,
+				"wrong request correlation cannot attach the pending worker driver to an action")
+			poll_projection_fault = "worker"
+			for _ = 1, 4 do tick() end
+			check(wf:action(action_id).phase == "ready" and count_commands("claim", action_id) == 0 and ack_sends == 0,
+				"a poll receipt projected for another worker cannot attach the pending poll driver")
+			poll_projection_fault = nil -- Restore the unmodified production projection, not a new command or receipt.
+			for _ = 1, 12 do tick(); if wf:action(action_id) == nil then break end end
+			check_window(wf:action(action_id) == nil and ack_id == action_id and ack_sends == 1
+				and count_commands("claim", action_id) == 1 and count_commands("lost", action_id) == 0
+				and not wf.authority.registry.dispatch.workers[worker_id].receipts["1"].publish
+				and count_events("mailbox_provision") == 1 and count_events("launch") == 1 and launch_deliveries == 1,
+				"exact independent poll receipt resumes its worker and drains ACK once without repeating the completed launch")
+			return
+		end
 		if ack_mode then
 			for _ = 1, 20 do
 				tick()
-				if ack_id and wf:action(ack_id).response then break end
+				if ack_id and (wf:action(ack_id) == nil or wf:action(ack_id).response) then break end
 			end
-			local a = assert(wf:action(ack_id))
-			local grant, request_bytes = a.claim.grant_id, a.request_bytes
+			check(wf:action(ack_id) == nil and ack_sends == 1 and wf.authority.registry.sessions[wf.origin.logical_session_id].controller.pending_executors == 0,
+				"known ACK publication commits and releases its action before any native notification")
+			local worker = wf.authority.registry.dispatch.workers[queued_worker]
 			if mode == "ack_terminal" then
-				check(a.phase == "complete" and ack_sends == 1 and #events == 3
-					and wf.authority.registry.dispatch.workers[queued_worker].compacted_floor == 0,
-					"terminal ACK completes once without native wake or status request and without receipt")
+				check(next(worker.wakes or {}) == nil and wake_sends == 0 and worker.compacted_floor == 0,
+					"terminal publication creates no notification and is never mistaken for producer receipt")
 				return
 			end
-			check(a.phase == "claimed" and wf.authority.registry.dispatch.workers[queued_worker].accept_pending,
-				"driver retains ACK1 wake before separate semantic accept")
-			clock += 31000
-			for _ = 1, 4 do tick() end
-			check(wf:action(ack_id).phase == "claimed" and wf:action(ack_id).claim.grant_id == grant
-				and wf:action(ack_id).request_bytes == request_bytes and ack_sends == 1,
-				"busy ACK wake survives deadline using original grant without another publication")
-			deferred_outcome.payload.wake_status = if mode == "ack_uncertain" then "uncertain" else "submitted"
+			check(next(worker.wakes) ~= nil and not worker.receipts["1"].publish and wake_sends == 0,
+				"awaiting-window notification persists separately while the busy worker consumes no execution slot")
+			if worker.accept_pending then
+				local accept = wf:apply("poll", { worker_id = queued_worker }); assert(accept.ok)
+				assert(wf:action(accept.action_id).request.op == "accept")
+				assert(wf:finish(accept.action_id, "accepted").ok)
+			end
+			native_state = "idle"
+			assert(wf:apply("observe", { worker_id = queued_worker, pane_binding = worker.pane_binding, native_state = native_state }).ok)
+			click("poll")
+			for _ = 1, 20 do tick(); if wake_request then break end end
+			assert(wake_request and wake_id ~= ack_id)
+			local grant = wf:action(wake_id).claim.grant_id
+			check(wake_sends == 1 and ack_sends == 1 and wf:action(ack_id) == nil, "fresh safe idle issues one independent native-wake grant without republishing ACK")
+			deferred_outcome = assert(protocol.decode_response(frame(wake_request, if mode == "ack_uncertain" then "uncertain" else "submitted",
+				if mode == "ack_uncertain" then nil else { wake_status = "submitted", wake_effect_started = true }), wake_request))
+			peer_revision += 1
 			for _ = 1, 20 do
 				tick()
-				if wf:action(ack_id).phase ~= "claimed" then break end
+				local pending = wf:action(wake_id)
+				if pending == nil or pending.phase == "uncertain" then break end
 			end
-			check(wf:action(ack_id).phase == (if mode == "ack_uncertain" then "uncertain" else "complete")
-				and wf:action(ack_id).claim.grant_id == grant and ack_sends == 1,
-				"ACK status settles or retains uncertainty under original grant without repeat effect")
+			local remaining = wf:action(wake_id)
+			check((if mode == "ack_uncertain" then remaining ~= nil and remaining.phase == "uncertain" and remaining.claim.grant_id == grant else remaining == nil)
+				and wake_sends == 1 and ack_sends == 1, "notification readback either settles or retains exact uncertainty; neither publication nor native ask repeats")
+			worker = wf.authority.registry.dispatch.workers[queued_worker]
+			check(worker.compacted_floor == 0 and not worker.receipts["1"].publish, "notification outcome is never forged producer consumption")
 			if mode == "ack_uncertain" then
-				tick() -- Observe the committed uncertain receipt and stop automatic continuation.
-				click("reconcile")
-				for _ = 1, 2 do tick() end
-				check(ack_sends == 1 and wf:action(ack_id).phase == "uncertain"
-					and wf.authority.registry.dispatch.workers[queued_worker].receipts["1"].publish,
-					"read-only uncertain ACK reconciliation never resends publication or clears outbox")
-			else
-				check(wf.authority.registry.dispatch.workers[queued_worker].compacted_floor == 0
-					and not wf.authority.registry.dispatch.workers[queued_worker].receipts["1"].publish,
-					"submitted ACK ask is queued evidence only, never producer consumption")
-			end
+				check(next(worker.wakes) ~= nil and wf:apply("retry", { action_id = wake_id }).code == "retry_refused", "uncertain native wake remains live and cannot blind retry")
+			else check(next(worker.wakes) == nil, "submitted native wake removes its completed notification obligation") end
 			return
 		end
 		if mode == "late" then
@@ -1276,10 +2984,17 @@ local function window_consumer(mode)
 			local provision_grant = wf:action(provision_id).claim.grant_id
 			check(events[2].op == "status" and wf:action(provision_id).phase == "claimed", "pending provision has a correlated retained-status response waiting")
 			clock += 31000; tick() -- Callback arrives after a long gap (host suspension) with status-found evidence already available.
-			check(wf:action(provision_id).phase == "complete" and last_receipt.grant_id == provision_grant
+			check(wf:action(provision_id) == nil and last_receipt.grant_id == provision_grant
 				and wf.authority.registry.dispatch.workers[queued_worker].phase == "provisioned", "late timer consumes conclusive status-found provisioning before considering timeout")
-			tick(); tick()
-			local launch_grant = wf:action(selected).claim.grant_id
+			hold_results = true
+			local launch_id = wf.authority.registry.dispatch.workers[queued_worker].launch_action_id
+			for _ = 1, 8 do
+				tick()
+				local launch = wf:action(launch_id)
+				if launch and launch.claim and count_events("launch") == 1 then break end
+			end
+			local launch_grant = assert(wf:action(launch_id)).claim.grant_id
+			hold_results = false
 			clock += 31000; tick(); tick() -- The direct rejection is also retained across a delayed callback after a gap.
 			check(last_receipt.grant_id == launch_grant and launch_deliveries == 1, "late direct rejection is committed under its original launch grant")
 			check(#events == 3 and events[1].op == "mailbox_provision" and events[2].op == "status" and events[3].op == "launch", "late outcomes never repeat provisioning or launch")
@@ -1288,8 +3003,12 @@ local function window_consumer(mode)
 			local provision = wf:action(selected)
 			assert(wf:apply("lost", { action_id = selected, executor = provision.claim.executor, grant_id = provision.claim.grant_id }).ok)
 			click("reconcile")
-			for _ = 1, 5 do tick() end
-			check(#events == 2 and events[1].op == "mailbox_provision" and events[2].op == "launch" and launch_deliveries == 1,
+			for _ = 1, 12 do
+				tick()
+				if launch_deliveries == 1 then break end
+			end
+			check_window(count_events("mailbox_provision") == 1 and count_events("launch") == 1
+				and count_events("status") == 1 and launch_deliveries == 1,
 				"read-only reconciliation never reexecutes provisioning and does not suppress the separately granted first launch")
 		elseif mode == "refused_chain" then
 			for _ = 1, 10 do
@@ -1303,10 +3022,12 @@ local function window_consumer(mode)
 			check(command_result.code == "orchestrator_slot_occupied" and selected == first_action,
 				"second operator start refuses without replacing original active action")
 			tick(); tick()
-			check(command_result.request_id == refusal_id and command_result.code == "orchestrator_slot_occupied"
-				and wf:action(first_action).phase == "complete" and last_receipt.grant_id == grant,
-				"failed second start preserves captured delivery and refusal while original grant settles")
-			check(#events == 2 and launch_deliveries == 2, "failed second start never resends either original SPAWN effect")
+			check_window(command_result.request_id == refusal_id and command_result.code == "orchestrator_slot_occupied"
+				and wf:action(first_action) ~= nil and wf:action(first_action).claim.grant_id == grant
+				and last_result.code == "stale_revision",
+				"failed second start preserves its refusal and original grant when the immutable lost observation becomes stale")
+			check(count_events("mailbox_provision") == 1 and count_events("launch") == 1 and launch_deliveries == 2,
+				"failed second start never resends either original SPAWN effect")
 		elseif mode == "auto_reconcile_worker" then
 			tick(); tick(); tick()
 			local provision_id = selected
@@ -1316,16 +3037,17 @@ local function window_consumer(mode)
 			check(wf:action(provision_id).phase == "uncertain" and count_commands("lost", provision_id) == 1,
 				"awake effect deadline leaves provisioning uncertain and pins its worker")
 			deferred_outcome = held_success -- SPAWN's retained registry now holds the definitive outcome.
+			peer_revision += 1
 			for _ = 1, 8 do
 				clock += 1000; tick()
-				if wf:action(provision_id).phase ~= "uncertain" then break end
+				if wf:action(provision_id) == nil or wf:action(provision_id).phase ~= "uncertain" then break end
 			end
-			check(wf:action(provision_id).phase == "complete" and wf.authority.registry.dispatch.workers[queued_worker].phase == "provisioned",
+			check(wf:action(provision_id) == nil and wf.authority.registry.dispatch.workers[queued_worker].phase == "provisioned",
 				"automatic read-only reconciliation settles the worker's definitive outcome without the owner")
 			for _ = 1, 8 do
 				tick()
 				local launch = wf:action(wf.authority.registry.dispatch.workers[queued_worker].launch_action_id)
-				if launch_deliveries == 1 and launch and launch.phase == "complete" then break end
+				if launch_deliveries == 1 and launch == nil then break end
 			end
 			check(count_events("mailbox_provision") == 1 and count_events("launch") == 1 and count_commands("claim", provision_id) == 1
 				and count_commands("lost", provision_id) == 1, "automatic reconciliation never re-claims or re-executes provisioning; the separate launch runs once")
@@ -1333,13 +3055,78 @@ local function window_consumer(mode)
 			-- The lost launch delivery is replayed after 1 s of awake backoff (two ticks), not on the next
 			-- tick; the extra ticks after settlement also show no SPAWN effect is ever repeated.
 			for _ = 1, 12 do tick() end
-			check(#events == 2 and events[1].op == "mailbox_provision" and events[2].op == "launch" and launch_deliveries == 2, "provision-to-launch chain performs each SPAWN effect once despite a lost host result")
+			check(count_events("mailbox_provision") == 1 and count_events("launch") == 1 and launch_deliveries == 3,
+				"provision-to-launch chain performs each effect once and freshly observes the positively refused stale delivery")
+		end
+		if mode == "chain" or mode == "refused_chain" then
+			local launch_id = selected
+			local launch = wf:action(launch_id)
+			local grant = if launch then launch.claim.grant_id else last_receipt.grant_id
+			if launch then
+				check_window(launch.phase == "claimed" and last_result.code == "stale_revision",
+					"genuine intervening control progress refuses the immutable observation without consuming its launch")
+			end
+			for _ = 1, 12 do
+				tick()
+				if wf:action(launch_id) == nil then break end
+			end
+			check_window(wf:action(launch_id) == nil and last_receipt.grant_id == grant
+				and launch_deliveries == 3 and count_events("status") == 1
+				and count_events("mailbox_provision") == 1 and count_events("launch") == 1
+				and count_commands("claim", launch_id) == 1 and count_commands("lost", launch_id) == 0,
+				"fresh retained read settles the same launch grant and rejection without an owner reclick, re-claim, timeout or effect replay")
 		end
 		local worker = wf.authority.registry.dispatch.workers[queued_worker]
-		check(wf:action(worker.launch_action_id).phase == "complete" and worker.phase == "held" and worker.reason.code == "binding_mismatch"
+		check_window(wf:action(worker.launch_action_id) == nil and worker.phase == "held" and worker.reason.code == "binding_mismatch"
 			and last_result.code == "bridge_rejected", "observed launch rejection commits precise prerequisite instead of timing out as uncertainty")
 		check(wf.authority.registry.sessions[wf.origin.logical_session_id].controller.pending_executors == 0
 			and wf.authority.registry.sessions[wf.origin.logical_session_id].orchestrator ~= nil, "rejection settles only its executor and retains coordinator reservation")
+		return
+	end
+	if mode == "background_settlement" then
+		click("catalog"); tick(); tick(); tick()
+		local first = selected
+		check(wf:action(first).phase == "claimed" and catalog_sends == 1, "captured catalog owns exactly one issued effect before selection changes")
+		native_session, native_focus = 8, 9003
+		check(api.owned_origin(cx, 9001, wf.origin), "native ownership survives selecting another same-window session")
+		for _, field in { "window_key", "window_epoch", "window_host_id", "native_session_id", "owner_id", "owner_generation", "host_pane_id", "alias_nonce" } do
+			local wrong = clone(wf.origin)
+			wrong[field] = if field == "owner_generation" then wrong[field] + 1 else "wrong-" .. tostring(wrong[field])
+			check(not api.owned_origin(cx, 9001, wrong), "background source rejects exact captured " .. field)
+		end
+		check(not api.owned_origin(cx, 9003, wf.origin), "another pane in the selected session is not the captured source")
+		panes[9001].tab = 3
+		check(not api.owned_origin(cx, 9001, wf.origin), "moving the source into another native session refuses background authority")
+		panes[9001].tab = 1
+		deferred_outcome = held_success; peer_revision += 1
+		for _ = 1, 16 do tick(); if wf:action(first) == nil and api.bookkeeping().watched == 0 then break end end
+		check_window(wf:action(first) == nil and catalog_sends == 1,
+			"retained exact owned effect settles while another same-window session is selected, without effect replay")
+		-- No window driver exists for this new host-authorized ready action: schedule
+		-- must discover its nonselected owned source itself.
+		local queued = wf:apply("catalog"); assert(queued.ok)
+		selected = queued.action_id; last_result = queued; scoped_results[selected] = { result = queued }
+		for _ = 1, 6 do tick(); if catalog_sends == 2 then break end end
+		check(catalog_sends == 2 and wf:action(selected).phase == "claimed",
+			"owned-source scheduling discovers an authorized ready action outside the selected session")
+		deferred_outcome = held_success; peer_revision += 1
+		for _ = 1, 16 do tick(); if wf:action(selected) == nil then break end end
+		check_window(wf:action(selected) == nil and catalog_sends == 2, "background-discovered action settles exactly once")
+		local pauses = count_commands("pause")
+		click("pause")
+		check(intent == nil and count_commands("pause") == pauses, "human intent observed after native selection changed is refused and consumed, not deferred")
+		native_session = 7; api.intents(cx)
+		check(count_commands("pause") == pauses and native_focus == 9003 and focus_changes == 0,
+			"returning to the source session never replays its refused human intent or mutates focus")
+		click("close_session")
+		assert(delayed_pick, "close confirmation is a real captured native picker callback")
+		local writes = wf.memory.writes
+		local session_before = quota.digest(wf.authority.registry.sessions[wf.origin.logical_session_id])
+		native_session = 8
+		delayed_pick.callback(delayed_pick.choice, nil, table.clone(cx))
+		check(wf.memory.writes == writes and quota.digest(wf.authority.registry.sessions[wf.origin.logical_session_id]) == session_before
+			and native_focus == 9003 and focus_changes == 0,
+			"fresh native callback after selection changes refuses human confirmation without mutating the source or focus")
 		return
 	end
 	if mode == "window_bookkeeping" then
@@ -1353,12 +3140,13 @@ local function window_consumer(mode)
 		check(wf:action(first).phase == "claimed" and api.bookkeeping().executed == 1 and catalog_sends == 1,
 			"pruning never drops the marker of a still-claimed effect and nothing is re-sent")
 		deferred_outcome = held_success
+		peer_revision += 1
 		for _ = 1, 12 do
 			tick()
-			if wf:action(first).phase == "complete" and api.bookkeeping().watched == 0 then break end
+			if wf:action(first) == nil and api.bookkeeping().watched == 0 then break end
 		end
 		local kept = api.bookkeeping()
-		check(wf:action(first).phase == "complete" and kept.executed == 0 and kept.watched == 0 and kept.auto_reconcile == 0 and catalog_sends == 1,
+		check(wf:action(first) == nil and kept.executed == 0 and kept.watched == 0 and kept.auto_reconcile == 0 and catalog_sends == 1,
 			"a settled action releases its window bookkeeping without repeating its effect")
 		return
 	end
@@ -1371,12 +3159,19 @@ local function window_consumer(mode)
 		check(wf:action(first).phase == "claimed" and count_commands("lost") == 0 and #notices == 0,
 			"a host suspension between ticks is not awake time and never expires the effect deadline")
 		deferred_outcome = held_success
-		for _ = 1, 4 do tick(); if dropped_delivery then break end end
+		peer_revision += 1
+		-- Pending status is polled every five wall-clock seconds, not every callback after wake.
+		for _ = 1, 4 do clock += 1500; tick(); if dropped_delivery then break end end
 		check(dropped_delivery and wf:action(first).phase == "claimed", "SPAWN's outcome after wake is captured once; its first host event is lost")
 		clock += 3600000; tick() -- Another suspension before the commit receipt is observed.
 		tick()
-		check(wf:action(first).phase == "complete" and last_result.code == "bridge_committed" and count_commands("lost") == 0 and catalog_sends == 1,
-			"the captured observation replays across a suspension instead of expiring its receipt deadline; no effect repeats")
+		if last_result.code == "stale_revision" then
+			check(wf:action(first).phase == "claimed" and count_commands("lost") == 0 and catalog_sends == 1,
+				"a real control commit during suspension keeps the refused immutable observation's grant live")
+			for _ = 1, 20 do tick(); if wf:action(first) == nil then break end end
+		end
+		check(wf:action(first) == nil and last_result.code == "bridge_committed" and count_commands("lost") == 0 and catalog_sends == 1,
+			"the retained outcome settles after suspension without deadline expiry or repeated effects; exact stale refusal permits a distinct fresh read")
 		-- The replay now lands one tick later (1 s awake backoff), so the window has not yet read its
 		-- receipt. Let it do so before the next catalog compacts this settled read: the real host keeps
 		-- the scope through retained.completed (see callbacks), but this fixture's surface does not.
@@ -1386,16 +3181,17 @@ local function window_consumer(mode)
 		for _ = 1, 6 do clock += 4000; tick() end
 		check(second ~= first and wf:action(second).phase == "claimed" and count_commands("lost", second) == 0, "awake time below the effect deadline keeps waiting")
 		clock += 4000; tick()
-		check(wf:action(second).phase == "uncertain" and count_commands("lost", second) == 1 and catalog_sends == 2
-			and notice:find("after the effect deadline", 1, true) ~= nil, "awake time still expires the effect deadline into retained uncertainty")
+		check(wf:action(second).phase == "uncertain" and count_commands("lost", second) == 1 and catalog_sends == 2,
+			"awake time still expires the effect deadline into retained uncertainty")
 		click("catalog"); tick(); tick(); tick()
 		local third = selected
 		for _ = 1, 5 do clock += 4000; tick() end
 		deferred_outcome = held_success -- SPAWN completes; its status answer becomes visible only on the expiring turn.
+		peer_revision += 1
 		clock += 4000; tick()
 		check(wf:action(third).phase == "claimed" and count_commands("lost", third) == 0, "awake time just below the deadline still waits for the retained outcome")
 		clock += 4000; tick() -- The awake deadline elapses on this turn.
-		check(wf:action(third).phase == "complete" and last_result.code == "bridge_committed" and count_commands("lost", third) == 0 and catalog_sends == 3,
+		check(wf:action(third) == nil and last_result.code == "bridge_committed" and count_commands("lost", third) == 0 and catalog_sends == 3,
 			"a conclusive outcome visible on the expiring turn is consumed before the awake deadline applies; no effect repeats")
 		return
 	end
@@ -1417,15 +3213,21 @@ local function window_consumer(mode)
 			for _, id in { first, second } do
 				local request_id = wf:action(id).request.request_id
 				retained_outcomes[request_id] = successes[request_id] -- SPAWN's registry now holds both definitive outcomes.
+				peer_revision += 1
 			end
 			for _ = 1, 40 do
 				clock += 1500; tick()
-				if wf:action(first).phase == "complete" and wf:action(second).phase == "complete" then break end
+				if wf:action(first) == nil and wf:action(second) == nil then break end
 			end
-			check(wf:action(first).phase == "complete" and wf:action(second).phase == "complete",
+			check(wf:action(first) == nil and wf:action(second) == nil,
 				"every uncertain read-only action is reconciled automatically, independent of selection")
 			check(catalog_sends == 2 and count_commands("claim", first) == 1 and count_commands("claim", second) == 1
 				and count_commands("lost", first) == 1 and count_commands("lost", second) == 1, "read-only reconciliation never re-claims or re-executes either read")
+			assert(wf:control("reconcile_session").ok)
+			for _ = 1, 12 do tick() end
+			local kept = api.bookkeeping()
+			check(kept.executed == 0 and kept.watched == 0 and kept.auto_reconcile == 0 and catalog_sends == 2,
+				"simultaneously completed scopes lost before one-watch pruning reclaim through the authenticated settled floor")
 			return
 		end
 		if mode == "auto_reconcile_bounded" then
@@ -1433,15 +3235,11 @@ local function window_consumer(mode)
 			check(count_events("status") == reads + 4 and wf:action(first).phase == "uncertain", "exactly four bounded automatic reads, each finding SPAWN still pending")
 			check(catalog_sends == 1 and count_commands("claim", first) == 1 and count_commands("lost", first) == 1,
 				"automatic reads never re-claim, re-execute or re-mark the effect")
-			local exhausted = false
-			for _, message in notices do
-				if message:find("Automatic read-only reconciliation found no definitive", 1, true) then exhausted = true end
-			end
-			check(exhausted, "exhausted automatic reads tell the owner and leave the owner control")
 			deferred_outcome = held_success
+			peer_revision += 1
 			click("reconcile")
 			for _ = 1, 4 do tick() end
-			check(wf:action(first).phase == "complete" and catalog_sends == 1 and count_commands("claim", first) == 1,
+			check(wf:action(first) == nil and catalog_sends == 1 and count_commands("claim", first) == 1,
 				"the owner's read-only control still settles the retained outcome without another effect")
 			return
 		end
@@ -1449,22 +3247,24 @@ local function window_consumer(mode)
 		check(count_events("status") == reads + 1 and wf:action(first).phase == "uncertain",
 			"one automatic status read finds SPAWN still pending and leaves the action uncertain")
 		deferred_outcome = held_success
+		peer_revision += 1
 		for _ = 1, 10 do
 			clock += 1000; tick()
-			if wf:action(first).phase ~= "uncertain" then break end
+			if wf:action(first) == nil or wf:action(first).phase ~= "uncertain" then break end
 		end
-		check(wf:action(first).phase == "complete" and last_result.code == "bridge_committed", "a later automatic read settles the definitive completed outcome")
+		check(wf:action(first) == nil and last_result.code == "bridge_committed", "a later automatic read settles the definitive completed outcome")
 		check(catalog_sends == 1 and count_events("status") == reads + 2 and count_commands("claim", first) == 1 and count_commands("lost", first) == 1,
 			"automatic reconciliation reads once per attempt and never re-claims or re-executes")
 		tick()
 		local second = uncertain_catalog()
 		local request = wf:action(second).request
-		deferred_outcome = dispatch.decode_response(frame(request, "rejected", nil, { code = "binding_mismatch", message = "SPAWN refused before any effect" }), request)
+		deferred_outcome = protocol.decode_response(frame(request, "rejected", nil, { code = "binding_mismatch", message = "SPAWN refused before any effect" }), request)
+		peer_revision += 1
 		for _ = 1, 6 do
 			clock += 1000; tick()
-			if wf:action(second).phase ~= "uncertain" then break end
+			if wf:action(second) == nil or wf:action(second).phase ~= "uncertain" then break end
 		end
-		check(wf:action(second).phase == "complete" and last_result.code == "bridge_rejected" and catalog_sends == 2 and count_commands("claim", second) == 1,
+		check(wf:action(second) == nil and last_result.code == "bridge_rejected" and catalog_sends == 2 and count_commands("claim", second) == 1,
 			"automatic reconciliation settles a definitive failed outcome exactly as the owner control would")
 		return
 	end
@@ -1483,7 +3283,8 @@ local function window_consumer(mode)
 		tick(); tick()
 		check(count_events("status") == reads + 1 and wf:action(id).phase == "uncertain" and count_commands("retry") == 0,
 			"a pending automatic read is no pre-effect evidence; the uncertain action is not retried")
-		deferred_outcome = dispatch.decode_response(frame(request, "uncertain", nil, { code = "target_unavailable", message = "Native effect outcome uncertain; do not retry" }), request)
+		deferred_outcome = protocol.decode_response(frame(request, "uncertain", nil, { code = "target_unavailable", message = "Native effect outcome uncertain; do not retry" }), request)
+		peer_revision += 1
 		for _ = 1, 20 do
 			clock += 1000; tick()
 			if wf:action(id).response ~= nil then break end
@@ -1492,23 +3293,50 @@ local function window_consumer(mode)
 		check(wf:action(id).phase == "uncertain" and wf:action(id).response.status == "uncertain" and count_commands("retry") == 0 and catalog_sends == 1,
 			"a committed uncertain outcome stays uncertain and is never retried automatically")
 		-- SPAWN's challenge expired unconsumed: its status read is definitive pre-effect evidence.
-		deferred_outcome = dispatch.decode_response(frame(request, "full", { resource = "window_authorization", current = 1, limit = 1, retryable = true, effect_started = false }), request)
+		deferred_outcome = protocol.decode_response(frame(request, "full", { resource = "window_authorization", current = 1, limit = 1, retryable = true, effect_started = false }), request)
+		peer_revision += 1
 		for _ = 1, 40 do
 			clock += 1000; tick()
-			if wf:action(id).phase ~= "uncertain" then break end
+			if wf:action(id) == nil or wf:action(id).phase ~= "uncertain" then break end
 		end
-		check(wf:action(id).phase == "backpressure" and last_result.code == "backpressure" and count_commands("retry") == 0 and catalog_sends == 1,
+		check_window(wf:action(id).phase == "backpressure" and last_result.code == "backpressure" and count_commands("retry") == 0 and catalog_sends == 1,
 			"the automatic read commits expired-authorization evidence on the uncertain action as retryable backpressure")
 		for _ = 1, 6 do tick() end -- 3 s awake: inside the recheck backoff.
 		check(count_commands("retry") == 0 and wf:action(id).phase == "backpressure", "no automatic recheck inside its awake backoff")
 		for _ = 1, 24 do
 			tick()
-			if wf:action(id).phase == "complete" then break end
+			if selected ~= id and wf:action(selected) == nil and last_result.code == "bridge_committed" then break end
 		end
-		check(count_commands("retry", id) == 1 and count_commands("claim", id) == 2 and catalog_sends == 2 and wf:action(id).phase == "complete"
-			and last_result.code == "bridge_committed", "after its backoff the exact request is rechecked once under a fresh grant and settles")
-		check(count_commands("lost", id) == 1 and wf:action(id).request_bytes == request_bytes and wf:action(id).retry_count == 1,
-			"the recheck reuses the same immutable action and is not marked lost again")
+		check(selected ~= id and count_commands("retry", id) == 1 and count_commands("claim", id) == 1
+			and count_commands("claim", selected) == 1 and catalog_sends == 2 and wf:action(id) == nil and wf:action(selected) == nil
+			and last_result.code == "bridge_committed", "backoff retry creates one fresh action/serial, claims once and consumes both completed attempts")
+		check(count_commands("lost", id) == 1 and events[1].bytes ~= events[2].bytes,
+			"recheck never reuses the old issued catalog request bytes or marks its successor lost")
+		return
+	end
+	if mode == "consumed_scope" then
+		click("catalog")
+		local waiting = selected
+		for _ = 1, 20 do tick(); if scoped_commit then break end end
+		assert(scoped_commit and wf:action(waiting) == nil and scoped_results[waiting] == nil)
+		for _ = 1, 8 do tick() end
+		check(api.bookkeeping().executed == 1 and api.bookkeeping().watched == 1,
+			"another authority's settled floor never reclaims this consumed but unacknowledged grant marker")
+		settlement_fault = false
+		local control = wf.authority.registry.sessions[wf.origin.logical_session_id]
+		local covered = control.request_floor > scoped_commit.request_serial or (control.bridge_control and control.bridge_control.request.settled_before > scoped_commit.request_serial)
+		check((host_deliveries > 1 or covered) and catalog_sends == 1 and count_commands("lost") == 0,
+			"missing scoped receipt either remains pending or settles only with positive current control coverage, never by absence")
+		assert(wf:control("reconcile_session").ok)
+		check(wf.authority.registry.sessions[wf.origin.logical_session_id].request_floor > scoped_commit.request_serial,
+			"real canonical reconcile confirms consumed coverage for the exact namespace/session/admission")
+		local deliveries = host_deliveries
+		for _ = 1, 12 do tick() end
+		check(host_deliveries == deliveries and catalog_sends == 1 and count_commands("claim", waiting) == 1 and count_commands("lost") == 0,
+			"root confirmed peer floor settles the missing scoped delivery without another receipt, replay or effect")
+		check(scoped_results[waiting] == nil and wf:action(waiting) == nil, "positive coverage needs no completed action or receipt history")
+		check(api.bookkeeping().executed == 0 and api.bookkeeping().watched == 0,
+			"confirmed settled-before floor reclaims receipt-less grant markers, not only explicit consumed holes")
 		return
 	end
 	if mode == "capacity_resume" then
@@ -1529,14 +3357,80 @@ local function window_consumer(mode)
 		assert(wf:apply("lost", { action_id = occupied[1], executor = grant.executor, grant_id = grant.grant_id }).ok)
 		for _ = 1, 20 do
 			tick()
-			if wf:action(waiting).phase == "complete" then break end
+			if wf:action(waiting) == nil then break end
 		end
-		check(wf:action(waiting).phase == "complete" and catalog_sends == 1 and count_events("catalog") == 1,
+		check(wf:action(waiting) == nil and catalog_sends == 1 and count_events("catalog") == 1,
 			"an uncertain read-only catalog frees its slot and the refused claim resumes automatically, executing once")
 		local relaunched = 0
 		for _, id in occupied do relaunched += count_commands("claim", id) end
 		check(relaunched == 0 and wf:action(occupied[1]).phase == "uncertain",
 			"capacity resume only re-claims never-granted ready work; the uncertain read is never claimed or executed again")
+		return
+	end
+	if mode == "stale_claim" then
+		lag_claims = true
+		click("catalog")
+		local waiting = selected
+		for _ = 1, 6 do tick() end
+		check(#lagged == 1 and wf:action(waiting).phase == "ready" and catalog_sends == 0,
+			"an unanswered background claim creates no grant, effect or replacement claim")
+		local captured = lagged[1]
+		local original = runtime.json.decode(captured.value)
+		click("pause"); click("resume")
+		for _ = 1, 6 do tick() end
+		check(#lagged == 1 and wf:action(waiting).phase == "ready" and catalog_sends == 0
+			and captured.value == lagged[1].value and original.expected_revision < wf.authority.registry.revision,
+			"authority progress alone never refreshes an unanswered immutable claim")
+		local unrelated = wf:event("claim", { action_id = waiting, executor = original.executor,
+			expected_revision = original.expected_revision })
+		local writes = wf.memory.writes
+		lag_claims = false
+		session:event(9001, { ev = "action", id = captured.id, act = captured.act, value = runtime.json.encode(unrelated) })
+		lag_claims = true
+		check(last_result.code == "stale_revision" and last_result.request_id ~= original.request_id and wf.memory.writes == writes,
+			"unrelated stale claim refusal is genuine but cannot acknowledge the pending claim")
+		for _ = 1, 4 do tick() end
+		check(#lagged == 1 and wf:action(waiting).phase == "ready" and catalog_sends == 0,
+			"an unrelated stale receipt does not clear the pending claim or authorize a fresh claim")
+		writes = wf.memory.writes
+		lag_claims = false
+		session:event(9001, captured)
+		check(last_result.command == "claim" and last_result.code == "stale_revision" and last_result.grant_id == nil
+			and last_result.request_id == original.request_id and last_result.action_id == waiting
+			and wf.memory.writes == writes and wf:action(waiting).phase == "ready",
+			"exact positively refused background claim creates no grant and preserves its captured bytes")
+		local attempts = #claim_attempts
+		for _ = 1, 12 do
+			tick()
+			if wf:action(waiting) == nil then break end
+		end
+		local fresh = claim_attempts[attempts + 1]
+		check_window(#claim_attempts == attempts + 1 and fresh ~= nil and fresh.request.request_id ~= original.request_id
+			and fresh.request.authority_namespace == original.authority_namespace
+			and fresh.request.expected_revision == fresh.revision and fresh.request.expected_revision > original.expected_revision
+			and fresh.request.action_id == waiting and wf:action(waiting) == nil
+			and catalog_sends == 1 and host_deliveries == 1 and last_result.code == "bridge_committed"
+			and count_commands("lost", waiting) == 0 and captured.value == lagged[1].value,
+			"exact stale refusal permits one distinct current-fence claim and one grant/effect/settlement without rewriting the original")
+		tick() -- Let the first completed delivery settle before the independent negative case.
+		lag_claims = true; lagged = {}
+		click("catalog")
+		local held_id = selected
+		for _ = 1, 6 do tick() end
+		check(#lagged == 1 and wf:action(held_id).phase == "ready", "second unanswered claim is captured independently")
+		local pending = runtime.json.decode(lagged[1].value)
+		click("pause"); click("resume")
+		local wrong_command = wf:event("catalog", { request_id = pending.request_id, action_id = held_id,
+			expected_revision = pending.expected_revision })
+		writes = wf.memory.writes
+		session:event(9001, { ev = "action", id = lagged[1].id, act = lagged[1].act, value = runtime.json.encode(wrong_command) })
+		check(last_result.command == "catalog" and last_result.code == "stale_revision" and last_result.grant_id == nil
+			and last_result.request_id == pending.request_id and wf.memory.writes == writes,
+			"same-ID wrong-command stale receipt is a genuine no-write refusal, not a claim answer")
+		for _ = 1, 12 do tick() end
+		check(#lagged == 1 and wf:action(held_id).phase == "ready" and wf:action(held_id).claim == nil
+			and catalog_sends == 1 and count_commands("lost", held_id) == 0,
+			"wrong-command correlation never authorizes a replacement claim, grant or native effect")
 		return
 	end
 	if mode == "duplicate_claim" then
@@ -1545,17 +3439,20 @@ local function window_consumer(mode)
 		click("catalog")
 		local waiting = selected
 		for _ = 1, 6 do tick() end -- 3 s awake before the host processes the first claim.
-		check(#lagged >= 1 and #lagged <= 3, "a claim in flight is re-sent only with backoff, not on every tick")
+		check(#lagged == 1, "a lost claim response is observed, never resent under a refreshed revision")
 		lag_claims = false
 		local queued = lagged; lagged = {}
 		for _, ev in queued do session:event(9001, ev) end -- The host catches up in order.
-		check(#queued >= 2 and wf:action(waiting).phase == "claimed" and last_result.code == "effect_already_claimed" and not last_result.ok,
-			"the first claim is granted and the visible result is the duplicate's refusal")
+		check(#queued == 1 and wf:action(waiting).phase == "claimed" and last_result.code == "effect_granted", "the original delayed claim grants one effect")
+		local grant, writes = wf:action(waiting).claim.grant_id, wf.memory.writes
+		session:event(9001, queued[1])
+		check(last_result.code == "stale_revision" and wf.memory.writes == writes and wf:action(waiting).claim.grant_id == grant,
+			"an explicitly replayed old claim keeps its original fence and cannot obtain another grant")
 		for _ = 1, 10 do
 			tick()
-			if wf:action(waiting).phase == "complete" then break end
+			if wf:action(waiting) == nil then break end
 		end
-		check(wf:action(waiting).phase == "complete" and catalog_sends == 1 and count_commands("lost") == 0 and last_result.code == "bridge_committed",
+		check_window(wf:action(waiting) == nil and catalog_sends == 1 and count_commands("lost") == 0 and last_result.code == "bridge_committed",
 			"a duplicate claim refusal neither holds nor strands the claimed action; the driver executes it once and completes")
 		return
 	end
@@ -1565,6 +3462,7 @@ local function window_consumer(mode)
 		local waiting = selected
 		for _ = 1, 10 do tick(); if held_results > 0 then break end end
 		check(held_results == 1 and catalog_sends == 1 and wf:action(waiting).phase == "claimed", "SPAWN's outcome is captured and delivered to the host once")
+		click("pause") -- A real intervening owner commit must not refresh the captured result's fence.
 		for _ = 1, 120 do tick() end -- 60 s awake with the host commit receipt still pending.
 		check(held_results <= 9, "receipt-pending replays back off instead of repeating every tick")
 		check(count_commands("lost", waiting) == 0 and #notices == 0 and wf:action(waiting).phase == "claimed",
@@ -1572,11 +3470,16 @@ local function window_consumer(mode)
 		hold_results = false
 		for _ = 1, 40 do
 			tick()
-			if wf:action(waiting).phase == "complete" then break end
+			if last_result.code == "stale_revision" then break end
 		end
-		check(wf:action(waiting).phase == "complete" and catalog_sends == 1 and count_commands("lost", waiting) == 0 and last_result.code == "bridge_committed",
-			"the next backed-off replay commits the captured outcome once the host catches up; no effect repeats")
-		tick() -- The window reads its receipt before the next catalog compacts this settled read (see suspend).
+		check(last_result.code == "stale_revision" and wf:action(waiting).phase == "claimed"
+			and catalog_sends == 1 and count_commands("lost", waiting) == 0,
+			"the delayed immutable envelope is refused after intervening commits; its grant remains live and no effect repeats")
+		for _ = 1, 20 do tick(); if wf:action(waiting) == nil then break end end
+		check(wf:action(waiting) == nil and catalog_sends == 1 and count_commands("claim", waiting) == 1
+			and count_commands("lost", waiting) == 0 and last_result.code == "bridge_committed",
+			"a fresh automatic retained-outcome read settles the original grant without refreshing or replaying its effect")
+		tick()
 		-- Still bounded: a host that renders no progress at all eventually leaves retained uncertainty.
 		hold_results = true
 		local delivered = held_results
@@ -1600,22 +3503,26 @@ local function window_consumer(mode)
 		check(last_result.code == "backpressure", "native full response reaches explicit backpressure state")
 		local previous_grant = wf:action(selected).claim.grant_id
 		click("retry"); tick(); tick()
-		check(wf:action(selected).phase == "claimed" and wf:action(selected).claim.grant_id ~= previous_grant
-			and #events == 2 and events[2].bytes == events[1].bytes, "real window resubmits exact request once for a fresh grant")
+		check_window(wf:action(selected).phase == "claimed" and wf:action(selected).claim.grant_id ~= previous_grant
+			and #events == 2 and events[2].bytes ~= events[1].bytes, "real window uses a fresh request/action/serial for the proven pre-effect retry")
 		tick()
 		check(events[3].op == "status" and wf:action(selected).phase == "claimed", "old full surface cannot settle new grant before fresh ordered status")
 		tick()
 	end
-	check(wf:action(selected).phase == "complete" and last_result.code == "bridge_committed", "real window consumer commits conclusive catalog without ambiguous occupancy")
+	check(wf:action(selected) == nil and last_result.code == "bridge_committed", "real window consumer commits conclusive catalog without ambiguous occupancy")
 end
-for _, mode in { "oversize", "retry", "chain", "late", "reconcile_chain", "refused_chain", "ack", "ack_uncertain", "ack_terminal",
+for _, mode in { "oversize", "retry", "chain", "late", "reconcile_chain", "refused_chain", "ack", "ack_uncertain", "ack_terminal", "stale_witness", "scoped_poll",
 	"suspend", "auto_reconcile", "auto_reconcile_bounded", "auto_reconcile_worker", "auto_reconcile_all", "capacity_resume", "expired_authorization",
-	"duplicate_claim", "slow_receipt", "window_bookkeeping" } do
+	"duplicate_claim", "stale_claim", "slow_receipt", "window_bookkeeping", "background_settlement", "foreground_bootstrap", "background_launch", "background_adjacent", "stale_intent", "consumed_scope",
+	"stale_result", "stale_result_lost", "stale_result_unrelated", "stale_result_kind", "stale_result_grant", "stale_result_grant_change",
+	"held_withdrawal", "capacity_withdrawal" } do
 	if section == nil or section == mode then window_consumer(mode) end
 end
 -- Each retirement section is independently runnable under the existing native callback budget.
-local function retirement_fixture()
-	local f = fixture(); local id = f:accepted(true)
+local function retirement_fixture(clock, unstarted_project)
+	local f = fixture(clock)
+	if unstarted_project then f.default_project = f:project("Coordinator only — START withheld", false) end
+	local id = f:accepted(true)
 	function f:worker() return self.authority.registry.dispatch.workers[id] end
 	function f:drain()
 		for _ = 1, 24 do
@@ -1644,15 +3551,8 @@ local function retirement_fixture()
 		local bytes = self:report(id, w.accepted_seq + 1, "COORDINATOR_RELEASE", payload, { action_id = grant.action_id, action_revision = grant.action_revision })
 		return self:apply("intake", { worker_id = id, bytes = bytes }), bytes
 	end
-	function f:watermark()
-		local w = self:worker()
-		local mark = { version = 1, type = "receipt_watermark", mailbox_handle = w.mailbox_handle,
-			through_seq = w.accepted_seq, receipt_chain_sha256 = w.receipt_chain }
-		for _, k in { "logical_session_id", "worker_id", "worker_generation", "launch_request_id", "work_id", "enrolment_token" } do mark[k] = w[k] end
-		local queued = self:apply("poll", { worker_id = id, bytes = "watermark" }); assert(queued.ok)
-		local page = assert(codec.project_page(runtime.json.encode(mark), self:action(queued.action_id).request.selector))
-		assert(self:finish(queued.action_id, "complete", runtime.json.decode(page)).ok)
-	end
+	local watermark = f.watermark
+	function f:watermark() return watermark(self, id) end
 	function f:quiesce()
 		self:drain(); assert(self:ack("activation").ok); local answer, bytes = self:release(); assert(answer.ok)
 		self:drain(); self:watermark(); return bytes
@@ -1685,17 +3585,19 @@ if section == nil or section == "retirement_auth" then
 end
 if section == nil or section == "retirement_finish" then
 	local f, id = retirement_fixture(); local bytes = f:quiesce()
-	local stop = f:apply("poll", { worker_id = id }); local request = f:action(stop.action_id).request
+	local stop = f:apply("poll", { worker_id = id }); must(stop.ok, stop)
+	assert(f:apply("claim", { action_id = stop.action_id, executor = f.origin.window_epoch }).ok)
+	local request = f:action(stop.action_id).request
 	check(request.op == "stop" and request.target_request_id == f:worker().launch_request_id and request.pane_binding.pane_id == "9002", "settled final watermark grants exact launched pane stop")
 	check(f:apply("poll", { worker_id = id }).code == "operation_pending", "pending stop cannot be duplicated")
-	check(dispatch.decode_response(frame(request, "stopped", { pane_binding = request.pane_binding, observation = "idle" }), request) == nil, "idle is never stopped proof")
+	check(protocol.decode_response(frame(request, "stopped", { pane_binding = request.pane_binding, observation = "idle" }), request) == nil, "idle is never stopped proof")
 	assert(f:finish(stop.action_id, "stopped", { pane_binding = request.pane_binding, observation = "exited" }).ok)
 	check(f.authority.registry.sessions[f.origin.logical_session_id].orchestrator ~= nil, "native stop alone does not free slot")
 	local retire = f:apply("poll", { worker_id = id }); local rr = f:action(retire.action_id).request
 	check(rr.op == "mailbox_retire" and rr.mode == "retire" and rr.report_floor == f:worker().accepted_seq and rr.reply_floor == f:worker().reply_seq, "mailbox retirement carries exact final floors and grant")
 	check(f:finish(retire.action_id, "retired", {}).code == "coordinator_retired", "retirement result atomically uses normal generation-bound owner release")
 	local old = f:worker().coordinator_owner_id
-	check(f.authority.registry.sessions[f.origin.logical_session_id].orchestrator == nil and f.authority.registry.retired[old] ~= nil, "owner blank retains owner tombstone and worker history")
+	check(f.authority.registry.sessions[f.origin.logical_session_id].orchestrator == nil and f.authority.registry.retired == nil, "owner clears without any retired-owner history")
 	local old_generation = f:worker().coordinator_generation
 	local successor = f:queue(true)
 	check(successor.ok and f.authority.registry.sessions[f.origin.logical_session_id].orchestrator.generation > old_generation
@@ -1753,13 +3655,11 @@ if section == nil or section == "retirement_capability" then
 	check(f:queue(true).code == "unsupported_capability", "old configured record cannot silently acquire coordinator support")
 	check(f:queue(false).ok, "old record remains usable for ordinary work")
 	local g = fixture(); local id = g:launched(true)
-	-- Explicit pre-extension persisted shape: no grant and no protocol marker.
+	-- Missing coordinator protocol is not a grant. Completed launch requests are consumed,
+	-- so only the retained worker marker can be changed in this explicit negative fixture.
 	g.authority.registry.dispatch.workers[id].coordinator_protocol = nil
 	local w = g.authority.registry.dispatch.workers[id]
-	local launch = g:action(w.launch_action_id)
-	launch.request.enrolment.coordinator_owner_id = nil; launch.request.enrolment.coordinator_generation = nil
-	launch.request_bytes = runtime.json.encode(launch.request)
-	g.memory.value = clone(g.authority.registry) -- Explicit compatible old persisted launch shape.
+	g.memory.value = clone(g.authority.registry)
 	assert(g:apply("intake", { worker_id = id, bytes = g:report(id, 1, "ACCEPTED", { assignment_sha256 = w.assignment_sha256 }) }).ok)
 	assert(g:finish(g:apply("poll", { worker_id = id }).action_id, "published", {}).ok)
 	assert(g:finish(g:apply("poll", { worker_id = id }).action_id, "accepted", {}).ok)
@@ -1806,12 +3706,12 @@ if section == nil or section == "rejected_read" then
 	local bytes = f:report(id, 2, "DONE", { checkpoint_id = "absent", artifact_revision = "rev", summary = "Invalid checkpoint reference" })
 	local framed = assert(codec.frame(bytes, "report", f.authority.registry.dispatch.workers[id]))
 	local manifest = f:apply("poll", { worker_id = id })
-	assert(f:finish(manifest.action_id, "complete", runtime.json.decode(assert(codec.project_page(framed.manifest, f:action(manifest.action_id).request.selector)))).ok)
+	assert(f:finish(manifest.action_id, "read", runtime.json.decode(assert(codec.project_page(framed.manifest, f:action(manifest.action_id).request.selector)))).ok)
 	local last
 	for _, chunk in framed.chunks do
 		local queued = f:apply("poll", { worker_id = id }); assert(queued.ok)
 		local page = runtime.json.decode(assert(codec.project_page(chunk, f:action(queued.action_id).request.selector)))
-		last = f:finish(queued.action_id, "complete", page)
+		last = f:finish(queued.action_id, "read", page)
 	end
 	local w = f.authority.registry.dispatch.workers[id]
 	check(last.code == "report_rejected" and last.report_applied == false, "completed semantic rejection is a committed transport result")
@@ -1846,15 +3746,15 @@ if section == nil or section == "rejected_read" then
 		if index == #objects then
 			assert(failed:apply("claim", { action_id = queued.action_id, executor = failed.origin.window_epoch }).ok)
 			failed.memory.fail = true
-			check(failed:finish(queued.action_id, "complete", page).code == "persistence_failed", "failed rejection save publishes no settlement")
+			check(failed:finish(queued.action_id, "read", page).code == "persistence_failed", "failed rejection save publishes no settlement")
 			check(failed:action(queued.action_id).phase == "claimed" and failed.authority.registry.dispatch.workers[failed_id].rejected_report == nil,
 				"failed save retains original claimed read and no exposed hold")
 			failed.memory.fail = false
-			check(failed:finish(queued.action_id, "complete", page).code == "uncommitted_observation"
+			check(failed:finish(queued.action_id, "read", page).code == "uncommitted_observation"
 				and failed.authority.registry.sessions[failed.origin.logical_session_id].controller.pending_executors == 1,
 				"same-runtime retry cannot bypass failed-result observation fence or release its occupied slot")
 		else
-			assert(failed:finish(queued.action_id, "complete", page).ok)
+			assert(failed:finish(queued.action_id, "read", page).ok)
 		end
 	end
 end
@@ -1882,6 +3782,51 @@ local function finish_ordinary(f, id)
 	assert(f:finish(retire.action_id, "retired", {}).ok)
 	return requested
 end
+if section == nil or section == "retirement_finish" then
+	for _, remote in { false, true } do
+		local f = fixture(); local subject = f:accepted(false)
+		f.target_pane = "9012"; local writer_id = f:accepted(false)
+		local function writer_worker() return f.authority.registry.dispatch.workers[writer_id] end
+		assert(f:apply("associate_document", { worker_id = subject, path = "/fixture/another-workers-plan.md",
+			evidence = { existing = true } }).ok)
+		assert(f:apply("intake", { worker_id = subject, bytes = f:report(subject, 2, "ASK",
+			{ question = "Which reviewed path?", options = runtime.json.array({ { id = "safe", label = "Safe path" } }) }) }).ok)
+		local gid = next(f.authority.registry.dispatch.gates)
+		assert(f:apply("answer", { gate_id = gid, gate_revision = 1, choice_id = "safe", answer = "Use the reviewed path." }).ok)
+		local function gate() return f.authority.registry.dispatch.gates[gid] end
+		local writer = { kind = "worker", worker_id = writer_id, worker_generation = writer_worker().worker_generation }
+		local before = "# Existing plan owned by another worker\n"
+		local evidence = { existing = true, quiescent = true, identity_proven = true, buffer_observed = true, disk_bytes = before }
+		local prepared = f:apply("ruling_prepare", { gate_id = gid, gate_revision = gate().revision, writer = writer, evidence = evidence })
+		must(prepared.ok and prepared.edit, prepared)
+		if remote then
+			local sent = f:apply("ruling_remote", { gate_id = gid, gate_revision = gate().revision, worker_id = writer_id })
+			must(sent.ok, sent)
+			local delivery = gate().ruling_delivery
+			local reply = clone(writer_worker().replies[tostring(delivery.reply_seq)])
+			assert(f:watermark(writer_id).ok) -- Publishes the real outbox before acknowledging receipt.
+			assert(f:apply("intake", { worker_id = writer_id, bytes = f:report(writer_id, writer_worker().accepted_seq + 1, "reply_ack",
+				{ message_id = reply.message_id, reply_seq = reply.reply_seq, reply_sha256 = reply.sha256, status = "recorded" },
+				{ action_id = reply.action_id, action_revision = reply.action_revision }) }).ok)
+		end
+		finish_ordinary(f, writer_id)
+		local ended = clone(writer_worker().stopped)
+		local queued = f:queue(false); must(queued.ok, queued)
+		check(writer_worker() ~= nil and writer_worker().mailbox_retired
+			and runtime.json.encode(writer_worker().stopped) == runtime.json.encode(ended)
+			and gate().ruling.intent.writer.worker_generation == writer.worker_generation,
+			"another worker's unresolved ruling pins its exact ended writer, without preventing stop or retirement")
+		check(state.rehydrate(clone(f.authority.registry)) ~= nil,
+			"prepared and remotely acknowledged ruling writers remain valid across unrelated queue and reload")
+		local edit = prepared.edit
+		evidence.disk_bytes = before:sub(1, edit.offset) .. edit.text .. before:sub(edit.offset + 1)
+		local observed = f:apply("ruling_observe", { gate_id = gid, gate_revision = gate().revision, writer = writer, evidence = evidence })
+		must(observed.ok and observed.code == "ruling_recorded", observed)
+		queued = f:queue(false); must(queued.ok, queued)
+		check(writer_worker() == nil and state.rehydrate(clone(f.authority.registry)) ~= nil,
+			"settled ruling releases only its writer dependency and leaves no completed writer history")
+	end
+end
 local function last_sweep(f)
 	local log = (f.authority.registry.dispatch.sweeps or {})[f.origin.logical_session_id]
 	return if log then log.runs[#log.runs] else nil
@@ -1898,7 +3843,9 @@ if section == nil or section == "finish" then
 	assert(f:apply("cancel_gate", { gate_id = gate_id, gate_revision = 1 }).ok)
 	local finish = f:event("finish", { worker_id = id })
 	check(f.authority:apply(finish).code == "finish_requested", "owner explicitly requests ordinary finish without fabricating coordinator release")
-	check(f.authority:apply(clone(finish)).code == "finish_requested", "exact finish command is idempotent")
+	local finish_writes = f.memory.writes
+	check(f.authority:apply(clone(finish)).code == "stale_revision" and f.memory.writes == finish_writes,
+		"replayed finish retains its captured revision and cannot mutate current state")
 	check(f:apply("reply", { worker_id = id }).code == "worker_retiring", "finish fences fresh progress requests")
 	check(f:apply("intake", { worker_id = id, bytes = f:report(id, 3, "HEARTBEAT", { state = "idle" }) }).code == "worker_retiring", "finish fences late new reports")
 	finish_ordinary(f, id)
@@ -1915,10 +3862,11 @@ if section == nil or section == "retirement_refused" then
 	stop_ordinary(f, id)
 	local retire = f:apply("poll", { worker_id = id }); assert(retire.ok and f:action(retire.action_id).request.mode == "retire")
 	assert(f:apply("claim", { action_id = retire.action_id, executor = f.origin.window_epoch }).ok)
+	local original_retirement = clone(f:action(retire.action_id).request)
 	local refused = f:apply("result", { action_id = retire.action_id, executor = f.origin.window_epoch, grant_id = f:action(retire.action_id).claim.grant_id,
 		response_bytes = frame(f:action(retire.action_id).request, "rejected", nil, { code = "producer_unsettled", message = "The stopped producer journal is not settled at the authorized floors; nothing was retired" }) })
 	local w = f.authority.registry.dispatch.workers[id]
-	check(refused.code == "retirement_refused" and f:action(retire.action_id).phase == "complete" and w.phase == "accepted"
+	check(refused.code == "retirement_refused" and f:action(retire.action_id) == nil and w.phase == "accepted"
 		and w.reason.code == "retirement_refused" and not w.mailbox_retired, "exact pre-effect refusal settles the attempt without holding the worker or retiring the mailbox")
 	check(not dispatch.unresolved(f.authority.registry, f.origin.logical_session_id, f.origin.owner_id), "a refused retirement releases its effect slot and blocks no owner clearing")
 	check(f:apply("poll", { worker_id = id }).code == "retirement_refused", "the driver never re-issues a refused retirement by itself")
@@ -1926,7 +3874,7 @@ if section == nil or section == "retirement_refused" then
 	check(f:apply("finish", { worker_id = id }).code == "retirement_rearmed", "explicit owner control re-arms one fresh retirement")
 	local again = f:apply("poll", { worker_id = id }); local request = f:action(again.action_id).request
 	check(again.ok and again.action_id ~= retire.action_id and request.op == "mailbox_retire" and request.mode == "retire"
-		and request.grant_id ~= f:action(retire.action_id).request.grant_id, "the re-armed retirement carries a fresh grant")
+		and request.grant_id ~= original_retirement.grant_id, "the re-armed retirement carries a fresh grant")
 	check(f:finish(again.action_id, "retired", {}).ok and f.authority.registry.dispatch.workers[id].mailbox_retired, "a settled journal then retires normally")
 	local g = fixture(); local gid = g:accepted(false); stop_ordinary(g, gid)
 	local uncertain = g:apply("poll", { worker_id = gid })
@@ -2003,13 +3951,13 @@ if section == nil or section == "sweep_policy" then
 	local f = fixture()
 	local sid = f.origin.logical_session_id
 	local saved = dispatch.policy(f.authority.registry, sid)
-	check(saved.sweep_enabled == true and saved.sweep_time == "03:00", "the nightly sweep defaults on at 03:00 local time")
+	check(saved.sweep_enabled == true and saved.sweep_time == "03:00:00", "the nightly sweep defaults on at 03:00 local time")
 	for _, bad in { "3:00", "24:00", "12:60", "noon", "", 300 } do
 		check(f:apply("policy", { policy = { sweep_time = bad } }).code == "invalid_policy", "sweep time " .. tostring(bad) .. " is refused")
 	end
 	check(f:apply("policy", { policy = { sweep_enabled = "yes" } }).code == "invalid_policy", "the sweep switch is a boolean")
-	check(f:apply("policy", { policy = { sweep_time = "23:59", sweep_enabled = false } }).ok
-		and dispatch.policy(f.authority.registry, sid).sweep_time == "23:59" and dispatch.policy(f.authority.registry, sid).sweep_enabled == false,
+	check(f:apply("policy", { policy = { sweep_time = "23:59:59", sweep_enabled = false } }).ok
+		and dispatch.policy(f.authority.registry, sid).sweep_time == "23:59:59" and dispatch.policy(f.authority.registry, sid).sweep_enabled == false,
 		"valid sweep settings save through the ordinary policy command")
 	local legacy = clone(f.authority.registry)
 	legacy.dispatch.policies[sid].sweep_enabled = nil; legacy.dispatch.policies[sid].sweep_time = nil
@@ -2017,13 +3965,24 @@ if section == nil or section == "sweep_policy" then
 	for _, key in { "worker_rollover_records", "worker_rollover_provider", "worker_rollover_account", "worker_rollover_model", "coordinator_rollover_records",
 		"coordinator_rollover_provider", "coordinator_rollover_account", "coordinator_rollover_model", "concurrency_limit",
 		"loop_cap", "review_rounds", "stale_claim_min", "require_code_review", "require_other_family", "family_map", "reviewer_records", "release_manager_record", "checkout_roots",
-		"auto_approve_kinds", "glitch_integration", "default_work_source", "board_path", "board_lanes", "inbox_folder", "auto_launch_intake", "routes",
+		"auto_approve_kinds", "glitch_integration", "board_path", "board_lanes", "inbox_folder", "auto_start_projects", "routes",
 		"labeller_record", "role_guidance", "templates" } do legacy.dispatch.policies[sid][key] = nil end
-	check(not dispatch.valid(legacy.dispatch, legacy), "a pre-sweep stored policy is accepted only at the restore boundary")
-	local migrated = assert(state.rehydrate(clone(legacy))).dispatch.policies[sid]
-	check(migrated.sweep_enabled == true and migrated.sweep_time == "03:00" and migrated.poll_ms == saved.poll_ms, "pre-sweep policies migrate with the sweep defaults")
-	local partial = clone(legacy); partial.dispatch.policies[sid].sweep_time = "03:00"
+	check(not dispatch.valid(legacy.dispatch, legacy) and state.rehydrate(clone(legacy)) == nil,
+		"current stores with missing sweep/Config fields fail closed rather than defaulting an apparent historical policy")
+	local partial = clone(legacy); partial.dispatch.policies[sid].sweep_time = "03:00:00"
 	check(state.rehydrate(partial) == nil, "a partial sweep policy is rejected, not defaulted")
+	do
+		local observed = fixture(function() return { now_ms = 1000 } end)
+		local sid = observed.origin.logical_session_id
+		local payload = { local_date = "2026-11-13", observed_at_ms = 1000, mailboxes = 0, time_zone = "UTC", observation_unavailable = true }
+		check(observed:apply("cleanup_notice", payload).code == "cleanup_observation_pending" and not (observed.authority.registry.dispatch.cleanup_notices or {})[sid], "pending inventory does not consume the daily marker")
+		payload.observation_unavailable = false; payload.open_files = 0; payload.stale_files = 0
+		check(observed:apply("cleanup_notice", payload).code == "cleanup_summary", "a completed observed inventory records the daily interaction summary")
+		local revision = observed.authority.registry.revision
+		check(observed:apply("cleanup_notice", payload).code == "no_progress" and observed.authority.registry.revision == revision, "repeated interaction cannot notify or mutate the completed day again")
+		local restored = assert(state.rehydrate(clone(observed.authority.registry)))
+		check(restored.dispatch.cleanup_notices[sid] == payload.local_date, "daily communication summary marker survives reload")
+	end
 end
 if section == nil or section == "slot_classes" then
 	local function lose(f, action_id)
@@ -2067,32 +4026,31 @@ if section == nil or section == "finish_capacity" then
 	check(state.rehydrate(clone(f.authority.registry)) ~= nil, "bounded lifetime-worker reclamation restores with monotonic serial and cursor")
 end
 if section == nil or section == "command_retention" then
-	local f = fixture(); local id = f:accepted(false)
-	local progress = f:event("reply", { worker_id = id }); assert(f.authority:apply(progress).ok)
-	local delivery = clone(f.authority.registry.dispatch.workers[id].workflow.report_request)
-	local noop = f:event("reply", { worker_id = id }); assert(f.authority:apply(noop).code == "report_request_pending")
-	assert(f:apply("intake", { worker_id = id, bytes = f:report(id, 2, "reply_ack", { message_id = delivery.message_id, reply_seq = delivery.reply_seq,
-		reply_sha256 = codec.sha256(delivery.bytes), status = "recorded" }, { action_id = delivery.action_id, action_revision = delivery.action_revision }) }).ok)
-	assert(f:apply("intake", { worker_id = id, bytes = f:report(id, 3, "HEARTBEAT", { state = "idle", request_id = delivery.request_id }) }).ok)
+	local f = fixture(); local sid = f.origin.logical_session_id
 	local old = f:event("pause"); assert(f.authority:apply(old).ok)
-	local read = f:apply("catalog"); assert(read.ok)
-	local claim = f:apply("claim", { action_id = read.action_id, executor = f.origin.window_epoch }); assert(claim.ok)
-	for index = 1, 270 do assert(f:apply(if index % 2 == 1 then "resume" else "pause").ok) end
 	assert(f:apply("resume").ok)
-	check(f.authority.registry.dispatch.commands[old.request_id] == nil, "settled actionless command history is actually reclaimed")
-	local before = runtime.json.encode(f.authority.registry)
-	check(f.authority:apply(old).code == "stale_command" and runtime.json.encode(f.authority.registry) == before, "compacted old pause cannot restore stale owner intent")
-	check(f.authority:apply(progress).code == "stale_command" and f.authority:apply(noop).code == "stale_command"
-		and f.authority.registry.dispatch.workers[id].workflow.report_request == nil, "compacted old issued and no-effect progress intents cannot create another request cycle")
-	check(f:finish(read.action_id, "catalog", { catalog_version = 2, setup = catalog_setup(0), namespace = "fixture-spawn", host_key = "fixture-host", config_revision = 0, revision = 0, records = runtime.json.array() }).ok, "newer control commands cannot make the original delayed effect result uncommittable")
-	local restored = state.rehydrate(clone(f.authority.registry))
-	check(restored ~= nil and restored.dispatch.command_cursors[f.origin.logical_session_id].seq > old.command_seq, "durable stale-command barrier survives restore independently of history")
-	local corrupt = clone(f.authority.registry); corrupt.dispatch.command_cursors = nil
-	check(state.rehydrate(corrupt) == nil, "retained sequenced commands cannot restore without their durable replay barrier")
-	corrupt = clone(f.authority.registry); corrupt.dispatch.command_cursors[f.origin.logical_session_id].seq = 1
-	check(state.rehydrate(corrupt) == nil, "restored replay barrier cannot move behind retained command evidence")
-	local legacy = f:event("pause"); legacy.command_seq = nil
-	check(f.authority:apply(legacy).code == "invalid_command", "live clients cannot bypass the monotonic intent contract")
+	local read = f:apply("catalog"); assert(read.ok)
+	check(f:action(read.action_id).request.request_serial == nil, "queue identity is not an issued serial")
+	assert(f:apply("claim", { action_id = read.action_id, executor = f.origin.window_epoch }).ok)
+	local original = clone(f:action(read.action_id).request)
+	for index = 1, 270 do assert(f:apply(if index % 2 == 1 then "pause" else "resume").ok) end
+	check(f.authority.registry.dispatch.commands == nil and f.authority.registry.request_outcomes == nil
+		and f.authority.registry.retired == nil, "ordinary commands retain no completed histories at any scope")
+	local before, writes = runtime.json.encode(f.authority.registry), f.memory.writes
+	check(f.authority:apply(old).code == "stale_revision" and runtime.json.encode(f.authority.registry) == before
+		and f.memory.writes == writes, "captured stale revision cannot execute an old pause")
+	assert(f:finish(read.action_id, "catalog", { catalog_version = 2, setup = catalog_setup(0), namespace = "fixture-spawn",
+		host_key = "fixture-host", config_revision = 0, revision = 0, records = runtime.json.array() }).ok)
+	check(f:action(read.action_id) == nil, "result consequence and action reclamation share one durable commit")
+	local floor, consumed = dispatch.ack_progress(f.authority.registry, sid)
+	check(floor == original.request_serial + 1 and #consumed == 0, "current issued counter and absent live action advance the floor without historical output")
+	local restored = assert(state.rehydrate(clone(f.authority.registry)))
+	check(restored.dispatch.command_cursors[sid].seq > old.command_seq and restored.dispatch.commands == nil,
+		"current cursor survives reload without completed command records")
+	local malformed = clone(f.authority.registry); malformed.dispatch.command_cursors[sid].seq = -1
+	check(state.rehydrate(malformed) == nil, "malformed current cursor is refused at restore")
+	local unfenced = f:event("pause"); unfenced.expected_revision = nil
+	check(not f.authority:apply(unfenced).ok, "live clients cannot omit the captured authority fence")
 end
 if section == nil or section == "catalog_join" then
 	local f = fixture(); local id = f:accepted(false)
@@ -2108,12 +4066,8 @@ if section == nil or section == "catalog_join" then
 	local legacy = clone(stored)
 	legacy.dispatch.catalogs[sid].namespace = nil; legacy.dispatch.catalogs[sid].host_key = nil; legacy.dispatch.catalogs[sid].config_revision = nil
 	legacy.dispatch.catalogs[sid].catalog_version = nil; legacy.dispatch.catalogs[sid].setup = nil
-	restored = assert(state.rehydrate(legacy))
-	check(restored.dispatch.catalogs[sid] == nil and restored.dispatch.workers[id].worker_id == id
-		and restored.dispatch.workers[id].enrolment_token == stored.dispatch.workers[id].enrolment_token
-		and restored.dispatch.command_cursors[sid].seq == stored.dispatch.command_cursors[sid].seq,
-		"one-way legacy cache invalidation preserves exact workers and replay barriers")
-	check(not dispatch.valid(legacy.dispatch, legacy), "legacy cache is accepted only at the explicit restore boundary")
+	check(state.rehydrate(clone(legacy)) == nil and not dispatch.valid(legacy.dispatch, legacy),
+		"current catalog identity cannot be erased by pretending it is a historical cache")
 	legacy.dispatch.catalogs[sid].unexpected = true
 	check(state.rehydrate(legacy) == nil, "migration cannot hide malformed historical catalogs")
 	for _, payload in {
@@ -2121,23 +4075,27 @@ if section == nil or section == "catalog_join" then
 		{ namespace = "fixture-spawn", host_key = "fixture-host", config_revision = 1, revision = 0, records = runtime.json.array() },
 	} do
 		local rejected = fixture(); local request = rejected:apply("catalog")
-		check(rejected:finish(request.action_id, "catalog", payload).code == "invalid_catalog",
-			"live catalogs require a complete matching source join, never the historical cache format")
+		local refused = rejected:finish(request.action_id, "catalog", payload)
+		check(not refused.ok and refused.code == "invalid_schema"
+			and rejected.authority.registry.dispatch.catalogs[rejected.origin.logical_session_id] == nil
+			and rejected:action(request.action_id).phase == "claimed",
+			"canonical response validation rejects incomplete live catalog identity before applying any catalog: " .. runtime.json.encode(refused))
 	end
 end
 if section == nil or section == "continuation" then
 	local f = fixture(); local id = f:accepted(false)
 	assert(f:apply("intake", { worker_id = id, bytes = f:report(id, 2, "ASK", { question = "Survive reload?", options = runtime.json.array({ { id = "yes", label = "Yes" } }) }) }).ok)
-	local pending = f:apply("poll", { worker_id = id }); local action = f:action(pending.action_id)
+	local pending = f:apply("poll", { worker_id = id }); must(pending.ok, pending)
 	assert(f:apply("claim", { action_id = pending.action_id, executor = f.origin.window_epoch }).ok)
 	local original = clone(f.authority.registry.dispatch.workers[id]); local claim = clone(f:action(pending.action_id).claim)
-	local bytes = frame(action.request, "published", {})
+	local bytes = frame(f:action(pending.action_id).request, "published")
 	local old_result = f:event("result", { action_id = pending.action_id, executor = claim.executor, grant_id = claim.grant_id, response_bytes = bytes })
 	f.authority = host.new_authority(f.memory); assert(f.authority:load().ok)
 	f.origin.window_epoch = "replacement-window"
 	f.controller_pane = "9010"
 	check(not f:apply("poll", { worker_id = id }).ok, "reload never automatically adopts retained worker aliases")
 	check(f:apply("continue_controller", { expected_revision = f.authority.registry.revision, operator_verified = true }).ok, "explicit exact-owner continuation establishes status-only replacement route")
+	assert(f:control("reconcile_session").ok) -- Fresh peer observation restores admission, never the old revision fence.
 	check(f.authority.registry.sessions[f.origin.logical_session_id].controller.pending_executors == 1, "controller continuation does not clear unknown executor occupancy")
 	check(f:apply("continue_worker", { worker_id = id, pane_binding = { pane_id = "9009", window_key = "", window_epoch = f.origin.window_epoch, native_session_id = "7", window_host_id = "local" },
 		continuation_proof = dispatch.continuation_proof(f.authority.registry, f.authority.registry.dispatch.workers[id]), operator_verified = true }).code == "settlement_pending", "attachment waits for individual old operation settlement")
@@ -2156,23 +4114,45 @@ if section == nil or section == "continuation" then
 	check(f:apply("answer", { gate_id = gid, gate_revision = 1, choice_id = "yes", answer = "Same generation, same question." }).ok, "retained pending gate can be answered after explicit attachment")
 	check(state.rehydrate(clone(f.authority.registry)) ~= nil, "attached route, original action claim and new-origin gate answer validate on restore")
 	local corrupt = clone(f.authority.registry)
-	local altered = corrupt.dispatch.actions[attached.action_id]
-	altered.response.payload.pane_binding.pane_id = "9999"
-	altered.response_bytes = frame(altered.request, "attached", altered.response.payload)
-	check(state.rehydrate(corrupt) == nil, "self-consistent response bytes still cannot forge a different selected attachment on restore")
+	corrupt.dispatch.workers[id].control_pane_binding.window_epoch = "different-native-incarnation"
+	check(state.rehydrate(corrupt) == nil, "compact current attachment still rejects a pane from a different native incarnation without a completed action transcript")
 	local coordinator = fixture(); local coordinator_id = coordinator:accepted(true)
 	local activation = coordinator:apply("poll", { worker_id = coordinator_id }); assert(activation.ok)
 	assert(coordinator:apply("claim", { action_id = activation.action_id, executor = coordinator.origin.window_epoch }).ok)
 	coordinator.authority = host.new_authority(coordinator.memory); assert(coordinator.authority:load().ok)
 	coordinator.origin.window_epoch = "continued-coordinator-window"
 	assert(coordinator:apply("continue_controller", { expected_revision = coordinator.authority.registry.revision, operator_verified = true }).ok)
+	assert(coordinator:control("reconcile_session").ok) -- Fresh peer observation restores admission, never the old revision fence.
 	local owner = coordinator.authority.registry.sessions[coordinator.origin.logical_session_id].orchestrator
 	check(owner.phase == "uncertain" and owner.pending_executors == 1 and coordinator:action(activation.action_id).phase == "uncertain",
 		"controller continuation cannot reactivate uncertain coordinator authority or clear its old activation executor")
+	do
+		local automatic = fixture()
+		local first, second = automatic:accepted(false), automatic:accepted(false)
+		local reading = automatic:apply("poll", { worker_id = second }); assert(reading.ok)
+		local function continue_with(proof)
+			local worker = automatic.authority.registry.dispatch.workers[first]
+			return automatic:apply("continue_worker", { worker_id = first, continuation_proof = proof,
+				pane_binding = clone(worker.pane_binding), machine_proof = { previous_pane_binding = clone(worker.pane_binding) } })
+		end
+		local before = dispatch.continuation_proof(automatic.authority.registry, automatic.authority.registry.dispatch.workers[first])
+		check(continue_with(before).code == "settlement_pending", "automatic attachment waits for another worker's outstanding session operation")
+		assert(automatic:finish(reading.action_id, "missing", {}).ok)
+		check(continue_with(before).code == "stale_recovery", "settling the other worker invalidates the previously refused continuation proof")
+		local resumed = continue_with(dispatch.continuation_proof(automatic.authority.registry, automatic.authority.registry.dispatch.workers[first]))
+		check(resumed.code == "attachment_queued" and automatic:action(resumed.action_id).worker_id == first,
+			"a fresh scoped proof can continue the original worker after session settlement")
+	end
 end
 if section == nil or section == "wake_separation" then
 	local clock = { now_ms = 1000, mono_ms = 1000, epoch = "wake-host" }
 	local f = fixture(function() return clone(clock) end); local ids = {}
+	local function projected(id)
+		for _, shown in dispatch.project(f.authority.registry, f.origin.logical_session_id, f.origin.alias_nonce).workflow.workers do
+			if shown.worker_id == id then return shown end
+		end
+		error("missing wake worker")
+	end
 	for _ = 1, 4 do
 		local id = f:accepted(false); table.insert(ids, id)
 		local w = f.authority.registry.dispatch.workers[id]
@@ -2181,7 +4161,8 @@ if section == nil or section == "wake_separation" then
 		local queued = f:apply("poll", { worker_id = id }); local request = f:action(queued.action_id).request
 		check(f:finish(queued.action_id, "published", { wake_status = "awaiting_window", wake_effect_started = false,
 			wake_target_request_id = request.request_id, wake_target_action_id = request.action_id }).ok, "known publication commits independently of never-started notification")
-		check(f:action(queued.action_id).phase == "complete" and f.authority.registry.dispatch.workers[id].wakes[request.action_id] ~= nil, "publication releases slot but retains durable wake obligation")
+		check(f:action(queued.action_id) == nil and f.authority.registry.dispatch.workers[id].wakes[request.action_id] ~= nil, "publication releases slot but retains durable wake obligation")
+		check(not projected(id).poll_continuation and not projected(id).due_poll, "a busy native wake is not a runnable continuation")
 	end
 	check(f.authority.registry.sessions[f.origin.logical_session_id].controller.pending_executors == 0, "four busy workers do not occupy four execution slots merely waiting for idle")
 	for _, id in ids do
@@ -2190,7 +4171,16 @@ if section == nil or section == "wake_separation" then
 	end
 	local id = ids[1]; local w = f.authority.registry.dispatch.workers[id]
 	assert(f:apply("observe", { worker_id = id, pane_binding = w.pane_binding, native_state = "idle" }).ok)
-	local wake = f:apply("poll", { worker_id = id }); check(f:action(wake.action_id).request.op == "native_wake", "fresh safe idle creates explicit bounded notification operation")
+	check(projected(id).poll_continuation and projected(id).due_poll, "fresh idle wake bypasses the remaining discovery delay")
+	-- No workflow tick between the clock change and poll: selection must refresh native health.
+	clock.mono_ms += dispatch.policy(f.authority.registry, f.origin.logical_session_id).stale_ms + 1
+	local stale = f:apply("poll", { worker_id = id, bytes = "watermark" }); assert(stale.ok, stale.message)
+	check(f:action(stale.action_id).request.op == "mailbox_read" and f:action(stale.action_id).request.selector.stream == "watermark",
+		"stale idle evidence cannot let a native wake preempt the periodic watermark")
+	assert(f:finish(stale.action_id, "missing", {}).ok)
+	assert(f:apply("observe", { worker_id = id, pane_binding = w.pane_binding, native_state = "idle" }).ok)
+	local wake = f:apply("poll", { worker_id = id, bytes = "watermark" })
+	check(f:action(wake.action_id).request.op == "native_wake", "fresh safe idle continuation precedes the periodic watermark")
 	assert(f:apply("observe", { worker_id = id, pane_binding = w.pane_binding, native_state = "working" }).ok)
 	check(f:action(wake.action_id) == nil and next(f.authority.registry.dispatch.workers[id].wakes) ~= nil, "busy race cancels only unclaimed wake action and retains notification obligation")
 	local read = f:apply("poll", { worker_id = id }); check(f:action(read.action_id).request.op == "mailbox_read", "unstarted wake race cannot starve mailbox reads")
@@ -2209,9 +4199,9 @@ if section == nil or section == "policy" then
 	local function saved() return dispatch.project(f.authority.registry, sid, f.origin.alias_nonce).workflow.policy end
 	local function projected(id) for _, worker in dispatch.project(f.authority.registry, sid, f.origin.alias_nonce).workflow.workers do if worker.worker_id == id then return worker end end end
 	local defaults = saved()
-	check(defaults.auto_rollover == false and defaults.rollover_threshold_pct == 80 and defaults.rollover_include_coordinator == false
-		and defaults.quota_routing == false and #defaults.excluded_workers == 0, "CP3 Config defaults extend the existing session policy")
-	for _, bad in { 0, 100, 80.5, -1, "80", true } do
+	check(defaults.auto_rollover == true and defaults.rollover_include_coordinator == false
+		and defaults.quota_routing == false and #defaults.excluded_workers == 0, "new session policy enables worker rollover without enabling coordinator rollover or quota routing")
+	for _, bad in { 100, 80.5, -1, "80", true } do
 		local before = runtime.json.encode(f.authority.registry)
 		check(f:apply("policy", { policy = { rollover_threshold_pct = bad }, expected_policy_sha256 = quota.digest(saved()) }).code == "invalid_policy"
 			and runtime.json.encode(f.authority.registry) == before, "rollover threshold " .. tostring(bad) .. " is refused with nothing changed")
@@ -2221,12 +4211,12 @@ if section == nil or section == "policy" then
 		check(f:apply("policy", { policy = bad, expected_policy_sha256 = quota.digest(saved()) }).code == "invalid_policy" and runtime.json.encode(f.authority.registry) == before,
 			"policy rejects undocumented, non-boolean or empty settings with nothing changed")
 	end
-	for _, threshold in { 1, 99 } do
+	for _, threshold in { 1, 99, 0, 99 } do
 		check(f:apply("policy", { policy = { rollover_threshold_pct = threshold }, expected_policy_sha256 = quota.digest(saved()) }).code == "policy_updated"
 			and saved().rollover_threshold_pct == threshold, "rollover threshold " .. tostring(threshold) .. " is accepted")
 	end
 	check(f:apply("policy", { policy = { auto_rollover = true, rollover_include_coordinator = true, quota_routing = true }, expected_policy_sha256 = quota.digest(saved()) }).code == "policy_updated"
-		and saved().auto_rollover and saved().rollover_include_coordinator and saved().quota_routing and saved().poll_ms == 5000,
+		and saved().auto_rollover and saved().rollover_include_coordinator and saved().quota_routing and saved().poll_ms == 300000,
 		"partial Config save changes only the named settings")
 	local displayed = saved()
 	assert(f:apply("pause").ok)
@@ -2238,13 +4228,11 @@ if section == nil or section == "policy" then
 	check(restored.dispatch.policies[sid].rollover_threshold_pct == 99 and restored.dispatch.policies[sid].quota_routing, "Config settings persist through strict restore")
 	-- quota_routing now has a consumer; the remaining unrouted fixtures need explicit selection.
 	assert(f:apply("policy", { policy = { quota_routing = false } }).ok)
-	-- Exactly-CP2 stored policies migrate only at the explicit restore boundary.
+	-- Historical-shaped policy bytes inside a current registry are corruption, not migration authority.
 	local legacy = clone(f.authority.registry)
 	legacy.dispatch.policies[sid] = { paused = true, poll_ms = 2000, heartbeat_ms = 10000, stale_ms = 30000, automatic_reports = true }
-	check(not dispatch.valid(legacy.dispatch, legacy), "CP2 policy shape is accepted only at the restore boundary")
-	local migrated = assert(state.rehydrate(clone(legacy))).dispatch.policies[sid]
-	check(migrated.paused and migrated.poll_ms == 2000 and migrated.automatic_reports and not migrated.auto_rollover and migrated.rollover_threshold_pct == 80
-		and not migrated.rollover_include_coordinator and not migrated.quota_routing and #migrated.excluded_workers == 0, "old stored policy loads with CP3 defaults")
+	check(not dispatch.valid(legacy.dispatch, legacy) and state.rehydrate(clone(legacy)) == nil,
+		"current registry never silently upgrades an injected CP2 policy or invents its missing security settings")
 	for _, forged in { { paused = false, poll_ms = 2000 }, { paused = false, poll_ms = 2000, heartbeat_ms = 10000, stale_ms = 30000, automatic_reports = true, unknown = 1 } } do
 		local corrupt = clone(legacy); corrupt.dispatch.policies[sid] = forged
 		check(state.rehydrate(corrupt) == nil, "partial or unknown-field stored policies are rejected, not defaulted")
@@ -2254,13 +4242,13 @@ if section == nil or section == "policy" then
 	-- Exclusion is honored by automatic report scheduling and never stops anything.
 	local id = f:accepted(false)
 	local other = f:accepted(false)
-	assert(f:apply("policy", { policy = { automatic_reports = true, heartbeat_ms = 5000, stale_ms = 600000 }, expected_policy_sha256 = quota.digest(saved()) }).ok)
+	assert(f:apply("policy", { policy = { automatic_reports = true, report_request_ms = 5000, stale_ms = 600000 }, expected_policy_sha256 = quota.digest(saved()) }).ok)
 	for _, worker_id in { id, other } do
 		local w = f.authority.registry.dispatch.workers[worker_id]
 		assert(f:apply("observe", { worker_id = worker_id, pane_binding = clone(w.pane_binding), native_state = "idle" }).ok)
 	end
 	clock.mono_ms += 6000
-	assert(f.authority:apply({ kind = "workflow_tick" }).ok)
+	assert(f:tick().ok)
 	check(projected(id).due_report and projected(other).due_report, "fixture makes both safe idle workers due for automatic reports")
 	check(f:apply("policy", { policy = { excluded_workers = { "worker-unknown" } }, expected_policy_sha256 = quota.digest(saved()) }).code == "invalid_policy",
 		"exclusion must name a managed worker of this session")
@@ -2276,7 +4264,7 @@ if section == nil or section == "policy" then
 		and runtime.json.encode(w.pane_binding) == runtime.json.encode(w_before.pane_binding) and actions_for(id) == actions_before,
 		"exclusion never stops, finishes, retires or rebinds the worker")
 	clock.mono_ms += 6000
-	assert(f.authority:apply({ kind = "workflow_tick" }).ok)
+	assert(f:tick().ok)
 	check(not projected(id).due_report, "later ticks keep the excluded worker out of automatic scheduling")
 	check(f:apply("observe", { worker_id = id, pane_binding = clone(w.pane_binding), native_state = "idle" }).ok, "excluded worker health observation continues")
 	check(state.rehydrate(clone(f.authority.registry)).dispatch.policies[sid].excluded_workers[1] == id, "exclusion persists by durable worker_id")
@@ -2289,7 +4277,7 @@ local function rollover_fixture()
 	local f = fixture(function() return clone(clock) end)
 	local id = f:accepted(false)
 	assert(f:apply("observe", { worker_id = id, pane_binding = clone(f.authority.registry.dispatch.workers[id].pane_binding), native_state = "idle" }).ok)
-	return f, id
+	return f, id, clock
 end
 local function worker_of(f, id) return f.authority.registry.dispatch.workers[id] end
 local function rollover_of(f, hid) return f.authority.registry.dispatch.rollovers[hid] end
@@ -2372,7 +4360,7 @@ if section == nil or section == "rollover" then
 	check(requested.ok and requested.code == "rollover_requested", "explicit owner control requests worker rollover")
 	local hid = requested.handover_id; local r = rollover_of(f, hid)
 	check(r.phase == "checkpoint_pending" and r.trigger == "owner" and r.controller_generation == f.origin.owner_generation
-		and r.history[1].phase == "requested" and r.history[2].phase == "checkpoint_pending", "requested and checkpoint_pending edges are durable and controller-bound")
+		and r.history == nil, "current checkpoint_pending edge is durable and controller-bound without completed phase history")
 	local issued = codec.decode_reply(worker_of(f, id).workflow.report_request.bytes, worker_of(f, id))
 	check(issued.kind == "report_request" and issued.payload.requested_kind == "CHECKPOINT", "rollover asks through the existing structured progress-request channel")
 	check(f:apply("finish", { worker_id = id }).code == "workflow_unsettled", "ordinary finish cannot discard an unfinished rollover")
@@ -2411,16 +4399,13 @@ if section == nil or section == "rollover" then
 	check(rollover_of(f, hid).phase == "predecessor_stop_requested" and worker_of(f, id).finish.request_id == hid, "live accepted successor opens the existing finish/stop path")
 	local stop = predecessor_stop_action(f, id)
 	check(rollover_of(f, hid).phase == "predecessor_stop_requested", "stop grant is not closure")
+	local forged = clone(f.authority.registry); forged.dispatch.rollovers[hid].phase = "predecessor_closed"; forged.dispatch.rollovers[hid].stop_observation = nil
+	check(state.rehydrate(forged) == nil, "a claimed stop cannot be promoted to closed without positive exit evidence")
 	assert(f:finish(stop, "stopped", { pane_binding = clone(f:action(stop).request.pane_binding), observation = "exited" }).ok)
-	r = rollover_of(f, hid)
-	local phases = {}; for _, edge in r.history do table.insert(phases, edge.phase) end
-	check(table.concat(phases, ",") == "requested,checkpoint_pending,requested,checkpoint_pending,checkpoint_verified,successor_granted,successor_created,handover_accepted,predecessor_stop_requested,predecessor_closed,complete",
-		"every edge is recorded in order: " .. table.concat(phases, ","))
-	check(r.stop_observation == "exited" and worker_of(f, succ_id).phase == "accepted" and worker_of(f, succ_id).finish == nil and worker_of(f, succ_id).stopped == nil,
-		"observed predecessor exit completes; successor keeps the work")
-	check(state.rehydrate(clone(f.authority.registry)) ~= nil, "completed rollover restores")
-	local forged = clone(f.authority.registry); forged.dispatch.rollovers[hid].stop_observation = nil
-	check(state.rehydrate(forged) == nil, "a closed/complete phase cannot restore without its exit evidence")
+	check(rollover_of(f, hid) == nil and f:action(stop) == nil
+		and worker_of(f, succ_id).phase == "accepted" and worker_of(f, succ_id).finish == nil and worker_of(f, succ_id).stopped == nil,
+		"observed predecessor exit settles and reclaims the handover and stop action; successor keeps the work")
+	check(state.rehydrate(clone(f.authority.registry)) ~= nil, "completed handover absence restores without a phase history")
 end
 if section == nil or section == "rollover_launch_failure" then
 	local f, id = rollover_fixture()
@@ -2431,15 +4416,24 @@ if section == nil or section == "rollover_launch_failure" then
 	check(f:apply("result", { action_id = launch, executor = f.origin.window_epoch, grant_id = a.claim.grant_id,
 		response_bytes = frame(a.request, "rejected", nil, { code = "input_too_large", message = "Successor task exceeds the configured argv bound." }) }).ok, "SPAWN refusal commits")
 	local r, pred = rollover_of(f, hid), worker_of(f, id)
-	check(r.phase == "successor_granted" and r.hold.code == "successor_launch_failed" and r.hold.message:find("input_too_large", 1, true) ~= nil,
+	check(r.phase == "successor_granted" and r.hold.code == "successor_launch_failed" and worker_of(f, succ_id).reason.code == "input_too_large",
 		"failed successor launch retains phase and evidence")
 	check(pred.phase == "accepted" and pred.finish == nil and pred.stop_action_id == nil and #actions_of(f, id, "stop") == 0, "failed successor launch leaves the predecessor alive and unstopped")
 	check(f:apply("rollover", { worker_id = id, trigger = "owner" }).code == "rollover_in_progress", "no second successor is granted beside a failed one")
 	check(state.rehydrate(clone(f.authority.registry)) ~= nil, "held rollover restores")
-	check(f:apply("cancel_rollover", { worker_id = id }).code == "rollover_cancelled" and rollover_of(f, hid).phase == "cancelled"
-		and rollover_of(f, hid).hold.code == "successor_launch_failed", "definitively failed launch can be cancelled with evidence retained")
-	local again = f:apply("rollover", { worker_id = id, trigger = "owner" })
-	check(again.ok and again.code == "rollover_requested" and again.handover_id ~= hid, "a new rollover uses a new handover identity")
+	check(f:apply("close_handover", { worker_id = id }).code == "handover_effect_started"
+		and rollover_of(f, hid).hold.code == "successor_launch_failed", "a failed launch cannot erase its already provisioned successor")
+	check(f:apply("rollover", { worker_id = id, trigger = "owner" }).code == "rollover_in_progress", "no alternate successor is allocated while that effect remains")
+	local cancelled = f:apply("cancel_work", { worker_id = succ_id }); assert(cancelled.ok, cancelled.message)
+	check(cancelled.code == "withdrawal_retiring" and f:action(cancelled.action_id).request.op == "mailbox_retire"
+		and worker_of(f, id).stop_action_id == nil, "owner cancellation retires only the definitively refused unused successor, never the live predecessor")
+	check(f:apply("close_handover", { worker_id = id }).code == "handover_effect_started",
+		"owner handover close still waits for positive successor retirement")
+	assert(f:finish(cancelled.action_id, "retired", {}).ok)
+	check(f:apply("close_handover", { worker_id = id }).code == "handover_closed" and worker_of(f, succ_id) == nil
+		and worker_of(f, id).phase == "accepted" and worker_of(f, id).finish == nil and #actions_of(f, id, "stop") == 0,
+		"separate owner close removes a positively retired refused successor and preserves its untouched predecessor")
+	check(state.rehydrate(clone(f.authority.registry)) ~= nil, "explicit failed-successor retirement and owner close restore without a replay")
 end
 if section == nil or section == "rollover_token" then
 	local f, id = rollover_fixture()
@@ -2486,11 +4480,14 @@ if section == nil or section == "rollover_reload" then
 	local idle = { worker_id = id, pane_binding = clone(worker_of(f, id).pane_binding), native_state = "idle" }
 	check(f:apply("observe", idle).code == "controller_mismatch" and rollover_of(f, hid).phase == "successor_granted", "restored uncertain controller cannot advance a rollover")
 	assert(f:apply("continue_controller", { expected_revision = f.authority.registry.revision, operator_verified = true }).ok)
+	assert(f:control("reconcile_session").ok) -- Fresh peer observation restores admission, never the old revision fence.
 	assert(f:apply("observe", idle).ok)
 	local successors = 0; for _, w in f.authority.registry.dispatch.workers do if w.handover_id == hid then successors += 1 end end
 	check(successors == 1 and #actions_of(f, succ_id, "mailbox_provision") == 1, "post-reload progress creates no duplicate successor or provision")
-	successor_created(f, succ_id)
-	check(rollover_of(f, hid).phase == "successor_created" and #actions_of(f, succ_id, "launch") == 1, "retained provision continues to exactly one launch")
+	local held_provision = actions_of(f, succ_id, "mailbox_provision")[1]
+	check(f:action(held_provision).phase == "held_ready"
+		and not f:apply("claim", { action_id = held_provision, executor = f.origin.window_epoch }).ok
+		and #actions_of(f, succ_id, "launch") == 0, "restored unissued-looking successor remains held; peer absence cannot authorize replay")
 	local g, gid = rollover_fixture()
 	local ghid, gsucc = rollover_granted(g, gid)
 	local launch = successor_provisioned(g, gsucc)
@@ -2498,20 +4495,27 @@ if section == nil or section == "rollover_reload" then
 	g.authority = host.new_authority(g.memory); assert(g.authority:load().ok)
 	check(g:action(launch).phase == "uncertain", "reload turns the claimed successor launch uncertain")
 	assert(g:apply("continue_controller", { expected_revision = g.authority.registry.revision, operator_verified = true }).ok)
+	assert(g:control("reconcile_session").ok) -- Fresh peer observation restores admission, never the old revision fence.
 	assert(g:apply("observe", { worker_id = gid, pane_binding = clone(worker_of(g, gid).pane_binding), native_state = "idle" }).ok)
 	check(rollover_of(g, ghid).phase == "successor_granted" and rollover_of(g, ghid).hold.code == "successor_launch_uncertain", "uncertain launch after reload holds")
-	check(g:apply("cancel_rollover", { worker_id = gid }).code == "rollover_effect_started" and #actions_of(g, gsucc, "launch") == 1
+	check(g:apply("close_handover", { worker_id = gid }).code == "handover_effect_started" and #actions_of(g, gsucc, "launch") == 1
 		and worker_of(g, gid).finish == nil, "uncertain successor launch is neither cancelled, duplicated nor allowed to stop the predecessor")
+	assert(g:allocation(gsucc, { state = "none" }).ok)
+	local close = g:apply("close_handover", { worker_id = gid })
+	local cancel = g:apply("cancel_work", { worker_id = gsucc })
+	check(not close.ok and not cancel.ok and g:action(launch).phase == "uncertain" and worker_of(g, gid).finish == nil,
+		"allocation absence cannot cancel an unknown native launch or handover: " .. runtime.json.encode({ close = close, cancel = cancel }))
 	-- A replacement window incarnation fences the never-claimed successor intent instead of replaying it.
 	local h, hid_worker = rollover_fixture()
 	local hhid, hsucc = rollover_granted(h, hid_worker)
 	h.authority = host.new_authority(h.memory); assert(h.authority:load().ok)
 	h.origin.window_epoch = "replacement-window"
 	assert(h:apply("continue_controller", { expected_revision = h.authority.registry.revision, operator_verified = true }).ok)
+	assert(h:control("reconcile_session").ok) -- Fresh peer observation restores admission, never the old revision fence.
 	local provision = h:action(actions_of(h, hsucc, "mailbox_provision")[1])
-	check(provision.phase == "resolved" and provision.resolution.evidence == "never_claimed" and rollover_of(h, hhid).hold.code == "successor_launch_fenced"
+	check(provision.phase == "held_ready" and provision.request.request_serial == nil
 		and #actions_of(h, hsucc, "launch") == 0 and #actions_of(h, hsucc, "mailbox_provision") == 1 and worker_of(h, hid_worker).finish == nil,
-		"a changed window fences the unexecuted successor grant with evidence; no replay, duplicate or predecessor stop")
+		"a changed window preserves an unknown restored intention; no nonexecution claim, duplicate or predecessor stop")
 	check(state.rehydrate(clone(h.authority.registry)) ~= nil, "fenced rollover hold restores")
 end
 if section == nil or section == "rollover_policy" then
@@ -2524,7 +4528,9 @@ if section == nil or section == "rollover_policy" then
 	check(not projected(id).due_rollover and f:apply("rollover", { worker_id = id, trigger = "policy" }).code == "rollover_not_due" and rollovers() == 0,
 		"context below the threshold never triggers rollover")
 	assert(send_report(f, id, "READY", { state = "idle", context_used_pct = 60 }).ok)
-	check(projected(id).due_rollover, "idle accepted worker at the threshold is due")
+	check(not projected(id).due_rollover, "threshold alone cannot roll over mid-work")
+	assert(send_report(f, id, "CHECKPOINT", handover_checkpoint("completed-boundary")).ok)
+	check(projected(id).due_rollover, "completed-work checkpoint after threshold makes idle worker rollover eligible")
 	assert(f:apply("policy", { policy = { excluded_workers = { id } } }).ok)
 	check(not projected(id).due_rollover and f:apply("rollover", { worker_id = id, trigger = "policy" }).code == "rollover_not_due" and rollovers() == 0,
 		"excluded worker is never rolled over automatically")
@@ -2546,16 +4552,220 @@ if section == nil or section == "rollover_policy" then
 	check(worker_of(f, id).finish == nil and #actions_of(f, id, "stop") == 0, "automatic request never stops anything by itself")
 	check(state.rehydrate(clone(f.authority.registry)) ~= nil, "policy-triggered rollover restores")
 end
+if section == nil or section == "rollover_context" then
+	local f, id, clock = rollover_fixture()
+	local sid = f.origin.logical_session_id
+	local function row()
+		for _, w in dispatch.project(f.authority.registry, sid, f.origin.alias_nonce).workflow.workers do if w.worker_id == id then return w end end
+	end
+	local function snapshot(current, baseline, window, observed)
+		return { current_tokens = current, first_turn_tokens = baseline, window_tokens = window or 1000, observed_at_ms = observed or clock.now_ms }
+	end
+	local function report(sample)
+		return send_report(f, id, "READY", { state = "idle", context_snapshot = sample })
+	end
+	check(dispatch.policy(f.authority.registry, sid).rollover_threshold_pct == 0, "new policy uses calculated headroom")
+	assert(send_report(f, id, "READY", { state = "idle", context_used_pct = 100 }).ok)
+	check(row().context_rollover.status == "unknown" and not row().due_rollover, "percent alone never fabricates a calculated baseline")
+	assert(report(snapshot(1000)).ok)
+	check(row().context_rollover.status == "unknown" and not row().due_rollover, "missing first-turn baseline remains unknown even at a full window")
+	assert(report(snapshot(639, 200)).ok)
+	assert(send_report(f, id, "CHECKPOINT", handover_checkpoint("before-threshold")).ok)
+	check(not row().due_rollover and row().context_rollover.threshold_pct == 64, "headroom uses measured first turn, not a flat 55 percent")
+	assert(report(snapshot(640, 200)).ok)
+	check(not row().due_rollover, "equality reaches threshold but cannot reuse an earlier completed checkpoint")
+	assert(report(snapshot(641, 200)).ok)
+	local empty = handover_checkpoint("incomplete-boundary"); empty.completed = runtime.json.array()
+	assert(send_report(f, id, "CHECKPOINT", empty).ok)
+	check(not row().due_rollover, "a checkpoint with no completed work is not a boundary")
+	assert(f:watermark(id).ok) -- Settle the eight retained receipts before another report; do not test capacity by accident.
+	assert(send_report(f, id, "CHECKPOINT", handover_checkpoint("after-threshold")).ok)
+	check(row().due_rollover, "repeated above-threshold reports preserve eligibility for the next actual completed boundary")
+	assert(report(snapshot(900, 201)).ok)
+	check(row().context_rollover.status == "inconsistent" and not row().due_rollover, "changed first-turn baseline cannot roll a generation")
+	assert(report(snapshot(900, 200, 2000)).ok)
+	check(row().context_rollover.status == "inconsistent" and not row().due_rollover, "changed runtime window cannot roll a generation")
+	assert(report(snapshot(900, 200)).ok)
+	check(not row().due_rollover, "a corrected measurement needs a new completed boundary after inconsistency")
+	assert(send_report(f, id, "CHECKPOINT", handover_checkpoint("corrected-boundary")).ok)
+	check(row().due_rollover, "the original stable baseline remains usable after a corrected measurement")
+	assert(f:watermark(id).ok)
+	assert(report(snapshot(900)).ok)
+	check(row().context_rollover.status == "measured" and worker_of(f, id).workflow.context.snapshot.first_turn_tokens == 200,
+		"a fresh current/window sample may reuse only this generation's stable measured first-turn baseline")
+	assert(send_report(f, id, "HEARTBEAT", { state = "idle" }).ok)
+	check(row().context_used_pct == nil and not row().due_rollover, "missing current measurement is unknown, not cached occupancy")
+	assert(report(snapshot(640, 200)).ok)
+	assert(send_report(f, id, "CHECKPOINT", handover_checkpoint("fresh-boundary")).ok)
+	local original = worker_of(f, id).workflow.context.at_ms
+	local replay = f:report(id, worker_of(f, id).accepted_seq + 1, "READY", { state = "idle", context_snapshot = snapshot(640, 200) })
+	assert(f:apply("intake", { worker_id = id, bytes = replay }).ok)
+	clock.now_ms += dispatch.policy(f.authority.registry, sid).stale_ms
+	clock.mono_ms = clock.now_ms
+	assert(f:apply("intake", { worker_id = id, bytes = replay }).ok)
+	assert(f:apply("observe", { worker_id = id, pane_binding = clone(worker_of(f, id).pane_binding), native_state = "idle" }).ok)
+	check(row().context_rollover.status == "stale" and row().context_used_pct == nil and not row().due_rollover
+		and worker_of(f, id).workflow.context.at_ms == original, "exact report replay and fresh native idle cannot renew a stale measurement")
+	assert(report(snapshot(900, 200, 1000, clock.now_ms - dispatch.policy(f.authority.registry, sid).stale_ms)).ok)
+	check(row().context_rollover.status == "stale" and not row().due_rollover, "new sequence carrying an old snapshot remains stale at the exact age boundary")
+	assert(report(snapshot(900, 200, 1000, clock.now_ms + 1)).ok)
+	check(row().context_rollover.status == "inconsistent" and not row().due_rollover, "future measurement time is not reliable current evidence")
+	assert(f:watermark(id).ok)
+	assert(f:apply("policy", { policy = { rollover_threshold_pct = 50 } }).ok)
+	assert(report(snapshot(499)).ok)
+	assert(send_report(f, id, "CHECKPOINT", handover_checkpoint("numeric-below")).ok)
+	check(not row().due_rollover and row().context_rollover.mode == "percentage", "numeric override uses actual current occupancy without needing first turn")
+	assert(report(snapshot(500)).ok)
+	local boundary = handover_checkpoint("numeric-equality"); boundary.context_snapshot = snapshot(500)
+	assert(send_report(f, id, "CHECKPOINT", boundary).ok)
+	check(row().due_rollover and row().context_used_pct == 50, "numeric override accepts exact threshold on a measured completed checkpoint")
+	check(state.rehydrate(clone(f.authority.registry)) ~= nil, "measured generation-local baseline and current snapshot restore strictly")
+	for _, bad in { snapshot(-1, 200), snapshot(1001, 200), snapshot(500, 1001), snapshot(500, 200, 0),
+		{ current_tokens = 500, window_tokens = 1000 }, snapshot(500.5, 200) } do
+		local before = runtime.json.encode(f.authority.registry)
+		check(not report(bad).ok and runtime.json.encode(f.authority.registry) == before, "invalid/incomplete runtime snapshot rejects without changing accepted measurements")
+	end
+	local g, gid = rollover_fixture()
+	assert(send_report(g, gid, "READY", { state = "idle", context_snapshot = { current_tokens = 1000, window_tokens = 1000, observed_at_ms = 1000 } }).ok)
+	local projected = dispatch.project(g.authority.registry, g.origin.logical_session_id, g.origin.alias_nonce).workflow.workers[1]
+	check(projected.context_rollover.status == "unknown" and not projected.due_rollover, "a different worker generation cannot borrow another generation's first-turn baseline")
+	for _, edge in {
+		{ window = 1000, baseline = 0, at = 550 },
+		{ window = 1000, baseline = 1000, at = 1000 },
+		{ window = 200000, baseline = 10000, at = 114500 },
+		{ window = 9007199254740991, baseline = 0, at = 4953959590107546 },
+		{ window = 9007199254740991, baseline = 4503599627370495, at = 6980579422424268 },
+		{ window = 9007199254740991, baseline = 9007199254740990, at = 9007199254740991 },
+	} do
+		local h, hid = rollover_fixture()
+		local function due()
+			for _, w in dispatch.project(h.authority.registry, h.origin.logical_session_id, h.origin.alias_nonce).workflow.workers do if w.worker_id == hid then return w.due_rollover end end
+		end
+		local before = handover_checkpoint("headroom-edge-before")
+		before.context_snapshot = { current_tokens = edge.at - 1, first_turn_tokens = edge.baseline, window_tokens = edge.window, observed_at_ms = 1000 }
+		assert(send_report(h, hid, "CHECKPOINT", before).ok)
+		check(not due(), "headroom excludes the integer immediately below threshold, including realistic and maximum-safe windows")
+		local reached = handover_checkpoint("headroom-edge-reached")
+		reached.context_snapshot = { current_tokens = edge.at, first_turn_tokens = edge.baseline, window_tokens = edge.window, observed_at_ms = 1000 }
+		assert(send_report(h, hid, "CHECKPOINT", reached).ok)
+		check(due(), "headroom includes exact threshold without floating-point drift or overflowing integer intermediates")
+	end
+end
+if section == nil or section == "rollover_context_roundtrip" then
+	for _, current in { 1, 2 } do
+		local f, id, clock = rollover_fixture()
+		local cp = handover_checkpoint("fractional-context")
+		cp.context_snapshot = { current_tokens = current, window_tokens = 3, first_turn_tokens = 0, observed_at_ms = 1000 }
+		assert(send_report(f, id, "CHECKPOINT", cp).ok)
+		assert(f:watermark(id).ok)
+		-- Exercise the actual native JSON persistence boundary, not clone equality or source text.
+		local encoded = runtime.json.encode(f.authority.registry)
+		local decoded = runtime.json.decode(encoded)
+		local restored, problem = state.rehydrate(decoded)
+		check(restored ~= nil, "native JSON fractional context survives strict State restore: " .. tostring(problem))
+		local projected
+		for _, row in dispatch.project(restored, f.origin.logical_session_id, f.origin.alias_nonce).workflow.workers do
+			if row.worker_id == id then projected = row end
+		end
+		check(projected.context_rollover.status == "unknown" and projected.context_used_pct == nil and not projected.due_rollover,
+			"restore without a live clock or explicit continuation never promotes persisted occupancy into fresh evidence")
+		local retained = restored.dispatch.workers[id].workflow.context
+		check(retained.used_pct > (if current == 1 then 33 else 66) and retained.used_pct < (if current == 1 then 34 else 67),
+			"strict native JSON restore retains fractional percentage evidence without requiring a serializer workaround")
+		local snapshot = restored.dispatch.workers[id].workflow.context.snapshot
+		check(snapshot.current_tokens == current and snapshot.window_tokens == 3 and snapshot.first_turn_tokens == 0,
+			"native JSON restore retains the exact measured counts underlying fractional percent")
+		-- Continue the actual serialized authority through its supported controller/worker
+		-- reattachment path, then supply a genuinely fresh measurement and native observation.
+		f.memory.value = decoded
+		f.authority = host.new_authority(f.memory, function() return clone(clock) end)
+		local loaded = f.authority:load(); assert(loaded.ok, runtime.json.encode(loaded))
+		assert(f:apply("continue_controller", { expected_revision = f.authority.registry.revision, operator_verified = true }).ok)
+		assert(f:control("reconcile_session").ok)
+		local original = clone(worker_of(f, id))
+		local pane = clone(original.pane_binding)
+		local attached = f:apply("continue_worker", { worker_id = id, pane_binding = pane,
+			continuation_proof = dispatch.continuation_proof(f.authority.registry, worker_of(f, id)), operator_verified = true })
+		assert(attached.ok, runtime.json.encode(attached))
+		assert(f:finish(attached.action_id, "attached", { pane_binding = pane,
+			previous_origin_binding = original.origin_binding, previous_pane_binding = original.pane_binding }).ok)
+		clock.now_ms += 1; clock.mono_ms += 1
+		local fresh = handover_checkpoint("fractional-context-fresh")
+		fresh.context_snapshot = { current_tokens = current, window_tokens = 3, first_turn_tokens = 0, observed_at_ms = clock.now_ms }
+		assert(send_report(f, id, "CHECKPOINT", fresh).ok)
+		assert(f:apply("observe", { worker_id = id, pane_binding = pane, native_state = "idle" }).ok)
+		for _, row in dispatch.project(f.authority.registry, f.origin.logical_session_id, f.origin.alias_nonce).workflow.workers do
+			if row.worker_id == id then projected = row end
+		end
+		check(projected.context_rollover.status == "measured" and projected.context_rollover.threshold_pct == 55
+			and projected.context_used_pct > (if current == 1 then 33 else 66)
+			and projected.context_used_pct < (if current == 1 then 34 else 67)
+			and projected.due_rollover == (current == 2),
+			"supported post-restore continuation and fresh runtime evidence recover the measured checkpoint eligibility on either side of threshold")
+	end
+end
+if section == nil or section == "rollover_context_handover" then
+	for _, measurement in {
+		{ field = "context_used_pct", value = 95 },
+		{ field = "context_snapshot", value = { current_tokens = 114500, first_turn_tokens = 10000, window_tokens = 200000, observed_at_ms = 1000 } },
+	} do
+		local f, id = rollover_fixture()
+		local requested = f:apply("rollover", { worker_id = id, trigger = "owner" }); assert(requested.ok)
+		local request = clone(worker_of(f, id).workflow.report_request)
+		assert(send_report(f, id, "reply_ack", { message_id = request.message_id, reply_seq = request.reply_seq,
+			reply_sha256 = codec.sha256(request.bytes), status = "recorded" },
+			{ action_id = request.action_id, action_revision = request.action_revision }).ok)
+		local cp = handover_checkpoint("measured-handover", request.request_id)
+		cp[measurement.field] = clone(measurement.value)
+		assert(send_report(f, id, "CHECKPOINT", cp).ok)
+		local r = rollover_of(f, requested.handover_id)
+		check(r.phase == "successor_granted", "a measured verified checkpoint grants the real successor")
+		local original = r.checkpoint
+		local predecessor_receipt = worker_of(f, id).receipts[tostring(worker_of(f, id).accepted_seq)].bytes
+		local succ_id = r.successor_worker_id
+		local launch = successor_provisioned(f, succ_id)
+		local assignment = f:action(launch).request.prompt
+		local transferred = runtime.json.decode(assert(assignment:match("\nCHECKPOINT (.+)$")))
+		check(transferred.context_used_pct == nil and transferred.context_snapshot == nil and transferred.request_id == nil
+			and transferred.checkpoint_id == cp.checkpoint_id and transferred.completed[1] == cp.completed[1]
+			and transferred.remaining[1] == cp.remaining[1],
+			"actual fresh-launch assignment transfers work and evidence but no predecessor runtime measurement or request correlation")
+		assert(f:finish(launch, "awaiting_acceptance", { pane_binding = successor_pane(f) }).ok)
+		local successor = worker_of(f, succ_id)
+		local before = runtime.json.encode(f.authority.registry)
+		local wrong = f:apply("intake", { worker_id = succ_id, bytes = f:report(succ_id, 1, "ACCEPTED",
+			{ assignment_sha256 = codec.sha256(original) }, { handover_id = successor.handover_id, handover_token = successor.handover_token }) })
+		check(not wrong.ok and wrong.code == "binding_mismatch" and runtime.json.encode(f.authority.registry) == before,
+			"predecessor checkpoint bytes cannot substitute for acceptance of the cleaned successor assignment")
+		local accept_id, accept_request = successor_accept_request(f, succ_id)
+		local receipt = runtime.json.decode(worker_of(f, succ_id).receipts["1"].bytes)
+		check(worker_of(f, succ_id).assignment_sha256 == codec.sha256(assignment) and receipt.event_sha256 == accept_request.event_sha256
+			and accept_request.handover_id == requested.handover_id, "successor committed receipt and semantic acceptance bind the actual cleaned assignment")
+		assert(f:finish(accept_id, "accepted", {}).ok)
+		successor = worker_of(f, succ_id)
+		local projected
+		for _, row in dispatch.project(f.authority.registry, f.origin.logical_session_id, f.origin.alias_nonce).workflow.workers do
+			if row.worker_id == succ_id then projected = row end
+		end
+		check(successor.phase == "accepted" and successor.accepted_seq == 1 and successor.workflow.context == nil
+			and successor.workflow.context_basis == nil and projected.context_rollover.status == "unknown" and not projected.due_rollover,
+			"accepted fresh generation begins with unknown runtime context, without inherited baseline or rollover eligibility")
+		r = rollover_of(f, requested.handover_id)
+		check(r.checkpoint == original and codec.decode_report(r.checkpoint, worker_of(f, id)).payload[measurement.field] ~= nil
+			and worker_of(f, id).receipts[tostring(worker_of(f, id).accepted_seq)].bytes == predecessor_receipt,
+			"cleaning successor input leaves predecessor immutable checkpoint and committed receipt unchanged")
+	end
+end
 -- Coordinator rollover (CP4): never two managed coordinators; successor only after observed closure and release.
 local function coordinator_owner(f) return f.authority.registry.sessions[f.origin.logical_session_id].orchestrator end
-local function coordinator_ready()
-	local f, id = retirement_fixture(); f:drain(); assert(f:ack("activation").ok)
+local function coordinator_ready(clock, unstarted_project)
+	local f, id = retirement_fixture(clock, unstarted_project); f:drain(); assert(f:ack("activation").ok)
 	return f, id
 end
 local function coordinator_retirement_requested(f, id)
 	local requested = f:apply("rollover", { worker_id = id, trigger = "owner" }); assert(requested.ok and requested.code == "rollover_requested", requested.message)
 	assert(rollover_of(f, requested.handover_id).kind == "coordinator" and rollover_of(f, requested.handover_id).phase == "checkpoint_pending")
-	assert(answer_checkpoint(f, id, "coordinator-cp-1").ok)
+	local checkpoint = answer_checkpoint(f, id, "coordinator-cp-1"); must(checkpoint.ok, checkpoint)
 	assert(rollover_of(f, requested.handover_id).phase == "retirement_requested", rollover_of(f, requested.handover_id).phase)
 	return requested.handover_id
 end
@@ -2579,7 +4789,7 @@ local function coordinator_successor_accepted(f, hid)
 	local succ_id = rollover_of(f, hid).successor_worker_id
 	local provision = actions_of(f, succ_id, "mailbox_provision"); assert(#provision == 1)
 	assert(f:finish(provision[1], "provisioned", { handle = "mailbox-coordinator-successor", binding_digest = string.rep("c", 64),
-		capabilities = runtime.json.array({ "report-files-v1", "native-ask-v1", "coordinator-control-v1" }), limits = {} }).ok)
+		capabilities = runtime.json.array({ "report-files-v1", "native-ask-v1", "coordinator-control-v1", "project-start-v1" }), limits = {} }).ok)
 	assert(f:finish(worker_of(f, succ_id).launch_action_id, "awaiting_acceptance", { pane_binding = successor_pane(f) }).ok)
 	local accept_id, accept_request = successor_accept_request(f, succ_id)
 	assert(f:finish(accept_id, "accepted", {}).ok)
@@ -2590,6 +4800,110 @@ local function ack_activation(f, worker_id)
 	return send_report(f, worker_id, "reply_ack", { message_id = reply.message_id, reply_seq = reply.reply_seq, reply_sha256 = reply.sha256, status = "recorded" },
 		{ action_id = grant.action_id, action_revision = grant.action_revision })
 end
+if section == nil or section == "project_start_rollover" then
+	local f, predecessor = coordinator_ready()
+	local project = f:project("START awaiting its original coordinator", false)
+	local p = f.authority.registry.dispatch.projects[project]
+	assert(f:apply("project_start", { orch_project_id = project, project_revision = p.revision }).ok)
+	f:drain()
+	local start = f.authority.registry.dispatch.projects[project].start
+	local reply = assert(codec.decode_reply(start.bytes, worker_of(f, predecessor)))
+	assert(send_report(f, predecessor, "reply_ack", { message_id = start.message_id, reply_seq = start.reply_seq,
+		reply_sha256 = codec.sha256(start.bytes), status = "recorded" }, { action_id = start.action_id, action_revision = start.action_revision }).ok)
+	local original = clone(f.authority.registry.dispatch.projects[project].start)
+	local handover = coordinator_retirement_requested(f, predecessor)
+	assert(coordinator_released(f, predecessor, coordinator_stop_action(f, predecessor)).ok)
+	local successor = coordinator_successor_accepted(f, handover); assert(ack_activation(f, successor).ok)
+	local current = f.authority.registry.dispatch.projects[project]
+	assert(current.start.closed and f:apply("project_start", { orch_project_id = project, project_revision = current.revision }).ok)
+	local fresh = clone(f.authority.registry.dispatch.projects[project].start)
+	check(fresh.action_id ~= original.action_id and fresh.coordinator.worker_id == successor, "a safely established successor receives only a separately approved fresh START")
+	local old = send_report(f, predecessor, "PROJECT_START_CLAIM", reply.payload,
+		{ action_id = original.action_id, action_revision = original.action_revision })
+	check(old.ok and old.refused == "start_owner_changed" and not f.authority.registry.dispatch.projects[project].started
+		and f.authority.registry.dispatch.projects[project].start.action_id == fresh.action_id,
+		"a late exact old-owner claim is consumed only as a refused fact, never inherited by the successor's fresh START")
+	local inherited = send_report(f, successor, "PROJECT_START_CLAIM", reply.payload,
+		{ action_id = original.action_id, action_revision = original.action_revision })
+	check(inherited.code == "start_claim_unauthorized" and f.authority.registry.dispatch.projects[project].start.bytes == fresh.bytes
+		and f.authority.registry.dispatch.projects[project].start_history[1].bytes == original.bytes
+		and not f.authority.registry.dispatch.projects[project].started, "the successor cannot inherit or rebind its predecessor's grant, owner or activation")
+	check(state.rehydrate(clone(f.authority.registry)) ~= nil, "old START evidence remains durable across successor ownership")
+end
+if section == nil or section == "current_handover" then
+	-- Closing a handover only ends successor creation. It must preserve every predecessor-side
+	-- obligation already issued, including a retirement or uncertain stop.
+	for _, phase in { "retirement_requested", "predecessor_stop_requested", "predecessor_closed", "successor_granted" } do
+		local f, id = coordinator_ready()
+		local hid = coordinator_retirement_requested(f, id)
+		local stop
+		if phase ~= "retirement_requested" then stop = coordinator_stop_action(f, id) end
+		if phase == "predecessor_closed" or phase == "successor_granted" then
+			assert(f:finish(stop, "stopped", { pane_binding = clone(f:action(stop).request.pane_binding), observation = "exited" }).ok)
+		end
+		if phase == "successor_granted" then
+			local retirement = f:apply("poll", { worker_id = id }); assert(retirement.ok)
+			assert(f:finish(retirement.action_id, "retired").ok)
+		end
+		local r = assert(rollover_of(f, hid))
+		check(r.phase == phase, phase .. ": reaches the real externally visible handover edge")
+		local successor = r.successor_worker_id
+		local old_stop = if stop then f:action(stop) else nil
+		local old_retirement = clone(worker_of(f, id).retirement)
+		check(f:apply("close_handover", { worker_id = id }).code == "handover_closed", phase .. ": fresh admission permits explicit close without an issued successor")
+		check(successor == nil or worker_of(f, successor) == nil, phase .. ": untouched successor draft is removed rather than left schedulable")
+		check(runtime.json.encode(worker_of(f, id).retirement) == runtime.json.encode(old_retirement)
+			and (old_stop == nil or f:action(stop) ~= nil), phase .. ": closure does not erase predecessor retirement or stop")
+		if phase == "successor_granted" then check(coordinator_owner(f) == nil, "closing untouched reserved successor releases its exact reservation in the same commit") end
+		check(state.rehydrate(clone(f.authority.registry)) ~= nil, phase .. ": closed handover with remaining obligations restores")
+	end
+	-- One worker can end more handovers than the old lifetime capacity. The protocol receives real
+	-- checkpoint/reply ACKs; only then does the terminal graph disappear.
+	local f, id = rollover_fixture()
+	for index = 1, 65 do
+		local requested = f:apply("rollover", { worker_id = id, trigger = "owner" }); assert(requested.ok)
+		local checkpoint = answer_checkpoint(f, id, "closed-handover-" .. index)
+		must(checkpoint.ok, { handover = index, result = checkpoint })
+		local r = assert(rollover_of(f, requested.handover_id)); local successor = r.successor_worker_id
+		assert(successor and f:action(actions_of(f, successor, "mailbox_provision")[1]).request_bytes == nil)
+		check(f:apply("close_handover", { worker_id = id }).code == "handover_closed" and worker_of(f, successor) == nil,
+			"handover " .. index .. ": owner exits only before successor issue")
+		for _ = 1, 16 do
+			local publish = false
+			for _, receipt in worker_of(f, id).receipts do if receipt.publish then publish = true end end
+			if not publish then break end
+			local pending = f:apply("poll", { worker_id = id }); assert(pending.ok)
+			assert(f:action(pending.action_id).request.op == "mailbox_publish_ack")
+			assert(f:finish(pending.action_id, "published").ok)
+		end
+		assert(f:watermark(id).ok)
+		check(rollover_of(f, requested.handover_id) == nil and next(f.authority.registry.dispatch.rollovers) == nil,
+			"handover " .. index .. ": settled phase record is reclaimed rather than evicted at a bound")
+		local flow = worker_of(f, id).workflow
+		local checkpoints, checkpoint_entries = 0, 0
+		for _ in flow.checkpoints do checkpoints += 1 end
+		for _, entry in flow.thread do if entry.kind == "CHECKPOINT" then checkpoint_entries += 1 end end
+		check(checkpoints == 1 and checkpoint_entries == 1 and flow.checkpoints["closed-handover-" .. index] ~= nil
+			and codec.decode_report(flow.evidence.CHECKPOINT, worker_of(f, id)).payload.checkpoint_id == "closed-handover-" .. index,
+			"handover " .. index .. ": only current checkpoint evidence and its thread entry remain, with latest proof preserved")
+	end
+	check(state.rehydrate(clone(f.authority.registry)) ~= nil, "more than64 ended handovers restore without lifetime history")
+	-- Two ended handovers before producer settlement retain both real checkpoint reports.
+	local pending, predecessor = rollover_fixture()
+	for index = 1, 2 do
+		local requested = pending:apply("rollover", { worker_id = predecessor, trigger = "owner" }); must(requested.ok, requested)
+		local checkpoint = answer_checkpoint(pending, predecessor, "undrained-handover-" .. index); must(checkpoint.ok, checkpoint)
+		must(pending:apply("close_handover", { worker_id = predecessor }).ok)
+	end
+	local unsettled = worker_of(pending, predecessor)
+	check(unsettled.workflow.checkpoints["undrained-handover-1"] ~= nil
+		and unsettled.workflow.checkpoints["undrained-handover-2"] ~= nil and unsettled.compacted_floor < unsettled.accepted_seq,
+		"an older checkpoint remains retained while its real producer receipts are undrained")
+	must(pending:watermark(predecessor).ok)
+	check(worker_of(pending, predecessor).workflow.checkpoints["undrained-handover-1"] == nil
+		and worker_of(pending, predecessor).workflow.checkpoints["undrained-handover-2"] ~= nil,
+		"the real cumulative receipt watermark releases only the older unreferenced checkpoint")
+end
 if section == nil or section == "rollover_coordinator" then
 	local f, id = coordinator_ready()
 	local old_owner, old_generation = coordinator_owner(f).owner_id, coordinator_owner(f).generation
@@ -2598,7 +4912,12 @@ if section == nil or section == "rollover_coordinator" then
 	check(coordinator_owner(f).owner_id == old_owner and coordinator_owner(f).phase == "retiring" and worker_of(f, id).retirement ~= nil,
 		"verified checkpoint quiesces the predecessor through the existing typed retirement; the slot stays occupied")
 	check(f:queue(true).code == "rollover_reserved" and handover_successors(f, hid) == 0, "no unrelated start or successor while the predecessor is quiescing")
-	check(f:apply("cancel_rollover", { worker_id = id }).code == "rollover_effect_started", "coordinator rollover cannot be cancelled after retirement was requested")
+	do
+		local closing, predecessor = coordinator_ready()
+		local closing_id = coordinator_retirement_requested(closing, predecessor)
+		check(closing:apply("close_handover", { worker_id = predecessor }).code == "handover_closed"
+			and handover_successors(closing, closing_id) == 0, "owner may close without successor after retirement requested; predecessor obligations remain")
+	end
 	local stop = coordinator_stop_action(f, id)
 	check(rollover_of(f, hid).phase == "predecessor_stop_requested" and handover_successors(f, hid) == 0 and coordinator_owner(f).owner_id == old_owner,
 		"stop grant alone never starts a successor")
@@ -2612,7 +4931,7 @@ if section == nil or section == "rollover_coordinator" then
 	local retire = f:apply("poll", { worker_id = id }); assert(f:action(retire.action_id).request.mode == "retire")
 	check(f:finish(retire.action_id, "retired", {}).code == "coordinator_retired", "normal generation-bound release runs through the existing retirement path")
 	local r = rollover_of(f, hid); local owner = coordinator_owner(f)
-	check(r.phase == "successor_granted" and f.authority.registry.retired[old_owner] ~= nil and owner.owner_id ~= old_owner and owner.generation > old_generation
+	check(r.phase == "successor_granted" and f.authority.registry.retired == nil and owner.owner_id ~= old_owner and owner.generation > old_generation
 		and owner.phase == "reserved" and owner.managed_worker_id == r.successor_worker_id and r.successor_owner_id == owner.owner_id,
 		"release and successor reservation commit in the same serialized transition")
 	check(handover_successors(f, hid) == 1, "exactly one successor coordinator is granted")
@@ -2625,10 +4944,8 @@ if section == nil or section == "rollover_coordinator" then
 		and succ.activation.activation_token ~= old_token, "successor activation is bound to the handover and never reuses the retired token")
 	check(rollover_of(f, hid).phase == "handover_accepted", "activation must be acknowledged before the successor counts")
 	assert(ack_activation(f, succ_id).ok)
-	r = rollover_of(f, hid)
-	local phases = {}; for _, edge in r.history do table.insert(phases, edge.phase) end
-	check(table.concat(phases, ",") == "requested,checkpoint_pending,checkpoint_verified,retirement_requested,predecessor_released,predecessor_stop_requested,predecessor_closed,owner_retired,successor_granted,successor_created,handover_accepted,complete",
-		"every coordinator edge is recorded in order: " .. table.concat(phases, ","))
+	check(rollover_of(f, hid) == nil and coordinator_owner(f).managed_worker_id == succ_id,
+		"successor activation settles the last handover obligation and reclaims its completed phase history")
 	check(send_report(f, id, "HEARTBEAT", { state = "idle" }).code == "owner_mismatch", "retired predecessor generation cannot report")
 	local proposal = { owner_id = owner.owner_id, owner_generation = owner.generation, activation_token = old_token, proposal_id = "after-rollover", kind = "report",
 		work_id = succ.work_id, project_id = "project-one" }
@@ -2657,11 +4974,13 @@ if section == nil or section == "rollover_coordinator_reload" then
 	f.authority = host.new_authority(f.memory); assert(f.authority:load().ok)
 	check(rollover_of(f, hid).phase == "retirement_requested" and coordinator_owner(f).phase == "uncertain", "reload keeps the durable phase and an uncertain occupied slot")
 	assert(f:apply("continue_controller", { expected_revision = f.authority.registry.revision, operator_verified = true }).ok)
+	assert(f:control("reconcile_session").ok) -- Fresh peer observation restores admission, never the old revision fence.
 	check(f:queue(true).code == "rollover_reserved" and handover_successors(f, hid) == 0, "after reload no unrelated start or successor can take the slot")
 	-- Ambiguous closure: explicit operator-assisted recovery of the exact orchestrator owner.
 	local function owner_event(kind, fields)
 		local event = { kind = kind, request_id = "coordinator-recovery-" .. kind .. "-" .. tostring(f.authority.registry.revision), orch_session_id = f.origin.logical_session_id,
 			target = "orchestrator", expected_owner_id = old.owner_id, expected_generation = old.generation }
+		event.authority_namespace = f.authority.registry.authority_namespace; event.expected_revision = f.authority.registry.revision
 		for k, v in fields do event[k] = v end
 		return f.authority:apply(event)
 	end
@@ -2671,11 +4990,12 @@ if section == nil or section == "rollover_coordinator_reload" then
 	assert(owner_event("confirm_recovery", { expected_revision = intent.revision, intent_id = intent.intent_id, evidence = "operator_attested", operator_verified = true }).ok)
 	assert(f:apply("observe", { worker_id = id, pane_binding = clone(worker_of(f, id).pane_binding), native_state = "unknown" }).ok)
 	local r = rollover_of(f, hid)
-	check(r.phase == "successor_granted" and r.closure == "operator_attested" and handover_successors(f, hid) == 1
-		and coordinator_owner(f).managed_worker_id == r.successor_worker_id and coordinator_owner(f).owner_id ~= old.owner_id,
-		"operator-attested recovery lets the retained handover reserve exactly one successor")
+	check(r.phase == "owner_retired" and r.closure == "operator_attested" and handover_successors(f, hid) == 0
+		and coordinator_owner(f) == nil and r.prepared.action.phase == "held_ready" and r.hold.code == "restored_preparation",
+		"owner-stop attestation retires only that owner; it cannot prove a restored successor draft never executed")
 	assert(f:apply("observe", { worker_id = id, pane_binding = clone(worker_of(f, id).pane_binding), native_state = "unknown" }).ok)
-	check(handover_successors(f, hid) == 1 and #actions_of(f, r.successor_worker_id, "mailbox_provision") == 1, "later progress never duplicates the successor")
+	check(handover_successors(f, hid) == 0 and rollover_of(f, hid).prepared.action.phase == "held_ready",
+		"later observations never turn restored preparation into replacement execution authority")
 	check(state.rehydrate(clone(f.authority.registry)) ~= nil, "operator-attested coordinator rollover restores")
 end
 if section == nil or section == "rollover_coordinator_restored" then
@@ -2693,7 +5013,7 @@ if section == nil or section == "rollover_coordinator_restored" then
 	check(worker_of(f, id).restored.reconciled == "observed_exit", "an observed exit reconciles the restored pane")
 	check(f:finish(retire.action_id, "retired", {}).code == "coordinator_retired" and rollover_of(f, hid).phase == "successor_granted", "reconciled hold resumes to exactly one successor")
 	local succ_id = coordinator_successor_accepted(f, hid); assert(ack_activation(f, succ_id).ok)
-	check(rollover_of(f, hid).phase == "complete", "successor activated")
+	check(rollover_of(f, hid) == nil, "activated successor and settled predecessor leave no terminal handover history")
 	assert(f:apply("observe", { worker_id = id, pane_binding = pane, native_state = "idle" }).ok)
 	check(worker_of(f, id).restored.reconciled == nil, "a reappearance after activation is recorded again")
 	local owner = coordinator_owner(f); local succ = worker_of(f, succ_id)
@@ -2709,7 +5029,10 @@ end
 if section == nil or section == "rollover_coordinator_successor_rejected" then
 	-- A coordinator successor that mistyped its handover token: the predecessor coordinator was stopped and retired, then SPAWN refused the
 	-- successor's ACCEPTED (one mistyped handover-token digit). No coordinator is active.
-	local f, id = coordinator_ready()
+	local clock = { now_ms = 1000, mono_ms = 1000, epoch = "coordinator-recovery-before" }
+	local f, id = coordinator_ready(function() return clone(clock) end)
+	check(not f:apply("cancel_work", { worker_id = id }).ok, "an accepted activated coordinator never uses failed-startup cleanup")
+	assert(f:apply("observe", { worker_id = id, pane_binding = clone(worker_of(f, id).pane_binding), native_state = "idle" }).ok)
 	local hid = coordinator_retirement_requested(f, id)
 	assert(coordinator_released(f, id, coordinator_stop_action(f, id)).code == "coordinator_retired")
 	local r = rollover_of(f, hid); local succ_id, owner = r.successor_worker_id, coordinator_owner(f)
@@ -2719,7 +5042,7 @@ if section == nil or section == "rollover_coordinator_successor_rejected" then
 	check(provisioned.handover_id == hid and provisioned.handover_sha256 == codec.sha256(hid .. ":" .. r.handover_token)
 		and not runtime.json.encode(provisioned):find(r.handover_token, 1, true), "the successor mailbox is provisioned with the handover ID and pair digest, never the token")
 	assert(f:finish(provision[1], "provisioned", { handle = "mailbox-coordinator-successor", binding_digest = string.rep("c", 64),
-		capabilities = runtime.json.array({ "report-files-v1", "native-ask-v1", "coordinator-control-v1" }), limits = {} }).ok)
+		capabilities = runtime.json.array({ "report-files-v1", "native-ask-v1", "coordinator-control-v1", "project-start-v1" }), limits = {} }).ok)
 	assert(f:finish(worker_of(f, succ_id).launch_action_id, "awaiting_acceptance", { pane_binding = successor_pane(f) }).ok)
 	assert(rollover_of(f, hid).phase == "successor_created")
 	local read = f:apply("poll", { worker_id = succ_id }); assert(read.ok, read.message)
@@ -2728,7 +5051,7 @@ if section == nil or section == "rollover_coordinator_successor_rejected" then
 	assert(f:apply("claim", { action_id = read.action_id, executor = f.origin.window_epoch }).ok)
 	local problem = { code = "binding_mismatch", message = "Acceptance differs from the issued assignment or handover." }
 	local refused = f:apply("result", { action_id = read.action_id, executor = f.origin.window_epoch, grant_id = f:action(read.action_id).claim.grant_id,
-		response_bytes = frame(request, "rejected", nil, problem) })
+		response_bytes = frame(f:action(read.action_id).request, "rejected", nil, problem) })
 	r = rollover_of(f, hid)
 	check(refused.code == "bridge_rejected" and worker_of(f, succ_id).phase == "held" and r.phase == "successor_created" and r.hold.code == "successor_unaccepted",
 		"a refused successor acceptance holds the coordinator handover")
@@ -2736,11 +5059,12 @@ if section == nil or section == "rollover_coordinator_successor_rejected" then
 	check(text:find(problem.message, 1, true) ~= nil and text:find("already stopped and retired, so no coordinator is active", 1, true) ~= nil
 		and text:find("fenced recovery for orchestrator owner " .. owner.owner_id, 1, true) ~= nil and text:find("keeps running", 1, true) == nil,
 		"the hold reports the retired predecessor, the SPAWN diagnostic and the recovery path: " .. text)
-	check(f:queue(true).code == "rollover_reserved" and handover_successors(f, hid) == 1 and #actions_of(f, succ_id, "launch") == 1,
-		"the held handover keeps the slot; nothing is relaunched")
+	check(f:queue(true).code == "rollover_reserved" and handover_successors(f, hid) == 1 and #actions_of(f, succ_id, "launch") == 0,
+		"the held handover keeps the slot and confirmed pane identity without retaining or reissuing its completed launch")
 	local function owner_event(kind, fields)
 		local event = { kind = kind, request_id = "successor-recovery-" .. kind .. "-" .. tostring(f.authority.registry.revision), orch_session_id = f.origin.logical_session_id,
 			target = "orchestrator", expected_owner_id = owner.owner_id, expected_generation = owner.generation }
+		event.authority_namespace = f.authority.registry.authority_namespace; event.expected_revision = f.authority.registry.revision
 		for k, v in fields do event[k] = v end
 		return f.authority:apply(event)
 	end
@@ -2749,12 +5073,84 @@ if section == nil or section == "rollover_coordinator_successor_rejected" then
 	local intent = owner_event("begin_recovery", { expected_revision = f.authority.registry.revision }); assert(intent.ok, intent.message)
 	local confirmed = owner_event("confirm_recovery", { expected_revision = intent.revision, intent_id = intent.intent_id, evidence = "operator_attested", operator_verified = true })
 	assert(confirmed.ok, confirmed.message)
+	local unproved_registry = clone(f.authority.registry)
+	local check_startup = f:apply("cancel_work", { worker_id = succ_id })
+	check(check_startup.code == "startup_retiring" and worker_of(f, succ_id).mailbox_retired ~= true
+		and worker_of(f, succ_id).stopped == nil and #actions_of(f, succ_id, "mailbox_retire") == 1,
+		"recovered owner may request only a native-check-gated retirement; unknown core lifecycle never clears its launched successor")
+	f.authority.registry = unproved_registry; f.memory.value = clone(unproved_registry)
 	assert(f:apply("observe", { worker_id = succ_id, pane_binding = successor_pane(f), native_state = "exited" }).ok)
 	r = rollover_of(f, hid)
-	check(r.phase == "cancelled" and r.hold.code == "successor_owner_recovered" and coordinator_owner(f) == nil
-		and handover_successors(f, hid) == 1 and #actions_of(f, succ_id, "launch") == 1, "fenced recovery of the successor's owner closes the rollover without relaunching")
+	check(r == nil and coordinator_owner(f) == nil
+		and handover_successors(f, hid) == 1 and #actions_of(f, succ_id, "launch") == 0, "fenced recovery settles and reclaims the handover without relaunching")
+	-- Branch from the same real failed successor: zero reports do not prove an empty
+	-- producer. Only SPAWN's exact retirement outcome releases this generation.
+	local retained_registry = clone(f.authority.registry)
+	local before_cleanup = clone(worker_of(f, succ_id))
+	local projected = dispatch.project(f.authority.registry, f.origin.logical_session_id, f.origin.alias_nonce).workers[succ_id]
+	check(projected.withdrawal.evidence == "failed_startup" and projected.pane_binding.pane_id == successor_pane(f).pane_id,
+		"Advanced exposes truthful failed-startup cleanup with the original real pane binding")
+	local cleanup = f:apply("cancel_work", { worker_id = succ_id })
+	check(cleanup.code == "startup_retiring" and worker_of(f, succ_id).startup_cancelling == true
+		and f:action(cleanup.action_id).request.report_floor == 0 and f:action(cleanup.action_id).request.reply_floor == 0,
+		"the recovered unaccepted successor uses existing zero-floor mailbox retirement")
+	check(f:apply("cancel_work", { worker_id = succ_id }).code == "retirement_unresolved"
+		and #actions_of(f, succ_id, "mailbox_retire") == 1, "a pending failed-startup retirement never duplicates its grant")
+	check(state.rehydrate(clone(f.authority.registry)) ~= nil, "the exact failed-startup retirement restores")
+	assert(f:finish(cleanup.action_id, "rejected", nil, { code = "producer_unsettled", message = "A producer journal claim remains unresolved." }).ok)
+	check(worker_of(f, succ_id).retirement_refused == true and worker_of(f, succ_id).mailbox_retired ~= true,
+		"nonempty producer proof keeps the original failed generation and its reservation")
+	cleanup = f:apply("cancel_work", { worker_id = succ_id }); assert(cleanup.code == "startup_retiring", cleanup.message)
+	local retiring = clone(worker_of(f, succ_id))
+	check(retiring.stopped == nil and retiring.release == nil and retiring.activation == nil and retiring.accepted_event == nil
+		and codec.sha256(runtime.json.encode(retiring.pane_binding)) == codec.sha256(runtime.json.encode(before_cleanup.pane_binding))
+		and retiring.enrolment_token == before_cleanup.enrolment_token and retiring.launch_request_id == before_cleanup.launch_request_id
+		and retiring.mailbox_handle == before_cleanup.mailbox_handle, "cleanup keeps original launch, pane, token and target without synthetic lifecycle evidence")
+	assert(f:finish(cleanup.action_id, "retired", {}).ok)
+	check(worker_of(f, succ_id).mailbox_retired == true and coordinator_owner(f) == nil
+		and #actions_of(f, succ_id, "mailbox_retire") == 0, "confirmed retirement leaves the owner-unreferenced failed coordinator settled and reclaimable")
+	check(state.rehydrate(clone(f.authority.registry)) ~= nil, "confirmed failed-startup retirement restores as reclaimable evidence")
+	local replacement = f:queue(true)
+	check(replacement.ok and coordinator_owner(f).managed_worker_id == replacement.worker_id
+		and worker_of(f, replacement.worker_id).record_id == before_cleanup.record_id and worker_of(f, succ_id) == nil,
+		"the next explicit same-record coordinator start reclaims the retired failed worker through the existing admission path")
+	-- Continue the existing stale-epoch/restoration branch without cleanup's terminal
+	-- outcome; neither branch borrows a native stop, report or replacement identity.
+	f.authority.registry = retained_registry; f.memory.value = clone(retained_registry)
+	clock.epoch = "coordinator-recovery-current"
+	clock.now_ms += 1000; clock.mono_ms = 1000
+	local writes = f.memory.writes
+	local stale_exit = f:queue(true)
+	check(not stale_exit.ok and f.memory.writes == writes and coordinator_owner(f) == nil,
+		"a prior-host-epoch exit cannot authorize a new coordinator or write a reservation")
+	local stale_registry = clone(f.authority.registry)
+	local stale_check = f:apply("cancel_work", { worker_id = succ_id })
+	check(stale_check.code == "startup_retiring" and worker_of(f, succ_id).mailbox_retired ~= true and worker_of(f, succ_id).stopped == nil,
+		"stale core exit evidence stages only a fresh native window check, never retirement or synthetic stop")
+	f.authority.registry = stale_registry; f.memory.value = clone(stale_registry)
+	assert(f:apply("observe", { worker_id = succ_id, pane_binding = successor_pane(f), native_state = "idle" }).ok)
+	writes = f.memory.writes
+	local reappeared = f:queue(true)
+	check(not reappeared.ok and f.memory.writes == writes and coordinator_owner(f) == nil,
+		"a reappeared latest native observation overrides old exit evidence without starting another coordinator")
+	assert(f:apply("observe", { worker_id = succ_id, pane_binding = successor_pane(f), native_state = "exited" }).ok)
+	check(worker_of(f, succ_id).stopped == nil and worker_of(f, succ_id).mailbox_retired ~= true,
+		"current exact exit observation does not invent a native stop or mailbox retirement")
 	local fresh = f:queue(true)
 	check(fresh.ok and fresh.code == "task_queued" and coordinator_owner(f).managed_worker_id == fresh.worker_id, "the freed slot accepts an explicit new coordinator start")
+	assert(f:apply("observe", { worker_id = succ_id, pane_binding = successor_pane(f), native_state = "idle" }).ok)
+	check(worker_of(f, succ_id).restored ~= nil and worker_of(f, succ_id).restored.reconciled == nil
+		and worker_of(f, succ_id).stopped == nil,
+		"a recovered prior coordinator reappearing after replacement reservation records restoration without inventing a stop")
+	check(not f:apply("cancel_work", { worker_id = succ_id }).ok, "a restored prior coordinator is never erased as an unused startup")
+	writes = f.memory.writes
+	local blocked = f:apply("claim", { action_id = fresh.action_id, executor = f.origin.window_epoch })
+	check(not blocked.ok and f.memory.writes == writes and f:action(fresh.action_id).claim == nil,
+		"the restored prior coordinator blocks replacement effects without writes or a grant")
+	assert(f:apply("observe", { worker_id = succ_id, pane_binding = successor_pane(f), native_state = "exited" }).ok)
+	check(worker_of(f, succ_id).restored.reconciled == "observed_exit"
+		and f:apply("claim", { action_id = fresh.action_id, executor = f.origin.window_epoch }).ok,
+		"only the exact subsequent exit releases the reserved replacement's first claim")
 	check(state.rehydrate(clone(f.authority.registry)) ~= nil, "closed coordinator handover restores")
 end
 if section == nil or section == "rollover_coordinator_policy" then
@@ -2776,7 +5172,12 @@ if section == nil or section == "rollover_coordinator_policy" then
 	assert(send_report(f, id, "READY", { state = "idle", context_used_pct = 40 }).ok)
 	check(not due() and refused(), "coordinator context below threshold is not due")
 	assert(send_report(f, id, "READY", { state = "idle", context_used_pct = 60 }).ok)
-	check(due(), "idle activated coordinator at threshold with both flags is due")
+	check(due(), "idle activated coordinator is due at threshold without a completed-work boundary")
+	assert(f:apply("policy", { policy = { rollover_threshold_pct = 0 } }).ok)
+	check(not due(), "coordinator calculated mode cannot use a percent-only sample")
+	assert(send_report(f, id, "READY", { state = "idle",
+		context_snapshot = { current_tokens = 640, first_turn_tokens = 200, window_tokens = 1000, observed_at_ms = clock.now_ms } }).ok)
+	check(due(), "coordinator calculated mode is due at exact headroom threshold without a completed checkpoint")
 	local requested = f:apply("rollover", { worker_id = id, trigger = "policy" })
 	check(requested.code == "rollover_requested" and rollover_of(f, requested.handover_id).kind == "coordinator" and rollover_of(f, requested.handover_id).trigger == "policy"
 		and rollover_of(f, requested.handover_id).phase == "checkpoint_pending", "policy trigger only requests the coordinator checkpoint")
@@ -2808,7 +5209,7 @@ if section == nil or section == "rollover_read_path" then
 			local queued = f:apply("poll", { worker_id = succ_id }); assert(queued.ok, queued.message)
 			local request = f:action(queued.action_id).request
 			assert(request.op == "mailbox_read" and request.selector.stream == "report", request.op)
-			outcome = f:finish(queued.action_id, "complete", runtime.json.decode(assert(codec.project_page(object, request.selector))))
+			outcome = f:finish(queued.action_id, "read", runtime.json.decode(assert(codec.project_page(object, request.selector))))
 		end
 		return outcome
 	end
@@ -2854,7 +5255,7 @@ if section == nil or section == "rollover_read_path" then
 	local csucc = rollover_of(c, chid).successor_worker_id
 	local provision = actions_of(c, csucc, "mailbox_provision"); assert(#provision == 1)
 	assert(c:finish(provision[1], "provisioned", { handle = "mailbox-coordinator-successor", binding_digest = string.rep("c", 64),
-		capabilities = runtime.json.array({ "report-files-v1", "native-ask-v1", "coordinator-control-v1" }), limits = {} }).ok)
+		capabilities = runtime.json.array({ "report-files-v1", "native-ask-v1", "coordinator-control-v1", "project-start-v1" }), limits = {} }).ok)
 	assert(c:finish(worker_of(c, csucc).launch_action_id, "awaiting_acceptance", { pane_binding = successor_pane(c) }).ok)
 	local coutcome = read_pages(c, csucc)
 	check(coutcome.ok and coutcome.code ~= "report_rejected" and worker_of(c, csucc).rejected_report == nil and worker_of(c, csucc).phase == "accepted",
@@ -2874,7 +5275,7 @@ local function read_report_pages(f, worker_id, bytes, binding)
 		local queued = f:apply("poll", { worker_id = worker_id }); assert(queued.ok, queued.message)
 		local request = f:action(queued.action_id).request
 		assert(request.op == "mailbox_read" and request.selector.stream == "report", request.op)
-		outcome = f:finish(queued.action_id, "complete", runtime.json.decode(assert(codec.project_page(object, request.selector))))
+		outcome = f:finish(queued.action_id, "read", runtime.json.decode(assert(codec.project_page(object, request.selector))))
 	end
 	return outcome
 end
@@ -2897,6 +5298,7 @@ if section == nil or section == "rollover_reload_continuation" then
 	f.authority = host.new_authority(f.memory); assert(f.authority:load().ok)
 	f.origin.window_epoch = "replacement-window"; f.controller_pane = "9010"
 	assert(f:apply("continue_controller", { expected_revision = f.authority.registry.revision, operator_verified = true }).ok)
+	assert(f:control("reconcile_session").ok) -- Fresh peer observation restores admission, never the old revision fence.
 	check(worker_of(f, succ_id).continuation_required and worker_of(f, succ_id).phase == "awaiting_acceptance" and rollover_of(f, hid).phase == "successor_created",
 		"reload mid-handover leaves the unaccepted successor without a continued route")
 	check(f:apply("poll", { worker_id = succ_id }).code == "worker_unbound", "its mailbox is not read before explicit continuation")
@@ -2920,9 +5322,9 @@ if section == nil or section == "rollover_reload_continuation" then
 	check(outcome.ok and worker_of(f, succ_id).phase == "accepted" and worker_of(f, succ_id).rejected_report == nil, "ACCEPTED is read through the continued route after reload")
 	assert(f:finish(accept_after_acceptance(f, succ_id), "accepted", {}).ok)
 	local successors = 0; for _, w in f.authority.registry.dispatch.workers do if w.handover_id == hid then successors += 1 end end
-	check(rollover_of(f, hid).phase == "handover_accepted" and successors == 1 and #actions_of(f, succ_id, "mailbox_provision") == 1
-		and #actions_of(f, succ_id, "launch") == 1 and #actions_of(f, succ_id, "attach_worker") == 1 and #actions_of(f, succ_id, "accept") == 1
-		and worker_of(f, id).finish == nil, "handover reaches handover_accepted with exactly one provision, launch, attachment and accept")
+	check(rollover_of(f, hid).phase == "handover_accepted" and successors == 1 and #actions_of(f, succ_id, "mailbox_provision") == 0
+		and #actions_of(f, succ_id, "launch") == 0 and #actions_of(f, succ_id, "attach_worker") == 0 and #actions_of(f, succ_id, "accept") == 0
+		and worker_of(f, id).finish == nil, "handover reaches handover_accepted retaining live bindings, not completed provision/launch/attachment/accept records")
 	check(state.rehydrate(clone(f.authority.registry)) ~= nil, "continued successor restores")
 end
 if section == nil or section == "recheck_report" then
@@ -2969,97 +5371,309 @@ if section == nil or section == "recheck_report" then
 	check(state.rehydrate(forged) == nil, "held bytes and their SHA-256 cannot diverge")
 	g.authority = host.new_authority(g.memory); assert(g.authority:load().ok)
 	assert(g:apply("continue_controller", { expected_revision = g.authority.registry.revision, operator_verified = true }).ok)
+	assert(g:control("reconcile_session").ok) -- Fresh peer observation restores admission, never the old revision fence.
 	check(g:apply("recheck_report", { worker_id = gsucc }).code == "worker_unbound", "re-check after reload requires explicit worker continuation first")
 end
--- Explicit verified attach of a hand-opened native agent pane (never automatic, never a terminal).
-if section == nil or section == "adopt" then
-	local ADOPT = "operator_verified_exact_agent_pane"
-	local function same_pane(a, b)
-		return type(a) == "table" and type(b) == "table" and a.pane_id == b.pane_id and a.window_epoch == b.window_epoch and a.window_key == b.window_key
-			and a.native_session_id == b.native_session_id and a.window_host_id == b.window_host_id
-	end
-	local function hand_pane(fx, id, changes)
-		local p = { pane_id = id or "9020", window_key = fx.origin.window_key, window_epoch = fx.origin.window_epoch, native_session_id = fx.origin.native_session_id, window_host_id = fx.origin.window_host_id }
-		for k, v in changes or {} do p[k] = v end
-		return p
-	end
-	local function attach(fx, pane, fields)
-		local event = { record_id = "native", record_revision = 0, catalog_revision = 0, prompt = "Adopted fixture task.", pane_binding = pane, attestation = ADOPT }
-		for k, v in fields or {} do event[k] = v end
-		return fx:apply("adopt", event)
-	end
-	local function provisioned(fx, queued)
-		assert(fx:finish(queued.action_id, "provisioned", { handle = "mailbox-adopted", binding_digest = string.rep("d", 64),
+if section == nil or section == "project_rollover" then
+	for _, enrolled in { false, true } do
+		local f = fixture(function() return { now_ms = 1000, mono_ms = 1000, epoch = "conversation-rollover" } end, { passive = true })
+		f:catalog(0)
+		local project = f:project("Live conversation, held project", false)
+		local pane = { pane_id = "9002", window_key = f.origin.window_key, window_epoch = f.origin.window_epoch,
+			native_session_id = f.origin.native_session_id, window_host_id = f.origin.window_host_id }
+		local fields = { orch_project_id = project, record_id = "native", record_revision = 0, catalog_revision = 0 }
+		if enrolled then fields.pane_binding = pane; fields.delivery = "native_ask"
+		else fields.prompt = codec.OPEN_CONVERSATION_ASSIGNMENT; fields.cwd = "/fixture"; fields.placement = "split"
+			fields.coordinator = false; fields.presentation = "user_new_tab"; fields.open_conversation = true end
+		local queued = f:apply(if enrolled then "enrol" else "queue", fields); assert(queued.ok, queued.message)
+		local id = queued.worker_id
+		assert(f:finish(queued.action_id, "provisioned", { handle = "mailbox-conversation", binding_digest = string.rep("a", 64),
 			capabilities = runtime.json.array({ "report-files-v1", "native-ask-v1" }), limits = {} }).ok)
-		return worker_of(fx, queued.worker_id).launch_action_id
+		assert(f:finish(worker_of(f, id).launch_action_id, "awaiting_acceptance", { pane_binding = pane }).ok)
+		assert(send_report(f, id, "ACCEPTED", { assignment_sha256 = worker_of(f, id).assignment_sha256 }).ok)
+		assert(f:finish(f:apply("poll", { worker_id = id }).action_id, "published", {}).ok)
+		assert(f:finish(f:apply("poll", { worker_id = id }).action_id, "accepted", {}).ok)
+		assert(f:apply("observe", { worker_id = id, pane_binding = pane, native_state = "idle" }).ok)
+		local hid, successor = rollover_granted(f, id)
+		local provision = actions_of(f, successor, "mailbox_provision")[1]
+		check(not dispatch.project(f.authority.registry, f.origin.logical_session_id, f.origin.alias_nonce).actions[provision].start_blocked,
+			"verified successor lineage can continue an active conversation without starting its project")
+		for _, mutation in { "token", "owner", "missing" } do
+			local forged = clone(f.authority.registry)
+			if mutation == "token" then forged.dispatch.workers[successor].handover_token = string.rep("0", 64)
+			elseif mutation == "owner" then forged.dispatch.rollovers[hid].successor_worker_id = id
+			else forged.dispatch.rollovers[hid] = nil end
+			check(dispatch.project(forged, f.origin.logical_session_id, f.origin.alias_nonce).actions[provision].start_blocked,
+				"arbitrary or mismatched handover metadata cannot release held work: " .. mutation)
+		end
+		successor_created(f, successor)
+		check(not f.authority.registry.dispatch.projects[project].started
+			and worker_of(f, successor).presentation == "background", "real provision and launch preserve the project's START hold")
+		check(state.rehydrate(clone(f.authority.registry)) ~= nil, "unstarted-project conversation handover restores")
 	end
+end
+
+-- Enrollment never substitutes an old task for fresh protocol instructions.
+if section == nil or section == "enrol" then
+	local function setup(clipboard)
+		local f = fixture(nil, { passive = true }); f:catalog(0)
+		local project = f:project("Existing conversation", false)
+		if clipboard then
+			local row = f.authority.registry.dispatch.catalogs[f.origin.logical_session_id].records[1]
+			row.backend = "local-terminal"; row.capabilities = runtime.json.array({ "report-files-v1", "worker-poll-v1" })
+			f.memory.value = clone(f.authority.registry)
+		end
+		local pane = { pane_id = "9020", window_key = f.origin.window_key, window_epoch = f.origin.window_epoch,
+			native_session_id = f.origin.native_session_id, window_host_id = f.origin.window_host_id }
+		local function enrol(extra)
+			local fields = { orch_project_id = project, record_id = "native", record_revision = 0, catalog_revision = 0,
+				pane_binding = clone(pane), delivery = if clipboard then "clipboard" else "native_ask" }
+			for key, value in extra or {} do fields[key] = value end
+			return f:apply("enrol", fields)
+		end
+		return f, pane, project, enrol
+	end
+	local function provision(f, queued)
+		assert(queued.ok, queued.message)
+		assert(f:finish(queued.action_id, "provisioned", { handle = "mailbox-enrolled", binding_digest = string.rep("d", 64),
+			capabilities = runtime.json.array({ "report-files-v1", "native-ask-v1", "worker-poll-v1" }), limits = {} }).ok)
+		return worker_of(f, queued.worker_id).launch_action_id
+	end
+	for _, clipboard in { false, true } do
+		local f, pane, project, enrol = setup(clipboard)
+		local writes = f.memory.writes
+		check(not enrol({ prompt = "Replay the existing task" }).ok and f.memory.writes == writes, "enrollment rejects task replay before writing")
+		local other = clone(pane); other.native_session_id = "8"
+		check(not enrol({ pane_binding = other }).ok, "enrollment refuses a pane of another native session")
+		local queued = enrol(); local id = queued.worker_id
+		local operation = provision(f, queued); local request = f:action(operation).request
+		check(request.op == "enrol" and request.delivery == (if clipboard then "clipboard" else "native_ask")
+			and request.preserve_context == true and request.attestation == nil and request.prompt == codec.OPEN_CONVERSATION_ASSIGNMENT
+			and request.enrolment.assignment_sha256 == codec.sha256(codec.OPEN_CONVERSATION_ASSIGNMENT)
+			and request.fresh == nil and request.cwd == nil, "one canonical enrollment preserves native context without launch or attestation")
+		local early = f:apply("intake", { worker_id = id, bytes = f:report(id, 1, "ACCEPTED", { assignment_sha256 = codec.sha256(codec.OPEN_CONVERSATION_ASSIGNMENT) }) })
+		check(early.code == "launch_unbound" and worker_of(f, id).accepted_event == nil, "reports cannot activate before the post-composition native result")
+		assert(f:finish(operation, "awaiting_acceptance", { pane_binding = pane }).ok)
+		check(worker_of(f, id).accepted_event == nil and worker_of(f, id).prompt_delivery == (if clipboard then "copied_not_accepted" else "submitted_not_accepted")
+			and f.authority.registry.dispatch.projects[project].started == false, "copy/submission is not acceptance and does not START a project")
+		check(enrol().code == "pane_bound", "a pending capability is not issued twice")
+		local cancel = f:apply("cancel_work", { worker_id = id }); assert(cancel.ok, cancel.message)
+		local retirement = f:action(cancel.action_id).request
+		check(retirement.op == "mailbox_retire" and retirement.mode == "retire" and retirement.report_floor == 0 and retirement.reply_floor == 0
+			and #actions_of(f, id, "stop") == 0, "pending enrollment cancellation revokes only the untouched capability")
+		local held = f:apply("intake", { worker_id = id, bytes = f:report(id, 1, "ACCEPTED", { assignment_sha256 = worker_of(f, id).assignment_sha256 }) })
+		check(not held.ok and worker_of(f, id).accepted_event == nil, "acceptance cannot race unresolved revocation")
+		assert(f:finish(cancel.action_id, "retired", {}).ok)
+		local p = f.authority.registry.dispatch.projects[project]
+		check(worker_of(f, id).mailbox_retired == true and worker_of(f, id).stopped == nil and next(p.associations) ~= nil
+			and #actions_of(f, id, "stop") == 0, "positive revocation keeps the original native conversation as a passive association")
+	end
+	for _, phase in { "queued", "provisioned", "refused", "awaiting_acceptance" } do
+		local c, binding, project, enroll = setup(false)
+		local p = c.authority.registry.dispatch.projects[project]
+		local associated = c:apply("associate_conversation", { orch_project_id = project, project_revision = p.revision,
+			pane_binding = binding, active = false, provider = "Declared original", account_label = "Not verified" })
+		assert(associated.ok, associated.message)
+		local original = clone(c.authority.registry.dispatch.projects[project].associations[associated.conversation_id])
+		local queued = enroll(); assert(queued.ok, queued.message)
+		if phase ~= "queued" then
+			local operation = provision(c, queued)
+			if phase == "refused" then
+				assert(c:finish(operation, "rejected", nil, { code = "unsupported_capability", message = "Agent was not safely idle." }).ok)
+				check(enroll().code == "pane_bound", "a refused ask retains its capability until proven cleanup; it cannot mint another token")
+			elseif phase == "awaiting_acceptance" then assert(c:finish(operation, "awaiting_acceptance", { pane_binding = binding }).ok) end
+		end
+		check(state.rehydrate(clone(c.authority.registry)) ~= nil, phase .. ": original passive association survives durable enrollment state")
+		local cancelled = c:apply("cancel_work", { worker_id = queued.worker_id }); assert(cancelled.ok, cancelled.message)
+		if cancelled.action_id then
+			check(c.authority.registry.dispatch.projects[project].associations[associated.conversation_id] == nil,
+				phase .. ": pending revocation cannot pretend the capability is already gone")
+			assert(c:finish(cancelled.action_id, "retired", {}).ok)
+		end
+		check(runtime.json.encode(c.authority.registry.dispatch.projects[project].associations[associated.conversation_id]) == runtime.json.encode(original)
+			and #actions_of(c, queued.worker_id, "stop") == 0, phase .. ": cancellation restores exact original association identity and labels without native stop")
+	end
+	local f, pane, _, enrol = setup(true)
+	local queued = enrol(); local operation = provision(f, queued)
+	assert(f:finish(operation, "awaiting_acceptance", { pane_binding = pane }).ok)
+	local cancel = f:apply("cancel_work", { worker_id = queued.worker_id }); assert(cancel.ok)
+	assert(f:finish(cancel.action_id, "rejected", nil, { code = "producer_unsettled", message = "Producer consumed the capability first." }).ok)
+	local w = worker_of(f, queued.worker_id); local token = w.enrolment_token
+	check(w.mailbox_retired ~= true and w.enrol_cancelling and w.retirement_refused and #actions_of(f, w.worker_id, "stop") == 0,
+		"producer-won refusal retains the live capability and does not stop the conversation")
+	assert(f:apply("intake", { worker_id = w.worker_id, bytes = f:report(w.worker_id, 1, "ACCEPTED", { assignment_sha256 = w.assignment_sha256 }) }).ok)
+	check(worker_of(f, w.worker_id).enrol_cancelling == nil and worker_of(f, w.worker_id).enrolment_token == token,
+		"only the original exact acceptance settles a consumed capability, without reissue")
+	local u, _, _, uncertain_enrol = setup(false)
+	local uq = uncertain_enrol(); local aid = provision(u, uq)
+	assert(u:apply("claim", { action_id = aid, executor = u.origin.window_epoch }).ok)
+	local grant = clone(u:action(aid).claim)
+	assert(u:apply("lost", { action_id = aid, executor = grant.executor, grant_id = grant.grant_id }).ok)
+	check(u:apply("retry", { action_id = aid }).code == "retry_refused" and not u:apply("cancel_work", { worker_id = uq.worker_id }).ok
+		and uncertain_enrol().code == "pane_bound" and #actions_of(u, uq.worker_id, "enrol") == 1, "uncertain enrollment is neither replayed nor deleted")
+end
+if section == nil or section == "projects" then
+	local f = fixture(nil, { passive = true }); f:catalog(0)
+	local a, b = f:project("Research", false), f:project("Separate work", false)
+	local pane = { pane_id = "9021", window_key = f.origin.window_key, window_epoch = f.origin.window_epoch,
+		native_session_id = f.origin.native_session_id, window_host_id = f.origin.window_host_id }
+	local p = f.authority.registry.dispatch.projects[a]
+	local attach = f:apply("associate_conversation", { orch_project_id = a, project_revision = p.revision, pane_binding = pane, active = true, provider = "Unknown" })
+	assert(attach.ok, attach.message)
+	local view = dispatch.project(f.authority.registry, f.origin.logical_session_id)
+	check(view.projects[a].status == "ACTIVE" and not view.projects[a].started and next(f.authority.registry.dispatch.actions) == nil,
+		"unsupported/busy conversation association is display-only and creates no protocol effects")
+	local function queue(project, prompt)
+		return f:apply("queue", { orch_project_id = project, record_id = "native", record_revision = 0, catalog_revision = 0,
+			prompt = prompt, cwd = "/fixture", placement = "split", coordinator = false })
+	end
+	local qa, qb = queue(a, "Read documentation only."), queue(b, "Unrelated work."); assert(qa.ok and qb.ok)
+	check(qa.action_id == nil and qb.action_id == nil and next(f.authority.registry.dispatch.actions) == nil, "association and queue intake cannot bypass START")
+	assert(f:apply("pause").ok)
+	p = f.authority.registry.dispatch.projects[a]
+	local start = f:apply("project_start", { orch_project_id = a, project_revision = p.revision }); assert(start.ok, start.message)
+	check(next(f.authority.registry.dispatch.actions) == nil and f.authority.registry.dispatch.projects[a].started
+		and not f.authority.registry.dispatch.projects[b].started, "START while paused records only the chosen intent")
+	assert(f:apply("resume").ok)
+	check(#actions_of(f, qa.worker_id, "mailbox_provision") == 1 and #actions_of(f, qb.worker_id, "mailbox_provision") == 0,
+		"resume releases only explicitly started project work")
+	p = f.authority.registry.dispatch.projects[a]
+	local revision = p.revision
+	check(f:apply("project_start", { orch_project_id = a, project_revision = revision }).code == "project_already_started"
+		and f.authority.registry.dispatch.projects[a].revision == revision and #actions_of(f, qa.worker_id, "mailbox_provision") == 1, "START is idempotent")
+	local unchanged = f:event("project_start", { orch_project_id = b, project_revision = f.authority.registry.dispatch.projects[b].revision })
+	local unrelated = f:project("Bookkeeping elsewhere", false)
+	unchanged.command_seq = f.command_seq + 1; f.command_seq = unchanged.command_seq
+	check(f.authority:apply(unchanged).ok, "subject proof survives unrelated project bookkeeping")
+	local bad = f:event("project_start", { orch_project_id = unrelated, project_revision = f.authority.registry.dispatch.projects[unrelated].revision })
+	assert(f:apply("pause").ok)
+	bad.command_seq = f.command_seq + 1; f.command_seq = bad.command_seq
+	local writes = f.memory.writes
+	check(not f.authority:apply(bad).ok and f.memory.writes == writes, "pause change invalidates a captured START with no write")
+	local missing = f:event("project_start", { orch_project_id = unrelated, project_revision = f.authority.registry.dispatch.projects[unrelated].revision })
+	missing.decision_context = nil
+	check(not f.authority:apply(missing).ok, "legacy missing-proof decisions never acquire implicit authority")
+	-- Association-only finish is presentation, not native stop. Reopen has no old workers or approvals.
+	local done = f:project("Read-only conversation", false)
+	p = f.authority.registry.dispatch.projects[done]
+	pane.pane_id = "9099"
+	assert(f:apply("associate_conversation", { orch_project_id = done, project_revision = p.revision, pane_binding = pane, active = true }).ok)
+	p = f.authority.registry.dispatch.projects[done]
+	assert(f:apply("project_finish", { orch_project_id = done, project_revision = p.revision, result = "Research findings reviewed." }).ok)
+	view = dispatch.project(f.authority.registry, f.origin.logical_session_id)
+	check(view.projects[done] == nil and #view.finished_projects == 1 and #view.finished_projects[1].links == 1, "finished association keeps a native conversation link without an effect")
+	local reopened = f:apply("project_reopen", { summary_index = 1 }); assert(reopened.ok)
+	check(not f.authority.registry.dispatch.projects[reopened.orch_project_id].started
+		and next(f.authority.registry.dispatch.projects[reopened.orch_project_id].associations) == nil, "reopen creates a new unstarted project, not a replay")
+	do
+		local moved = fixture(nil, { passive = true }); moved:catalog(0)
+		local source, target = moved:project("Held task", false), moved:project("Already started", true)
+		local queued = moved:apply("queue", { orch_project_id = source, record_id = "native", record_revision = 0, catalog_revision = 0,
+			prompt = "Keep this task held.", cwd = "/fixture", placement = "split", coordinator = false })
+		assert(queued.ok)
+		local target_row = moved.authority.registry.dispatch.projects[target]
+		assert(moved:apply("project_associate", { worker_id = queued.worker_id, orch_project_id = target, project_revision = target_row.revision }).ok)
+		check(#actions_of(moved, queued.worker_id, "mailbox_provision") == 0 and worker_of(moved, queued.worker_id).checks_pending,
+			"moving held work into an ACTIVE project does not supply START authority")
+		target_row = moved.authority.registry.dispatch.projects[target]
+		assert(moved:apply("project_start", { orch_project_id = target, project_revision = target_row.revision }).ok)
+		check(#actions_of(moved, queued.worker_id, "mailbox_provision") == 1, "explicit destination START releases the moved task once")
+	end
+	do
+		local failed = fixture(nil, { passive = true }); failed:catalog(0)
+		local row = failed.authority.registry.dispatch.catalogs[failed.origin.logical_session_id].records[1]
+		row.backend = "local-terminal"; row.placement = "replace_if_alone"
+		row.capabilities = runtime.json.array({ "report-files-v1", "worker-poll-v1" }); failed.memory.value = clone(failed.authority.registry)
+		local project = failed:project("Unsupported background placement", false)
+		local queued = failed:apply("queue", { orch_project_id = project, record_id = row.id, record_revision = row.revision, catalog_revision = 0,
+			prompt = "Wait for explicit START.", cwd = row.cwd, placement = row.placement, coordinator = false })
+		assert(queued.ok and queued.code == "task_held")
+		local p = failed.authority.registry.dispatch.projects[project]
+		assert(failed:apply("project_start", { orch_project_id = project, project_revision = p.revision }).ok)
+		local w = worker_of(failed, queued.worker_id)
+		check(w.project_held and w.checks_pending and w.reason.code == "unsupported_placement" and next(failed.authority.registry.dispatch.actions) == nil,
+			"failed START remains visible, held and effect-free instead of stranding an unissued worker")
+		assert(failed:apply("cancel_work", { worker_id = queued.worker_id }).ok)
+		check(worker_of(failed, queued.worker_id) == nil, "a failed unissued launch remains cancellable")
+	end
+	for _, same_checkout in { false, true } do
+		local gated = fixture(nil, { passive = true }); gated:catalog(0)
+		local records = gated.authority.registry.dispatch.catalogs[gated.origin.logical_session_id].records
+		local other = clone(records[1]); other.id = "other-record"; other.cwd = if same_checkout then "/different-saved-cwd" else records[1].cwd
+		table.insert(records, other); gated.memory.value = clone(gated.authority.registry)
+		local projects = { gated:project("First checkout", true), gated:project("Second checkout", true) }
+		for i, project in projects do
+			local cwd = if i == 1 or same_checkout then "/project/one" else "/project/two"
+			assert(gated:apply("project_repository", { orch_project_id = project,
+				project_revision = gated.authority.registry.dispatch.projects[project].revision,
+				repository = { cwd = cwd, repo_root = cwd, common_dir = cwd .. "/.git", target_ref = "main",
+					head_revision = string.rep("a", 40), queue_route = "orch_queue" } }).ok)
+		end
+		local queued
+		for i, project in projects do local record = if i == 1 then records[1] else other
+			queued = gated:apply("queue", { orch_project_id = project, record_id = record.id, record_revision = record.revision,
+				catalog_revision = 0, prompt = "Edit only the declared file.", cwd = record.cwd, placement = record.placement,
+				coordinator = false, files = runtime.json.array({ "same.luau" }) })
+			assert(queued.ok, queued.message)
+		end
+		local kinds = {}
+		for _, gate in gated.authority.registry.dispatch.gates do if gate.worker_id == queued.worker_id then kinds[gate.kind] = true end end
+		check((kinds.shared_checkout == true) == same_checkout and (kinds.file_overlap == true) == same_checkout,
+			"collision gates compare execution checkout rather than equal/different saved record defaults")
+		if same_checkout then
+			local p = gated.authority.registry.dispatch.projects[projects[2]]
+			local repository = clone(p.repository); repository.queue_route = "repository_queue"
+			local before = runtime.json.encode(gated.authority.registry)
+			local changed = gated:apply("project_repository", { orch_project_id = p.orch_project_id, project_revision = p.revision, repository = repository })
+			check(changed.code == "repository_route_conflict" and runtime.json.encode(gated.authority.registry) == before,
+				"another unfinished project cannot silently change a shared repository target's queue route")
+		end
+	end
+end
+if section == nil or section == "local_v5" then
 	local f = fixture(); f:catalog(0)
-	local pane = hand_pane(f)
-	check(attach(f, hand_pane(f, nil, { native_session_id = "8" })).code == "invalid_task", "a pane of another native session or host is refused")
-	check(attach(f, hand_pane(f, nil, { window_epoch = "old-window" })).code == "invalid_task", "a stale window-scoped attestation is refused")
-	check(attach(f, pane, { attestation = "assumed" }).code == "invalid_task", "adoption requires the exact operator attestation")
-	check(attach(f, pane, { catalog_revision = 1 }).code == "catalog_changed", "a stale catalog selection is refused")
-	local queued = attach(f, pane)
-	check(queued.ok and queued.code == "adoption_queued", "explicit verified attach queues a normal worker generation")
-	local id = queued.worker_id
-	check(same_pane(worker_of(f, id).adopt_pane_binding, pane) and worker_of(f, id).pane_binding == nil and #actions_of(f, id, "mailbox_provision") == 1,
-		"adoption provisions through the existing mailbox path before any native effect")
-	check(attach(f, pane).code == "pane_bound", "a pane with a pending adoption is never adopted twice")
-	local adopt_id = provisioned(f, queued)
-	local adopt = f:action(adopt_id).request
-	check(adopt.op == "adopt" and adopt.attestation == ADOPT and same_pane(adopt.pane_binding, pane) and adopt.cwd == nil and adopt.fresh == nil
-		and adopt.enrolment.handover_id == nil and adopt.enrolment.enrolment_token == worker_of(f, id).enrolment_token, "SPAWN receives an adopt request bound to the exact pane, not a launch")
-	check(f:finish(adopt_id, "awaiting_acceptance", { pane_binding = hand_pane(f, "9021") }).code == "binding_mismatch", "a different pane outcome can never bind the adopted worker")
-	assert(f:finish(adopt_id, "awaiting_acceptance", { pane_binding = pane }).ok)
-	local w = worker_of(f, id)
-	check(w.phase == "awaiting_acceptance" and same_pane(w.pane_binding, pane), "the attested pane becomes the worker's launch pane binding")
-	assert(f:apply("intake", { worker_id = id, bytes = f:report(id, 1, "ACCEPTED", { assignment_sha256 = w.assignment_sha256 }) }).ok)
-	assert(f:finish(f:apply("poll", { worker_id = id }).action_id, "published", {}).ok)
-	local accept = f:apply("poll", { worker_id = id }); assert(f:action(accept.action_id).request.op == "accept")
-	assert(f:finish(accept.action_id, "accepted", {}).ok)
-	check(worker_of(f, id).phase == "accepted" and #actions_of(f, id, "mailbox_provision") == 1 and #actions_of(f, id, "adopt") == 1
-		and #actions_of(f, id, "launch") == 0 and #actions_of(f, id, "accept") == 1, "adopted worker reaches accepted with exactly one provision, one adopt ask and no launch")
-	check(f:apply("reply", { worker_id = id }).ok, "after acceptance the adopted worker uses the ordinary workflow")
-	check(attach(f, pane).code == "pane_bound", "an accepted adopted pane is never adopted again")
-	local launched = f:accepted(false)
-	check(attach(f, clone(worker_of(f, launched).pane_binding)).code == "pane_bound", "a launched worker's pane cannot be adopted")
-	check(state.rehydrate(clone(f.authority.registry)) ~= nil, "adopted worker restores")
-	local forged = clone(f.authority.registry); forged.dispatch.workers[id].adopt_pane_binding.pane_id = "9099"
-	check(state.rehydrate(forged) == nil, "an adopted worker's pane binding cannot diverge from its attested pane")
-	local native_only = fixture(); native_only:catalog(0)
-	native_only.authority.registry.dispatch.catalogs[native_only.origin.logical_session_id].records[1].backend = "local-terminal"
-	native_only.memory.value = clone(native_only.authority.registry)
-	check(attach(native_only, hand_pane(native_only)).code == "unsupported_capability", "terminal/shell records can never adopt a pane")
-	-- Busy, non-agent or out-of-scope panes are refused by SPAWN before any native ask.
-	local g = fixture(); g:catalog(0)
-	local gq = attach(g, hand_pane(g)); local gadopt = provisioned(g, gq)
-	assert(g:apply("claim", { action_id = gadopt, executor = g.origin.window_epoch }).ok)
-	local ga = g:action(gadopt)
-	check(g:apply("result", { action_id = gadopt, executor = g.origin.window_epoch, grant_id = ga.claim.grant_id, response_bytes = frame(ga.request, "rejected", nil,
-		{ code = "target_unavailable", message = "Target pane is not an idle native agent in the exact window, session and host; nothing was sent" }) }).ok, "SPAWN pre-effect refusal commits")
-	check(worker_of(g, gq.worker_id).phase == "held" and worker_of(g, gq.worker_id).pane_binding == nil and g:action(gadopt).phase == "complete"
-		and g:apply("claim", { action_id = gadopt, executor = g.origin.window_epoch }).code == "effect_already_claimed", "a refused adoption holds the worker and is never retried")
-	check(attach(g, hand_pane(g)).code == "adoption_queued", "a refused pane may be attached again only by a new explicit owner action")
-	-- An uncertain native ask is never repeated and keeps the pane bound.
-	local u = fixture(); u:catalog(0)
-	local uq = attach(u, hand_pane(u)); local uadopt = provisioned(u, uq)
-	assert(u:apply("claim", { action_id = uadopt, executor = u.origin.window_epoch }).ok)
-	local grant = u:action(uadopt).claim
-	assert(u:apply("lost", { action_id = uadopt, executor = grant.executor, grant_id = grant.grant_id }).ok)
-	check(u:action(uadopt).phase == "uncertain" and u:apply("retry", { action_id = uadopt }).code == "retry_refused"
-		and u:apply("claim", { action_id = uadopt, executor = u.origin.window_epoch }).code == "effect_already_claimed" and #actions_of(u, uq.worker_id, "adopt") == 1,
-		"an uncertain adoption is never repeated")
-	check(attach(u, hand_pane(u)).code == "pane_bound", "an uncertain adoption keeps the pane bound")
-	-- Reload mid-adopt holds the claimed ask as uncertain.
-	local m = fixture(); m:catalog(0)
-	local mq = attach(m, hand_pane(m)); local madopt = provisioned(m, mq)
-	assert(m:apply("claim", { action_id = madopt, executor = m.origin.window_epoch }).ok)
-	m.authority = host.new_authority(m.memory); assert(m.authority:load().ok)
-	check(m:action(madopt).phase == "uncertain" and worker_of(m, mq.worker_id).pane_binding == nil, "reload mid-adopt holds the claimed ask as uncertain")
-	assert(m:apply("continue_controller", { expected_revision = m.authority.registry.revision, operator_verified = true }).ok)
-	check(attach(m, hand_pane(m)).code == "pane_bound" and #actions_of(m, mq.worker_id, "adopt") == 1, "reload never re-adopts or repeats the ask")
-	local p = fixture(); p:catalog(0); assert(p:apply("pause").ok)
-	check(attach(p, hand_pane(p)).code == "session_paused", "pause holds new adoptions")
+	local ready, issued = f:queue(false), f:queue(false); assert(ready.ok and issued.ok)
+	assert(f:apply("claim", { action_id = issued.action_id, executor = f.origin.window_epoch }).ok)
+	assert(f:apply("pause").ok)
+	local raw = clone(f.authority.registry)
+	raw.version = 4; raw.dispatch.projects = nil; raw.dispatch.finished_projects = nil
+	raw.installation_defaults.policy.auto_start_projects = nil; raw.installation_defaults.policy.auto_launch_intake = false
+	for _, p in raw.dispatch.policies do p.auto_start_projects = nil; p.auto_launch_intake = false end
+	for _, w in raw.dispatch.workers do w.orch_project_id = nil; w.presentation = nil; w.selected_record = nil end
+	local original = runtime.json.encode(raw)
+	local saved_grant = clone(raw.dispatch.actions[issued.action_id].claim)
+	local saved_bytes = raw.dispatch.actions[issued.action_id].request_bytes
+	local restored, info = state.rehydrate(raw); must(restored, info)
+	check(restored.version == 5 and info.upgrade_required and info.backup_key == "authority_state_v4_original"
+		and restored.authority_namespace == raw.authority_namespace and restored.execution_epoch == raw.execution_epoch + 1,
+		"local v4 conversion changes schema/epoch, never authority namespace")
+	check(runtime.json.encode(raw) == original and runtime.json.encode(assert(state.upgrade_backup(raw, nil))) == original,
+		"conversion leaves the original byte-equivalent value available for host backup")
+	local conflict = clone(raw); conflict.revision += 1
+	local backup, problem = state.upgrade_backup(raw, conflict)
+	check(backup == nil and problem.code == "upgrade_backup_conflict", "a different preserved original is never overwritten")
+	check(restored.dispatch.actions[ready.action_id].phase == "held_ready"
+		and restored.dispatch.actions[issued.action_id].phase == "uncertain"
+		and restored.dispatch.actions[issued.action_id].request_bytes == saved_bytes
+		and restored.dispatch.actions[issued.action_id].claim.grant_id == saved_grant.grant_id,
+		"ready work is held while issued immutable bytes/grants remain exact")
+	local project = restored.dispatch.workers[ready.worker_id].orch_project_id
+	check(project ~= nil and not restored.dispatch.projects[project].started
+		and dispatch.policy(restored, f.origin.logical_session_id).paused
+		and restored.installation_defaults.policy.auto_launch_intake == nil, "migration preserves pause and never turns old intake into start authority")
+	f.authority.registry = restored; f.memory.value = clone(restored)
+	assert(f:apply("continue_controller", { operator_verified = true }).ok)
+	assert(f:control("reconcile_session").ok)
+	f:catalog(0)
+	local p = f.authority.registry.dispatch.projects[project]
+	assert(f:apply("project_start", { orch_project_id = project, project_revision = p.revision }).ok)
+	check(f:action(ready.action_id).phase == "ready" and not f:apply("claim", { action_id = ready.action_id, executor = f.origin.window_epoch }).ok,
+		"explicit START may rearm a provably unissued intention but pause still blocks its effect")
+	check(f:action(issued.action_id).phase == "uncertain" and f:action(issued.action_id).request_bytes == saved_bytes,
+		"START never replays or rewrites a previously issued effect")
+	local cancelled = f:apply("cancel_work", { worker_id = ready.worker_id })
+	check(cancelled.ok and f.authority.registry.dispatch.workers[ready.worker_id] == nil
+		and f:action(issued.action_id).request_bytes == saved_bytes, "Cancel removes only proven unissued work and leaves unrelated uncertainty intact")
 end
 -- Real macOS defect: a coordinator self-released while its owner-triggered rollover waited at
 -- `requested`; the rollover then held `predecessor_unavailable` forever. The next coordinator
@@ -3088,7 +5702,7 @@ if section == nil or section == "rollover_coordinator_self_release" then
 		"a coordinator's own release before a verified checkpoint closes its rollover visibly with no successor")
 	f:drain(); f:watermark()
 	local stop = f:apply("poll", { worker_id = id }); assert(stop.ok, stop.message); assert(f:action(stop.action_id).request.op == "stop")
-	check(coordinator_released(f, id, stop.action_id).code == "coordinator_retired" and rollover_of(f, hid).phase == "cancelled"
+	check(coordinator_released(f, id, stop.action_id).code == "coordinator_retired" and rollover_of(f, hid) == nil
 		and handover_successors(f, hid) == 0 and coordinator_owner(f) == nil, "its normal release, exact stop and mailbox retirement free the slot; nothing is granted")
 	check(state.rehydrate(clone(f.authority.registry)) ~= nil, "self-released rollover closure restores")
 	-- The live case: the checkpoint request waits at `requested` because the coordinator is not
@@ -3122,19 +5736,21 @@ if section == nil or section == "rollover_coordinator_self_release" then
 	check(f:action(ack.action_id).phase == "uncertain" and f:apply("poll", { worker_id = new_id }).code == "operation_pending" and worker_of(f, new_id).activation == nil
 		and not f:apply("rollover", { worker_id = new_id, trigger = "owner" }).ok, "reproduction: an uncertain ACCEPTED ACK blocks SPAWN accept, activation and rollover")
 	check(f:apply("retry", { action_id = ack.action_id }).code == "retry_refused", "uncertain publication still never takes the capacity retry path")
+	local old_request = clone(f:action(ack.action_id).request)
 	local readback = f:apply("readback_publication", { action_id = ack.action_id })
-	check(readback.ok and readback.code == "readback_queued" and f:action(ack.action_id).phase == "resolved" and f:action(ack.action_id).resolution.evidence == "publication_readback"
-		and coordinator_owner(f).pending_executors == 0, "readback resolves the uncertain attempt with explicit evidence and releases its executor count")
+	check(readback.ok and readback.code == "readback_queued" and f:action(ack.action_id) == nil
+		and coordinator_owner(f).pending_executors == 0, "publication readback consumes its attempted action while the exact outbox bytes remain live")
 	check(f:apply("readback_publication", { action_id = ack.action_id }).code == "readback_refused", "a resolved attempt cannot be read back again")
 	local again = f:apply("poll", { worker_id = new_id }); assert(again.ok, again.message)
-	local old_request, new_request = f:action(ack.action_id).request, f:action(again.action_id).request
+	local new_request = f:action(again.action_id).request
 	check(again.action_id ~= ack.action_id and new_request.op == "mailbox_publish_ack" and new_request.request_id ~= old_request.request_id
 		and new_request.ack_b64 == old_request.ack_b64 and new_request.ack_sha256 == old_request.ack_sha256, "the outbox re-issues exactly the same immutable ACK bytes")
 	check(state.rehydrate(clone(f.authority.registry)) ~= nil, "resolved readback attempt restores")
 	assert(f:finish(again.action_id, "already_published", {}).ok)
 	local accept = f:apply("poll", { worker_id = new_id }); assert(accept.ok, accept.message); assert(f:action(accept.action_id).request.op == "accept")
 	assert(f:finish(accept.action_id, "accepted", {}).ok)
-	check(worker_of(f, new_id).activation ~= nil and #actions_of(f, new_id, "mailbox_publish_ack") == 2, "after readback the generation is accepted and its activation is issued")
+	check(worker_of(f, new_id).activation ~= nil and #actions_of(f, new_id, "mailbox_publish_ack") == 0,
+		"after readback the generation is accepted, activation is issued, and completed ACK attempts are consumed")
 	assert(ack_activation(f, new_id).ok)
 	check(worker_of(f, new_id).activation.acknowledged, "the second generation's activation is acknowledged")
 	local rolled = f:apply("rollover", { worker_id = new_id, trigger = "owner" })
@@ -3147,27 +5763,36 @@ end
 if section == nil or section == "accept_after_owner_recovery" then
 	local REVOKED = "Controller recovery revoked the unconsumed authorization"
 	local function scenario(coordinator, legacy)
-		local f = fixture(); local id = f:launched(coordinator)
+		local clock = { now_ms = 1000, mono_ms = 1000, epoch = "accept-recovery-host" }
+		local f = fixture(function() return clone(clock) end); local id = f:launched(coordinator)
 		assert(f:apply("intake", { worker_id = id, bytes = f:report(id, 1, "ACCEPTED", { assignment_sha256 = worker_of(f, id).assignment_sha256 }) }).ok)
-		assert(f:finish(f:apply("poll", { worker_id = id }).action_id, "published", {}).ok)
+		local publication = f:apply("poll", { worker_id = id }); assert(publication.ok)
+		local publication_request = f:action(publication.action_id).request
+		assert(f:finish(publication.action_id, "published", if legacy then { wake_status = "awaiting_window",
+			wake_effect_started = false, wake_target_request_id = publication_request.request_id,
+			wake_target_action_id = publication.action_id } else {}).ok)
 		local accept = f:apply("poll", { worker_id = id }); assert(accept.ok, accept.message)
-		local old_request = clone(f:action(accept.action_id).request); assert(old_request.op == "accept")
+		assert(f:action(accept.action_id).request.op == "accept")
 		assert(f:apply("claim", { action_id = accept.action_id, executor = f.origin.window_epoch }).ok)
+		local old_request = clone(f:action(accept.action_id).request)
 		local claim = clone(f:action(accept.action_id).claim)
 		local old_origin = clone(f.origin)
-		f.authority = host.new_authority(f.memory); assert(f.authority:load().ok)
+		clock.epoch = "accept-recovery-reloaded"
+		f.authority = host.new_authority(f.memory, function() return clone(clock) end); assert(f.authority:load().ok)
 		f.origin.window_epoch = "replacement-window"; f.controller_pane = "9010"
 		assert(f:apply("continue_controller", { expected_revision = f.authority.registry.revision, operator_verified = true }).ok)
+		assert(f:control("reconcile_session").ok) -- Fresh peer observation restores admission, never the old revision fence.
 		if coordinator then check(coordinator_owner(f).phase == "uncertain", "controller continuation alone never reactivates the reloaded coordinator") end
 		-- SPAWN owner recovery revoked the never-consumed accept; the continued route reads that outcome.
 		local problem = { code = if legacy then "binding_mismatch" else "authorization_revoked", message = REVOKED }
 		local read = f:apply("result", { action_id = accept.action_id, executor = claim.executor, grant_id = claim.grant_id, response_bytes = frame(old_request, "rejected", nil, problem) })
-		check(read.ok and read.code == "accept_reissue" and worker_of(f, id).phase == "accepted" and worker_of(f, id).accept_pending and f:action(accept.action_id).phase == "complete",
-			"a revoked never-consumed acceptance is pre-effect, not a terminal hold")
 		if legacy then
-			-- Durable state written before this fix: the worker was already held with the revocation.
-			local stored = f.authority.registry.dispatch.workers[id]; stored.phase = "held"; stored.reason = clone(problem)
-			f.memory.value = clone(f.authority.registry)
+			check(read.ok and worker_of(f, id).phase == "held" and worker_of(f, id).reason.code == "binding_mismatch"
+				and worker_of(f, id).accept_pending and f:action(accept.action_id) == nil,
+				"legacy diagnostic wording cannot turn a generic binding refusal into pre-effect authorization")
+		else
+			check(read.ok and read.code == "accept_reissue" and worker_of(f, id).phase == "accepted" and worker_of(f, id).accept_pending and f:action(accept.action_id) == nil,
+				"a revoked never-consumed acceptance is pre-effect, not a terminal hold")
 		end
 		check(f:apply("poll", { worker_id = id }).code == "worker_unbound", "nothing is re-issued before explicit worker attachment")
 		local pane = { pane_id = "9011", window_key = "", window_epoch = f.origin.window_epoch, native_session_id = "7", window_host_id = "local" }
@@ -3175,8 +5800,37 @@ if section == nil or section == "accept_after_owner_recovery" then
 			continuation_proof = dispatch.continuation_proof(f.authority.registry, worker_of(f, id)), operator_verified = true }); assert(attached.ok, attached.message)
 		local original = worker_of(f, id)
 		assert(f:finish(attached.action_id, "attached", { pane_binding = pane, previous_origin_binding = clone(original.origin_binding), previous_pane_binding = clone(original.pane_binding) }).ok)
+		if legacy then
+			check(worker_of(f, id).phase == "held" and worker_of(f, id).reason.code == "binding_mismatch",
+				"explicit attachment changes only the route, never clears a generic acceptance refusal")
+			check(next(worker_of(f, id).wakes) ~= nil, "the earlier ACK's deferred wake survives held acceptance and attachment")
+			assert(f:apply("observe", { worker_id = id, pane_binding = pane, native_state = "idle" }).ok)
+			local notification = f:apply("poll", { worker_id = id }); must(notification.ok, notification)
+			check(f:action(notification.action_id).request.op == "native_wake" and #actions_of(f, id, "accept") == 0,
+				"held generic acceptance still permits its independent deferred ACK notification")
+			assert(f:finish(notification.action_id, "submitted", { wake_status = "submitted", wake_effect_started = true }).ok)
+			check(next(worker_of(f, id).wakes) == nil and worker_of(f, id).phase == "held" and worker_of(f, id).accept_pending,
+				"settling the real native-wake grant neither accepts the worker nor republishes its ACK")
+			must(f:watermark(id).ok)
+			local compact = f:apply("poll", { worker_id = id }); must(compact.ok, compact)
+			check(f:action(compact.action_id).request.op == "mailbox_retire"
+				and f:action(compact.action_id).request.mode == "compact" and #actions_of(f, id, "accept") == 0,
+				"held generic acceptance permits real producer watermark and mailbox compaction")
+			must(f:finish(compact.action_id, "compacted").ok)
+			local settled = worker_of(f, id)
+			check(settled.compacted_floor == settled.accepted_seq and next(settled.receipts) == nil
+				and settled.compaction_pending == nil and settled.phase == "held" and settled.accept_pending
+				and #actions_of(f, id, "accept") == 0,
+				"producer settlement drains without clearing the generic hold or authorizing another accept")
+			local writes = f.memory.writes
+			local refused = f:apply("poll", { worker_id = id })
+			check(not refused.ok and f.memory.writes == writes and #actions_of(f, id, "accept") == 0,
+				"a held generic refusal cannot reissue acceptance or write on polling")
+			check(state.rehydrate(clone(f.authority.registry)) ~= nil, "held legacy refusal restores without invented authorization")
+			return
+		end
 		check(worker_of(f, id).phase == "accepted" and worker_of(f, id).accept_pending and (not coordinator or coordinator_owner(f).phase == "running"),
-			"explicit attested attachment resumes the generation" .. (if legacy then " from its pre-fix hold" else ""))
+			"explicit attested attachment resumes the generation")
 		local reissued = f:apply("poll", { worker_id = id }); assert(reissued.ok, reissued.message)
 		local new_request = f:action(reissued.action_id).request
 		check(new_request.op == "accept" and reissued.action_id ~= accept.action_id and new_request.origin_binding.window_epoch == "replacement-window" and new_request.controller_pane == "9010"
@@ -3219,7 +5873,7 @@ if section == nil or section == "publication_readback" then
 		and repeated.part == request.part and repeated.index == request.index and repeated.reply_seq == request.reply_seq and repeated.message_id == request.message_id,
 		"the outbox re-issues the exact same immutable reply part")
 	assert(f:finish(again.action_id, "published", {}).ok)
-	check(f:action(pub.action_id).phase == "resolved" and f:action(again.action_id).phase == "complete", "one resolved readback attempt and one settled publication")
+	check(f:action(pub.action_id) == nil and f:action(again.action_id) == nil, "readback and settled publication leave no completed action copies")
 	-- Native effects never take this path.
 	local g = fixture(); g:catalog(0)
 	local queued = g:queue(false); assert(queued.ok)
@@ -3241,6 +5895,7 @@ if section == nil or section == "publication_readback" then
 		local original = clone(f.authority.registry.dispatch.workers[fid])
 		reload(f, pub.action_id)
 		assert(f:apply("continue_controller", { expected_revision = f.authority.registry.revision, operator_verified = true }).ok)
+		assert(f:control("reconcile_session").ok) -- Fresh peer observation restores admission, never the old revision fence.
 		check(f:action(pub.action_id).phase == "uncertain", name .. ": continuation keeps the stopped executor's publication uncertain, never resolved")
 		local pane = { pane_id = "9009", window_key = "", window_epoch = f.origin.window_epoch, native_session_id = "7", window_host_id = "local" }
 		local function attach()
@@ -3249,7 +5904,7 @@ if section == nil or section == "publication_readback" then
 		end
 		check(attach().code == "settlement_pending", name .. ": the uncertain publication still blocks reattachment")
 		local readback = f:apply("readback_publication", { action_id = pub.action_id })
-		check(readback.ok and f:action(pub.action_id).phase == "resolved", name .. ": readback settles it on the continued controller route before reattachment: " .. tostring(readback.message))
+		check(readback.ok and f:action(pub.action_id) == nil, name .. ": readback consumes the attempt on the continued route before reattachment: " .. tostring(readback.message))
 		local attached = attach(); check(attached.ok, name .. ": reattachment proceeds after the readback: " .. tostring(attached.message))
 		assert(f:finish(attached.action_id, "attached", { pane_binding = pane, previous_origin_binding = original.origin_binding, previous_pane_binding = original.pane_binding }).ok)
 		local again = f:apply("poll", { worker_id = fid }); assert(again.ok, again.message)
@@ -3257,7 +5912,7 @@ if section == nil or section == "publication_readback" then
 		check(repeated.op == "mailbox_publish_reply" and again.action_id ~= pub.action_id and repeated.object_sha256 == request.object_sha256,
 			name .. ": the reattached route re-issues the exact same reply bytes")
 		assert(f:finish(again.action_id, "published", {}).ok)
-		check(f:action(again.action_id).phase == "complete" and state.rehydrate(clone(f.authority.registry)) ~= nil, name .. ": one settled publication; the state restores")
+		check(f:action(again.action_id) == nil and state.rehydrate(clone(f.authority.registry)) ~= nil, name .. ": one settled publication; the state restores")
 	end
 	readback_reload("host restart", fixture(), function(f, action_id)
 		local grant = f:action(action_id).claim
@@ -3269,28 +5924,33 @@ if section == nil or section == "publication_readback" then
 		f.origin.window_epoch = "replacement-window"; f.controller_pane = "9010"
 	end)
 end
--- Never-launched work whose provision, launch or adoption explicit continuation fenced as unexecuted
--- has an owner withdrawal (cancel_work), gated on SPAWN's retained status when SPAWN received the
--- request. Regression: a retried launch was fenced never_claimed while SPAWN still
--- held its expired window challenge; neither cancel_work nor rebind_unlaunched applied, so the work
--- and its reservations were wedged. Withdrawn work whose mailbox was already provisioned retires
--- that never-used mailbox (w.withdrawn) instead of deleting the worker and leaking the generation.
+-- Startup withdrawal: live unissued intents and exact pre-effect refusals can be
+-- cancelled; uncertain requests require retained current SPAWN proof first.
+-- Continuation never turns a restored draft into proof of nonexecution.
+-- A provisioned unused mailbox retires before its worker/reservations are released.
 if section == nil or section == "withdraw_fenced" then
 	local AUTH_FULL = { resource = "window_authorization", current = 1, limit = 1, retryable = true, effect_started = false }
 	local PROVISIONED_W = { handle = "mailbox-withdraw", binding_digest = string.rep("e", 64),
-		capabilities = runtime.json.array({ "report-files-v1", "native-ask-v1", "coordinator-control-v1" }), limits = {} }
+		capabilities = runtime.json.array({ "report-files-v1", "native-ask-v1", "coordinator-control-v1", "project-start-v1" }), limits = {} }
 	local function continue_on_b(fx)
 		fx.origin.window_epoch = "replacement-window"; fx.controller_pane = "9010"
 		assert(fx:apply("continue_controller", { expected_revision = fx.authority.registry.revision, operator_verified = true }).ok)
+		assert(fx:control("reconcile_session").ok) -- Fresh peer observation restores admission, never the old revision fence.
 	end
 	-- The window's exact SPAWN status read of the fenced request and SPAWN's framed answer.
-	local function status_evidence(fx, a, status, outcome_status, outcome_payload, overrides)
-		local query = { schema = 1, origin = "orchplus", op = "status", request_id = next_id(), action_id = next_id(), origin_binding = clone(a.request.origin_binding),
-			controller_pane = fx.controller_pane or "9001", controller_generation = a.request.controller_generation, target_request_id = a.request.request_id }
+	local function status_evidence(fx, a, status, outcome_status, outcome_payload, overrides, outcome_error)
+		local query = { schema = 2, origin = "orchplus", op = "status", request_id = next_id(), action_id = next_id(), origin_binding = clone(fx.origin),
+			controller_pane = fx.controller_pane or "9001", controller_generation = fx.origin.owner_generation, target_request_id = a.request.request_id,
+			target_request_serial = a.request.request_serial, authority_namespace = a.request.authority_namespace,
+			logical_session_id = a.request.logical_session_id, admission_seq = a.request.admission_seq }
 		for k, v in overrides or {} do query[k] = v end
-		local payload = if outcome_status then { outcome = { schema = 1, op = a.request.op, request_id = a.request.request_id, action_id = a.request.action_id,
-			origin_binding = clone(a.request.origin_binding), controller_generation = a.request.controller_generation, status = outcome_status, payload = outcome_payload } } else nil
-		return { query_bytes = runtime.json.encode(query), response_bytes = frame(query, status, payload) }
+		local payload
+		if outcome_status then
+			local outcome = frame(a.request, outcome_status, fx:peer_payload(a, outcome_status, outcome_payload), outcome_error, nil, fx.authority.registry.revision)
+			-- `found` contains the complete validated response body, never its v2 transport envelope.
+			payload = { outcome = assert(codec.decode_dispatch_response(outcome, a.request)) }
+		end
+		return { query_bytes = runtime.json.encode(query), response_bytes = frame(query, status, payload, nil, nil, fx.authority.registry.revision) }
 	end
 	local function cancel(fx, worker_id, evidence)
 		local fields = { worker_id = worker_id }
@@ -3320,34 +5980,67 @@ if section == nil or section == "withdraw_fenced" then
 		for k in b do if a[k] == nil then return false end end
 		return true
 	end
-	-- The live defect: an expired challenge backpressured the launch, the automatic recheck made it
-	-- ready again (keeping SPAWN's answer), and continuation fenced it before any new claim.
+	-- Cancellation eligibility also includes ordinary live startup; it is not fencing evidence.
+	do
+		local fresh = fixture(); fresh:catalog(0)
+		local queued_fresh = fresh:queue(false); assert(queued_fresh.ok)
+		local offered = withdrawal(fresh, queued_fresh.worker_id)
+		check(offered.pending_startup and offered.evidence == "unissued" and not offered.status_required,
+			"fresh unissued provisioning projects pending startup without removing cancellation eligibility")
+		assert(fresh:finish(queued_fresh.action_id, "provisioned", PROVISIONED_W).ok)
+		offered = withdrawal(fresh, queued_fresh.worker_id)
+		check(offered.pending_startup and offered.op == "launch" and offered.evidence == "unissued"
+			and offered.mailbox_retire == "not_requested" and not offered.status_required,
+			"provisioned but unissued launch remains ordinary pending startup with exact unused-mailbox cancellation")
+		local launch = worker_of(fresh, queued_fresh.worker_id).launch_action_id
+		assert(fresh:finish(launch, "full", AUTH_FULL).code == "backpressure")
+		offered = withdrawal(fresh, queued_fresh.worker_id)
+		check(not offered.pending_startup and offered.evidence == "pre_effect_refusal" and not offered.status_required,
+			"actual pre-effect refusal is distinct from pending startup without inventing a continuation")
+		local cancelled = cancel(fresh, queued_fresh.worker_id)
+		check(cancelled.ok and cancelled.code == "withdrawal_retiring" and not withdrawal(fresh, queued_fresh.worker_id).pending_startup,
+			"cancelled startup retains its mailbox retirement, never masquerading as normal queued work")
+	end
+	-- A fresh retry has no issued identity. Continuation holds it without replay; explicit
+	-- cancellation may remove that proven-unissued draft, never an uncertain claimed effect.
+	do
+		local draft = fixture(); draft:catalog(0)
+		local queued_draft = draft:queue(false); assert(queued_draft.ok)
+		assert(draft:finish(queued_draft.action_id, "full", AUTH_FULL).code == "backpressure")
+		local retry = draft:apply("retry", { action_id = queued_draft.action_id }); assert(retry.ok)
+		check(retry.action_id ~= queued_draft.action_id and draft:action(queued_draft.action_id) == nil, "retry does not inherit the old refusal as evidence for a new request")
+		continue_on_b(draft)
+		local offered = withdrawal(draft, queued_draft.worker_id)
+		check(draft:action(retry.action_id).phase == "held_ready" and draft:action(retry.action_id).request_bytes == nil
+			and draft:action(retry.action_id).claim == nil and offered and offered.evidence == "unissued" and not offered.status_required,
+			"continued never-issued draft remains held and exposes only its actual unissued identity")
+		check(cancel(draft, queued_draft.worker_id).ok and draft:action(retry.action_id) == nil
+			and worker_of(draft, queued_draft.worker_id) == nil, "explicit cancellation removes the unissued draft without inventing a SPAWN outcome")
+	end
+	-- An issued launch with an unknown outcome stays uncertain across continuation. Withdrawal
+	-- requires a fresh exact current peer refusal; missing state or a historical draft is not proof.
 	local f = fixture(); f:catalog(0)
 	local queued = f:queue(false); assert(queued.ok, queued.message)
 	assert(f:finish(queued.action_id, "provisioned", PROVISIONED_W).ok)
 	local id = queued.worker_id
 	local launch_id = worker_of(f, id).launch_action_id
-	check(f:finish(launch_id, "full", AUTH_FULL).code == "backpressure", "an expired SPAWN window challenge settles the launch as pre-effect backpressure")
-	assert(f:apply("retry", { action_id = launch_id }).ok)
+	assert(f:apply("claim", { action_id = launch_id, executor = f.origin.window_epoch }).ok)
+	local issued = f:action(launch_id)
+	assert(f:apply("lost", { action_id = launch_id, executor = issued.claim.executor, grant_id = issued.claim.grant_id }).ok)
 	local before = clone(f:action(launch_id))
 	continue_on_b(f)
 	local fenced = f:action(launch_id)
-	check(fenced.phase == "resolved" and fenced.resolution.evidence == "never_claimed" and fenced.request_bytes == before.request_bytes
-		and worker_of(f, id).origin_binding.window_epoch == "fixture-window", "continuation fences the retried old-route launch; it is neither moved nor re-sent")
+	check(fenced.phase == "uncertain" and fenced.request_bytes == before.request_bytes and fenced.request.request_serial == before.request.request_serial
+		and worker_of(f, id).origin_binding.window_epoch == "fixture-window", "continuation preserves the issued old-route uncertainty without replay or invented nonexecution")
 	local offered = withdrawal(f, id)
 	check(offered ~= nil and offered.action_id == launch_id and offered.op == "launch" and offered.status_required == true
+		and offered.evidence == "unconfirmed" and offered.pending_startup == false
 		and offered.request_id == fenced.request.request_id and offered.controller_generation == fenced.request.controller_generation
 		and offered.mailbox_provisioned == true and offered.mailbox_retire == "not_requested",
 		"the controller offers withdrawal of the fenced launch, gated on SPAWN's status of that exact request; its provisioned mailbox is not yet retired")
-	local projection = state.project(f.authority.registry)
-	projection.dispatch = dispatch.project(f.authority.registry, f.origin.logical_session_id, f.origin.alias_nonce)
-	local rendered = load("views").render({ pane = 42, alias_nonce = f.origin.alias_nonce, orch_session_id = f.origin.logical_session_id,
-		action_serial = 0, actions = {} }, projection, "ready")
-	local worker_node = assert(role_node(rendered, "orchplus.worker", "workflow-worker-" .. id), "the fenced worker keeps its machine node")
-	local worker_span = worker_node.p.spans[1]
-	local machine = runtime.json.decode(if type(worker_span) == "string" then worker_span else worker_span.t)
-	check(runtime.json.encode(rendered):find("Cancel never-launched work", 1, true) ~= nil and machine.withdrawal.request_id == fenced.request.request_id
-		and machine.withdrawal.origin_binding.window_epoch == "fixture-window", "the controller renders the withdrawal control and the exact request the window reads status for")
+	local machine = dispatch.project(f.authority.registry, f.origin.logical_session_id, f.origin.alias_nonce).workers[id]
+	check(machine.withdrawal.request_id == fenced.request.request_id and machine.withdrawal.origin_binding.window_epoch == "fixture-window",
+		"uncertain startup projects its exact status-read identity without claiming nonexecution")
 	check(cancel(f, id).code == "status_required" and worker_of(f, id) ~= nil, "SPAWN received the launch, so withdrawal needs its retained SPAWN status")
 	check(cancel(f, id, status_evidence(f, fenced, "found", "pending", { authorization_required = true })).code == "authorization_live" and worker_of(f, id) ~= nil,
 		"a still-live SPAWN challenge refuses withdrawal until it expires")
@@ -3362,15 +6055,15 @@ if section == nil or section == "withdraw_fenced" then
 	-- The SPAWN side of the same shape is SPAWN tests/dispatch.luau section `unused_retirement`.
 	local cancelled = cancel(f, id, status_evidence(f, fenced, "found", "full", AUTH_FULL))
 	local fw = worker_of(f, id)
-	check(cancelled.ok and cancelled.code == "withdrawal_retiring" and fw ~= nil and f:action(launch_id) ~= nil and f:action(launch_id).phase == "resolved"
+	check(cancelled.ok and cancelled.code == "withdrawal_retiring" and fw ~= nil and f:action(launch_id) == nil
 		and retirements(f, id) == 1 and fw.mailbox_retire_action_id == cancelled.action_id
-		and fw.withdrawn ~= nil and fw.withdrawn.op == "launch" and fw.withdrawn.action_id == launch_id and fw.withdrawn.evidence == "never_claimed",
-		"SPAWN's expired challenge proves the launch can never run: the worker and its fenced launch are kept and exactly one mailbox retirement is queued")
+		and fw.withdrawn ~= nil and fw.withdrawn.op == "launch" and fw.withdrawn.action_id == launch_id and fw.withdrawn.evidence == "pre_effect_refusal",
+		"the exact current pre-effect refusal consumes the uncertain launch into one live mailbox-retirement obligation")
 	local retire = f:action(cancelled.action_id).request
 	check(retire.op == "mailbox_retire" and retire.mode == "retire" and retire.handle == "mailbox-withdraw" and retire.origin_binding.window_epoch == "replacement-window"
 		and fw.origin_binding.window_epoch == "fixture-window", "the retirement is issued on the continued route; the fenced work keeps its old route")
 	local retiring_view = withdrawal(f, id)
-	check(retiring_view ~= nil and retiring_view.mailbox_retire == "retiring" and retiring_view.status_required == false and retiring_view.evidence == "never_claimed"
+	check(retiring_view ~= nil and retiring_view.mailbox_retire == "retiring" and retiring_view.status_required == false and retiring_view.evidence == "pre_effect_refusal"
 		and retiring_view.action_id == launch_id and retiring_view.request_id == fenced.request.request_id and retiring_view.mailbox_provisioned == true,
 		"the withdrawal shows the pending retirement; its consumed status evidence is not asked for again")
 	check(cancel(f, id).code == "retirement_unresolved" and retirements(f, id) == 1, "a pending retirement is never issued twice")
@@ -3394,34 +6087,38 @@ if section == nil or section == "withdraw_fenced" then
 		"a full mailbox allocation refuses the provision before effects")
 	continue_on_b(g)
 	local gprov = g:action(gq.action_id)
-	check(gprov.phase == "resolved" and gprov.resolution.evidence == "pre_effect_refusal" and worker_of(g, gq.worker_id).phase == "queued"
-		and withdrawal(g, gq.worker_id).op == "mailbox_provision", "continuation fences the refused provision and offers withdrawal")
-	check(cancel(g, gq.worker_id, status_evidence(g, gprov, "found", "rejected")).code == "work_cancelled" and worker_of(g, gq.worker_id) == nil,
-		"a terminal SPAWN rejection proves the provision can never run")
+	check(gprov.phase == "backpressure" and gprov.response.status == "full" and worker_of(g, gq.worker_id).phase == "queued"
+		and withdrawal(g, gq.worker_id).op == "mailbox_provision", "continuation retains the exact positive current pre-effect refusal")
+	assert(g:allocation(gq.worker_id, { state = "none" }).ok)
+	check(cancel(g, gq.worker_id).code == "work_cancelled" and worker_of(g, gq.worker_id) == nil and g:action(gq.action_id) == nil,
+		"positive generation allocation-none proof consumes the unused full provision without inventing an absent root")
 	local h = fixture(); h:catalog(0)
 	local hq = h:queue(false); assert(hq.ok)
-	assert(h:finish(hq.action_id, "full", { resource = "mailbox_allocation", current = 16, limit = 16, retryable = true, effect_started = false }).ok)
+	assert(h:apply("claim", { action_id = hq.action_id, executor = h.origin.window_epoch }).ok)
 	continue_on_b(h)
-	check(cancel(h, hq.worker_id, status_evidence(h, h:action(hq.action_id), "missing")).code == "work_cancelled" and worker_of(h, hq.worker_id) == nil,
-		"no SPAWN record of the fenced provision: the work is withdrawn")
+	check(cancel(h, hq.worker_id, status_evidence(h, h:action(hq.action_id), "missing")).code == "allocation_required" and worker_of(h, hq.worker_id) ~= nil,
+		"a provision outcome cannot stand in for observation of its possibly retained allocation")
+	assert(h:allocation(hq.worker_id, { state = "none" }).ok)
+	check(cancel(h, hq.worker_id, status_evidence(h, h:action(hq.action_id), "found", "rejected", nil, nil, OCCUPIED)).code == "work_cancelled" and worker_of(h, hq.worker_id) == nil,
+		"exact allocation-none and the original terminal startup rejection together permit withdrawal")
 	-- Adoption whose native ask was never claimed: never sent, so no SPAWN read is needed.
 	local m = fixture(); m:catalog(0)
 	local function hand(fx) return { pane_id = "9020", window_key = fx.origin.window_key, window_epoch = fx.origin.window_epoch,
 		native_session_id = fx.origin.native_session_id, window_host_id = fx.origin.window_host_id } end
-	local function adopt(fx)
-		return fx:apply("adopt", { record_id = "native", record_revision = 0, catalog_revision = 0, prompt = "Adopted fixture task.", pane_binding = hand(fx),
-			attestation = "operator_verified_exact_agent_pane" })
+	local function enroll(fx)
+		fx.enrol_project = fx.enrol_project or fx:project("Withdrawal conversation", false)
+		return fx:apply("enrol", { record_id = "native", record_revision = 0, catalog_revision = 0,
+			orch_project_id = fx.enrol_project, pane_binding = hand(fx), delivery = "native_ask" })
 	end
-	local adopted = adopt(m); assert(adopted.ok, adopted.message)
+	local adopted = enroll(m); assert(adopted.ok, adopted.message)
 	assert(m:finish(adopted.action_id, "provisioned", PROVISIONED_W).ok)
 	local ask = worker_of(m, adopted.worker_id).launch_action_id
-	continue_on_b(m)
 	local mid = adopted.worker_id
-	check(m:action(ask).request.op == "adopt" and m:action(ask).phase == "resolved" and m:action(ask).resolution.evidence == "never_claimed"
+	check(m:action(ask).request.op == "enrol" and m:action(ask).phase == "ready" and m:action(ask).request_bytes == nil
 		and withdrawal(m, mid).status_required == false and withdrawal(m, mid).mailbox_retire == "not_requested",
-		"continuation fences the never-claimed adoption ask; SPAWN never received it")
+		"a live same-incarnation unissued adoption intent needs no fabricated peer outcome")
 	local mfirst = cancel(m, mid)
-	check(mfirst.code == "withdrawal_retiring" and worker_of(m, mid) ~= nil and worker_of(m, mid).withdrawn.op == "adopt" and retirements(m, mid) == 1,
+	check(mfirst.code == "withdrawal_retiring" and worker_of(m, mid) ~= nil and worker_of(m, mid).withdrawn.op == "enrol" and retirements(m, mid) == 1,
 		"the fenced adoption is withdrawn without a SPAWN read; its unused mailbox retires")
 	-- SPAWN revoked the retirement's never-consumed authorization: the marker is released and the
 	-- owner's next cancel issues the one retirement again.
@@ -3435,14 +6132,20 @@ if section == nil or section == "withdraw_fenced" then
 	check(reject(m, msecond.action_id, OCCUPIED).code == "bridge_rejected" and worker_of(m, mid).phase == "held" and withdrawal(m, mid).mailbox_retire == "refused"
 		and withdrawal(m, mid).status_required == false and worker_of(m, mid).reason.code == "binding_mismatch",
 		"SPAWN's definite refusal holds the worker visibly with a refused retirement")
+	check(m:action(msecond.action_id) == nil and retirements(m, mid) == 0
+		and worker_of(m, mid).retirement_refused == true and worker_of(m, mid).mailbox_retired ~= true,
+		"the completed refused grant is consumed, but the unused mailbox's live retirement obligation remains")
 	check(state.rehydrate(clone(m.authority.registry)) ~= nil, "a held withdrawn worker restores")
 	local mthird = cancel(m, mid)
 	check(mthird.code == "withdrawal_retiring" and mthird.action_id ~= msecond.action_id and retirements(m, mid, "ready") == 1,
 		"after a definite refusal the owner may cancel again with exactly one fresh retirement")
+	check(worker_of(m, mid).retirement_refused == nil and cancel(m, mid).code == "retirement_unresolved"
+		and retirements(m, mid, "ready") == 1,
+		"explicit retry consumes the refusal marker into one fresh obligation, never a second grant")
 	check(m:finish(mthird.action_id, "retired", nil).ok and worker_of(m, mid).mailbox_retired == true and withdrawal(m, mid) == nil,
 		"SPAWN confirms the fresh retirement")
-	check(adopt(m).code == "adoption_queued" and worker_of(m, mid) == nil,
-		"the retired withdrawn worker is reclaimed; the owner may explicitly adopt the pane again in the continued window")
+	check(enroll(m).code == "enrolment_queued" and worker_of(m, mid) == nil,
+		"proven retirement reclaims the old capability; explicit enrollment can bind the same conversation again")
 	-- A fenced coordinator start keeps its never-bound orchestrator reservation until the unused
 	-- mailbox retires, then releases it.
 	local c = fixture(); c:catalog(0)
@@ -3453,16 +6156,16 @@ if section == nil or section == "withdraw_fenced" then
 	check(c:finish(claunch, "full", AUTH_FULL).code == "backpressure", "the coordinator launch is refused before effects")
 	continue_on_b(c)
 	local reserved = coordinator_owner(c)
-	check(c:action(claunch).resolution.evidence == "pre_effect_refusal" and reserved.phase == "reserved" and reserved.managed_worker_id == cid,
-		"the fenced coordinator start still holds the session's orchestrator reservation")
+	check(c:action(claunch).phase == "backpressure" and c:action(claunch).response.status == "full" and reserved.phase == "reserved" and reserved.managed_worker_id == cid,
+		"the current refused coordinator start still holds the session's orchestrator reservation")
 	check(c:queue(true).code == "orchestrator_slot_occupied", "no second coordinator can start while the fenced one holds the slot")
-	local cretire = cancel(c, cid, status_evidence(c, c:action(claunch), "found", "full", AUTH_FULL))
+	local cretire = cancel(c, cid)
 	check(cretire.code == "withdrawal_retiring" and worker_of(c, cid) ~= nil and worker_of(c, cid).withdrawn.evidence == "pre_effect_refusal"
 		and coordinator_owner(c) ~= nil and coordinator_owner(c).managed_worker_id == cid and coordinator_owner(c).phase == "reserved",
 		"withdrawal keeps the coordinator reservation while the unused mailbox retires")
 	check(c:queue(true).code == "orchestrator_slot_occupied" and state.rehydrate(clone(c.authority.registry)) ~= nil,
 		"the slot stays held until SPAWN confirms retirement; the state restores")
-	check(c:finish(cretire.action_id, "retired", nil).ok and coordinator_owner(c) == nil and c.authority.registry.retired[reserved.owner_id] ~= nil,
+	check(c:finish(cretire.action_id, "retired", nil).ok and coordinator_owner(c) == nil and c.authority.registry.retired == nil,
 		"confirmed retirement releases the never-bound coordinator reservation")
 	check(c:queue(true).code == "task_queued" and worker_of(c, cid) == nil and state.rehydrate(clone(c.authority.registry)) ~= nil,
 		"the freed slot accepts an explicit new coordinator start; the withdrawn worker is reclaimed")
@@ -3473,9 +6176,9 @@ if section == nil or section == "withdraw_fenced" then
 	local ulaunch = worker_of(u, uq.worker_id).launch_action_id
 	assert(u:apply("claim", { action_id = ulaunch, executor = u.origin.window_epoch }).ok)
 	continue_on_b(u)
-	check(u:action(ulaunch).phase == "uncertain" and withdrawal(u, uq.worker_id) == nil
-		and cancel(u, uq.worker_id, status_evidence(u, u:action(ulaunch), "missing")).code == "worker_unbound" and worker_of(u, uq.worker_id) ~= nil,
-		"an uncertain claimed launch is never withdrawn, even when SPAWN reports no record")
+	check(u:action(ulaunch).phase == "uncertain" and withdrawal(u, uq.worker_id).status_required == true
+		and cancel(u, uq.worker_id, status_evidence(u, u:action(ulaunch), "missing")).code == "unknown_effect" and worker_of(u, uq.worker_id) ~= nil,
+		"unknown peer outcome leaves the claimed launch uncertain; only a positive exact current refusal could withdraw it")
 	-- A launch (or adoption ask) SPAWN definitively rejected after its mailbox was provisioned: the
 	-- owner's cancel retires the never-used mailbox through the exact retirement path; the worker stays
 	-- visible until SPAWN confirms `retired`, and a refused or uncertain retirement keeps it.
@@ -3483,17 +6186,19 @@ if section == nil or section == "withdraw_fenced" then
 		local q = fx:queue(coordinator); assert(q.ok, q.message)
 		assert(fx:finish(q.action_id, "provisioned", PROVISIONED_W).ok)
 		local launch = worker_of(fx, q.worker_id).launch_action_id
+		assert(fx:apply("claim", { action_id = launch, executor = fx.origin.window_epoch }).ok)
+		local issued = clone(fx:action(launch))
 		check(reject(fx, launch, OCCUPIED).code == "bridge_rejected", "SPAWN's definite launch rejection commits after provisioning")
-		return q.worker_id, launch
+		return q.worker_id, launch, issued
 	end
 	local r = fixture(); r:catalog(0)
-	local rid, rlaunch = rejected_launch(r, false)
+	local rid, rlaunch, rejected_request = rejected_launch(r, false)
 	local rw = worker_of(r, rid)
-	check(rw.phase == "held" and rw.mailbox_handle ~= nil and rw.pane_binding == nil and r:action(rlaunch).phase == "complete", "the work is held with a provisioned, never-used mailbox")
+	check(rw.phase == "held" and rw.mailbox_handle ~= nil and rw.pane_binding == nil and r:action(rlaunch) == nil, "the work is held with a provisioned, never-used mailbox")
 	local roffer = withdrawal(r, rid)
 	check(roffer ~= nil and roffer.evidence == "spawn_rejected" and roffer.op == "launch" and roffer.status_required == false and roffer.mailbox_retire == "not_requested",
 		"the controller offers withdrawal that will retire the unused mailbox")
-	check(cancel(r, rid, status_evidence(r, r:action(rlaunch), "missing")).code == "invalid_command", "a terminal SPAWN rejection takes no status evidence")
+	check(cancel(r, rid, status_evidence(r, rejected_request, "missing")).code == "invalid_command", "a terminal SPAWN rejection takes no status evidence")
 	local retiring = cancel(r, rid)
 	local retire = r:action(retiring.action_id)
 	check(retiring.code == "withdrawal_retiring" and worker_of(r, rid) ~= nil and retire.request.op == "mailbox_retire" and retire.request.mode == "retire"
@@ -3529,11 +6234,11 @@ if section == nil or section == "withdraw_fenced" then
 	-- A rejected adoption ask is withdrawn the same way.
 	local a = fixture(); a:catalog(0)
 	local apane = { pane_id = "9020", window_key = a.origin.window_key, window_epoch = a.origin.window_epoch, native_session_id = a.origin.native_session_id, window_host_id = a.origin.window_host_id }
-	local aq = a:apply("adopt", { record_id = "native", record_revision = 0, catalog_revision = 0, prompt = "Adopted fixture task.", pane_binding = apane,
-		attestation = "operator_verified_exact_agent_pane" }); assert(aq.ok, aq.message)
+	local aq = a:apply("enrol", { record_id = "native", record_revision = 0, catalog_revision = 0, pane_binding = apane,
+		orch_project_id = a:project("Refused enrollment", false), delivery = "native_ask" }); assert(aq.ok, aq.message)
 	assert(a:finish(aq.action_id, "provisioned", PROVISIONED_W).ok)
 	check(reject(a, worker_of(a, aq.worker_id).launch_action_id, { code = "target_unavailable", message = "Target pane is not an idle native agent in the exact window, session and host; nothing was sent" }).code == "bridge_rejected"
-		and withdrawal(a, aq.worker_id).op == "adopt" and cancel(a, aq.worker_id).code == "withdrawal_retiring", "a refused adoption ask retires its unused mailbox on cancel")
+		and withdrawal(a, aq.worker_id).op == "enrol" and cancel(a, aq.worker_id).code == "withdrawal_retiring", "a refused enrollment ask retires its unused mailbox on cancel")
 	-- A coordinator start releases its orchestrator slot once the unused mailbox retires.
 	local co = fixture(); co:catalog(0)
 	local coid = rejected_launch(co, true)
@@ -3541,7 +6246,7 @@ if section == nil or section == "withdraw_fenced" then
 	check(coowner.phase == "reserved" and coowner.managed_worker_id == coid, "the rejected coordinator start still holds the reserved slot")
 	local coretire = cancel(co, coid)
 	check(coretire.code == "withdrawal_retiring" and coordinator_owner(co) ~= nil, "the slot stays reserved until retirement is confirmed")
-	check(co:finish(coretire.action_id, "retired", nil).ok and coordinator_owner(co) == nil and co.authority.registry.retired[coowner.owner_id] ~= nil,
+	check(co:finish(coretire.action_id, "retired", nil).ok and coordinator_owner(co) == nil and co.authority.registry.retired == nil,
 		"confirmed retirement releases the never-bound coordinator reservation")
 	check(co:queue(true).code == "task_queued" and state.rehydrate(clone(co.authority.registry)) ~= nil, "a new coordinator start takes the freed slot")
 end
@@ -3590,7 +6295,7 @@ do
 	local function q_reason(doc, id) return q_entry(q_normalize(doc, { id or "native" }), id or "native").reason end
 	local function q_policy(extra)
 		local p = { quota_routing = true, quota_reserve_pct = 10, quota_max_age_ms = 900000, initial_dispatch_records = {},
-			initial_dispatch_provider = false, initial_dispatch_account = false, initial_dispatch_model = false }
+			initial_dispatch_provider = false, initial_dispatch_account = false, initial_dispatch_enabled = true }
 		for k, v in extra or {} do p[k] = v end
 		return p
 	end
@@ -3598,6 +6303,17 @@ do
 	if section == nil or section == "quota_normalize" then
 		local evidence = q_normalize(q_document({ q_publication("remote-a", "native") }, { q_source("remote-a") }))
 		local entry = q_entry(evidence, "native")
+		do
+			local policy = q_policy({ quota_max_age_ms = 0 })
+			check(quota.assess(evidence, "native", 0, policy, QNOW).status == "sufficient", "disabled age override uses valid source freshness")
+			local stale = clone(evidence); stale.records[1].observed_at_ms = QNOW - stale.stale_after_ms - 1
+			check(quota.assess(stale, "native", 0, policy, QNOW).reason == "stale", "disabled age override still expires at source freshness")
+			policy.quota_max_age_ms = 86400000
+			check(quota.assess(stale, "native", 0, policy, QNOW).reason == "stale", "positive age override cannot bypass source freshness")
+			local reset = clone(evidence); reset.records[1].reset_at_ms = QNOW - 1
+			policy.quota_max_age_ms = 0
+			check(quota.assess(reset, "native", 0, policy, QNOW).reason == "reset_passed", "disabled age override cannot bypass elapsed source reset")
+		end
 		check(entry.state == "known" and entry.remaining_pct == 60 and entry.weekly_reset_ms == QNOW + 86400000 and entry.reset_at_ms == QNOW + 3600000
 			and entry.observed_at_ms == QNOW - 60000 and entry.windows == 2 and #entry.binding == 16 and #entry.principal == 16,
 			"complete identity-bound evidence yields the lowest bound window, earliest weekly reset and binding digests")
@@ -3704,6 +6420,16 @@ do
 			for k, v in extra or {} do r[k] = v end
 			return quota.PREFIX .. runtime.json.encode(r)
 		end
+		local native_frame = page("r1", "snapshot", 0, raw:sub(1, half))
+		local raw_body = native_frame:sub(#quota.PREFIX + 1)
+		local carrier_page = assert(quota.decode_response_json(raw_body, { request_id = "r1", op = "snapshot" }))
+		local native_page = assert(quota.decode_response(native_frame, { request_id = "r1", op = "snapshot" }))
+		check(quota.canonical(carrier_page) == quota.canonical(native_page) and carrier_page.data == raw:sub(1, half),
+			"pane-free JSON and real native framing consume the same exact capacity evidence")
+		local uncorrelated, issue = quota.decode_response_json(raw_body, { request_id = "other", op = "snapshot" })
+		check(uncorrelated == nil and issue.code == "uncorrelated", "raw carrier bodies retain the original correlation fence")
+		check(quota.decode_response_json(native_frame, { request_id = "r1", op = "snapshot" }) == nil,
+			"the JSON carrier never accepts a fabricated native-frame wrapper")
 		local function assemble(second_data, extra)
 			local first = assert(quota.decode_response(page("r1", "snapshot", 0, raw:sub(1, half), extra), { request_id = "r1", op = "snapshot" }))
 			local a = assert(quota.assembly(first))
@@ -3777,7 +6503,7 @@ do
 
 	local function q_row(id, provider, account, model)
 		return { id = id, revision = 0, provider = provider, account_label = account, model_variant = model, backend = "native-agent", enabled = true, eligible = true,
-			capabilities = runtime.json.array({ "report-files-v1", "native-ask-v1", "coordinator-control-v1" }), unsupported = runtime.json.array(), cwd = "/fixture", placement = "split" }
+			capabilities = runtime.json.array({ "report-files-v1", "native-ask-v1", "coordinator-control-v1", "project-start-v1" }), unsupported = runtime.json.array(), cwd = "/fixture", placement = "split" }
 	end
 	local function q_known(id, remaining, weekly, principal)
 		return { id = id, revision = 0, state = "known", remaining_pct = remaining, observed_at_ms = QNOW - 60000, reset_at_ms = QNOW + 3600000,
@@ -3793,10 +6519,16 @@ do
 		local r = f:apply("catalog")
 		assert(f:finish(r.action_id, "catalog", { catalog_version = 2, setup = catalog_setup(0), namespace = QJOIN.namespace, host_key = QJOIN.host_key, config_revision = 0, revision = 0, records = runtime.json.array({
 			q_row("native", "omp", "Work", "m1"), q_row("alt-same", "omp", "Work", "m1"), q_row("alt-early", "omp", "Work", "m1"),
-			q_row("alt-model", "omp", "Work", "m2"), q_row("alt-provider", "other", "Work", "m1") }) }).ok)
+			q_row("alt-model", "omp", "Other account", "m2"), q_row("alt-provider", "other", "Work", "m1") }) }).ok)
+		assert(f:apply("policy", { policy = { initial_dispatch_enabled = true, worker_rollover_enabled = true, coordinator_rollover_enabled = true } }).ok)
 		return f
 	end
-	local function q_queue(f) return f:apply("queue", { record_id = "native", record_revision = 0, catalog_revision = 0, prompt = "Quota fixture task", cwd = "/fixture", placement = "split", coordinator = false }) end
+	local function q_queue(f, preserve_checkout_gate)
+		local queued = f:apply("queue", { record_id = "native", record_revision = 0, catalog_revision = 0,
+			prompt = "Quota fixture task", cwd = "/fixture", placement = "split", coordinator = false })
+		return if preserve_checkout_gate then queued else f:allow_shared_fixture(queued)
+	end
+	local function q_outcome(answer) return answer.launch or answer.code end
 	local function q_worker(f, id) return f.authority.registry.dispatch.workers[id] end
 	local function q_actions(f, id) local n = 0; for _, a in f.authority.registry.dispatch.actions do if a.worker_id == id then n += 1 end end; return n end
 	local function q_capacity(f, records, revision) return f:apply("capacity", { capacity = q_evidence(records, revision) }) end
@@ -3804,9 +6536,16 @@ do
 		for _, g in f.authority.registry.dispatch.gates or {} do if g.worker_id == id and g.kind == "quota_fallback" and g.phase == "pending" then return g end end
 		return nil
 	end
-	local PROVISIONED = { handle = "mailbox-fixture", binding_digest = A, capabilities = runtime.json.array({ "report-files-v1", "native-ask-v1", "coordinator-control-v1" }), limits = {} }
+	local PROVISIONED = { handle = "mailbox-fixture", binding_digest = A, capabilities = runtime.json.array({ "report-files-v1", "native-ask-v1", "coordinator-control-v1", "project-start-v1" }), limits = {} }
 
 	if section == nil or section == "quota_routing" then
+		do
+			local disabled = q_fixture()
+			assert(disabled:apply("policy", { policy = { quota_routing = true, initial_dispatch_enabled = false, initial_dispatch_records = { "alt-same" } } }).ok)
+			assert(q_capacity(disabled, { q_known("native", 0), q_known("alt-same", 80) }).ok)
+			local work = q_queue(disabled)
+			check(work.code == "task_held" and q_gate(disabled, work.worker_id) == nil and q_actions(disabled, work.worker_id) == 0, "disabled starting-work allowance cannot select or propose an allowlisted alternative")
+		end
 		-- Off: exactly today's explicit selection, whatever USAGE says.
 		local off = q_fixture()
 		check(q_capacity(off, { q_known("native", 0) }).code == "capacity_recorded", "evidence can be recorded while routing is off")
@@ -3843,7 +6582,7 @@ do
 		assert(q_capacity(f, { q_unknown("native", "unbound"), q_known("alt-same", 90) }, string.rep("d", 64)).ok)
 		queued = q_queue(f)
 		w = q_worker(f, queued.worker_id)
-		check(queued.code == "task_held" and queued.action_id == nil and q_actions(f, queued.worker_id) == 0 and w.routing.phase == "held"
+		check(q_outcome(queued) == "task_held" and queued.action_id == nil and q_actions(f, queued.worker_id) == 0 and w.routing.phase == "held"
 			and w.routing.reason.code == "quota_unknown" and w.phase == "queued", "unbound evidence holds the work without provisioning or substitution")
 		assert(q_capacity(f, { q_known("native", 50) }, string.rep("e", 64)).ok)
 		w = q_worker(f, queued.worker_id)
@@ -3858,10 +6597,15 @@ do
 		assert(q_capacity(g, { q_known("native", 80) }).ok)
 		clock.now_ms = QNOW + 120000
 		local expired = q_queue(g)
-		check(expired.code == "task_held" and q_worker(g, expired.worker_id).routing.candidates[1].reason == "evidence_expired", "an expired USAGE lease holds new work")
-		-- Owner can withdraw never-provisioned held work; provisioned work cannot be cancelled here.
+		check(q_outcome(expired) == "task_held" and q_worker(g, expired.worker_id).routing.candidates[1].reason == "evidence_expired", "an expired USAGE lease holds new work")
+		-- Owner can withdraw held work; a known unissued provisioned launch retires its unused mailbox.
 		check(g:apply("cancel_work", { worker_id = expired.worker_id }).code == "work_cancelled" and q_worker(g, expired.worker_id) == nil, "held unprovisioned work can be cancelled")
-		check(f:apply("cancel_work", { worker_id = queued.worker_id }).code == "worker_unbound", "provisioned routed work is not cancellable through cancel_work")
+		local provision = actions_of(f, queued.worker_id, "mailbox_provision")[1]
+		assert(f:finish(provision, "provisioned", PROVISIONED).ok)
+		local withdrawn = f:apply("cancel_work", { worker_id = queued.worker_id })
+		check(withdrawn.code == "withdrawal_retiring" and q_worker(f, queued.worker_id).mailbox_handle ~= nil
+			and f:action(withdrawn.action_id).request.op == "mailbox_retire",
+			"withdrawing an unissued routed launch retains and explicitly retires its already-provisioned mailbox")
 		-- Restore keeps decisions and drops the evidence lease.
 		local restored = assert(state.rehydrate(clone(f.authority.registry)))
 		check(restored.dispatch.capacity == nil and restored.dispatch.workers[queued.worker_id].routing.phase == "selected", "restore keeps routing decisions and requires fresh evidence")
@@ -3869,26 +6613,46 @@ do
 	end
 
 	if section == nil or section == "quota_gate" then
-		-- A sufficient alternative whose model change Config does not permit becomes an owner gate.
+		-- A sufficient alternative whose account change Config does not permit becomes an owner gate.
 		local f = q_fixture()
 		assert(f:apply("policy", { policy = { quota_routing = true, initial_dispatch_records = { "alt-model" } } }).ok)
 		assert(q_capacity(f, { q_known("native", 0), q_known("alt-model", 80) }).ok)
 		local queued = q_queue(f)
 		local w = q_worker(f, queued.worker_id)
 		local gate = q_gate(f, queued.worker_id)
-		check(queued.code == "task_gated" and q_actions(f, queued.worker_id) == 0 and w.routing.phase == "gated" and w.routing.gate.denied == "model"
+		check(queued.code == "task_gated" and q_actions(f, queued.worker_id) == 0 and w.routing.phase == "gated" and w.routing.gate.denied == "account"
 			and gate ~= nil and w.routing.gate.gate_id == gate.id and w.routing.gate.to.id == "alt-model" and w.routing.gate.from.id == "native" and w.routing.gate.evidence_revision == A,
-			"a denied model fallback is a durable gate bound to the exact tuples and evidence, with nothing provisioned")
+			"a denied account fallback is a durable gate bound to the exact tuples and evidence, with nothing provisioned")
 		local listed = false
-		for _, item in gate.evidence do if item == "denied:model" then listed = true end end
+		for _, item in gate.evidence do if item == "denied:account" then listed = true end end
 		check(listed, "the gate records the denied permission as evidence")
 		local pending_state = clone(f.authority.registry)
 		check(dispatch.valid(pending_state.dispatch, pending_state), "the pending fallback gate state is valid")
+		do
+			local raw = clone(pending_state)
+			raw.version = 4; raw.dispatch.projects = nil; raw.dispatch.finished_projects = nil
+			raw.installation_defaults.policy.auto_start_projects = nil; raw.installation_defaults.policy.auto_launch_intake = false
+			for _, p in raw.dispatch.policies do p.auto_start_projects = nil; p.auto_launch_intake = false end
+			for _, worker in raw.dispatch.workers do worker.orch_project_id = nil; worker.presentation = nil; worker.selected_record = nil end
+			local restored, info = state.rehydrate(raw); must(restored, info)
+			local migrated = fixture(function() return { now_ms = QNOW } end)
+			migrated.origin = clone(f.origin); migrated.authority.registry = restored; migrated.memory.value = clone(restored)
+			assert(migrated:apply("continue_controller", { operator_verified = true }).ok)
+			assert(migrated:control("reconcile_session").ok)
+			local before = clone(q_worker(migrated, queued.worker_id).routing)
+			local project = migrated.authority.registry.dispatch.projects[q_worker(migrated, queued.worker_id).orch_project_id]
+			local started = migrated:apply("project_start", { orch_project_id = project.orch_project_id, project_revision = project.revision })
+			check(started.ok and q_actions(migrated, queued.worker_id) == 0
+				and runtime.json.encode(q_worker(migrated, queued.worker_id).routing) == runtime.json.encode(before)
+				and migrated.authority.registry.dispatch.gates[gate.id] ~= nil,
+				"v4 START preserves the existing exact model-fallback decision instead of replacing routing and orphaning its owner gate")
+			check(state.rehydrate(clone(migrated.authority.registry)) ~= nil, "migrated quota gate and retained routing restore together")
+		end
 		check(f:apply("answer", { gate_id = gate.id, gate_revision = gate.revision, choice_id = "approve", answer = "Approve alt-model" }).code == "fallback_approved", "owner approval is accepted")
 		w = q_worker(f, queued.worker_id)
-		check(w.record_id == "alt-model" and w.routing.phase == "selected" and w.routing.authority == "owner_gate" and w.routing.needs == "model"
-			and f.authority.registry.dispatch.gates[gate.id].phase == "resolved" and q_actions(f, queued.worker_id) == 1
-			and f.authority.registry.dispatch.policies[f.origin.logical_session_id].initial_dispatch_model == false,
+		check(w.record_id == "alt-model" and w.routing.phase == "selected" and w.routing.authority == "owner_gate" and w.routing.needs == "account"
+			and f.authority.registry.dispatch.gates[gate.id] == nil and q_actions(f, queued.worker_id) == 1
+			and f.authority.registry.dispatch.policies[f.origin.logical_session_id].initial_dispatch_account == false,
 			"approval provisions that work only on the destination and never edits Config")
 		check(dispatch.valid(f.authority.registry.dispatch, f.authority.registry), "resolved fallback gate state is valid")
 		-- Reject keeps the work held.
@@ -3907,11 +6671,11 @@ do
 		check(q_gate(s, queued.worker_id).id == gate.id and q_worker(s, queued.worker_id).routing.gate.evidence_revision == B, "newer evidence for the same proposal keeps the question stable")
 		assert(s:apply("policy", { policy = { quota_reserve_pct = 20 } }).ok)
 		local replacement = q_gate(s, queued.worker_id)
-		check(replacement ~= nil and replacement.id ~= gate.id and s.authority.registry.dispatch.gates[gate.id].phase == "superseded", "a routing-policy edit supersedes the old gate")
-		check(s:apply("answer", { gate_id = gate.id, gate_revision = gate.revision, choice_id = "approve", answer = "Approve" }).code == "stale_gate", "a superseded fallback cannot be approved")
-		assert(s:apply("policy", { policy = { initial_dispatch_model = true } }).ok)
+		check(replacement ~= nil and replacement.id ~= gate.id and s.authority.registry.dispatch.gates[gate.id] == nil, "a routing-policy edit replaces and reclaims the obsolete gate")
+		check(not s:apply("answer", { gate_id = gate.id, gate_revision = gate.revision, choice_id = "approve", answer = "Approve" }).ok, "a superseded fallback cannot be approved")
+		assert(s:apply("policy", { policy = { initial_dispatch_account = true } }).ok)
 		local w2 = q_worker(s, queued.worker_id)
-		check(w2.routing.phase == "selected" and w2.routing.authority == "policy" and w2.record_id == "alt-model" and s.authority.registry.dispatch.gates[replacement.id].phase == "superseded",
+		check(w2.routing.phase == "selected" and w2.routing.authority == "policy" and w2.record_id == "alt-model" and s.authority.registry.dispatch.gates[replacement.id] == nil,
 			"granting the permission selects the alternative by policy and closes the gate")
 		-- Unknown requested identity: any alternative is an account change.
 		local u = q_fixture()
@@ -3920,7 +6684,7 @@ do
 		queued = q_queue(u)
 		check(queued.code == "task_gated" and q_worker(u, queued.worker_id).routing.gate.denied == "account", "equal labels never prove the same account when the selected record is unbound")
 		local p = q_fixture()
-		assert(p:apply("policy", { policy = { quota_routing = true, initial_dispatch_records = { "alt-provider" }, initial_dispatch_account = true, initial_dispatch_model = true } }).ok)
+		assert(p:apply("policy", { policy = { quota_routing = true, initial_dispatch_records = { "alt-provider" }, initial_dispatch_account = true } }).ok)
 		assert(q_capacity(p, { q_known("native", 0), q_known("alt-provider", 90) }).ok)
 		queued = q_queue(p)
 		check(queued.code == "task_gated" and q_worker(p, queued.worker_id).routing.gate.denied == "provider", "a provider switch without provider permission is gated")
@@ -4003,7 +6767,7 @@ do
 		local r = f:apply("catalog")
 		assert(f:finish(r.action_id, "catalog", { catalog_version = 2, setup = catalog_setup(0), namespace = QJOIN.namespace, host_key = QJOIN.host_key, config_revision = 0, revision = 0, records = runtime.json.array({
 			q_row("native", "omp", "Work", "m1"), q_row("alt-same", "omp", "Work", "m1"), q_row("alt-early", "omp", "Work", "m1"),
-			q_row("alt-model", "omp", "Work", "m2"), q_row("alt-provider", "other", "Work", "m1") }) }).ok)
+			q_row("alt-model", "omp", "Other account", "m2"), q_row("alt-provider", "other", "Work", "m1") }) }).ok)
 	end
 	local function q_rollover_fixture()
 		local clock = { now_ms = QNOW, mono_ms = 1000, epoch = "quota-rollover" }
@@ -4031,45 +6795,45 @@ do
 		local succ = worker_of(off, rollover_of(off, hid).successor_worker_id)
 		check(rollover_of(off, hid).phase == "successor_granted" and succ.record_id == "native" and succ.routing == nil,
 			"quota_routing off: the successor uses the predecessor's record with no routing state")
-		-- Permitted: the worker_rollover allowlist and model permission select the alternative.
+		-- Permitted: the worker_rollover allowlist and account permission select the alternative.
 		local f, id = q_rollover_fixture()
-		assert(f:apply("policy", { policy = { quota_routing = true, worker_rollover_records = { "alt-model" }, worker_rollover_model = true } }).ok)
+		assert(f:apply("policy", { policy = { quota_routing = true, worker_rollover_enabled = true, worker_rollover_records = { "alt-model" }, worker_rollover_account = true } }).ok)
 		assert(q_capacity(f, { q_known("native", 0), q_known("alt-model", 80) }).ok)
 		hid = q_rollover(f, id)
 		local r = rollover_of(f, hid)
 		succ = worker_of(f, r.successor_worker_id)
 		check(r.phase == "successor_granted" and succ.record_id == "alt-model" and succ.routing.scope == "worker_rollover" and succ.routing.authority == "policy"
-			and succ.routing.needs == "model" and succ.routing.requested.id == "native" and succ.routing.reservation.phase == "reserved"
+			and succ.routing.needs == "account" and succ.routing.requested.id == "native" and succ.routing.reservation.phase == "reserved"
 			and worker_of(f, id).record_id == "native" and f:action(actions_of(f, succ.worker_id, "mailbox_provision")[1]).request.record_id == "alt-model",
 			"a permitted rollover substitution provisions the successor on the alternative; the running predecessor is unchanged")
 		check(dispatch.valid(f.authority.registry.dispatch, f.authority.registry) and state.rehydrate(clone(f.authority.registry)) ~= nil, "routed successor state is valid and restores")
 		-- Denied: initial-dispatch permission does not leak into rollover; the gate sits on the predecessor.
 		local g, gid = q_rollover_fixture()
-		assert(g:apply("policy", { policy = { quota_routing = true, worker_rollover_records = { "alt-model" }, initial_dispatch_model = true } }).ok)
+		assert(g:apply("policy", { policy = { quota_routing = true, worker_rollover_enabled = true, worker_rollover_records = { "alt-model" }, initial_dispatch_account = true } }).ok)
 		assert(q_capacity(g, { q_known("native", 0), q_known("alt-model", 80) }).ok)
 		hid = q_rollover(g, gid)
 		r = rollover_of(g, hid)
 		local gate = q_gate_on(g, gid)
 		check(r.phase == "checkpoint_verified" and r.hold.code == "quota_fallback_gate" and r.successor_worker_id == nil and gate ~= nil
-			and r.quota.gate.gate_id == gate.id and r.quota.gate.denied == "model" and r.quota.gate.scope == "worker_rollover" and r.quota.gate.to.id == "alt-model",
+			and r.quota.gate.gate_id == gate.id and r.quota.gate.denied == "account" and r.quota.gate.scope == "worker_rollover" and r.quota.gate.to.id == "alt-model",
 			"a denied rollover substitution is a durable predecessor-bound gate; no successor exists")
 		check(dispatch.valid(g.authority.registry.dispatch, g.authority.registry), "the pending rollover fallback gate is valid")
 		check(g:apply("answer", { gate_id = gate.id, gate_revision = gate.revision, choice_id = "approve", answer = "Approve" }).code == "fallback_approved", "owner approves this successor's substitution")
 		r = rollover_of(g, hid)
 		succ = if r.successor_worker_id then worker_of(g, r.successor_worker_id) else nil
 		check(r.phase == "successor_granted" and succ ~= nil and succ.record_id == "alt-model" and succ.routing.authority == "owner_gate" and succ.routing.authorized_digest ~= nil
-			and r.quota == nil and g.authority.registry.dispatch.gates[gate.id].phase == "resolved" and g.authority.registry.dispatch.policies[g.origin.logical_session_id].worker_rollover_model == false,
+			and r.quota == nil and g.authority.registry.dispatch.gates[gate.id] == nil and g.authority.registry.dispatch.policies[g.origin.logical_session_id].worker_rollover_account == false,
 			"approval grants only this successor on the destination and never edits Config")
 		-- Reject holds the rollover; cancelling it closes the decision.
 		local x, xid = q_rollover_fixture()
-		assert(x:apply("policy", { policy = { quota_routing = true, worker_rollover_records = { "alt-model" } } }).ok)
+		assert(x:apply("policy", { policy = { quota_routing = true, worker_rollover_enabled = true, worker_rollover_records = { "alt-model" } } }).ok)
 		assert(q_capacity(x, { q_known("native", 0), q_known("alt-model", 80) }).ok)
 		hid = q_rollover(x, xid)
 		gate = q_gate_on(x, xid)
 		check(x:apply("answer", { gate_id = gate.id, gate_revision = gate.revision, choice_id = "reject", answer = "Reject" }).code == "fallback_rejected"
 			and rollover_of(x, hid).hold.code == "quota_fallback_rejected" and rollover_of(x, hid).successor_worker_id == nil and q_gate_on(x, xid) == nil,
 			"rejection holds the rollover without reopening the same question")
-		check(x:apply("cancel_rollover", { worker_id = xid }).code == "rollover_cancelled" and rollover_of(x, hid).quota == nil, "cancelling the rollover discards its fallback decision")
+		check(x:apply("close_handover", { worker_id = xid }).code == "handover_closed", "owner closes the no-successor handover and discards its fallback decision")
 		-- Nothing sufficient: held; fresh evidence grants the successor on the predecessor's record.
 		local h, hidw = q_rollover_fixture()
 		assert(h:apply("policy", { policy = { quota_routing = true } }).ok)
@@ -4082,6 +6846,63 @@ do
 		check(r.phase == "successor_granted" and worker_of(h, r.successor_worker_id).record_id == "native"
 			and worker_of(h, r.successor_worker_id).routing.authority == "requested_sufficient", "fresh sufficient evidence grants the successor on the same record")
 	end
+	if section == nil or section == "quota_coordinator_rollover" then
+		local clock = { now_ms = QNOW, mono_ms = 1000, epoch = "quota-coordinator-rollover" }
+		local f, id = coordinator_ready(function() return clone(clock) end, true)
+		local project_id = worker_of(f, id).orch_project_id
+		local predecessor = clone(worker_of(f, id)); local previous_owner = clone(coordinator_owner(f))
+		q_catalog(f)
+		assert(f:apply("policy", { policy = { quota_routing = true, coordinator_rollover_enabled = true,
+			coordinator_rollover_records = { "alt-model" }, coordinator_rollover_account = true } }).ok)
+		assert(q_capacity(f, { q_known("native", 0), q_known("alt-model", 80) }).ok)
+		assert(f:apply("observe", { worker_id = id, pane_binding = clone(predecessor.pane_binding), native_state = "idle" }).ok)
+		local hid = coordinator_retirement_requested(f, id)
+		check(handover_successors(f, hid) == 0 and coordinator_owner(f).owner_id == previous_owner.owner_id
+			and not f.authority.registry.dispatch.projects[project_id].started, "account-switch selection neither overlaps coordinators nor starts the project")
+		local prepared = rollover_of(f, hid).prepared
+		check(prepared ~= nil and prepared.worker.record_id == "alt-model" and prepared.worker.coordinator_owner_id == nil
+			and prepared.worker.routing.reservation == nil and #actions_of(f, prepared.worker.worker_id, "mailbox_provision") == 0
+			and state.rehydrate(clone(f.authority.registry)) ~= nil,
+			"the selected coordinator successor is a valid immutable draft, not a reserved owner, slot or issued provision")
+		local stop = coordinator_stop_action(f, id)
+		assert(coordinator_released(f, id, stop).code == "coordinator_retired")
+		local r = rollover_of(f, hid); local succ_id = r.successor_worker_id; local successor = worker_of(f, succ_id)
+		local provision_id = actions_of(f, succ_id, "mailbox_provision")[1]
+		local provision_request = f:action(provision_id).request
+		check(r.phase == "successor_granted" and successor.record_id == "alt-model"
+			and successor.routing.scope == "coordinator_rollover" and successor.routing.needs == "account"
+			and provision_request.record_id == "alt-model" and provision_request.worker_id ~= predecessor.worker_id
+			and provision_request.enrolment_token ~= predecessor.enrolment_token
+			and provision_request.handover_id == hid and provision_request.handover_sha256 == codec.sha256(hid .. ":" .. r.handover_token),
+			"coordinator alternative provisions its own account record, worker, token and handover digest")
+		check(coordinator_owner(f).owner_id ~= previous_owner.owner_id and coordinator_owner(f).generation > previous_owner.generation
+			and successor.coordinator_owner_id == coordinator_owner(f).owner_id and worker_of(f, id).stopped ~= nil and worker_of(f, id).mailbox_retired,
+			"successor gets a new owner only after exact predecessor stop and mailbox retirement")
+		assert(f:finish(provision_id, "provisioned", { handle = "mailbox-account-successor", binding_digest = string.rep("c", 64),
+			capabilities = runtime.json.array({ "report-files-v1", "native-ask-v1", "coordinator-control-v1", "project-start-v1" }), limits = {} }).ok)
+		local launch_id = worker_of(f, succ_id).launch_action_id
+		assert(f:apply("claim", { action_id = launch_id, executor = f.origin.window_epoch,
+			capacity_validation = { revision = A, auth_revision = "auth-1", status = "current", validated_at_ms = QNOW, expires_at_ms = QNOW + 60000 } }).ok)
+		local launch_request = f:action(launch_id).request
+		check(launch_request.record_id == "alt-model" and launch_request.enrolment.enrolment_token == provision_request.enrolment_token
+			and launch_request.enrolment.handover_id == hid and launch_request.enrolment.handover_token == r.handover_token,
+			"account-switch native launch uses the successor's separately provisioned exact transport identity")
+		assert(f:finish(launch_id, "awaiting_acceptance", { pane_binding = successor_pane(f) }).ok)
+		local accept_id, accepted_request = successor_accept_request(f, succ_id)
+		assert(f:finish(accept_id, "accepted", {}).ok)
+		check(accepted_request.handover_id == hid and worker_of(f, succ_id).activation.activation_token ~= predecessor.activation.activation_token,
+			"account-switch coordinator acceptance and activation retain the exact new handover/owner binding")
+		assert(ack_activation(f, succ_id).ok)
+		local kept = worker_of(f, id)
+		check(kept.record_id == predecessor.record_id and kept.mailbox_handle == predecessor.mailbox_handle
+			and kept.enrolment_token == predecessor.enrolment_token and kept.launch_request_id == predecessor.launch_request_id
+			and runtime.json.encode(kept.pane_binding) == runtime.json.encode(predecessor.pane_binding)
+			and kept.coordinator_owner_id == previous_owner.owner_id and kept.activation.activation_token == predecessor.activation.activation_token,
+			"switching accounts preserves every predecessor launch/mailbox/owner identity unchanged")
+		check(rollover_of(f, hid) == nil and not f.authority.registry.dispatch.projects[project_id].started
+			and state.rehydrate(clone(f.authority.registry)) ~= nil, "completed coordinator account rollover preserves START=false and restores")
+	end
+
 
 	if section == nil or section == "quota_ledger" then
 		local f = q_fixture()
@@ -4093,14 +6914,15 @@ do
 		check(first.code == "task_queued" and w1.routing.reservation.phase == "reserved" and w1.routing.reservation.decision_digest == w1.routing.decision_digest
 			and w1.routing.reservation.evidence_revision == A, "a routed launch reserves a slot bound to its decision and evidence revision")
 		local second = q_queue(f)
-		check(second.code == "task_held" and q_worker(f, second.worker_id).routing.reason.code == "concurrency_limit" and q_actions(f, second.worker_id) == 0,
+		check(q_outcome(second) == "task_held" and q_worker(f, second.worker_id).routing.reason.code == "concurrency_limit" and q_actions(f, second.worker_id) == 0,
 			"the configured concurrency limit holds the next routed launch")
 		local function validation(revision) return { revision = revision or A, auth_revision = "auth-1", status = "current", validated_at_ms = QNOW, expires_at_ms = QNOW + 60000 } end
 		assert(f:finish(first.action_id, "provisioned", PROVISIONED).ok)
 		local launch = q_worker(f, first.worker_id).launch_action_id
 		assert(f:apply("claim", { action_id = launch, executor = f.origin.window_epoch, capacity_validation = validation() }).ok)
 		check(q_worker(f, first.worker_id).routing.reservation.phase == "claimed", "the launch claim moves the reservation to claimed")
-		assert(f:finish(launch, "rejected", nil).ok)
+		assert(f:finish(launch, "rejected", nil, { code = "target_unavailable",
+			message = "Target pane is not an idle native agent in the exact window, session and host; nothing was sent" }).ok)
 		local history = {}
 		for _, edge in q_worker(f, first.worker_id).routing.reservation.history do table.insert(history, edge.phase) end
 		check(table.concat(history, ",") == "reserved,claimed,released", "a definitive pre-pane launch failure releases the slot: " .. table.concat(history, ","))
@@ -4116,7 +6938,7 @@ do
 		assert(f:apply("lost", { action_id = launch2, executor = f.origin.window_epoch, grant_id = grant }).ok)
 		check(f:action(launch2).phase == "uncertain" and q_worker(f, second.worker_id).routing.reservation.phase == "uncertain", "an uncertain launch keeps its reservation")
 		local third = q_queue(f)
-		check(third.code == "task_held" and q_worker(f, third.worker_id).routing.reason.code == "concurrency_limit", "an uncertain reservation still occupies the slot")
+		check(q_outcome(third) == "task_held" and q_worker(f, third.worker_id).routing.reason.code == "concurrency_limit", "an uncertain reservation still occupies the slot")
 		check(state.rehydrate(clone(f.authority.registry)) ~= nil, "the ledger restores")
 		local forged = clone(f.authority.registry); forged.dispatch.workers[second.worker_id].routing.reservation.phase = "parked"
 		check(state.rehydrate(forged) == nil, "an unknown reservation phase is rejected at restore")
@@ -4140,14 +6962,40 @@ do
 		local listed = false
 		for _, item in gate.evidence do if item:sub(1, 27) == "selector:unverified_absent " then listed = true end end
 		check(listed and q_worker(f, queued.worker_id).routing.selector == "unverified_absent", "fallback evidence and the decision record the unverified selector state")
-		local projection = state.project(f.authority.registry)
-		projection.dispatch = dispatch.project(f.authority.registry, f.origin.logical_session_id, f.origin.alias_nonce)
-		local rendered = runtime.json.encode(load("views").render({ pane = 42, alias_nonce = f.origin.alias_nonce, orch_session_id = f.origin.logical_session_id,
-			action_serial = 0, actions = {} }, projection, "ready"))
-		check(rendered:find("Model/profile selector: unverified", 1, true) ~= nil and rendered:find("selector unverified (none recorded)", 1, true) ~= nil,
-			"the controller shows the selector as unverified, never enforced")
-		assert(f:apply("policy", { policy = { initial_dispatch_model = true } }).ok)
+		local projected = dispatch.project(f.authority.registry, f.origin.logical_session_id, f.origin.alias_nonce)
+		check(projected.workers[queued.worker_id].routing.selector == "unverified_absent",
+			"the consumer receives unverified selector evidence, not fabricated identity enforcement")
+		assert(f:apply("policy", { policy = { initial_dispatch_account = true } }).ok)
 		check(q_worker(f, queued.worker_id).record_id == "alt-model", "selector state is evidence only: it neither blocks nor enables a permitted substitution")
+		local manual = q_fixture()
+		local project = manual:project("Verified project cwd", false)
+		local p = manual.authority.registry.dispatch.projects[project]
+		assert(manual:apply("project_repository", { orch_project_id = project, project_revision = p.revision,
+			repository = { cwd = "/project/checkout", repo_root = "/project/checkout", common_dir = "/project/.git",
+				target_ref = "main", head_revision = string.rep("a", 40), queue_route = "orch_queue" } }).ok)
+		local rows = manual.authority.registry.dispatch.catalogs[manual.origin.logical_session_id].records
+		for _, row in rows do if row.id == "alt-model" then row.cwd = "/alt/default"; row.placement = "replace_if_alone" end end
+		manual.memory.value = clone(manual.authority.registry)
+		assert(manual:apply("policy", { policy = { quota_routing = true, initial_dispatch_records = { "alt-model" }, initial_dispatch_account = true } }).ok)
+		assert(q_capacity(manual, { q_known("native", 0), q_known("alt-model", 80) }).ok)
+		local opening = manual:apply("queue", { orch_project_id = project, record_id = "native", record_revision = 0, catalog_revision = 0,
+			prompt = codec.OPEN_CONVERSATION_ASSIGNMENT, cwd = "/fixture", placement = "split", coordinator = false,
+			presentation = "user_new_tab", open_conversation = true, execution_cwd = "/project/checkout" })
+		assert(opening.ok, opening.message)
+		local choice = q_gate(manual, opening.worker_id)
+		check(choice ~= nil and q_worker(manual, opening.worker_id).record_id == "native" and q_actions(manual, opening.worker_id) == 0,
+			"a manual conversation click always asks before substituting, even when automatic model substitution is allowed")
+		assert(manual:apply("answer", { gate_id = choice.id, gate_revision = choice.revision, choice_id = "approve", answer = "Use this alternative." }).ok)
+		local selected = q_worker(manual, opening.worker_id)
+		check(selected.record_id == "alt-model" and selected.cwd == "/alt/default" and selected.placement == "replace_if_alone"
+			and selected.execution_cwd == "/project/checkout" and selected.presentation == "user_new_tab",
+			"fallback keeps the chosen record defaults separate from effective project cwd and presentation")
+		local provision
+		for aid, action in manual.authority.registry.dispatch.actions do if action.worker_id == opening.worker_id and action.request.op == "mailbox_provision" then provision = aid end end
+		assert(manual:finish(provision, "provisioned", PROVISIONED).ok)
+		local launch = manual:action(q_worker(manual, opening.worker_id).launch_action_id).request
+		check(launch.placement == "tab" and launch.cwd == "/project/checkout" and launch.execution_cwd == "/project/checkout"
+			and launch.prompt == codec.OPEN_CONVERSATION_ASSIGNMENT, "new-tab override works even for a saved replace record without losing canonical enrollment bytes")
 	end
 
 	if section == nil or section == "withdraw_fenced" then
@@ -4166,9 +7014,10 @@ do
 		local w = q_worker(f, queued.worker_id)
 		check(w.phase == "held" and w.mailbox_handle == nil and w.routing.phase == "selected" and f:action(w.launch_action_id) == nil,
 			"the routed work is held: selected, never provisioned and never launched")
-		local offered = dispatch.project(f.authority.registry, f.origin.logical_session_id, f.origin.alias_nonce).workers[queued.worker_id].withdrawal
-		check(offered ~= nil and offered.evidence == "spawn_rejected" and offered.op == "mailbox_provision" and offered.status_required == false,
-			"the controller offers withdrawal on SPAWN's retained rejection, with no further status read")
+		check(f:apply("cancel_work", { worker_id = queued.worker_id }).code == "allocation_required"
+			and q_worker(f, queued.worker_id) ~= nil,
+			"a provision rejection cannot release a possibly retained allocation without observing its exact generation")
+		assert(f:allocation(queued.worker_id, { state = "none" }).ok)
 		local cancelled = f:apply("cancel_work", { worker_id = queued.worker_id })
 		check(cancelled.code == "work_cancelled" and q_worker(f, queued.worker_id) == nil and q_actions(f, queued.worker_id) == 0,
 			"the rejected work and its settled provision are removed, releasing its routing reservation")
@@ -4181,20 +7030,27 @@ do
 		assert(u:apply("claim", { action_id = uq.action_id, executor = u.origin.window_epoch }).ok)
 		local grant = u:action(uq.action_id).claim
 		assert(u:apply("lost", { action_id = uq.action_id, executor = grant.executor, grant_id = grant.grant_id }).ok)
-		check(u:action(uq.action_id).phase == "uncertain" and u:apply("cancel_work", { worker_id = uq.worker_id }).code == "worker_unbound"
-			and q_worker(u, uq.worker_id) ~= nil, "an uncertain provision is never withdrawn")
+		local uncertain_before, uncertain_writes = runtime.json.encode(u.authority.registry), u.memory.writes
+		local uncertain_cancel = u:apply("cancel_work", { worker_id = uq.worker_id })
+		check(uncertain_cancel.ok == false and u:action(uq.action_id).phase == "uncertain"
+			and q_worker(u, uq.worker_id) ~= nil and runtime.json.encode(u.authority.registry) == uncertain_before
+			and u.memory.writes == uncertain_writes, "an uncertain provision is never withdrawn or changed without current SPAWN evidence")
 		-- So does a claimed one still awaiting SPAWN.
 		local c = q_fixture()
 		assert(c:apply("policy", { policy = { quota_routing = true } }).ok)
 		assert(q_capacity(c, { q_known("native", 60) }).ok)
 		local cq = q_queue(c); assert(cq.code == "task_queued", cq.message)
 		assert(c:apply("claim", { action_id = cq.action_id, executor = c.origin.window_epoch }).ok)
-		check(c:apply("cancel_work", { worker_id = cq.worker_id }).code == "worker_unbound" and q_worker(c, cq.worker_id) ~= nil, "a claimed provision is never withdrawn")
+		local claimed_before, claimed_writes = runtime.json.encode(c.authority.registry), c.memory.writes
+		check(c:apply("cancel_work", { worker_id = cq.worker_id }).ok == false and q_worker(c, cq.worker_id) ~= nil
+			and runtime.json.encode(c.authority.registry) == claimed_before and c.memory.writes == claimed_writes,
+			"a claimed provision is never withdrawn or changed while awaiting SPAWN")
 		-- Fenced routed launch with a provisioned mailbox: withdrawal keeps the fenced launch, so the
 		-- work is never routed again, holds no concurrency reservation and opens no fallback gate
 		-- while its unused mailbox retires.
 		local AUTH_FULL = { resource = "window_authorization", current = 1, limit = 1, retryable = true, effect_started = false }
 		local validation = { revision = A, auth_revision = "auth-1", status = "current", validated_at_ms = QNOW, expires_at_ms = QNOW + 60000 }
+		for _, continued in { false, true } do
 		local p = q_fixture()
 		assert(p:apply("policy", { policy = { quota_routing = true, concurrency_limit = 1 } }).ok)
 		assert(q_capacity(p, { q_known("native", 60) }).ok)
@@ -4206,30 +7062,54 @@ do
 		local pa = p:action(plaunch)
 		check(p:apply("result", { action_id = plaunch, executor = pa.claim.executor, grant_id = pa.claim.grant_id, response_bytes = frame(pa.request, "full", AUTH_FULL) }).code == "backpressure",
 			"the routed launch is refused before effects by an expired SPAWN window challenge")
-		p.origin.window_epoch = "replacement-window"; p.controller_pane = "9010"
-		assert(p:apply("continue_controller", { expected_revision = p.authority.registry.revision, operator_verified = true }).ok)
+		if continued then
+			p.origin.window_epoch = "replacement-window"; p.controller_pane = "9010"
+			assert(p:apply("continue_controller", { expected_revision = p.authority.registry.revision, operator_verified = true }).ok)
+			assert(p:control("reconcile_session").ok) -- Fresh peer observation restores admission, never the old revision fence.
+		end
 		local pfenced = p:action(plaunch)
-		check(pfenced.phase == "resolved" and pfenced.resolution.evidence == "pre_effect_refusal", "continuation fences the routed launch")
-		local query = { schema = 1, origin = "orchplus", op = "status", request_id = next_id(), action_id = next_id(), origin_binding = clone(pfenced.request.origin_binding),
-			controller_pane = p.controller_pane, controller_generation = pfenced.request.controller_generation, target_request_id = pfenced.request.request_id }
-		local outcome = { schema = 1, op = "launch", request_id = pfenced.request.request_id, action_id = pfenced.request.action_id, origin_binding = clone(pfenced.request.origin_binding),
-			controller_generation = pfenced.request.controller_generation, status = "full", payload = AUTH_FULL }
-		local withdrawn = p:apply("cancel_work", { worker_id = pid, query_bytes = runtime.json.encode(query), response_bytes = frame(query, "found", { outcome = outcome }) })
+		check(pfenced.phase == "backpressure" and pfenced.response.status == "full", "continuation retains the routed launch's exact pre-effect refusal")
+		local withdrawn = p:apply("cancel_work", { worker_id = pid })
 		local pw = q_worker(p, pid)
-		check(withdrawn.code == "withdrawal_retiring" and pw ~= nil and p:action(plaunch) ~= nil and pw.routing.phase == "selected" and pw.routing.reservation.phase == "released",
-			"the withdrawn routed work keeps its fenced launch and holds no concurrency reservation")
+		check(withdrawn.code == "withdrawal_retiring" and pw ~= nil and p:action(plaunch) == nil and pw.routing.phase == "selected" and pw.routing.reservation.phase == "released",
+			"withdrawal consumes the proven-unexecuted launch and releases concurrency while mailbox retirement remains live")
+		local cancelled_questions = true
+		for _, question in p.authority.registry.dispatch.gates do
+			if question.worker_id == pid and question.delivery == nil and question.ruling == nil and question.execution == nil
+				and question.phase ~= "cancelled" and question.phase ~= "resolved" then cancelled_questions = false end
+		end
+		check(cancelled_questions and pw.launch_gates == nil, "proven withdrawal settles effect-free launch questions instead of pinning a retired mailbox forever")
 		local actions_before = q_actions(p, pid)
 		assert(q_capacity(p, { q_known("native", 0) }, B).ok)
 		check(q_gate(p, pid) == nil and q_actions(p, pid) == actions_before and q_worker(p, pid).routing.phase == "selected",
 			"new capacity evidence never re-routes the withdrawn work or opens a fallback gate for it")
 		assert(q_capacity(p, { q_known("native", 60) }, C).ok)
-		local next_work = q_queue(p)
-		check(next_work.code == "task_queued" and q_worker(p, next_work.worker_id).routing.reservation.phase == "reserved",
-			"the concurrency limit of one admits new routed work while the withdrawal retires")
+		local next_work = q_queue(p, true)
+		-- Both fixture tasks deliberately use /fixture. The retained retiring worker
+		-- still participates in conservative checkout collision detection; that
+		-- independent owner gate precedes quota routing and its reservation check.
+		local next_worker = q_worker(p, next_work.worker_id)
+		local checkout_gate = if next_worker and next_worker.launch_gates and #next_worker.launch_gates == 1
+			then p.authority.registry.dispatch.gates[next_worker.launch_gates[1]] else nil
+		check(next_work.code == "task_gated" and checkout_gate ~= nil and checkout_gate.kind == "shared_checkout"
+			and table.find(checkout_gate.evidence, "peer:" .. pid .. ":/fixture") ~= nil,
+			"shared fixture checkout requires its separate owner decision before testing the released concurrency slot")
+		next_work = p:allow_shared_fixture(next_work)
+		-- answer_checkout_gate preserves the queue result in `launch`; its own
+		-- command receipt is `launch_released`, not a second queue receipt.
+		local routed = q_worker(p, next_work.worker_id)
+		local provision = if next_work.action_id then p:action(next_work.action_id) else nil
+		check(next_work.code == "launch_released" and next_work.launch == "task_queued"
+			and routed.routing.reservation.phase == "reserved"
+			and provision ~= nil and provision.phase == "ready" and provision.request.op == "mailbox_provision"
+			and provision.worker_id == routed.worker_id,
+			"the concurrency limit of one admits new routed work while the withdrawal retires: "
+				.. runtime.json.encode({ answer = next_work, routing = routed.routing }))
 		check(state.rehydrate(clone(p.authority.registry)) ~= nil, "the routed withdrawal restores")
 		check(p:finish(withdrawn.action_id, "retired", nil).ok and q_worker(p, pid).mailbox_retired == true, "SPAWN confirms the routed withdrawal's retirement")
 		q_queue(p) -- Queueing reclaims settled retired workers first.
 		check(q_worker(p, pid) == nil, "the retired routed worker is reclaimed")
+		end
 	end
 
 	if section == nil or section == "quota_continuation" then
@@ -4246,17 +7126,7 @@ do
 		local function continue_on_b(f)
 			f.origin.window_epoch = "replacement-window"; f.controller_pane = "9010"
 			assert(f:apply("continue_controller", { expected_revision = f.authority.registry.revision, operator_verified = true }).ok)
-		end
-		local function on_b(request) return request.origin_binding.window_epoch == "replacement-window" and request.controller_pane == "9010" end
-		local function launch_on_b(f, worker_id, name)
-			local w = q_worker(f, worker_id)
-			local claimed = f:apply("claim", { action_id = w.launch_action_id, executor = f.origin.window_epoch, capacity_validation = validation() })
-			check(claimed.ok and f:action(w.launch_action_id).phase == "claimed", name .. ": the continued window claims the launch: " .. tostring(claimed.message))
-			check(state.rehydrate(clone(f.authority.registry)) ~= nil, name .. ": the moved worker and its retained provision restore")
-			local pane = { pane_id = "9003", window_key = f.origin.window_key, window_epoch = f.origin.window_epoch, native_session_id = f.origin.native_session_id, window_host_id = f.origin.window_host_id }
-			local launched = f:finish(w.launch_action_id, "awaiting_acceptance", { pane_binding = pane })
-			check(launched.ok and q_worker(f, worker_id).pane_binding.pane_id == "9003" and q_worker(f, worker_id).routing.reservation.phase == "launching",
-				name .. ": it launches in the continued window and keeps its reservation: " .. tostring(launched.message))
+			assert(f:control("reconcile_session").ok) -- Fresh peer observation restores admission, never the old revision fence.
 		end
 		-- Live defect: provision claimed on A, controller continued on B, provision completes after.
 		local f, queued = routed()
@@ -4267,34 +7137,39 @@ do
 		check(f:action(queued.action_id).phase == "uncertain" and f:action(queued.action_id).request_bytes == provision.request_bytes,
 			"the provision claimed on the old window stays uncertain with its exact request")
 		local settled = f:apply("result", { action_id = queued.action_id, executor = provision.claim.executor, grant_id = provision.claim.grant_id,
-			response_bytes = frame(provision.request, "provisioned", PROVISIONED) })
+			response_bytes = frame(provision.request, "provisioned", f:peer_payload(provision, "provisioned", PROVISIONED)) })
 		check(settled.ok, "the old provision settles through the continued route: " .. tostring(settled.message))
 		local w = q_worker(f, queued.worker_id)
 		local launch = f:action(w.launch_action_id)
-		check(launch.phase == "ready" and launch.claim == nil and on_b(launch.request) and w.origin_binding.window_epoch == "replacement-window"
+		check(launch.phase == "ready" and launch.claim == nil and launch.request_bytes == nil
+			and launch.request.origin_binding.window_epoch == old_origin.window_epoch
+			and w.origin_binding.window_epoch == old_origin.window_epoch
 			and launch.request.request_id == w.launch_request_id and w.routing.reservation.phase == "reserved",
-			"the launch released after continuation is bound to the continued route, with its reserved IDs and reservation")
-		local stale = f:event("claim", { action_id = w.launch_action_id, executor = old_origin.window_epoch, capacity_validation = validation() })
-		stale.origin = clone(old_origin); stale.controller_pane = "9001"
-		check(not f.authority:apply(stale).ok and f:action(w.launch_action_id).phase == "ready", "the old window cannot run it")
-		launch_on_b(f, queued.worker_id, "late provision")
-		-- Never-claimed provision at continuation: rewritten in place on the continued route.
+			"late provision settles once without rewriting the immutable worker or issuing its old-route launch")
+		check(f:apply("claim", { action_id = w.launch_action_id, executor = f.origin.window_epoch,
+			capacity_validation = validation() }).code == "claim_mismatch" and launch.request_bytes == nil,
+			"the continued window cannot acquire the old-route launch by changing its executor")
+		-- Pre-existing drafts are held at continuation, not rewritten or silently issued.
 		local h, hq = routed()
 		local before = clone(h:action(hq.action_id).request)
 		continue_on_b(h)
 		local moved = h:action(hq.action_id)
-		check(moved.phase == "ready" and moved.resolution == nil and on_b(moved.request) and moved.request.request_id == before.request_id
-			and on_b(runtime.json.decode(moved.request_bytes)), "a never-claimed provision moves to the continued route under the same IDs")
-		assert(h:finish(hq.action_id, "provisioned", PROVISIONED).ok)
-		check(on_b(h:action(q_worker(h, hq.worker_id).launch_action_id).request), "its launch is built on the continued route")
-		launch_on_b(h, hq.worker_id, "ready provision")
-		-- Never-claimed launch at continuation: rewritten in place on the continued route.
+		check(moved.phase == "held_ready" and moved.request_bytes == nil
+			and runtime.json.encode(moved.request) == runtime.json.encode(before),
+			"a continued provision draft preserves its exact intent and remains unissued")
+		check(not h:apply("claim", { action_id = hq.action_id, executor = h.origin.window_epoch }).ok
+			and h:action(hq.action_id).phase == "held_ready", "continuation alone cannot authorize the held provision")
+		-- The same fence applies to an already-provisioned launch draft.
 		local k, kq = routed()
 		assert(k:finish(kq.action_id, "provisioned", PROVISIONED).ok)
 		local kw = q_worker(k, kq.worker_id)
+		local original_launch = clone(k:action(kw.launch_action_id).request)
 		continue_on_b(k)
-		check(k:action(kw.launch_action_id).phase == "ready" and on_b(k:action(kw.launch_action_id).request), "a ready, never-claimed launch moves to the continued route")
-		launch_on_b(k, kq.worker_id, "ready launch")
+		check(k:action(kw.launch_action_id).phase == "held_ready" and k:action(kw.launch_action_id).request_bytes == nil
+			and runtime.json.encode(k:action(kw.launch_action_id).request) == runtime.json.encode(original_launch),
+			"a continued launch draft preserves its exact intent without an execution grant")
+		check(not k:apply("claim", { action_id = kw.launch_action_id, executor = k.origin.window_epoch,
+			capacity_validation = validation() }).ok, "capacity evidence cannot authorize a different native origin")
 		-- A launch already claimed on the old window keeps its route and becomes uncertain.
 		local g, gq = routed()
 		assert(g:finish(gq.action_id, "provisioned", PROVISIONED).ok)
@@ -4316,11 +7191,6 @@ local POLICY_V2 = { "quota_reserve_pct", "quota_max_age_ms", "initial_dispatch_r
 local POLICY_V3 = { "sweep_enabled", "sweep_time" }
 local POLICY_V4 = { "worker_rollover_records", "worker_rollover_provider", "worker_rollover_account", "worker_rollover_model",
 	"coordinator_rollover_records", "coordinator_rollover_provider", "coordinator_rollover_account", "coordinator_rollover_model", "concurrency_limit" }
-local POLICY_NEW = { loop_cap = 3, review_rounds = 2, stale_claim_min = 30, require_code_review = true, require_other_family = true, family_map = {}, reviewer_records = {},
-	release_manager_record = "", checkout_roots = {}, auto_approve_kinds = {}, glitch_integration = true, default_work_source = "glitch_plan",
-	board_path = "", board_lanes = { queued = "Todo", running = "Doing", review = "Review", done = "Done" }, inbox_folder = "", auto_launch_intake = false,
-	routes = {}, labeller_record = "", role_guidance = { builder = "", reviewer = "", release_manager = "", labeller = "", coordinator = "" }, templates = {} }
-local function key_count(t) local n = 0; for _ in t do n += 1 end; return n end
 local function same_json(a, b)
 	local function canon(v)
 		if type(v) ~= "table" then return runtime.json.encode(v) end
@@ -4332,28 +7202,124 @@ local function same_json(a, b)
 	return canon(a) == canon(b)
 end
 if section == nil or section == "policy_keys" then
-	local f = fixture(function() return { now_ms = 1000, mono_ms = 1000, epoch = "policy-keys-host" } end)
+	do
+		local allocations = fixture(); allocations:catalog(0)
+		local queued = allocations:queue(false); assert(queued.ok, queued.message)
+		assert(allocations:finish(queued.action_id, "rejected", nil, { code = "helper_declined", message = "Initialization failed after the intent could be recorded." }).ok)
+		local id = queued.worker_id
+		local held = allocations.authority.registry.dispatch.workers[id]
+		check(held.phase == "held" and held.mailbox_allocation == "possible" and held.launch_refused
+			and allocations:action(queued.action_id) == nil and allocations:apply("cancel_work", { worker_id = id }).code == "allocation_required",
+			"a consumed provision rejection preserves possible allocation and cannot silently delete its generation")
+		-- Old stores consumed the original negative action and had no allocation/op marker.
+		held.mailbox_allocation = nil; held.launch_refused_op = nil
+		local writes = allocations.memory.writes
+		check(not allocations:allocation(id, nil).ok and allocations.memory.writes == writes
+			and allocations.authority.registry.dispatch.workers[id].phase == "held",
+			"pending/unknown observation leaves legacy startup and original refusal intact")
+		local provision = allocations:peer_payload({ request = {}, worker_id = id }, "provisioned", {
+			handle = "observed-legacy-allocation", binding_digest = string.rep("b", 64),
+			capabilities = runtime.json.array({ "report-files-v1", "native-ask-v1" }) })
+		check(not allocations:allocation(id, { state = "retained", provision = provision }, { worker_id = "different-worker" }).ok
+			and allocations.memory.writes == writes, "another exact generation's allocation proof cannot be applied to this worker")
+		assert(allocations:allocation(id, { state = "retained", provision = provision }).ok)
+		held = allocations.authority.registry.dispatch.workers[id]
+		check(held.mailbox_handle == provision.handle and held.phase == "held" and held.launch_refused
+			and held.reason.code == "helper_declined" and allocations:action(held.launch_action_id) == nil
+			and dispatch.project(allocations.authority.registry, held.logical_session_id, allocations.origin.alias_nonce).workers[id].allocation_target == nil,
+			"legacy allocation observation recovers only metadata: no manufactured successful startup, native launch or replay")
+		local cancelled = allocations:apply("cancel_work", { worker_id = id }); assert(cancelled.ok, cancelled.message)
+		check(cancelled.code == "withdrawal_retiring" and allocations:action(cancelled.action_id).request.op == "mailbox_retire",
+			"the real owner cancellation retires the recovered unused allocation through the existing bound path")
+		assert(allocations:finish(cancelled.action_id, "retired", {}).ok)
+		check(allocations.authority.registry.dispatch.workers[id].mailbox_retired and state.rehydrate(clone(allocations.authority.registry)) ~= nil,
+			"only positive retirement frees the recovered allocation and its evidence restores")
+	end
+	do
+		local space = fixture()
+		local first = space:accepted(false)
+		for _ = 1, 14 do local queued = space:queue(false); assert(queued.ok and queued.action_id, queued.message) end
+		local waiting = space:queue(false); assert(waiting.ok, waiting.message)
+		check(waiting.action_id == nil and #actions_of(space, waiting.worker_id, "mailbox_provision") == 0
+			and worker_of(space, waiting.worker_id).reason.code == "waiting_for_agent_space",
+			"high logical concurrency cannot consume physical review/rollover headroom: " .. runtime.json.encode(waiting))
+		local co = space:queue(true)
+		check(co.ok and co.action_id == nil and #actions_of(space, co.worker_id, "mailbox_provision") == 0 and coordinator_owner(space) == nil,
+			"an initial coordinator allocation cannot consume protected progress space or reserve an owner while held")
+		assert(space:apply("cancel_work", { worker_id = co.worker_id }).code == "work_cancelled")
+		finish_ordinary(space, first)
+		check(#actions_of(space, waiting.worker_id, "mailbox_provision") == 1,
+			"ordinary explicit Finish, actual native exit and positive mailbox retirement release the retained waiting task, not a lifetime-task ceiling")
+	end
+	do
+		local space, first = rollover_fixture()
+		for _ = 1, 14 do local queued = space:queue(false); assert(queued.ok and queued.action_id, queued.message) end
+		local waiting = space:queue(false); assert(waiting.ok and #actions_of(space, waiting.worker_id, "mailbox_provision") == 0, waiting.message)
+		local handover, successor = rollover_granted(space, first)
+		check(successor ~= nil and #actions_of(space, successor, "mailbox_provision") == 1
+			and rollover_of(space, handover).phase == "successor_granted",
+			"default-worker rollover can use its reserved physical progress slot even when ordinary admissions wait")
+		check(#actions_of(space, waiting.worker_id, "mailbox_provision") == 0 and state.rehydrate(clone(space.authority.registry)) ~= nil,
+			"overlap preserves ordinary held work and exact successor/predecessor evidence without extra launches")
+	end
+	do
+		local migrated = fixture(nil, { default_limits = true })
+		local migration_sid = migrated.origin.logical_session_id
+		migrated.authority.registry.dispatch.family_migrations = { [migration_sid] = { native = "muse" } }
+		migrated.authority.registry.installation_defaults.family_migrations = { native = "muse" }
+		migrated:catalog(0, "native", nil, "meta")
+		check(migrated.authority.registry.dispatch.family_migrations[migration_sid].native == "muse",
+			"a derived catalog family cannot discard an explicit legacy declaration without the SPAWN writer")
+		local declaration = migrated:apply("migrate_families")
+		assert(declaration.ok and declaration.action_id, declaration.message)
+		check(migrated:action(declaration.action_id).request.declarations[1].provider_family == "muse",
+			"ORCH forwards the saved declaration without duplicating SPAWN aliases")
+		local confirmed = migrated:finish(declaration.action_id, "resolved", { config_revision = 1, applied = 1,
+			families = runtime.json.array({ { record_id = "native", provider_family = "meta" } }) })
+		assert(confirmed.ok, runtime.json.encode(confirmed))
+		check(migrated.authority.registry.dispatch.family_migrations[migration_sid].native == "meta"
+			and migrated.authority.registry.installation_defaults.family_migrations.native == "meta"
+			and migrated:action(declaration.action_id) ~= nil and state.rehydrate(migrated.authority.registry) ~= nil,
+			"the exact writer response durably retains its canonical target, not catalog success or an ORCH alias")
+		migrated:catalog(2, "native", nil, "other")
+		check(migrated.authority.registry.dispatch.family_migrations[migration_sid].native == "meta",
+			"a fresh but differing catalog cannot settle a successful saved-family obligation")
+		migrated:catalog(3, "native", nil, "meta")
+		check(next(migrated.authority.registry.dispatch.family_migrations[migration_sid]) == nil
+			and next(migrated.authority.registry.installation_defaults.family_migrations) == nil
+			and migrated:action(declaration.action_id) == nil and next(migrated.authority.registry.dispatch.workers) == nil,
+			"only the matching fresh canonical catalog settles both scopes and the receipt without launching work")
+	end
+	local f = fixture(function() return { now_ms = 1000, mono_ms = 1000, epoch = "policy-keys-host" } end, { default_limits = true })
+	assert(f:apply("policy", { policy = { concurrency_limit = 4, require_code_review = true, require_other_family = true } }).ok)
 	local sid = f.origin.logical_session_id
 	local function saved() return dispatch.policy(f.authority.registry, sid) end
 	local function save(fields) return f:apply("policy", fields) end
 	local defaults = saved()
-	check(key_count(defaults) == 47, "a fresh session policy has exactly 47 keys")
-	local new_ok = true
-	for key, value in POLICY_NEW do if not same_json(defaults[key], value) then new_ok = false end end
-	check(new_ok and key_count(POLICY_NEW) == 20, "every Contract B key starts at its documented default")
-	-- A fresh session has no stored policy yet; one save stores the full 47-key form.
-	check(save({ policy = { loop_cap = 4 } }).code == "policy_updated" and key_count(f.authority.registry.dispatch.policies[sid]) == 47, "the first save stores all 47 keys")
-	check(saved().require_code_review and saved().require_other_family, "fresh sessions require review and another family")
+	do
+		local limited = fixture(function() return { now_ms = 1000 } end, { default_limits = true })
+		assert(limited:apply("policy", { policy = { concurrency_limit = 4 } }).ok)
+		limited:catalog(0)
+		local workers = {}
+		for index = 1, 4 do
+			local work = limited:allow_shared_fixture(limited:queue(false))
+			assert(work.ok and work.action_id, work.message)
+			table.insert(workers, work.worker_id)
+		end
+		local fifth = limited:allow_shared_fixture(limited:queue(false))
+		check(fifth.ok and #actions_of(limited, fifth.worker_id, "mailbox_provision") == 0, "the configured concurrency limit holds excess managed work even with quota routing off")
+		assert(limited:apply("policy", { policy = { concurrency_limit = 5 } }).ok)
+		check(#actions_of(limited, fifth.worker_id, "mailbox_provision") == 1, "raising the managed task limit releases the retained fifth assignment without re-adding it")
+		for _, worker in workers do check(limited.authority.registry.dispatch.workers[worker] ~= nil, "changing task limit preserves prior admitted work") end
+	end
+	-- A partial save retains every independent setting.
+	check(save({ policy = { loop_cap = 4 } }).code == "policy_updated" and saved().concurrency_limit == 4, "partial policy edits retain unrelated limits")
 	for _, old in { true, false } do
 		local legacy = clone(f.authority.registry)
 		local p = legacy.dispatch.policies[sid]
 		p.require_code_review = nil; p.require_other_family = nil; p.enforce_cross_family = old
 		check(not dispatch.valid(legacy.dispatch, legacy), "obsolete policy is never a live schema")
-		local restored = assert(state.rehydrate(clone(legacy)))
-		local migrated = restored.dispatch.policies[sid]
-		check(migrated.require_code_review == true and migrated.require_other_family == old and migrated.enforce_cross_family == nil
-			and migrated.loop_cap == 4, "old family policy migrates without disabling review or changing unrelated settings")
-		check(state.rehydrate(clone(restored)) ~= nil, "migrated policy restores again without a legacy alias")
+		check(state.rehydrate(clone(legacy)) == nil, "obsolete family policy inside a current store requires explicit source migration, never implicit defaults")
 	end
 	for _, patch in {
 		{ enforce_cross_family = false }, { enforce_cross_family = true },
@@ -4381,24 +7347,19 @@ if section == nil or section == "policy_keys" then
 	check(saved().require_code_review and not saved().require_other_family, "reenabling review does not resurrect the previous family requirement")
 	assert(save({ policy = { require_other_family = true } }).ok)
 	check(saved().require_other_family, "the owner can explicitly enable another family again")
-	-- Migration: each historical store shape restores to all 47 keys with its own values kept.
+	-- Every historical-shaped policy is invalid when injected into the current store.
 	local shapes, keys = {}, {}
 	for _, group in { POLICY_V0, POLICY_V1, POLICY_V2, POLICY_V3, POLICY_V4 } do
 		for _, key in group do table.insert(keys, key) end
 		table.insert(shapes, table.clone(keys))
 	end
-	for index, shape in shapes do
-		check(#shape == ({ 5, 10, 16, 18, 27 })[index], "historical shape " .. index .. " has its recorded key count")
+	for _, shape in shapes do
 		local legacy = clone(f.authority.registry); local stored = {}
 		for _, key in shape do stored[key] = clone(defaults[key]) end
 		stored.poll_ms = 2000
 		legacy.dispatch.policies[sid] = stored
 		check(not dispatch.valid(legacy.dispatch, legacy), #shape .. "-key policy is not a live store shape")
-		local restored = state.rehydrate(clone(legacy))
-		local migrated = restored and restored.dispatch.policies[sid]
-		local filled = migrated ~= nil and key_count(migrated) == 47 and migrated.poll_ms == 2000
-		if filled then for key, value in POLICY_NEW do if not same_json(migrated[key], value) then filled = false end end end
-		check(filled, #shape .. "-key policy migrates at restore to 47 keys with the new defaults and its own values kept")
+		check(state.rehydrate(clone(legacy)) == nil, #shape .. "-key historical policy cannot impersonate current schema provenance")
 		local short = clone(legacy); short.dispatch.policies[sid].poll_ms = nil
 		check(state.rehydrate(short) == nil, #shape - 1 .. "-key policy (one key missing from the " .. #shape .. "-key form) is rejected, not defaulted")
 	end
@@ -4410,30 +7371,25 @@ if section == nil or section == "policy_keys" then
 	-- Bounds: each limit refused one past, accepted at the edge; refusals change nothing.
 	local cases = {
 		{ "loop_cap", { 0, 11, 2.5, "3", true }, { 1, 10 } },
-		{ "review_rounds", { 0, 3, 1.5 }, { 1, 2 } },
-		{ "stale_claim_min", { -1, 1441, 0.5, "30" }, { 0, 1440 } },
+		{ "review_rounds", { 0, 11, 1.5 }, { 1, 5, 10 } },
+		{ "stale_claim_min", { -1, 1441, 0.001, "30" }, { 0, 1/60, 0.5, 1440 } },
 		{ "require_code_review", { "yes", 1, runtime.json.null }, { false, true } },
 		{ "require_other_family", { "yes", 1, runtime.json.null }, { false, true } },
 		{ "glitch_integration", { "no", 0 }, { false, true } },
-		{ "auto_launch_intake", { "true" }, { true, false } },
-		{ "default_work_source", { "jira", "", 1 }, { "board", "glitch_plan" } },
+		{ "auto_start_projects", { "true" }, { true, false } },
 		{ "auto_approve_kinds", { { "deploy" }, { "report", "report" }, "landing" },
 			{ { "dispatch", "landing" }, { "dispatch", "report", "review", "landing" }, {} } },
-		{ "family_map", { { native = "Anthropic" }, { native = "" }, { native = string.rep("a", 25) }, { [""] = "openai" } }, { { native = "anthropic" }, { native = "a" .. string.rep("b", 23) }, {} } },
+
 		{ "reviewer_records", { { "a", "b", "c", "d", "e", "f", "g", "h", "i" }, { "*" }, { "rec-*" } }, { { "a", "b", "c", "d", "e", "f", "g", "h" }, { "rec-b", "rec-a" }, {} } },
 		{ "release_manager_record", { runtime.json.null, 5, "*" }, { "native", "" } },
-		{ "labeller_record", { runtime.json.null, false }, { "native", "" } },
+
 		{ "checkout_roots", { { "relative/root" }, { "/" .. string.rep("r", 512) }, { "/a", "/b", "/c", "/d", "/e", "/f", "/g", "/h", "/i" } },
 			{ { "/" .. string.rep("r", 511) }, { "/a", "/b", "/c", "/d", "/e", "/f", "/g", "/h" }, {} } },
-		{ "board_path", { "board.md", runtime.json.null }, { "/srv/board.md", "" } },
-		{ "inbox_folder", { "inbox", runtime.json.null }, { "/srv/inbox", "" } },
+		{ "board_path", { "../escape", runtime.json.null }, { "ORCH+ Board.tern", "/srv/board.md", "" } },
+		{ "inbox_folder", { "../escape", runtime.json.null }, { "inbox", "/srv/inbox", "" } },
 		{ "board_lanes", { { queued = "Todo", running = "Doing", review = "Review" }, { queued = "Todo", running = "Doing", review = "Review", done = string.rep("d", 65) },
 			{ queued = "Todo", running = "Doing", review = "Review", done = "Done", extra = "X" } },
 			{ { queued = "Backlog", running = "Doing", review = "Review", done = string.rep("d", 64) }, { queued = "Todo", running = "Doing", review = "Review", done = "Done" } } },
-		{ "role_guidance", { { builder = string.rep("g", 1025), reviewer = "", release_manager = "", labeller = "", coordinator = "" }, { builder = "" } },
-			{ { builder = string.rep("g", 1024), reviewer = "Review strictly.", release_manager = "", labeller = "", coordinator = "" } } },
-		{ "routes", { { { class = "Docs", record_id = "native" } }, { { class = "docs" } }, { { class = "a" .. string.rep("b", 32), record_id = "native" } } },
-			{ { { class = "docs", record_id = "native" } }, { { class = "a" .. string.rep("b", 31), record_id = "native" } }, {} } },
 	}
 	for _, case in cases do
 		local key, bad, good = case[1], case[2], case[3]
@@ -4455,24 +7411,62 @@ if section == nil or section == "policy_keys" then
 	check(state.rehydrate(duplicate) == nil, "a stored reviewer list with a duplicate id is refused")
 	local unsorted = clone(f.authority.registry); unsorted.dispatch.policies[sid].reviewer_records = { "rec-z", "rec-a" }
 	check(state.rehydrate(unsorted) ~= nil, "a stored reviewer list in owner order restores")
-	-- role_guidance_put edits exactly one role's text.
-	local guidance_before = clone(saved().role_guidance)
-	check(save({ role_guidance_put = { role = "reviewer", text = string.rep("r", 1024) } }).code == "policy_updated"
-		and saved().role_guidance.reviewer == string.rep("r", 1024) and saved().role_guidance.builder == guidance_before.builder
-		and saved().role_guidance.coordinator == guidance_before.coordinator, "role_guidance_put sets only the named role's text, at the 1024-byte bound")
-	check(save({ role_guidance_put = { role = "reviewer", text = "" } }).code == "policy_updated" and saved().role_guidance.reviewer == "", "role_guidance_put may clear a role")
-	for _, bad in { { role = "reviewer", text = string.rep("r", 1025) }, { role = "owner", text = "x" }, { role = "builder" }, { text = "x" }, { role = "builder", text = 5 },
-		{ role = "builder", text = "x", extra = true } } do
-		local before = runtime.json.encode(f.authority.registry)
-		check(save({ role_guidance_put = bad }).code == "invalid_policy" and runtime.json.encode(f.authority.registry) == before,
-			"role_guidance_put " .. runtime.json.encode(bad) .. " is refused with nothing changed")
+	local before_override = runtime.json.encode(f.authority.registry)
+	check(save({ role_guidance_put = { role = "builder", text = "Retired override." } }).code == "invalid_command"
+		and save({ policy = { role_guidance = {} } }).code == "invalid_policy"
+		and runtime.json.encode(f.authority.registry) == before_override,
+		"retired role override commands and policy fields have no active edit path")
+	-- Retired settings: absent from canonical defaults, refused in new payloads, read only from a previous store.
+	check(defaults.glitch_project_discovery == nil and defaults.default_work_source == nil
+		and dispatch.default_policy().glitch_project_discovery == nil and dispatch.default_policy().default_work_source == nil,
+		"fresh canonical defaults carry neither retired setting")
+	for _, retired in { { "glitch_project_discovery", true }, { "default_work_source", "board" }, { "default_work_source", "glitch_plan" } } do
+		local before_retired = runtime.json.encode(f.authority.registry)
+		check(save({ policy = { [retired[1]] = retired[2] } }).code == "invalid_policy" and runtime.json.encode(f.authority.registry) == before_retired,
+			"a new policy payload carrying " .. retired[1] .. " is refused with nothing changed")
+		local bad = clone(saved()); bad[retired[1]] = retired[2]
+		check(not dispatch.valid_policy(bad), retired[1] .. " is not part of the current policy shape")
+	end
+	do
+		-- A store saved by the previous version still validates, then migrates; unrelated explicit values survive; a second restore is stable.
+		assert(save({ policy = { loop_cap = 3, concurrency_limit = 2 } }).ok)
+		local previous = clone(f.authority.registry)
+		previous.dispatch.policies[sid].glitch_project_discovery = false
+		previous.dispatch.policies[sid].default_work_source = "glitch_plan"
+		check(dispatch.previous_policy(previous.dispatch.policies[sid]) and dispatch.valid(previous.dispatch, previous),
+			"the previous exact keyset is a recognized historical read shape")
+		local first = state.rehydrate(clone(previous))
+		check(first ~= nil, "a previous-version store restores instead of being rejected before migration")
+		local policy = first.dispatch.policies[sid]
+		check(policy.glitch_project_discovery == nil and policy.default_work_source == nil and policy.loop_cap == 3 and policy.concurrency_limit == 2,
+			"migration drops both retired settings and keeps unrelated explicit values")
+		check(dispatch.valid_policy(policy) and not dispatch.previous_policy(policy), "the migrated policy is the current shape")
+		local second = state.rehydrate(clone(first))
+		check(second ~= nil and runtime.json.encode(second.dispatch.policies[sid]) == runtime.json.encode(policy)
+			and second.installation_defaults.policy.default_work_source == nil, "a second restore is stable")
+		-- The previous shape with the legacy family flag also migrates.
+		local variant = clone(previous.dispatch.policies[sid])
+		variant.enforce_cross_family = variant.require_other_family; variant.require_code_review = nil; variant.require_other_family = nil
+		check(dispatch.valid_policy(variant, true) and dispatch.migrate_policy(variant).default_work_source == nil,
+			"the previous shape's enforce-cross-family variant is still read at the restore boundary")
+		-- Both save scopes: the reusable default is a previous-shaped store too.
+		local previous_defaults = clone(f.authority.registry)
+		previous_defaults.installation_defaults.policy.glitch_project_discovery = true
+		previous_defaults.installation_defaults.policy.default_work_source = "board"
+		local restored_defaults = state.rehydrate(clone(previous_defaults))
+		check(restored_defaults ~= nil and restored_defaults.installation_defaults.policy.glitch_project_discovery == nil
+			and restored_defaults.installation_defaults.policy.default_work_source == nil, "a previous-shaped installation default migrates the same way")
+		-- Adding the historical shape does not relax the preferred-record consistency check that already held for it.
+		local mismatched = clone(previous_defaults)
+		mismatched.installation_defaults.policy.preferred_worker_record = "record-a"; mismatched.installation_defaults.builder_record = "record-b"
+		check(state.rehydrate(mismatched) == nil, "a previous-shaped default with inconsistent preferred records is still refused")
 	end
 	local before_two = runtime.json.encode(f.authority.registry)
-	check(save({ role_guidance_put = { role = "builder", text = "x" }, template_remove = "t01" }).code == "invalid_policy" and runtime.json.encode(f.authority.registry) == before_two,
+	check(save({ policy = { loop_cap = 3 }, template_remove = "t01" }).code == "invalid_policy" and runtime.json.encode(f.authority.registry) == before_two,
 		"two edits in one save are refused")
 	-- Bad templates through the same policy command.
 	local function template(id, prompt_len, next_id)
-		return { id = id, title = "Template " .. id, prompt = string.rep("x", prompt_len - 7) .. "{input}", output = "out/" .. id .. ".md", next = next_id or "" }
+		return { id = id, title = "Template " .. id, prompt = string.rep("x", prompt_len - 7) .. "{input}", output = "out/" .. id .. ".md", next = next_id or "", custom_fields = {} }
 	end
 	for _, bad in { (function() local t = template("t01", 32); t.prompt = "no placeholder"; return t end)(),
 		(function() local t = template("t01", 32); t.prompt = "{input} twice {input}"; return t end)(), template("t01", 4097),
@@ -4529,7 +7523,7 @@ if section == nil or section == "policy_keys" then
 	check(save({ policy = { loop_cap = 5 }, expected_policy_sha256 = quota.digest(saved()) }).code == "policy_updated" and saved().loop_cap == 5,
 		"the current editor saves the new key")
 	local fence_before = runtime.json.encode(f.authority.registry)
-	check(save({ policy = { loop_cap = 6 }, expected_policy = displayed }).code == "controller_mismatch" and runtime.json.encode(f.authority.registry) == fence_before,
+	check(save({ policy = { loop_cap = 6 }, expected_policy = displayed }).code == "invalid_command" and runtime.json.encode(f.authority.registry) == fence_before,
 		"the removed full expected_policy fence is refused by the closed event check")
 	check(save({ policy = { loop_cap = 6 }, template_put = template("t50", 32) }).code == "invalid_policy" and runtime.json.encode(f.authority.registry) == fence_before,
 		"a save carrying both a policy patch and a template edit is refused")
@@ -4598,7 +7592,7 @@ if section == nil or section == "loop_caps" then
 		check(repeat_over.code == "loop_capped" and repeat_over.gate_id == over.gate_id and #loop_gates(f, "rollover_checkpoint") == 1, "a further re-request reuses the open gate")
 		check(state.rehydrate(clone(f.authority.registry)) ~= nil, "a gated rollover loop restores")
 		if cap == 10 then
-			check(answer_gate(f, over.gate_id, "allow_more").code == "loop_cap_answered" and f.authority.registry.dispatch.gates[over.gate_id].phase == "resolved"
+			check(answer_gate(f, over.gate_id, "allow_more").code == "loop_cap_answered" and f.authority.registry.dispatch.gates[over.gate_id] == nil
 				and rollover_of(f, hid).checkpoint_loop.count == 0 and rollover_of(f, hid).checkpoint_loop.state == nil, "allow_more resets the rollover loop")
 			check(f:apply("rollover", { worker_id = id, trigger = "owner" }).code == "checkpoint_rerequested", "after allow_more the owner may request the checkpoint again")
 		else
@@ -4621,7 +7615,12 @@ if section == nil or section == "loop_caps" then
 		assert(f:finish(launch, "full", FULL).code == "backpressure")
 		local early = true
 		for _ = 1, cap do
-			early = early and f:apply("retry", { action_id = launch, trigger = "owner" }).ok and open_loop_gates(f, "full_retry") == 0
+			local retried = f:apply("retry", { action_id = launch, trigger = "owner" })
+			early = early and retried.ok and open_loop_gates(f, "full_retry") == 0
+			launch = assert(retried.action_id)
+			check(f:apply("claim", { action_id = launch, executor = f.origin.window_epoch }).code == "peer_reconcile_required",
+				"worker-bound native retry cannot issue while the old pre-effect result is still unacknowledged by the peer")
+			assert(f:control("reconcile_session").ok)
 			early = early and f:finish(launch, "full", FULL).code == "backpressure"
 		end
 		check(early and f:action(launch).retry_loop.count == cap, "cap " .. cap .. ": " .. cap .. " owner retries of full backpressure run without a loop gate")
@@ -4630,7 +7629,9 @@ if section == nil or section == "loop_caps" then
 		check(over.code == "loop_capped" and g and g.kind == "loop_cap" and f:action(launch).phase == "backpressure" and f:action(launch).retry_loop.count == cap,
 			"cap " .. cap .. ": the next owner retry opens a loop_cap gate and the action stays in backpressure")
 		check(starts(g.question, "Owner retry of full backpressure reached " .. cap .. " attempts; last error: full:window_authorization."), "the retry loop gate names the loop and the last error")
-		check(f:apply("retry", { action_id = launch }).code ~= "loop_capped" and f:action(launch).retry_loop.count == cap, "an automatic recheck is neither counted nor capped")
+		local automatic = f:apply("retry", { action_id = launch }); assert(automatic.ok); launch = automatic.action_id
+		check(f:action(launch).retry_loop.count == cap, "automatic recheck uses a fresh identity without counting or bypassing the live owner loop decision")
+		assert(f:control("reconcile_session").ok)
 		check(state.rehydrate(clone(f.authority.registry)) ~= nil, "a gated retry loop restores")
 		if cap == 1 then
 			if f:action(launch).phase ~= "backpressure" then assert(f:finish(launch, "full", FULL).code == "backpressure") end
@@ -4651,10 +7652,10 @@ if section == nil or section == "loop_caps" then
 		assert(f:apply("policy", { policy = { loop_cap = cap } }).ok)
 		-- The automatic scheduler marks this worker due once it is idle and heartbeat_ms has passed.
 		local function due_after_heartbeat()
-			assert(f:apply("policy", { policy = { automatic_reports = true, heartbeat_ms = 5000, stale_ms = 600000 } }).ok)
+			assert(f:apply("policy", { policy = { automatic_reports = true, report_request_ms = 5000, stale_ms = 600000 } }).ok)
 			assert(f:apply("observe", { worker_id = id, pane_binding = clone(worker_of(f, id).pane_binding), native_state = "idle" }).ok)
 			clock.mono_ms += 6000; clock.now_ms += 6000
-			assert(f.authority:apply({ kind = "workflow_tick" }).ok)
+			assert(f:tick().ok)
 			for _, shown in dispatch.project(f.authority.registry, f.origin.logical_session_id, f.origin.alias_nonce).workflow.workers do
 				if shown.worker_id == id then return shown.due_report end
 			end
@@ -4683,7 +7684,7 @@ if section == nil or section == "loop_caps" then
 			-- A new report clears the loop record entirely (no record = count 0, not gated).
 			local reset = send_report(f, id, "READY", { state = "idle", summary = "New progress" })
 			local loop = worker_of(f, id).workflow.report_loop
-			check(reset.ok and (loop == nil or (loop.count == 0 and loop.state == nil)) and f.authority.registry.dispatch.gates[over.gate_id].phase ~= "pending",
+			check(reset.ok and (loop == nil or (loop.count == 0 and loop.state == nil)) and f.authority.registry.dispatch.gates[over.gate_id] == nil,
 				"a new unsolicited report resets the loop and supersedes its gate")
 			check(worker_of(f, id).workflow.report_request == nil and due_after_heartbeat() == true, "after a reset an idle worker past heartbeat_ms is due for an automatic report")
 			check(cycle().code ~= "loop_capped", "after a new report the next automatic request is sent")
@@ -4703,7 +7704,7 @@ if section == nil or section == "loop_caps" then
 	-- builder. Every cycle requests the same proven revision; a refresh voids the review, so a cycle
 	-- after a refresh re-reviews it.
 	local LREV = string.rep("c", 40)
-	local LCAPS = { "report-files-v1", "native-ask-v1", "coordinator-control-v1", "check-runner-v1", "release-manager-v1" }
+	local LCAPS = { "report-files-v1", "native-ask-v1", "coordinator-control-v1", "project-start-v1", "check-runner-v1", "release-manager-v1" }
 	local function lcp(cp_id)
 		return { checkpoint_id = cp_id, task_ref = "task:fixture", project_id = "project-one", worktree_ref = "/fixture", artifact_revision = LREV,
 			completed = runtime.json.array({ "Implemented the assigned change" }), remaining = runtime.json.array(), holds = runtime.json.array(),
@@ -4716,18 +7717,23 @@ if section == nil or section == "loop_caps" then
 		local records = {}
 		for _, record_id in { "native", "reviewer", "release" } do
 			table.insert(records, { id = record_id, revision = 0, provider = "omp", account_label = "configured, not verified", backend = "native-agent", enabled = true, eligible = true,
-				capability_evidence = "configured_operator_attestation_not_runtime_proof", effective_identity = { provider = "omp", evidence = "configured" },
+				capability_evidence = "configured_operator_attestation_not_runtime_proof", effective_identity = { provider = "omp", identity_status = "configured_not_verified" },
 				capabilities = runtime.json.array(LCAPS), unsupported = runtime.json.array(), cwd = "/fixture", placement = "split" })
 		end
 		assert(f:finish(r.action_id, "catalog", { catalog_version = 2, setup = catalog_setup(0), namespace = "fixture-spawn", host_key = "fixture-host", config_revision = 0, revision = 0, records = runtime.json.array(records) }).ok)
 		assert(f:apply("policy", { policy = { require_code_review = true, require_other_family = false, reviewer_records = runtime.json.array({ "reviewer" }), release_manager_record = "release" } }).ok)
+		f.default_project = f:project("Landing fixture project", true)
+		local project = f.authority.registry.dispatch.projects[f.default_project]
+		assert(f:apply("project_repository", { orch_project_id = project.orch_project_id, project_revision = project.revision,
+			repository = { cwd = "/fixture", repo_root = "/fixture", common_dir = "/fixture/.git",
+				target_ref = "refs/heads/main", head_revision = LREV, queue_route = "orch_queue" } }).ok)
 		return f
 	end
 	local function lstart(f, coordinator, pane)
 		local event = { record_id = "native", record_revision = 0, catalog_revision = 0, prompt = "Complete the explicit landing fixture assignment.", cwd = "/fixture",
 			placement = "split", coordinator = coordinator }
 		if not coordinator then event.checks = runtime.json.array({ { check_id = "unit", argv = runtime.json.array({ "luau", "tests/run.luau" }) } }) end
-		local queued = f:apply("queue", event); assert(queued.ok and queued.action_id, queued.message)
+		local queued = f:allow_shared_fixture(f:apply("queue", event)); assert(queued.ok and queued.action_id, queued.message)
 		local id = queued.worker_id
 		assert(f:finish(queued.action_id, "provisioned", { handle = "mailbox-landing-" .. pane, binding_digest = string.rep("d", 64),
 			capabilities = runtime.json.array(LCAPS), limits = {}, manifest_sha256 = worker_of(f, id).manifest_sha256 }).ok)
@@ -4801,11 +7807,11 @@ if section == nil or section == "loop_caps" then
 		return false
 	end
 	local function landing_cycle(f, id, k, head)
-		-- The builder consumes any landing_refresh it was sent, so refreshes never fill its reply outbox.
+		-- Consume both the exact approval decision and landing refresh; publication alone is not a producer ACK.
 		local owed = {}
 		for _, retained in worker_of(f, id).replies do
 			local reply = not retained.acknowledged and codec.decode_reply(retained.bytes, worker_of(f, id))
-			if reply and reply.kind == "landing_refresh" then table.insert(owed, { message_id = reply.message_id, reply_seq = reply.reply_seq, bytes = retained.bytes,
+			if reply and (reply.kind == "landing_refresh" or reply.kind == "owner_decision") then table.insert(owed, { message_id = reply.message_id, reply_seq = reply.reply_seq, bytes = retained.bytes,
 				action_id = reply.action_id, action_revision = reply.action_revision }) end
 		end
 		for _, delivery in owed do settle_receipts(f, id); assert(lack(f, id, delivery).ok) end
@@ -4850,23 +7856,17 @@ if section == nil or section == "loop_caps" then
 		for _, old in { true, false } do
 			local legacy = historical(f.authority.registry, old)
 			local exact = runtime.json.encode(legacy)
-			local restored, problem = state.rehydrate(legacy)
-			check(restored == nil and type(problem) == "table" and problem.code == "migration_blocked",
-				"an outstanding immutable grant visibly blocks legacy policy migration")
+			local restored = state.rehydrate(legacy)
+			check(restored == nil, "current immutable-grant store rejects historical-shaped policy corruption instead of invoking migration")
 			check(runtime.json.encode(legacy) == exact and legacy.dispatch.landing.items[lid].grants[1].bytes == grant.bytes,
 				"blocked migration neither rewrites grant bytes nor partially migrates its input")
 		end
 		local prior = clone(f.authority.registry); prior.version = 2
-		local restored, problem = state.rehydrate(prior)
-		check(restored == nil and type(problem) == "table" and problem.code == "migration_blocked",
-			"pre-cutover registry with an outstanding grant also blocks even without an obsolete policy field")
+		check(state.rehydrate(prior) == nil, "changing only the version cannot turn current v2 dispatch envelopes and grant authority into a valid legacy source")
 		assert(stale(f, id, lid, "head-1").ok)
 		local drained = historical(f.authority.registry, false)
-		local migrated = assert(state.rehydrate(drained))
-		check(migrated.dispatch.policies[f.origin.logical_session_id].require_code_review
-			and not migrated.dispatch.policies[f.origin.logical_session_id].require_other_family
-			and migrated.dispatch.landing.items[lid].grants[1].bytes == grant.bytes,
-			"a conclusively stale-target grant permits migration while retaining its exact immutable bytes")
+		check(state.rehydrate(drained) == nil and drained.dispatch.landing.items[lid].grants[1].bytes == grant.bytes,
+			"settling a grant does not authorize implicit rewriting of an obsolete policy in a current store")
 	end
 	for _, cap in { 1, 3 } do
 		local f = lfixture(); local id = lbuilder(f, "9002")
@@ -4975,11 +7975,7 @@ if section == nil or section == "worker_fields" then
 	-- well-formed digest alone is checked on the seeded rollover predecessor below instead.
 	for name, value in valid do
 		local good = clone(f.authority.registry); good.dispatch.workers[id][name] = clone(value)
-		if name == "manifest_sha256" then
-			check(state.rehydrate(good) == nil, "a manifest digest the retained provision request never carried is refused")
-		else
-			check(state.rehydrate(good) ~= nil, name .. " accepts a well-formed value")
-		end
+		check(state.rehydrate(good) ~= nil, name .. " accepts its current well-formed value without a retained completed provision transcript")
 	end
 	for name, value in invalid do
 		local bad = clone(f.authority.registry); bad.dispatch.workers[id][name] = clone(value)
@@ -4987,41 +7983,30 @@ if section == nil or section == "worker_fields" then
 	end
 	local unknown = clone(f.authority.registry); unknown.dispatch.workers[id].reviewer_of = "worker-1"
 	check(state.rehydrate(unknown) == nil, "the worker key list stays closed")
-	-- 0.3.0 workers restore with role defaults; family stays unresolved.
+	-- Missing roles in a current store are not proof of legacy provenance.
 	local legacy = clone(f.authority.registry); legacy.dispatch.workers[id].role = nil; legacy.dispatch.workers[id].family = nil
 	local restored = state.rehydrate(clone(legacy))
-	check(restored ~= nil and restored.dispatch.workers[id].role == "builder" and restored.dispatch.workers[id].family == nil, "a 0.3.0 worker restores as a builder")
+	check(restored == nil, "a current worker cannot silently acquire a builder role during reload")
 	local c = fixture(); local cid = c:accepted(true)
 	check(c.authority.registry.dispatch.workers[cid].role == "coordinator", "a queued coordinator gets role coordinator")
 	local cl = clone(c.authority.registry); cl.dispatch.workers[cid].role = nil
 	local crestored = state.rehydrate(cl)
-	check(crestored ~= nil and crestored.dispatch.workers[cid].role == "coordinator", "a 0.3.0 coordinator restores with role coordinator from its markers")
-	-- Family comes from the owner's family map at queue time.
-	local m = fixture(); m:catalog(0)
-	assert(m:apply("policy", { policy = { family_map = { native = "anthropic" } } }).ok)
+	check(crestored == nil, "a current worker cannot silently acquire a coordinator role from unrelated markers")
+	-- Family comes only from the SPAWN-supplied declaration.
+	local m = fixture(); m:catalog(0, "native", nil, "anthropic")
+	check(not m:apply("policy", { policy = { family_map = { native = "openai" } } }).ok, "legacy family declarations are not executable policy aliases")
 	local mq = m:queue(false); assert(mq.ok, mq.message)
-	check(m.authority.registry.dispatch.workers[mq.worker_id].family == "anthropic", "an owner-mapped record resolves its family at queue time")
+	check(m.authority.registry.dispatch.workers[mq.worker_id].family == "anthropic", "SPAWN declaration binds the queued worker family")
 	-- Successor copy: assignment fields copy, family is recomputed, checkout/results/usage never inherit.
 	local r, rid = rollover_fixture()
 	local pred = r.authority.registry.dispatch.workers[rid]
 	for name, value in valid do pred[name] = clone(value) end
-	-- The successor's provision rebuilds the manifest from the copied fields, so the seed is its real
-	-- digest, carried by the predecessor's retained provision request as a CP2 queue would have sent it.
+	-- Seed the live worker's manifest binding directly: completed provision request bytes are absent.
 	local manifest = assert(codec.encode_manifest({ checks = pred.checks, files = pred.files, scope = pred.scope, base_ref = pred.base_ref }))
 	pred.manifest_sha256 = codec.sha256(manifest)
-	for _, a in r.authority.registry.dispatch.actions do
-		if a.worker_id == rid and a.request.op == "mailbox_provision" then
-			-- Its retained request bytes and response frame bind the exact request, so both are rewritten.
-			a.request.manifest = manifest; a.request_bytes = runtime.json.encode(a.request)
-			if a.response_bytes then
-				local payload = clone(a.response.payload); payload.manifest_sha256 = pred.manifest_sha256
-				a.response_bytes = frame(a.request, a.response.status, payload); a.response = dispatch.decode_response(a.response_bytes, a.request)
-			end
-		end
-	end
 	pred.family = "anthropic"
 	assert(dispatch.valid(r.authority.registry.dispatch, r.authority.registry), "seeded predecessor fields are valid")
-	assert(r:apply("policy", { policy = { family_map = { native = "openai" } } }).ok)
+	r:catalog(0, "native", nil, "openai")
 	local _, succ_id = rollover_granted(r, rid)
 	local succ = r.authority.registry.dispatch.workers[succ_id]
 	local copied = succ.role == "builder"
@@ -5033,11 +8018,314 @@ if section == nil or section == "worker_fields" then
 	check(succ.checkout == nil and succ.check_results == nil and succ.usage_before == nil and succ.usage_after == nil,
 		"the successor reports its own checkout, check results and usage")
 	check(state.rehydrate(clone(r.authority.registry)) ~= nil, "predecessor and successor worker fields restore")
-	local shown
-	for _, candidate in dispatch.project(r.authority.registry, r.origin.logical_session_id, r.origin.alias_nonce).workflow.workers do
-		if candidate.worker_id == rid then shown = candidate end
+end
+-- Public reducer boundary regressions: observations are bookkeeping, execution bindings are not.
+local function boundary_binding(f, pane)
+	return { pane_id = pane or "9020", window_key = f.origin.window_key, window_epoch = f.origin.window_epoch,
+		native_session_id = f.origin.native_session_id, window_host_id = f.origin.window_host_id }
+end
+local function boundary_repository(f, project, cwd, target)
+	return f:apply("project_repository", { orch_project_id = project,
+		project_revision = f.authority.registry.dispatch.projects[project].revision,
+		repository = { cwd = cwd, repo_root = "/fixture/repository", common_dir = "/fixture/repository/.git",
+			target_ref = target or "main", head_revision = string.rep("a", 40), queue_route = "orch_queue" } })
+end
+local function boundary_queue(f, project)
+	return f:apply("queue", { orch_project_id = project, record_id = "native", record_revision = 0, catalog_revision = 0,
+		prompt = "A bounded independent assignment.", cwd = "/fixture", placement = "split", coordinator = false })
+end
+local function boundary_v4(f)
+	local raw = clone(f.authority.registry)
+	raw.version = 4; raw.dispatch.projects = nil; raw.dispatch.finished_projects = nil
+	raw.installation_defaults.policy.auto_start_projects = nil; raw.installation_defaults.policy.auto_launch_intake = false
+	for _, p in raw.dispatch.policies do p.auto_start_projects = nil; p.auto_launch_intake = false end
+	for _, w in raw.dispatch.workers do
+		w.orch_project_id = nil; w.presentation = nil; w.selected_record = nil; w.project_held = nil; w.launch_refused = nil
+		w.launch_refused_op = nil
 	end
-	check(shown ~= nil and shown.role == "builder" and shown.family == "anthropic" and shown.class == "docs" and shown.files_count == 1 and shown.checks_count == 1
-		and shown.scope.paths == 1 and shown.scope.systems == 1 and shown.manifest_sha256 == nil, "views get role, family, class and counts, never the manifest digest")
+	local restored, info = state.rehydrate(raw); must(restored, info)
+	f.authority.registry = restored; f.memory.value = clone(restored)
+	assert(f:apply("continue_controller", { operator_verified = true }).ok)
+	assert(f:control("reconcile_session").ok)
+	return restored
+end
+local function boundary_open(f, project, enrolled)
+	local row = f.authority.registry.dispatch.catalogs[f.origin.logical_session_id].records[1]
+	local pane = boundary_binding(f)
+	local fields = { orch_project_id = project, record_id = row.id, record_revision = row.revision, catalog_revision = 0 }
+	if enrolled then fields.pane_binding = pane; fields.delivery = if row.backend == "native-agent" then "native_ask" else "clipboard"
+	else fields.prompt = codec.OPEN_CONVERSATION_ASSIGNMENT; fields.cwd = row.cwd; fields.placement = row.placement
+		fields.coordinator = false; fields.presentation = "user_new_tab"; fields.open_conversation = true end
+	local queued = f:apply(if enrolled then "enrol" else "queue", fields); assert(queued.ok, queued.message)
+	assert(f:finish(queued.action_id, "provisioned", { handle = "mailbox-boundary", binding_digest = string.rep("a", 64),
+		capabilities = runtime.json.array(clone(row.capabilities)), limits = {} }).ok)
+	assert(f:finish(worker_of(f, queued.worker_id).launch_action_id, "awaiting_acceptance", { pane_binding = pane }).ok)
+	return queued.worker_id, pane
+end
+if section == nil or section == "project_observation" then
+	local creation = fixture(nil, { passive = true }); creation:catalog(0)
+	local other = creation:project("Already running discussion", false)
+	local pane = boundary_binding(creation)
+	local attached = creation:apply("associate_conversation", { orch_project_id = other,
+		project_revision = creation.authority.registry.dispatch.projects[other].revision, pane_binding = pane, active = true })
+	assert(attached.ok)
+	local selected = creation:event("new_project", { name = "Separate discussion",
+		source = { kind = "manual", ref = "/workspace/research", revision = "selected-source" } })
+	assert(creation:apply("observe_conversation", { orch_project_id = other,
+		project_revision = creation.authority.registry.dispatch.projects[other].revision,
+		conversation_id = attached.conversation_id, pane_binding = pane, active = false }).ok)
+	selected.command_seq = creation.command_seq + 1; creation.command_seq = selected.command_seq
+	local added = creation.authority:apply(selected)
+	check(added.ok and creation.authority.registry.dispatch.projects[added.orch_project_id].name == "Separate discussion"
+		and not creation.authority.registry.dispatch.projects[added.orch_project_id].started,
+		"new project survives unrelated agent observations and remains unstarted")
+	creation.authority:apply(selected)
+	local matches = 0
+	for _, project in creation.authority.registry.dispatch.projects do if project.name == "Separate discussion" then matches += 1 end end
+	check(matches == 1, "replaying a project-creation request cannot create another project")
+	for _, change in { "name", "source", "policy", "owner", "context" } do
+		local f = fixture(nil, { passive = true }); f:catalog(0)
+		local event = f:event("new_project", { name = "Selected discussion",
+			source = { kind = "manual", ref = "/workspace/research", revision = "selected-source" } })
+		if change == "name" then event.name = "Different discussion"
+		elseif change == "source" then event.source.ref = "/workspace/different"
+		elseif change == "policy" then assert(f:apply("policy", { policy = { quota_reserve_pct = 11 } }).ok)
+		elseif change == "owner" then event.origin.owner_generation += 1
+		else event.decision_context = nil end
+		event.expected_revision = f.authority.registry.revision
+		event.command_seq = f.command_seq + 1
+		local writes = f.memory.writes
+		check(not f.authority:apply(event).ok and f.memory.writes == writes,
+			"new project rejects changed " .. change .. " without saving a project")
+	end
+	for _, command in { "project_start", "answer", "project_associate" } do
+		local f = fixture(nil, { passive = true }); f:catalog(0)
+		local project = f:project("Stable owner subject", command ~= "project_start")
+		local pane = boundary_binding(f)
+		local attached = f:apply("associate_conversation", { orch_project_id = project,
+			project_revision = f.authority.registry.dispatch.projects[project].revision, pane_binding = pane, active = true })
+		assert(attached.ok, attached.message)
+		local fields = { orch_project_id = project, project_revision = f.authority.registry.dispatch.projects[project].revision }
+		if command == "answer" then
+			assert(boundary_queue(f, project).ok)
+			local queued = boundary_queue(f, project); assert(queued.ok and queued.code == "task_gated")
+			local gate = f.authority.registry.dispatch.gates[worker_of(f, queued.worker_id).launch_gates[1]]
+			fields = { gate_id = gate.id, gate_revision = gate.revision, choice_id = "launch_anyway", answer = "Owner coordinates the checkout." }
+		elseif command == "project_associate" then
+			local held = boundary_queue(f, f:project("Held member", false)); assert(held.ok)
+			fields.worker_id = held.worker_id
+		end
+		local decision = f:event(command, fields)
+		local revision = f.authority.registry.dispatch.projects[project].revision
+		-- Native idle/working/idle all mean a live association; absence observations also cannot
+		-- change the project's task/repository/owner decision subject.
+		for _, active in { true, true, true, false, true, false } do
+			assert(f:apply("observe_conversation", { orch_project_id = project, project_revision = revision,
+				conversation_id = attached.conversation_id, pane_binding = pane, active = active }).ok)
+		end
+		check(f.authority.registry.dispatch.projects[project].revision == revision
+			and dispatch.project(f.authority.registry, f.origin.logical_session_id).projects[project].status == "ACTIVE",
+			command .. ": idle/activity observations preserve project identity and ACTIVE display")
+		decision.command_seq = f.command_seq + 1; f.command_seq = decision.command_seq
+		local applied = f.authority:apply(decision)
+		check(applied.ok, command .. ": captured owner decision survives observation-only commits: " .. tostring(applied.code))
+		local wrong = clone(pane); wrong.native_session_id = "other-session"
+		local before = runtime.json.encode(f.authority.registry)
+		check(not f:apply("observe_conversation", { orch_project_id = project,
+			project_revision = f.authority.registry.dispatch.projects[project].revision, conversation_id = attached.conversation_id,
+			pane_binding = wrong, active = true }).ok and runtime.json.encode(f.authority.registry) == before,
+			command .. ": same pane number in another native binding cannot mutate the association")
+	end
+	local f = fixture(nil, { passive = true }); f:catalog(0)
+	local project, pane = f:project("Binding changes are consequential", false), boundary_binding(f)
+	local attached = f:apply("associate_conversation", { orch_project_id = project,
+		project_revision = f.authority.registry.dispatch.projects[project].revision, pane_binding = pane, active = true }); assert(attached.ok)
+	local decision = f:event("project_start", { orch_project_id = project, project_revision = f.authority.registry.dispatch.projects[project].revision })
+	assert(f:apply("detach_conversation", { orch_project_id = project, project_revision = f.authority.registry.dispatch.projects[project].revision,
+		conversation_id = attached.conversation_id }).ok)
+	pane.pane_id = "9021"
+	assert(f:apply("associate_conversation", { orch_project_id = project, project_revision = f.authority.registry.dispatch.projects[project].revision,
+		pane_binding = pane, active = true }).ok)
+	decision.command_seq = f.command_seq + 1; f.command_seq = decision.command_seq
+	local writes = f.memory.writes
+	check(not f.authority:apply(decision).ok and f.memory.writes == writes, "a changed conversation binding invalidates the old START without writing")
+end
+if section == nil or section == "project_repository_guards" then
+	local function repository_decision()
+		local selected = fixture(nil, { passive = true }); selected:catalog(0)
+		local project = selected:project("Selected checkout", false)
+		local event = selected:event("project_repository", { orch_project_id = project,
+			project_revision = selected.authority.registry.dispatch.projects[project].revision,
+			repository = { cwd = "/fixture/checkout", repo_root = "/fixture/checkout", common_dir = "/fixture/checkout/.git",
+				target_ref = "refs/heads/main", head_revision = string.rep("a", 40), queue_route = "orch_queue" } })
+		return selected, project, event
+	end
+	local progress, selected_project, selected = repository_decision()
+	progress:project("Unrelated background bookkeeping", false)
+	selected.command_seq = progress.command_seq + 1; progress.command_seq = selected.command_seq
+	local saved = progress.authority:apply(selected)
+	check(saved.ok and progress.authority.registry.dispatch.projects[selected_project].repository.cwd == "/fixture/checkout",
+		"unchanged repository selection survives unrelated authority progress")
+	for _, change in { "target", "policy", "project", "owner", "target-policy" } do
+		local guarded, project, captured = repository_decision()
+		if change == "target" then captured.repository.target_ref = "refs/heads/other"
+		elseif change == "policy" then assert(guarded:apply("pause").ok)
+		elseif change == "project" then assert(guarded:apply("project_start", { orch_project_id = project, project_revision = captured.project_revision }).ok)
+		elseif change == "owner" then captured.origin.window_epoch = "different-window"
+		else
+			local other = guarded:project("Another target participant", false)
+			assert(guarded:apply("project_repository", { orch_project_id = other,
+				project_revision = guarded.authority.registry.dispatch.projects[other].revision, repository = clone(captured.repository) }).ok)
+		end
+		captured.command_seq = guarded.command_seq + 1; guarded.command_seq = captured.command_seq
+		local unchanged = runtime.json.encode(guarded.authority.registry)
+		check(not guarded.authority:apply(captured).ok and runtime.json.encode(guarded.authority.registry) == unchanged,
+			"repository confirmation rejects changed " .. change .. " without changing saved work")
+	end
+	local f = fixture(nil, { passive = true }); f:catalog(0)
+	local project = f:project("Canonical repository subject", true)
+	assert(boundary_repository(f, project, "/fixture/worktree", "main").ok)
+	local revision = f.authority.registry.dispatch.projects[project].revision
+	local decision = f:event("project_start", { orch_project_id = project, project_revision = revision })
+	check(boundary_repository(f, project, "/fixture/worktree", "refs/heads/main").code == "no_progress"
+		and f.authority.registry.dispatch.projects[project].revision == revision, "canonical target aliases do not retarget or revise a project")
+	decision.command_seq = f.command_seq + 1; f.command_seq = decision.command_seq
+	check(f.authority:apply(decision).ok, "an equivalent repository refresh preserves the captured START")
+	local first = boundary_queue(f, project); assert(first.ok and first.action_id)
+	local before = runtime.json.encode(f.authority.registry)
+	check(not boundary_repository(f, project, "/fixture/other-tree").ok and runtime.json.encode(f.authority.registry) == before,
+		"an unissued retained provision prevents changing its effective execution checkout")
+	assert(f:finish(first.action_id, "provisioned", { handle = "mailbox-repository", binding_digest = string.rep("a", 64),
+		capabilities = runtime.json.array({ "report-files-v1", "native-ask-v1" }), limits = {} }).ok)
+	assert(f:finish(worker_of(f, first.worker_id).launch_action_id, "awaiting_acceptance", { pane_binding = boundary_binding(f) }).ok)
+	local gated = boundary_queue(f, project); assert(gated.ok and gated.code == "task_gated")
+	before = runtime.json.encode(f.authority.registry)
+	check(not boundary_repository(f, project, "/fixture/other-tree").ok and runtime.json.encode(f.authority.registry) == before,
+		"open checkout evidence cannot be silently retargeted")
+end
+if section == nil or section == "migration_start_guards" then
+	for _, routed in { false, true } do
+		local f = fixture(); f:catalog(0)
+		if routed then assert(f:apply("policy", { policy = { quota_routing = true } }).ok) end
+		local queued = f:queue(false); assert(queued.ok, queued.message)
+		if not routed then assert(f:finish(queued.action_id, "rejected", nil,
+			{ code = "unsupported_capability", message = "Provisioning refused before creating a mailbox." }).ok) end
+		local old_routing = runtime.json.encode(worker_of(f, queued.worker_id).routing)
+		boundary_v4(f); f:catalog(0)
+		local w = worker_of(f, queued.worker_id)
+		local project = f.authority.registry.dispatch.projects[w.orch_project_id]
+		check(not w.project_held, "migration does not recast refused or quota-owned starts as never-issued work")
+		assert(f:apply("project_start", { orch_project_id = project.orch_project_id, project_revision = project.revision }).ok)
+		check(#actions_of(f, queued.worker_id, "mailbox_provision") == 0
+			and (not routed or runtime.json.encode(worker_of(f, queued.worker_id).routing) == old_routing),
+			"START neither reissues the refused provision nor overwrites an existing quota decision")
+		check(state.rehydrate(clone(f.authority.registry)) ~= nil, "non-replayed migrated decision remains durable")
+	end
+end
+if section == nil or section == "enrol_route_cancel" then
+	local f = fixture(nil, { passive = true }); f:catalog(0)
+	local project = f:project("Retain the existing conversation", false)
+	local id, pane = boundary_open(f, project, true)
+	local token = worker_of(f, id).enrolment_token
+	f.origin.window_epoch = "continued-controller-window"
+	assert(f:apply("continue_controller", { operator_verified = true }).ok)
+	assert(f:control("reconcile_session").ok)
+	local cancelled = f:apply("cancel_work", { worker_id = id }); assert(cancelled.ok, cancelled.message)
+	local request = f:action(cancelled.action_id).request
+	check(request.op == "mailbox_retire" and request.origin_binding.window_epoch == f.origin.window_epoch
+		and worker_of(f, id).origin_binding.window_epoch == pane.window_epoch and worker_of(f, id).enrolment_token == token,
+		"a continued controller revokes only the original exact pending enrollment capability")
+	check(state.rehydrate(clone(f.authority.registry)) ~= nil, "new-route enrollment revocation restores before settlement")
+	assert(f:finish(cancelled.action_id, "retired", {}).ok)
+	local associated
+	for _, association in f.authority.registry.dispatch.projects[project].associations do associated = association end
+	check(worker_of(f, id).mailbox_retired and associated ~= nil and associated.pane_binding.pane_id == pane.pane_id
+		and #actions_of(f, id, "stop") == 0, "positive cleanup preserves the native conversation without native stop or token reissue")
+end
+if section == nil or section == "project_history_reuse" then
+	local f = fixture(nil, { passive = true }); f:catalog(0)
+	local project, pane = f:project("A finished research conversation", false), boundary_binding(f)
+	assert(f:apply("associate_conversation", { orch_project_id = project,
+		project_revision = f.authority.registry.dispatch.projects[project].revision, pane_binding = pane, active = true }).ok)
+	assert(f:apply("project_finish", { orch_project_id = project,
+		project_revision = f.authority.registry.dispatch.projects[project].revision, result = "Reviewed research result." }).ok)
+	local reopened = f:apply("project_reopen", { summary_index = 1 }); assert(reopened.ok)
+	check(f:apply("associate_conversation", { orch_project_id = reopened.orch_project_id,
+		project_revision = f.authority.registry.dispatch.projects[reopened.orch_project_id].revision, pane_binding = pane, active = true }).ok,
+		"finished passive associations do not permanently lock the native pane")
+	check(#f.authority.registry.dispatch.finished_projects == 1 and #f.authority.registry.dispatch.finished_projects[1].links == 1,
+		"reusing a native conversation preserves its bounded independent finished summary")
+	assert(f:apply("detach_conversation", { orch_project_id = reopened.orch_project_id,
+		project_revision = f.authority.registry.dispatch.projects[reopened.orch_project_id].revision,
+		conversation_id = next(f.authority.registry.dispatch.projects[reopened.orch_project_id].associations) }).ok)
+	f:project("Never started, no outcome", false)
+	local summary = runtime.json.encode(f.authority.registry.dispatch.finished_projects)
+	local close_id = next_id()
+	assert(f.authority:apply(f:state_event("begin_close", { close_id = close_id,
+		control_origin = { kind = "closing", binding = clone(f.origin), controller_pane = "9001", close_id = close_id } })).ok)
+	assert(f.authority:apply(f:state_event("release_controller", { expected_owner_id = f.origin.owner_id, expected_generation = f.origin.owner_generation })).ok)
+	assert(f:control("close_session").ok)
+	assert(f.authority:apply(f:state_event("confirm_close", { close_id = close_id })).ok)
+	check(runtime.json.encode(f.authority.registry.dispatch.finished_projects) == summary,
+		"closing empty or never-started projects does not fabricate outcomes or evict real history")
+end
+if section == nil or section == "project_reserve" then
+	local f = fixture(nil, { passive = true }); f:catalog(0)
+	local project = f:project("Capacity hold", false)
+	local queued = boundary_queue(f, project); assert(queued.ok)
+	local function reduce(command, fields, reserved)
+		local candidate, result = state.apply(f.authority.registry, f:event(command, fields), { now_ms = 1000, reserved_capacity = reserved })
+		if candidate then f.authority.registry = candidate; f.memory.value = clone(candidate) end
+		return result
+	end
+	assert(reduce("project_start", { orch_project_id = project, project_revision = f.authority.registry.dispatch.projects[project].revision }, true).ok)
+	check(#actions_of(f, queued.worker_id, "mailbox_provision") == 0, "START records intent without consuming receipt/recovery reserve")
+	assert(reduce("pause", nil, true).ok)
+	assert(reduce("resume", nil, true).ok)
+	check(#actions_of(f, queued.worker_id, "mailbox_provision") == 0, "Resume cannot bypass reserved-capacity admission")
+	assert(reduce("pause", nil, true).ok)
+	assert(reduce("resume", nil, false).ok)
+	local provisions = actions_of(f, queued.worker_id, "mailbox_provision"); assert(#provisions == 1)
+	check(not reduce("claim", { action_id = provisions[1], executor = f.origin.window_epoch }, true).ok
+		and f:action(provisions[1]).phase == "ready", "a new provision claim cannot consume recovery capacity")
+	check(reduce("claim", { action_id = provisions[1], executor = f.origin.window_epoch }, false).ok, "ordinary capacity releases the same single retained provision")
+end
+if section == nil or section == "rollover_location" then
+	for _, terminal in { false, true } do
+		local f = fixture(function() return { now_ms = 1000, mono_ms = 1000, epoch = "rollover-location" } end, { passive = true })
+		f:catalog(0)
+		if terminal then
+			local row = f.authority.registry.dispatch.catalogs[f.origin.logical_session_id].records[1]
+			row.backend = "local-terminal"; row.placement = "replace_if_alone"
+			row.capabilities = runtime.json.array({ "report-files-v1", "worker-poll-v1" }); f.memory.value = clone(f.authority.registry)
+		end
+		local project = f:project("Conversation execution location", false)
+		assert(boundary_repository(f, project, "/fixture/original-worktree").ok)
+		local id, pane = boundary_open(f, project, false)
+		assert(send_report(f, id, "ACCEPTED", { assignment_sha256 = worker_of(f, id).assignment_sha256 }).ok)
+		assert(f:finish(f:apply("poll", { worker_id = id }).action_id, "published", {}).ok)
+		assert(f:finish(f:apply("poll", { worker_id = id }).action_id, "accepted", {}).ok)
+		assert(f:apply("observe", { worker_id = id, pane_binding = pane, native_state = "idle" }).ok)
+		assert(boundary_repository(f, project, "/fixture/new-project-worktree").ok)
+		local requested = f:apply("rollover", { worker_id = id, trigger = "owner" }); assert(requested.ok, requested.message)
+		check(not boundary_repository(f, project, "/fixture/third-worktree").ok, "a pending handover freezes project execution bindings")
+		assert(answer_checkpoint(f, id, "location-checkpoint").ok)
+		local handover = rollover_of(f, requested.handover_id)
+		local successor = handover.successor_worker_id
+		assert(successor, runtime.json.encode({ terminal = terminal, phase = handover.phase, hold = handover.hold }))
+		local w = worker_of(f, successor)
+		check(w.execution_cwd == "/fixture/original-worktree" and w.cwd == "/fixture" and w.presentation == "background",
+			"successor inherits the predecessor execution checkout, not a later project or saved-record default")
+		local provision = actions_of(f, successor, "mailbox_provision"); assert(#provision == 1)
+		local provisioned = f:finish(provision[1], "provisioned", { handle = "mailbox-location-successor", binding_digest = string.rep("b", 64),
+			capabilities = runtime.json.array(clone(worker_of(f, id).capabilities)), limits = {} })
+		assert(provisioned.ok, runtime.json.encode(provisioned))
+		local request = f:action(worker_of(f, successor).launch_action_id).request
+		check(request.cwd == "/fixture/original-worktree" and request.presentation == "background"
+			and request.placement == (if terminal then "tab" else "split")
+			and worker_of(f, successor).placement == (if terminal then "replace_if_alone" else "split"),
+			"background terminal rollover freezes an unfocused tab without rewriting its saved record")
+		check(state.rehydrate(clone(f.authority.registry)) ~= nil, "the exact inherited launch and saved record restore together")
+	end
 end
 return "dispatch" .. (if section then "/" .. section else "") .. ": " .. tostring(checks) .. " checks passed"

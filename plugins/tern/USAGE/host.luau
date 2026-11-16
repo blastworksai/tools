@@ -2,11 +2,13 @@
 -- USAGE blocks, rendered by the host from its own authenticated companion.
 local ui = tern.ui
 local aggregate = require("./aggregate").new()
+local companion = require("./companion")
 local collector = require("./source_collect")
 local host_setup = require("./host_setup")
 local presentation = require("./presentation")
 local view_layout = require("./view_layout")
 local refresh: any
+local channel_status: any = { state = "starting" }
 type UsageWindow = any
 type Account = any
 
@@ -36,6 +38,7 @@ local poll_timer: TimerHandle? = nil
 local render_timer: TimerHandle? = nil
 local poll_generation = 0
 local render_generation = 0
+local unloaded = false
 
 local WINDOW_LABELS: { [string]: string } = {
 	five_hour = "5 hours",
@@ -66,6 +69,31 @@ local REASONS: { [string]: string } = {
 	api_key_login = "signed in with an API key; no subscription quota",
 	web_login_forbidden = "provider refused usage access; sign in again with the provider's CLI",
 }
+
+local function platform_hold_node(): Node?
+	local os = tern.runtime.os
+	if os == "linux" then return nil end
+	local children: { Node } = {}
+	if os == "macos" or os == "windows" then
+		local name = if os == "macos" then "macOS" else "Windows"
+		table.insert(children, ui.text(ui.span("USAGE platform hold · " .. name .. " is not qualified", "error")))
+		table.insert(children, ui.text(ui.span("Readings are withheld rather than presented as current or healthy. Catalog ready is catalog-only, not support evidence; real runtime and provider acceptance is still required.", "warning")))
+		if os == "macos" then
+			table.insert(children, ui.text("Claude: open Claude Code once as this OS user with the SPAWN-selected config directory. Unlock or sign in through macOS Keychain yourself; USAGE never unlocks it or changes its ACL."))
+			table.insert(children, ui.text("Provider CLI: install and sign in as this OS user. GUI lookup includes /opt/homebrew/bin and /usr/local/bin; an absolute executable path in SPAWN avoids PATH ambiguity."))
+			table.insert(children, ui.text("CA certificates: if python.org Python reports a TLS certificate failure, run Install Certificates.command in /Applications/Python 3.x, then retry. Never disable TLS verification."))
+		else
+			table.insert(children, ui.text("Provider CLI: install and sign in as this OS user. Prefer a native .exe or an absolute SPAWN executable path; GUI lookup also checks the resolved per-user npm directory before .cmd/.bat adapters."))
+			table.insert(children, ui.text("Private-data ACL: the current OS user must own plugin-data/usage, with only that user's FullControl allow rules, no deny/other-user access and no reparse points. Repair ownership/ACLs without granting broad access, then retry Setup."))
+			table.insert(children, ui.text("ACL/performance: repeated Setup or Display timeouts remain a hold. Real Windows ACL latency against the 30-second request deadline is still unqualified; do not weaken permission checks to make it pass."))
+		end
+	else
+		table.insert(children, ui.text(ui.span("USAGE unsupported route · " .. tostring(os), "error")))
+		table.insert(children, ui.text(ui.span("The USAGE companion is not supported here, and no reading is presented as healthy. Use a qualified Linux desktop source; iOS and Tern's web client cannot run the companion.", "warning")))
+	end
+	table.insert(children, ui.text(ui.span("Open USAGE Setup or USAGE Diagnostics from the command palette for setup guidance.", "muted")))
+	return ui.node("col", { role = "usage-platform-hold", gap = "sm" }, children)
+end
 
 -- collector.state() codes: why the latest source publication did not land.
 local COLLECTOR: { [string]: string } = {
@@ -121,21 +149,6 @@ local function wall_now(): number
 	return math.floor(os.time() * 1000)
 end
 
-local function elapsed_text(milliseconds: number): string
-	local seconds = math.max(0, math.floor(milliseconds / 1000))
-	if seconds < 60 then
-		return "<1m"
-	elseif seconds < 3600 then
-		return tostring(seconds // 60) .. "m"
-	elseif seconds < 86400 then
-		local hours = seconds // 3600
-		local minutes = (seconds % 3600) // 60
-		return tostring(hours) .. "h" .. (if minutes > 0 then " " .. tostring(minutes) .. "m" else "")
-	end
-	local days = seconds // 86400
-	local hours = (seconds % 86400) // 3600
-	return tostring(days) .. "d" .. (if hours > 0 then " " .. tostring(hours) .. "h" else "")
-end
 local function percent_text(value: number): string
 	return tostring(math.floor(value + 0.5)) .. "%"
 end
@@ -150,6 +163,11 @@ end
 
 local function reason_text(code: string): string
 	return REASONS[code] or title_key(code)
+end
+
+-- A failed login warns; every other unavailable/last-known cause stays muted.
+local function reason_span(code: string, prefix: string?): any
+	return ui.span((prefix or "") .. reason_text(code), if presentation.LOGIN_REASONS[code] ~= nil then "warning" else "muted")
 end
 
 local POOL_LABELS: { [string]: string } = {
@@ -193,10 +211,15 @@ local function append_problems(children: { Node })
 	if problem ~= nil then table.insert(children, ui.text(ui.span(problem, "error"))) end
 	local health = collector_text()
 	if health ~= nil then table.insert(children, ui.text(ui.span(health, "error"))) end
+	for _, conflict in if model ~= nil then model.roster_conflicts or {} else {} do
+		table.insert(children, ui.text(ui.span("Account list needs review for " .. conflict.scope_id
+			.. ". Conflicting saved lists are hidden; their clocks cannot identify the current list.", "warning")))
+	end
 end
 
 -- Text for a model without accounts: the roster is empty only if the companion said so.
 local function no_accounts_text(): string?
+	if model ~= nil and #(model.roster_conflicts or {}) > 0 then return nil end
 	if answered then return presentation.EMPTY_TEXT end
 	return if loading then "Loading accounts…" else nil
 end
@@ -217,7 +240,8 @@ local function window_usage(window: UsageWindow, now_ms: number): string
 	if state == "unavailable" then return reason_text(window.unavailable_reason or "unavailable") end
 	if state ~= "fresh" then
 		return "Last known " .. percent_text(window.used) .. " used"
-			.. (if state == "reset_passed" then " · reset passed" elseif state == "stale" then " · stale" else "")
+			.. (if state == "login" then " · " .. (presentation.login_problem(window) :: string)
+				elseif state == "reset_passed" then " · reset passed" elseif state == "stale" then " · stale" else "")
 	end
 	return percent_text(window.used) .. " used"
 end
@@ -231,17 +255,18 @@ local function heat_text(spans: any, role: string?): Node
 	return ui.node("row", { role = role, gap = "none" }, { node })
 end
 
-local function quota_span(text: string, role: string?): any
-	return ui.span(text, if role == nil then "muted" else nil)
+local function quota_span(text: string, style: string?): any
+	return ui.span(text, style)
 end
 
 local function window_detail_node(window: UsageWindow, now_ms: number, selected: boolean, provider: string): Node
-	local role = presentation.heat(window.used, presentation.window_state(window, now_ms))
+	local state = presentation.window_state(window, now_ms)
+	local role = presentation.heat(window.used, state)
 	local usage = if provider == "muse" and window.used == nil then presentation.MUSE_WAITING else window_usage(window, now_ms)
 	local children: { Node } = {
 		ui.node("row", { role = "usage-quota-heading" }, {
 			ui.text(ui.span(window_name(window) .. (if selected then " · summary" else ""), "strong")),
-			heat_text(quota_span(usage, role), role),
+			heat_text(quota_span(usage, presentation.text_style(state)), role),
 		}),
 	}
 	if window.used ~= nil then
@@ -256,14 +281,14 @@ local function window_detail_node(window: UsageWindow, now_ms: number, selected:
 	elseif window.reset_label ~= nil then
 		table.insert(children, ui.text(ui.span(window.reset_label, "muted")))
 	end
-	local observed = if window.observed_at_ms > 0 then "Observed " .. elapsed_text(now_ms - window.observed_at_ms) .. " ago" else "Not yet observed"
+	local observed = if window.observed_at_ms > 0 then "Observed " .. presentation.elapsed(now_ms - window.observed_at_ms) .. " ago" else "Not yet observed"
 	if window.reset_calendar ~= nil and window.reset_calendar.timezone ~= nil then
 		observed ..= " · Source timezone: " .. window.reset_calendar.timezone
 	end
 	table.insert(children, ui.text(ui.span(observed, "muted")))
 	local reason = window.unavailable_reason or window.last_known_reason
 	if reason ~= nil then
-		table.insert(children, ui.text(ui.span("Unavailable: " .. reason_text(reason), "muted")))
+		table.insert(children, ui.text(reason_span(reason, "Unavailable: ")))
 	end
 	return ui.node("col", { role = "usage-quota", gap = "xs" }, children)
 end
@@ -274,7 +299,7 @@ local function account_hovercard(account: Account, now_ms: number): Node
 		ui.node("row", { role = "usage-account-heading" }, {
 			ui.node("icon", { name = value.icon }),
 			ui.text(ui.span((account.provider_label or title_key(account.provider)) .. " · " .. account.account_label, "strong")),
-			heat_text(quota_span(value.text, value.heat), value.heat),
+			heat_text(quota_span(value.text, value.style), value.heat),
 		}),
 		ui.text(ui.span("Source: " .. (USAGE_SOURCES[account.usage_source] or account.usage_source)
 			.. (if account.plan ~= nil then " · " .. account.plan else ""), "muted")),
@@ -331,12 +356,13 @@ local function compact_view(mode: string): Node
 				local reason = window.unavailable_reason or window.last_known_reason
 				if reason ~= nil and not seen[reason] then
 					seen[reason] = true
-					table.insert(reasons, reason_text(reason))
+					if #reasons > 0 then table.insert(reasons, ui.span(" · ", "muted")) end
+					table.insert(reasons, reason_span(reason))
 				end
 			end
 			local label = (account.provider_label or title_key(account.provider)) .. " · " .. account.account_label
 			local link = ui.link(label, "usage://account/" .. view_layout.encode(account.id), "strong")
-			local quota = quota_span(value.text, value.heat)
+			local quota = quota_span(value.text, value.style)
 			local countdown = presentation.compact_countdown(value, now_ms)
 			local usage_node = heat_text(if countdown ~= nil then { quota, ui.span(" · " .. countdown, "muted") } else quota, value.heat)
 			if bottom then
@@ -352,7 +378,7 @@ local function compact_view(mode: string): Node
 						ui.text(link),
 					}),
 					usage_node,
-					ui.text(ui.span(table.concat(reasons, " · "), "muted")),
+					ui.text(if #reasons > 0 then reasons else ui.span("", "muted")),
 				}))
 			end
 		end
@@ -393,7 +419,10 @@ local function details_view(selected: string?): Node
 			table.insert(children, account_hovercard(account, now_ms))
 		end
 	end
-	if selected ~= nil and not found and answered then table.insert(children, ui.text("This account is no longer defined in SPAWN.")) end
+	if selected ~= nil and not found and answered then
+		table.insert(children, ui.text(if #(model.roster_conflicts or {}) > 0 then
+			"This account cannot be resolved while its saved lists conflict." else "This account is no longer defined in SPAWN."))
+	end
 	if #ordered == 0 then
 		local empty = no_accounts_text()
 		if empty ~= nil then table.insert(children, ui.text(ui.span(empty, "muted"))) end
@@ -423,6 +452,12 @@ local function config_view(state: BlockState): Node
 		ui.text(ui.span(refresh:text(), "muted")),
 		ui.button("Refresh now", { busy = refresh.requesting, actions = { click = "refresh" } }),
 	}
+	if channel_status.state == "held" then
+		table.insert(children, ui.text(ui.span("ORCH+ usage connection is held: " .. tostring(channel_status.code)
+			.. ". Usage permissions and provider sessions were not changed.", "warning")))
+	end
+	local hold = platform_hold_node()
+	if hold ~= nil then table.insert(children, 2, hold) end
 	if refresh.progress ~= nil then
 		for _, failure in refresh.progress.failures or {} do
 			table.insert(children, ui.text(ui.span((failure.account or "Source") .. ": " .. reason_text(failure.code), "muted")))
@@ -436,6 +471,8 @@ local function config_view(state: BlockState): Node
 end
 
 local function main_view(state: BlockState): Node
+	local hold = platform_hold_node()
+	if hold ~= nil then return hold end
 	if state.mode == "narrow" or state.mode == "bottom" then return compact_view(state.mode) end
 	return details_view(state.account)
 end
@@ -494,6 +531,7 @@ end
 
 local completed_at: number? = nil
 refresh = require("./view_state").new(function()
+	if unloaded then return end
 	render_all()
 	rearm_poll()
 	if refresh.progress == nil then return end
@@ -511,6 +549,7 @@ end)
 
 local function source_updated() fetch() end
 fetch = function()
+	if unloaded then return end
 	if aggregate.busy then return end
 	cancel_poll()
 	loading = true
@@ -519,6 +558,7 @@ fetch = function()
 		if block.state.kind == "config" then refresh:read_preferences(); break end
 	end
 	aggregate:refresh(function(ok, err)
+		if unloaded then return end
 		loading = false
 		answered = ok
 		problem = if ok then nil else (if err ~= nil then err.message else "USAGE unavailable; last readings retained.")
@@ -609,6 +649,7 @@ tern.block.define("accounts", definition("accounts"))
 tern.block.define("account", definition("account"))
 tern.block.define("config", definition("config"))
 require("./capacity").install()
+require("./display").install(aggregate)
 
 tern.on("pane_exited", function(event: PaneExitedEvent)
 	blocks[event.pane] = nil
@@ -618,6 +659,42 @@ tern.on("pane_exited", function(event: PaneExitedEvent)
 	end
 end)
 
+local function unload(_cx: any)
+	unloaded = true
+	collector.stop()
+	cancel_poll()
+	cancel_render()
+	companion.unload()
+end
+
 -- The collector runs even when no USAGE block or desktop window is open.
 collector.start(source_updated)
 fetch()
+
+-- The same host-local read carrier serves local and attached remote windows.
+-- It never creates a pane, launches a provider or grants a consumer permission.
+local channel_endpoint, channel_error = require("./channel/channel").open({
+	plugin_id = "usage", plugin_data = tern.plugin.data,
+	incarnation = string.format("usage-%d-%08x-%08x", os.time(), math.random(1, 2147483647), math.random(1, 2147483647)),
+	fs = tern.fs, json = tern.json, base64 = tern.base64,
+})
+if channel_endpoint == nil then
+	channel_status = { state = "held", code = if channel_error ~= nil then channel_error.code else "channel_unavailable" }
+else
+	local channel_reader = require("./usage_channel").new(aggregate, channel_endpoint)
+	local function poll_channel()
+		if unloaded then return end
+		local ok = pcall(channel_reader.pump)
+		local next_status = if ok then channel_reader.status() else { state = "held", code = "channel_adapter_failed" }
+		if tern.json.encode(next_status) ~= tern.json.encode(channel_status) then
+			channel_status = next_status
+			render_all()
+		end
+		if ok then tern.timer(250, poll_channel) end
+	end
+	tern.timer(0, poll_channel)
+end
+
+require("./updater/host").register()
+
+companion.on_unload(unload)

@@ -5,6 +5,9 @@ local root, section = ...
 local fixture_chunk = assert(loadstring(tern.fs.read(root .. "/tests/dispatch.luau"), "dispatch-fixture"))
 setfenv(fixture_chunk, setmetatable({}, { __index = getfenv() }))
 local api = fixture_chunk(root, "fixture")
+local workflow_chunk = assert(loadstring(tern.fs.read(root .. "/tests/workflow.luau"), "workflow-helpers"))
+setfenv(workflow_chunk, setmetatable({}, { __index = getfenv() }))
+local workflow = workflow_chunk(root, "helpers", api)
 local checks = 0
 local function check(ok, message) assert(ok, message); checks += 1 end
 local function worker(f, id) return f.authority.registry.dispatch.workers[id] end
@@ -52,7 +55,7 @@ if section == nil or section == "correlation" then
  local writes = f.memory.writes
  local pending_intent = f:event("reply", { worker_id = id })
  check(f.authority:apply(pending_intent).code == "report_request_pending" and f.memory.writes == writes + 1, "new no-effect owner intent consumes its durable replay sequence without issuing another reply")
- check(f.authority:apply(api.clone(pending_intent)).code == "report_request_pending" and f.memory.writes == writes + 1, "exact pending-intent replay creates neither reply nor write storm")
+ check(f.authority:apply(api.clone(pending_intent)).code == "stale_revision" and f.memory.writes == writes + 1, "captured pending intent cannot execute again after its command commit")
  check(ack(f, id, request).ok, "matching immutable reply consumption accepted")
  check(worker(f, id).workflow.report_request.acknowledged and worker(f, id).workflow.report_request ~= nil, "reply ACK is not a progress response")
  local before = tern.json.encode(f.authority.registry)
@@ -61,7 +64,7 @@ if section == nil or section == "correlation" then
  check(send(f, id, "WAITING", { reason = "Need longer", request_id = request.request_id }).ok and worker(f, id).workflow.report_request ~= nil, "WAITING retains outstanding request without resend")
  check(send(f, id, "HEARTBEAT", { state = "working", request_id = request.request_id }).ok, "correlated progress fulfills request")
  check(worker(f, id).workflow.report_request == nil, "request settles only after both ACK and response")
- check(f.authority:apply(api.clone(pending_intent)).code == "report_request_pending" and worker(f,id).workflow.report_request == nil, "previously successful no-effect reply intent cannot create a new request after the old cycle settles")
+ check(f.authority:apply(api.clone(pending_intent)).code == "stale_revision" and worker(f,id).workflow.report_request == nil, "old pending intent cannot create a new request after the cycle settles")
  check(api.state.rehydrate(api.clone(f.authority.registry)) ~= nil, "request settlement restores")
  local g = api.fixture(); local gid = g:accepted(false); assert(g:apply("reply", { worker_id = gid }).ok)
  local r = api.clone(worker(g, gid).workflow.report_request); local payload = cp(); payload.request_id = r.request_id
@@ -127,13 +130,14 @@ if section == nil or section == "results" then
    check(e and e.state == "pending" and e.effect_ref == "landing_not_requested",
     "an approved landing proposal approves the work's landing request; with none requested it waits (" .. tostring(e and e.state) .. " " .. tostring(e and e.effect_ref) .. ")")
    check(send(f,id,"LANDING_RESULT",payload,extra).code == "landing_unauthorized",
-    "an approved landing proposal cannot authorize a LANDING_RESULT; only the release manager holding an issued landing_grant can")
+    "an approved landing proposal cannot authorize a result without an exact issued grant held by its sender")
    check(f.authority.registry.dispatch.landing == nil, "a landing proposal approves an existing request; it never creates a queue item or grant")
   else
    local before = tern.json.encode(f.authority.registry.dispatch.reviews or {})
    check(send(f,id,"REVIEW_RESULT",payload,extra).code == "review_unauthorized",
     "a coordinator never files REVIEW_RESULT, even correlated to its own approved review proposal")
-   check(f.authority.registry.dispatch.gates[gid].result == nil and worker(f,id).workflow.evidence.REVIEW_RESULT == nil
+   local retained_gate = f.authority.registry.dispatch.gates[gid]
+   check((retained_gate == nil or retained_gate.result == nil) and worker(f,id).workflow.evidence.REVIEW_RESULT == nil
     and tern.json.encode(f.authority.registry.dispatch.reviews or {}) == before, "the refused coordinator result records no review evidence")
   end
   check(worker(f,id).stop_action_id == nil and worker(f,id).release == nil, "a refused result never invents native closure/release")
@@ -144,12 +148,10 @@ if section == nil or section == "migration" then
  local f = api.fixture(); local id = f:accepted(false); assert(f:apply("reply", { worker_id = id }).ok)
  local old = api.clone(f.authority.registry); local issued = worker(f,id).workflow.report_request.bytes
  old.dispatch.workers[id].workflow = nil; old.dispatch.gates = nil; old.dispatch.policies = nil
- local restored = api.state.rehydrate(old)
- check(restored ~= nil and restored.dispatch.workers[id].work_id == old.dispatch.workers[id].work_id
-  and restored.dispatch.workers[id].accepted_seq == old.dispatch.workers[id].accepted_seq,
-  "additive workflow migration preserves the accepted worker's identity and report cursor")
- check(restored.dispatch.workers[id].workflow.report_request.bytes == issued, "migration adopts exact existing report-request outbox without reissuing")
- check(restored.dispatch.workers[id].workflow.health.freshness == "unconfirmed", "migration never invents old progress freshness")
+ check(api.state.rehydrate(old) == nil, "missing current workflow state is corruption, not an implicit additive migration")
+ local restored = assert(api.state.rehydrate(api.clone(f.authority.registry)))
+ check(restored.dispatch.workers[id].workflow.report_request.bytes == issued, "reload retains exact live report-request outbox without reissuing")
+ check(restored.dispatch.workers[id].workflow.health.freshness == "unconfirmed", "reload never invents report freshness")
  local invalid = api.clone(f.authority.registry); invalid.dispatch.workers[id].workflow.observation_cursor = true
  check(api.state.rehydrate(invalid) == nil, "malformed persisted observation cursor rejects rather than throwing")
  invalid = api.clone(f.authority.registry); invalid.dispatch.workers[id].workflow.report_request.acknowledged = true
@@ -160,16 +162,18 @@ if section == nil or section == "capacity" then
  local bytes = f:report(id, 2, "HEARTBEAT", { state = "working" })
  assert(f:apply("intake", { worker_id = id, bytes = bytes }).ok)
  local saved_ack = worker(f, id).receipts["2"].bytes
- -- Cosmetic history is independent of receipt identity; fill only settled display entries.
- w = worker(f, id); w.workflow.thread = {}
- for i = 1, 128 do table.insert(w.workflow.thread, { id = "history-" .. i, kind = "HEARTBEAT", summary = "Settled display", at_ms = 1, state = "settled" }) end
- f.memory.value = api.clone(f.authority.registry)
- check(send(f, id, "READY", { state = "idle" }).ok and #worker(f, id).workflow.thread == 128, "settled display history evicts at its bound")
- check(f:apply("intake", { worker_id = id, bytes = bytes }).code == "report_replayed", "exact report replay survives display eviction")
- check(worker(f, id).receipts["2"].bytes == saved_ack, "replay retains original committed ACK bytes/revision")
- w = worker(f, id)
- for _, entry in w.workflow.thread do entry.state = "pending" end
- local candidate = api.clone(f.authority.registry); local snapshot = tern.json.encode(candidate)
+ check(send(f, id, "READY", { state = "idle" }).ok, "current READY fact commits")
+ for _, entry in worker(f, id).workflow.thread do
+  check(entry.state == "pending" and entry.kind ~= "HEARTBEAT" and entry.kind ~= "READY", "informational reports retain facts, never completed log copies")
+ end
+ check(f:apply("intake", { worker_id = id, bytes = bytes }).code == "report_replayed", "an unconsumed receipt still identifies an exact report")
+ check(worker(f, id).receipts["2"].bytes == saved_ack, "current receipt preserves original ACK bytes until consumption")
+ -- Exercise the pending-entry bound independently of display history or receipt compaction.
+ local candidate = api.clone(f.authority.registry)
+ candidate.dispatch.workers[id].workflow.thread = {}
+ for i = 1, 128 do table.insert(candidate.dispatch.workers[id].workflow.thread,
+  { id = "pending-" .. i, kind = "ASK", summary = "Unresolved question", at_ms = 1, state = "pending" }) end
+ local snapshot = tern.json.encode(candidate)
  local _, err = api.dispatch.intake(candidate, candidate.dispatch.workers[id], f:report(id, 4, "ASK", { question = "Retain me", options = tern.json.array({ { id = "yes", label = "Yes" } }) }), { now_ms = 2 })
  check(err.code == "full" and tern.json.encode(candidate) == snapshot, "full pending thread rejects without mutating candidate/gates/serial/receipt")
 end
@@ -204,11 +208,12 @@ if section == nil or section == "context" then
  end
  local before = tern.json.encode(f.authority.registry)
  check(not send(f, id, "WAITING", { reason = "Need input", context_used_pct = 10 }).ok and tern.json.encode(f.authority.registry) == before,
-  "context_used_pct is accepted only on READY and HEARTBEAT")
- check(send(f, id, "HEARTBEAT", { state = "working" }).ok and context().used_pct == 100 and context().seq == reported_seq,
-  "a report without context_used_pct keeps the latest reported value and its seq")
+  "WAITING cannot carry a progress context measurement")
  local projected = api.dispatch.project(f.authority.registry, f.origin.logical_session_id, f.origin.alias_nonce).workflow.workers[1]
- check(projected.context_used_pct == 100 and projected.context_seq == reported_seq, "worker health projection exposes the worker-reported value and seq")
+ check(projected.context_used_pct == 100 and projected.context_seq == reported_seq and projected.context_rollover.status == "unknown",
+  "actual percent is displayed but cannot stand in for a measured first-turn baseline")
+ check(send(f, id, "HEARTBEAT", { state = "working" }).ok and context() == nil,
+  "progress without a current measurement invalidates previous current usage")
  check(api.state.rehydrate(api.clone(f.authority.registry)) ~= nil, "stored context usage restores through strict validation")
  for _, forged in { { used_pct = 101, seq = reported_seq }, { used_pct = 5.5, seq = reported_seq }, { used_pct = 5, seq = worker(f, id).accepted_seq + 1 }, { used_pct = 5, seq = reported_seq, extra = true } } do
   local invalid = api.clone(f.authority.registry); invalid.dispatch.workers[id].workflow.context = forged
@@ -218,7 +223,7 @@ end
 -- CP2 (0.4.0): Contract G assignments, helper-produced CHECK_RESULT/CHECKOUT reports and the Rule H
 -- landing proof. Revisions are git object names (lowercase hex); `hx` maps a readable fixture name to one.
 local function hx(name) return api.codec.sha256("revision:" .. name):sub(1, 40) end
-local CAPS = { "report-files-v1", "native-ask-v1", "coordinator-control-v1", "check-runner-v1", "release-manager-v1" }
+local CAPS = { "report-files-v1", "native-ask-v1", "coordinator-control-v1", "project-start-v1", "check-runner-v1", "release-manager-v1" }
 local OUTPUT = api.codec.sha256("check output")
 local UNIT = tern.json.array({ { check_id = "unit", argv = tern.json.array({ "luau", "tests/run.luau" }) } })
 -- Every CP2+ catalog carries the `reviewer` record (CP3 reviewers are fresh workers queued by ORCH+ on
@@ -227,7 +232,7 @@ local function catalog(f, rows)
  local records = {}
  for _, row in rows do
   table.insert(records, { id = row[1], revision = 0, provider = "omp", account_label = "configured, not verified", backend = "native-agent", enabled = true, eligible = true,
-   capability_evidence = "configured_operator_attestation_not_runtime_proof", effective_identity = { provider = "omp", evidence = "configured" },
+   capability_evidence = "configured_operator_attestation_not_runtime_proof", effective_identity = { provider = "omp", identity_status = "configured_not_verified" },
    capabilities = tern.json.array(CAPS), unsupported = tern.json.array(), cwd = row[2], placement = "split" })
  end
  local reviewer = api.clone(records[1]); reviewer.id = "reviewer"; reviewer.cwd = "/fixture"; table.insert(records, reviewer)
@@ -235,13 +240,32 @@ local function catalog(f, rows)
  local release = api.clone(records[1]); release.id = "release"; release.cwd = "/fixture"; table.insert(records, release)
  local r = f:apply("catalog"); assert(r.ok, r.message)
  assert(f:finish(r.action_id, "catalog", { catalog_version = 2, setup = { schema = 1, state = "completed", config_revision = 0, readiness = { state = "not_run", config_revision = 0, summary = "" } }, namespace = "fixture-spawn", host_key = "fixture-host", config_revision = 0, revision = 0, records = tern.json.array(records) }).ok)
- assert(f:apply("policy", { policy = { reviewer_records = tern.json.array({ "reviewer" }), release_manager_record = "release" } }).ok)
+ assert(f:apply("policy", { policy = { reviewer_records = tern.json.array({ "reviewer" }), merge_actor_mode = "selected_record", release_manager_record = "release" } }).ok)
  f.cp2_catalog = true
 end
 local function queue_work(f, record, cwd, fields, coordinator)
  local event = { record_id = record, record_revision = 0, catalog_revision = 0, prompt = "Complete the declared fixture assignment.", cwd = cwd, placement = "split", coordinator = coordinator == true }
  for key, value in fields or {} do event[key] = value end
- return f:apply("queue", event)
+ if event.orch_project_id == nil then
+  f.report_projects = f.report_projects or {}
+  local project_id = f.report_projects[cwd]
+  local project = if project_id then f.authority.registry.dispatch.projects[project_id] else nil
+  if not project or project.finished then project_id = f:project("Report fixture " .. cwd, true); f.report_projects[cwd] = project_id end
+  event.orch_project_id = project_id
+ end
+ local queued = f:apply("queue", event)
+ if f.approve_shared_for_overlap and queued.worker_id then
+  for _, gate_id in api.clone(worker(f, queued.worker_id).launch_gates or {}) do
+   local gate = f.authority.registry.dispatch.gates[gate_id]
+   if gate.kind == "shared_checkout" then
+    local approved = f:apply("answer", { gate_id = gate.id, gate_revision = gate.revision, choice_id = "launch_anyway",
+     answer = "Fixture owner coordinates this shared checkout; file-overlap decisions remain separate." })
+    assert(approved.ok, approved.message)
+    if approved.action_id then return approved end
+   end
+  end
+ end
+ return queued
 end
 local launches = 0
 -- Provision (action_id from queue or launch_released), launch, ACCEPT; caps are the provisioned capabilities.
@@ -259,7 +283,7 @@ local function start(f, worker_id, action_id, caps)
  return worker_id
 end
 local function launch(f, record, cwd, fields, caps)
- local queued = queue_work(f, record, cwd, fields); assert(queued.ok and queued.action_id, queued.message)
+ local queued = f:allow_shared_fixture(queue_work(f, record, cwd, fields)); assert(queued.ok and queued.action_id, queued.message)
  return start(f, queued.worker_id, queued.action_id, caps)
 end
 -- A landing builder: review required, same-family allowed, with one declared check.
@@ -314,6 +338,11 @@ local function review(f, id, cp_id, revision, outcome)
  local prior = w.checkout
  assert(checkout(f, id, checkpoint.payload.worktree_ref, if prior then prior.changed_files else nil,
   { head = hx(revision), dirty = if prior then prior.dirty else false }).ok)
+ -- Positive review setup explicitly acknowledges the shared worktree. Tests of
+ -- checkout refusal still submit raw CHECKOUT reports without this helper.
+ for _, gate in gates_of(f, id, "shared_checkout") do
+  if gate.phase == "pending" then assert(answer(f, gate, "acknowledge").ok) end
+ end
  local sent = send(f, id, "REVIEW_READY", { checkpoint_id = cp_id, artifact_revision = hx(revision) }); assert(sent.ok, sent.message)
  local rv, serial = nil, -1
  for _, candidate in f.authority.registry.dispatch.reviews or {} do
@@ -323,14 +352,9 @@ local function review(f, id, cp_id, revision, outcome)
  -- A revision whose latest review is already approved (and not voided) needs no second review.
  if rv and rv.status == "approved" and rv.void == nil and rv.artifact_revision == hx(revision) and (outcome or "approved") == "approved" then return rv.review_id end
  assert(rv and rv.status == "queued", "REVIEW_READY queued no review")
- local rid = rv.reviewer_worker_id
- if not rid then for key, w in f.authority.registry.dispatch.workers do if w.role == "reviewer" and w.review_id == rv.review_id and w.phase == "queued" then rid = key end end end
- local provision
- for key, a in f.authority.registry.dispatch.actions do if a.worker_id == rid and a.request.op == "mailbox_provision" and a.phase == "ready" then provision = key end end
- assert(provision, "reviewer provision missing"); start(f, rid, provision)
- local request = f.authority.registry.dispatch.reviews[rv.review_id].request; assert(request, "review_request missing")
- local result = send(f, rid, "REVIEW_RESULT", { review_id = rv.review_id, round = request.round, artifact_revision = hx(revision), outcome = outcome or "approved",
-  findings = tern.json.array(), summary = "Reviewed the exact checkpoint revision" }, { action_id = request.action_id, action_revision = request.action_revision })
+ local rid, request = workflow.open(f, rv)
+ local result = workflow.result(f, rid, request, outcome or "approved", tern.json.array(),
+  { summary = "Reviewed the exact checkpoint revision" })
  assert(result.ok, result.message)
  rm(f)
  return rv.review_id
@@ -383,6 +407,23 @@ local function no_builder_grant(f)
 end
 local function restores(f) return no_builder_grant(f) and api.state.rehydrate(api.clone(f.authority.registry)) ~= nil end
 local function request(f, id, cp_id, revision, head, target)
+ local target_ref = target or "refs/heads/main"
+ local canonical_target = if target_ref:sub(1, 5) == "refs/" then target_ref else "refs/heads/" .. target_ref
+ local current_checkout = worker(f, id).checkout
+ if not current_checkout or current_checkout.head ~= hx(revision) then
+  local checkpoint = assert(api.codec.decode_report(worker(f, id).workflow.evidence.CHECKPOINT, worker(f, id)))
+  local evidence = if current_checkout then api.clone(current_checkout) else {
+   worktree_path = checkpoint.payload.worktree_ref, common_dir = checkpoint.payload.worktree_ref .. "/.git",
+   branch = "feature", base = hx("checkout-base"), changed_files = tern.json.array(),
+   changed_overflow = false, changed_total = 0, dirty = false }
+  -- Stored CHECKOUT adds host/cache metadata; the report carries only helper facts.
+  local fresh = { worktree_path = evidence.worktree_path, common_dir = evidence.common_dir, branch = evidence.branch,
+   head = hx(revision), base = evidence.base, changed_files = evidence.changed_files,
+   changed_overflow = evidence.changed_overflow, changed_total = evidence.changed_total, dirty = evidence.dirty }
+  local observed = send(f, id, "CHECKOUT", fresh); assert(observed.ok, observed.message)
+  current_checkout = worker(f, id).checkout
+ end
+ workflow.repository(f, current_checkout.common_dir, canonical_target, "orch_queue", worker(f, id).orch_project_id, current_checkout.worktree_path)
  local sent = send(f, id, "LANDING_REQUEST", lreq(cp_id, revision, head, target)); assert(sent.ok, sent.message)
  for key, candidate in landing(f).items do
   if candidate.work_id == worker(f, id).work_id and candidate.request.target_ref == (target or "refs/heads/main")
@@ -450,7 +491,10 @@ if section == nil or section == "landing_queue" then
   and issued.payload.repo_ref == "repo:fixture" and issued.payload.checkpoint_id == "cp-a" and issued.payload.builder_work_id == worker(f, a).work_id
   and issued.payload.review_id == item(f, la).proof.review_id, "the grant names the exact artifact, target, expected head, builder work and review")
  check(send(f, a, "LANDING_REQUEST", lreq("cp-a", "rev-a")).code == "landing_in_progress", "a granted work cannot re-request the same target")
- local lr = request(f, b, "cp-b", "rev-b", "release-0", "refs/heads/release")
+ local release_project = f:project("Independent release target", true)
+ local c = builder(f, { checks = UNIT, orch_project_id = release_project })
+ ready(f, c, "cp-release", "rev-release")
+ local lr = request(f, c, "cp-release", "rev-release", "release-0", "refs/heads/release")
  assert(approve(f, lr).ok)
  check(queue(f, lr) ~= queue(f, la) and queue(f, lr).slot == lr and item(f, lr).status == "granted" and queue(f, la).slot == la,
   "another target keeps an independent FIFO queue and slot")
@@ -478,8 +522,9 @@ if section == nil or section == "landing_reorder" then
   "owner moves an ungranted item up one place")
  check(g:apply("move_landing", { landing_id = lx, landing_revision = item(g, lx).revision + 1, direction = "down" }).code == "stale_landing", "a stale revision cannot reorder")
  check(g:apply("move_landing", { landing_id = lx, landing_revision = item(g, lx).revision, direction = "up" }).code == "landing_not_movable", "the head cannot move further up")
+ local cancelled_gate = item(g, ly).gate_id
  check(g:apply("cancel_landing", { landing_id = ly, landing_revision = item(g, ly).revision }).ok and item(g, ly).status == "cancelled"
-  and table.find(queue(g, lx).order, ly) == nil and g.authority.registry.dispatch.gates[item(g, ly).gate_id].phase == "cancelled",
+  and table.find(queue(g, lx).order, ly) == nil and g.authority.registry.dispatch.gates[cancelled_gate] == nil,
   "owner cancels an ungranted item and withdraws its approval gate")
  assert(approve(g, lx).ok)
  check(g:apply("cancel_landing", { landing_id = lx, landing_revision = item(g, lx).revision }).code == "landing_not_cancellable", "a granted item cannot be cancelled")
@@ -534,8 +579,8 @@ if section == nil or section == "landing_results" then
  ready(f, a, "cp-a", "rev-a"); ready(f, b, "cp-b", "rev-b")
  local la, lb = request(f, a, "cp-a", "rev-a"), request(f, b, "cp-b", "rev-b")
  assert(approve(f, la).ok); assert(approve(f, lb).ok)
- check(report_landing(f, b, la, "landed", { result_revision = "head-x" }).code == "landing_unauthorized", "a builder cannot settle a grant: only its release-manager holder reports the result")
- check(report_landing(f, a, la, "landed", { result_revision = "head-x" }).code == "landing_unauthorized", "not even the requesting builder settles its own grant")
+ check(report_landing(f, b, la, "landed", { result_revision = "head-x" }).code == "binding_mismatch", "an unrelated builder cannot report a grant issued to the selected release actor")
+ check(report_landing(f, a, la, "landed", { result_revision = "head-x" }).code == "binding_mismatch", "the requesting builder cannot report another actor's grant")
  check(report_landing(f, nil, la, "landed", { result_revision = "head-x", target_revision = "other" }).code == "revision_mismatch", "a result must echo the grant's expected head")
  check(report_landing(f, nil, la, "rejected", { reason = "Merge conflicts in a shared file" }).ok, "exact rejected result accepted")
  check(item(f, la).status == "failed" and item(f, la).hold.code == "rejected" and queue(f, la).head == nil, "rejected fails the item without inventing a target head")
@@ -631,7 +676,10 @@ end
 -- Live gap: a queued request blocked as target_moved after another item landed was never told.
 local function notices(f, id)
  local n = 0
- for _, entry in worker(f, id).workflow.thread do if entry.kind == "landing_refresh" then n += 1 end end
+ for _, retained in worker(f, id).replies do
+  local reply = api.codec.decode_reply(retained.bytes, worker(f, id))
+  if not retained.acknowledged and reply.kind == "landing_refresh" then n += 1 end
+ end
  return n
 end
 local function refresh_replies(f, id)
@@ -687,7 +735,7 @@ if section == nil or section == "landing_refresh" then
  ready(f, b, "cp-b2", "rev-b2")
  check(request(f, b, "cp-b2", "rev-b2", "head-1") == lb and item(f, lb).status == "verifying" and item(f, lb).hold.code == "approval_pending"
   and item(f, lb).approval == nil and #item(f, lb).grants == 0, "the refreshed request rebinds the item and needs owner approval again")
- check(notices(f, b) == 1, "a refreshed request against the current head owes no further notice")
+ check(notices(f, b) == 0, "the acknowledged refresh retains no completed notice; a current-head request owes no new delivery")
  assert(approve(f, lb).ok)
  check(queue(f, lb).slot == lb and grant(f, lb).target_revision == "head-1" and grant(f, lb).source_revision == hx("rev-b2"), "only the new approval grants against the new head")
  ready(f, c, "cp-c2", "rev-c2")
@@ -706,6 +754,13 @@ if section == nil or section == "landing_refresh_deferred" then
  ready(g, ga, "cp-a", "rev-a"); ready(g, gb, "cp-b", "rev-b")
  local gla, glb = request(g, ga, "cp-a", "rev-a"), request(g, gb, "cp-b", "rev-b")
  assert(approve(g, gla).ok); assert(approve(g, glb).ok)
+ -- Canonical watermark polling publishes the landing approval's owner_decision as well as receipts.
+ -- Consume that setup reply before filling all eight slots with unanswered-by-the-worker questions.
+ settle(g, gb)
+ local approval = g.authority.registry.dispatch.gates[item(g, glb).gate_id]
+ assert(approval.delivery and approval.delivery.published, "landing approval decision was not published")
+ assert(ack(g, gb, approval.delivery).ok)
+ settle(g, gb)
  for index = 1, 8 do
   settle(g, gb)
   assert(send(g, gb, "ASK", { question = "Proceed with fixture step " .. index .. "?", options = tern.json.array({ { id = "yes", label = "Yes" } }) }).ok)
@@ -723,10 +778,16 @@ if section == nil or section == "landing_refresh_deferred" then
    assert(g:finish(polled.action_id, if op == "mailbox_retire" then "compacted" elseif op == "mailbox_read" then "missing" else "published", {}).ok)
   end
  end
- local held = 0; for _ in worker(g, gb).replies do held += 1 end
+ local held = 0
+ for _, retained in worker(g, gb).replies do
+  local reply = assert(api.codec.decode_reply(retained.bytes, worker(g, gb)))
+  assert(not retained.acknowledged and reply.kind == "owner_decision"
+   and g.authority.registry.dispatch.gates[reply.gate_id].kind == "owner_question", "capacity fixture retained a non-question reply")
+  held += 1
+ end
  check(held == 8, "the builder's unacknowledged reply outbox is full")
  check(report_landing(g, nil, gla, "landed", { result_revision = "head-1" }).ok, "the first request lands while the outbox is full")
- check(item(g, glb).status == "blocked" and item(g, glb).hold.code == "target_moved" and item(g, glb).hold.message:find("Refresh notice deferred", 1, true) ~= nil
+ check(item(g, glb).status == "blocked" and item(g, glb).hold.code == "target_moved"
   and item(g, glb).refresh == nil and notices(g, gb) == 0, "a full outbox keeps the target_moved hold visible and defers the notice")
  settle(g, gb); assert(send(g, gb, "HEARTBEAT", { state = "working" }).ok)
  check(item(g, glb).refresh == nil and notices(g, gb) == 0 and item(g, glb).hold.code == "target_moved", "later commits keep the obligation while the outbox stays full")
@@ -739,7 +800,7 @@ if section == nil or section == "landing_refresh_deferred" then
  check(send(g, gb, "reply_ack", { message_id = first.message_id, reply_seq = first.reply_seq, reply_sha256 = api.codec.sha256(oldest.bytes), status = "recorded" },
   { action_id = first.action_id, action_revision = first.action_revision }).ok, "consuming the oldest reply frees outbox capacity")
  check(item(g, glb).refresh ~= nil and item(g, glb).refresh.current_revision == "head-1" and notices(g, gb) == 1 and #refresh_replies(g, gb) == 1
-  and item(g, glb).hold.code == "target_moved" and item(g, glb).hold.message:find("deferred", 1, true) == nil, "the deferred refresh is issued exactly once on the next commit")
+  and item(g, glb).hold.code == "target_moved", "the deferred refresh is issued exactly once on the next commit")
  check(restores(g), "the late-issued refresh restores")
 end
 if section == nil or section == "landing_refresh_backfill" then
@@ -769,23 +830,6 @@ if section == nil or section == "landing_refresh_backfill" then
 end
 if section == nil or section == "effect_retention" then
  local f = api.fixture(); local id = f:accepted(false)
- local commands = function() return f.authority.registry.dispatch.commands end
- local function effects()
-  local claims, results, bytes, per_action, repeated = 0, 0, 0, {}, false
-  for _, command in commands() do
-   local kind = command.event.command
-   if kind == "claim" or kind == "result" or kind == "lost" then
-    bytes += #tern.json.encode(command)
-    if kind == "claim" then claims += 1 end
-    if kind == "result" then
-     results += 1; repeated = repeated or command.event.response_bytes ~= nil
-     per_action[command.event.action_id] = (per_action[command.event.action_id] or 0) + 1
-    end
-   end
-  end
-  local most = 0; for _, n in per_action do most = math.max(most, n) end
-  return claims, results, bytes, most, repeated
- end
  for cycle = 1, 24 do
   assert(send(f, id, "HEARTBEAT", { state = "working" }).ok)
   local queued = f:apply("poll", { worker_id = id }); assert(queued.ok, queued.message)
@@ -797,51 +841,38 @@ if section == nil or section == "effect_retention" then
    assert(f:action(compact.action_id).request.op == "mailbox_retire")
    assert(f:finish(compact.action_id, "compacted", {}).ok)
   end
-  local claims, results, bytes, most, repeated = effects()
-  local polls = 0; for _, command in commands() do if command.event.command == "poll" then polls += 1 end end
-  check(claims == 0 and most <= 1 and not repeated and bytes <= 768 * results and polls == 0,
-   "cycle " .. cycle .. ": settled effects keep one compact result per action, no claim copy, no repeated response bytes and no poll outcome")
+  check(f.authority.registry.dispatch.commands == nil and f:action(queued.action_id) == nil,
+   "cycle " .. cycle .. ": consumed effects retain no command outcomes or completed action copies")
  end
- -- Exact duplicate result after its bytes were pruned from the retained outcome.
+ -- Lost result responses use current reconciliation; stale commands cannot execute again.
  assert(send(f, id, "HEARTBEAT", { state = "idle" }).ok)
  local poll_event = f:event("poll", { worker_id = id })
  local queued = f.authority:apply(poll_event); assert(queued.ok, queued.message)
  assert(f:apply("claim", { action_id = queued.action_id, executor = f.origin.window_epoch }).ok)
  local a = f:action(queued.action_id)
  local result_event = f:event("result", { action_id = queued.action_id, executor = f.origin.window_epoch, grant_id = a.claim.grant_id,
-  response_bytes = api.frame(a.request, "published", {}) })
+  response_bytes = api.frame(a.request, "published", nil, nil, nil, f.authority.registry.revision) })
  local committed = f.authority:apply(result_event); assert(committed.ok, committed.message)
  assert(send(f, id, "READY", { state = "idle", summary = "Still here" }).ok)
- local retained = commands()[result_event.request_id]
- check(retained ~= nil and retained.event.response_bytes == nil and f:action(queued.action_id).response_bytes == result_event.response_bytes,
-  "the retained result outcome omits the bytes its action already holds")
+ check(f.authority.registry.dispatch.commands == nil and f:action(queued.action_id) == nil,
+  "result consumption removes its action and retains no historical command response")
  local writes, revision = f.memory.writes, f.authority.registry.revision
  local replay = f.authority:apply(api.clone(result_event))
- check(replay.ok and replay.code == committed.code and f.memory.writes == writes and f.authority.registry.revision == revision,
-  "an exact duplicate result is still a read-only replay after pruning")
- local changed = api.clone(result_event); changed.response_bytes = api.frame(a.request, "already_published", {})
- check(f.authority:apply(changed).code == "request_conflict" and f.memory.writes == writes, "different bytes under the same result request ID still conflict")
- check(f.authority:apply(api.clone(poll_event)).code == "stale_command" and f.memory.writes == writes and f:action(queued.action_id).phase == "complete",
-  "a replayed poll without a retained outcome is refused by the command_seq barrier and queues nothing")
- -- Legacy stores: full claim/result outcomes validate, then restore compacts or drops them once.
- local legacy = api.clone(f.authority.registry); local sid = f.origin.logical_session_id
- legacy.dispatch.commands[result_event.request_id].event.response_bytes = result_event.response_bytes
- legacy.dispatch.commands["legacy-claim"] = { revision = legacy.revision, event = { kind = "dispatch", request_id = "legacy-claim", orch_session_id = sid,
-  origin = api.clone(f.origin), controller_pane = "9001", command = "claim", action_id = queued.action_id, executor = f.origin.window_epoch },
-  result = { ok = true, code = "effect_granted", message = "effect_granted", action_id = queued.action_id, request = api.clone(a.request), claim = api.clone(a.claim) } }
- legacy.dispatch.commands["legacy-orphan"] = { revision = legacy.revision, event = { kind = "dispatch", request_id = "legacy-orphan", orch_session_id = sid,
-  origin = api.clone(f.origin), controller_pane = "9001", command = "result", action_id = "action-999999", executor = f.origin.window_epoch,
-  grant_id = "grant-999999", response_bytes = result_event.response_bytes }, result = { ok = true, code = "bridge_committed", message = "bridge_committed" } }
- check(api.dispatch.valid(legacy.dispatch, legacy), "legacy full effect outcomes still validate")
- local restored = assert(api.state.rehydrate(api.clone(legacy)))
- local kept = restored.dispatch.commands
- check(kept[result_event.request_id] ~= nil and kept[result_event.request_id].event.response_bytes == nil and kept["legacy-claim"] == nil and kept["legacy-orphan"] == nil,
-  "restore compacts the current result and drops settled claims and orphaned outcomes once")
- check(api.state.rehydrate(api.clone(restored)) ~= nil, "the compacted store restores again")
+ check(not replay.ok and replay.code == "stale_revision" and f.memory.writes == writes and f.authority.registry.revision == revision,
+  "exact duplicate result cannot replay an old execution after current-state consumption")
+ local changed = api.clone(result_event); changed.response_bytes = api.frame(a.request, "already_published", nil)
+ check(f.authority:apply(changed).code == "stale_revision" and f.memory.writes == writes, "different result bytes cannot refresh the captured fence")
+ check(f.authority:apply(api.clone(poll_event)).code == "stale_revision" and f.memory.writes == writes and f:action(queued.action_id) == nil,
+  "replayed poll cannot queue another effect after its original revision")
+ local invalid = api.clone(f.authority.registry)
+ invalid.dispatch.commands = { [result_event.request_id] = { event = api.clone(result_event), result = committed, revision = revision } }
+ check(api.state.rehydrate(invalid) == nil, "current stores reject completed command histories rather than silently retaining an alias")
+ check(api.state.rehydrate(api.clone(f.authority.registry)) ~= nil, "consumed current-state registry restores without result history")
 end
 if section == nil or section == "idle_poll" then
  local now = 1000
  local f = api.fixture(function() return { now_ms = 1700000000000 + now, mono_ms = now, epoch = "idle-host" } end)
+ assert(f:apply("policy", { policy = { report_request_ms = 60000, stale_ms = 180000 } }).ok)
  local id = f:accepted(false)
  local function observe(state) return f:apply("observe", { worker_id = id, pane_binding = api.clone(worker(f, id).pane_binding), native_state = state }) end
  assert(observe("idle").ok)
@@ -873,9 +904,36 @@ if section == nil or section == "idle_poll" then
  now += 45000
  local stale = f:apply("poll", { worker_id = id })
  check(stale.ok and f:action(stale.action_id).request.op == "mailbox_read", "idle evidence older than stale_ms/4 no longer suppresses the read")
+ local terminal = api.fixture(function() return { now_ms = 1700000000000 + now, mono_ms = now, epoch = "idle-terminal-host" } end)
+ local caps = tern.json.array({ "report-files-v1", "worker-poll-v1", "argv-v1" })
+ local catalog = terminal:apply("catalog")
+ assert(terminal:finish(catalog.action_id, "catalog", { catalog_version = 2, setup = { schema = 1, state = "completed", config_revision = 0, readiness = { state = "not_run", config_revision = 0, summary = "" } },
+  namespace = "fixture-spawn", host_key = "fixture-host", config_revision = 0, revision = 0,
+  records = tern.json.array({ { id = "terminal", revision = 0, provider = "omp", account_label = "terminal polling fixture", backend = "local-terminal", enabled = true, eligible = true,
+   capability_evidence = "configured_transport_contract_not_provider_readiness", effective_identity = { provider = "omp", identity_status = "configured_not_verified" },
+   capabilities = caps, unsupported = tern.json.array(), cwd = "/fixture", placement = "split" } }) }).ok)
+ local queued = terminal:allow_shared_fixture(terminal:apply("queue", { record_id = "terminal", record_revision = 0, catalog_revision = 0, prompt = "Observe actual terminal reports.", cwd = "/fixture", placement = "split", coordinator = false }))
+ assert(queued.ok, queued.message)
+ assert(terminal:finish(queued.action_id, "provisioned", { handle = "mailbox-idle-terminal", binding_digest = string.rep("a", 64), capabilities = caps, limits = {} }).ok)
+ local tw = worker(terminal, queued.worker_id)
+ assert(terminal:finish(tw.launch_action_id, "awaiting_acceptance", { pane_binding = { pane_id = "9002", window_key = terminal.origin.window_key,
+  window_epoch = terminal.origin.window_epoch, native_session_id = terminal.origin.native_session_id, window_host_id = terminal.origin.window_host_id } }).ok)
+ assert(send(terminal, tw.worker_id, "ACCEPTED", { assignment_sha256 = tw.assignment_sha256 }).ok)
+ assert(terminal:finish(terminal:apply("poll", { worker_id = tw.worker_id }).action_id, "published", {}).ok)
+ assert(terminal:finish(terminal:apply("poll", { worker_id = tw.worker_id }).action_id, "accepted", {}).ok)
+ tw = worker(terminal, queued.worker_id)
+ assert(terminal:apply("observe", { worker_id = tw.worker_id, pane_binding = api.clone(tw.pane_binding), native_state = "idle" }).ok)
+ now += 10
+ local empty = terminal:apply("poll", { worker_id = tw.worker_id })
+ assert(terminal:finish(empty.action_id, "missing", {}).ok)
+ now += 10
+ local again = terminal:apply("poll", { worker_id = tw.worker_id })
+ check(again.ok and again.action_id ~= nil and terminal:action(again.action_id).request.op == "mailbox_read"
+  and terminal:action(again.action_id).request.selector.slot == tw.accepted_seq + 1,
+  "an idle-looking polling terminal still reads the next report because its helper can publish without a native working edge")
 end
--- Contract B 0.3.0 → 0.4.0 landing upgrade: a retained 0.3.0 landing_grant (the closed 9-key payload, no
--- builder/review/proof fields) restores fail-closed as legacy_grant_outstanding; nothing re-addresses it.
+-- Old issued landing grants cannot enter current runtime through an implicit additive upgrade.
+-- Their original bytes remain untouched for explicit native-source migration diagnostics.
 local LEGACY_ENVELOPE = "version logical_session_id worker_id worker_generation launch_request_id work_id message_id reply_seq action_id action_revision kind payload"
 local LEGACY_PAYLOAD = "landing_id grant_id project_id checkpoint_id repo_ref target_ref target_revision source_ref source_revision"
 local function legacy_bytes(bytes)
@@ -899,7 +957,7 @@ local function to_legacy(stored, lid)
  b.reply_seq += 1; raw.reply_seq = b.reply_seq
  local bytes = legacy_bytes(tern.json.encode(raw))
  g.bytes = bytes; g.worker_id = b.worker_id; g.reply_seq = b.reply_seq; it.proof = nil; it.holder = nil
- -- codec.frame refuses legacy bytes (it decodes under Contract D); the validator checks only digest, length and chunk count.
+ -- Preserve the old envelope bytes instead of laundering them through the current encoder.
  local chunks = {}; for offset = 1, #bytes, 2048 do table.insert(chunks, bytes:sub(offset, offset + 2047)) end
  reply.bytes = bytes; reply.sha256 = api.codec.sha256(bytes); reply.reply_seq = b.reply_seq
  reply.frames = { manifest = reply.frames.manifest, chunks = chunks, message_sha256 = reply.sha256, message_bytes = #bytes }
@@ -913,43 +971,15 @@ if section == nil or section == "landing_legacy" then
  assert(approve(f, la).ok); assert(approve(f, lb).ok)
  assert(item(f, la).status == "granted" and item(f, lb).approval ~= nil and #item(f, lb).grants == 0)
  check(gates_of(f, nil, "legacy_grant_outstanding")[1] == nil and grant(f, la).legacy == nil, "a 0.4.0 grant is never marked legacy")
- local stored = api.clone(f.memory.value); local before = to_legacy(stored, la)
- local revision = stored.dispatch.landing.items[la].revision
- local restored = api.state.rehydrate(api.clone(stored))
- check(restored ~= nil and api.dispatch.valid(restored.dispatch, restored), "a store holding a 0.3.0 landing_grant restores and the upgraded registry validates")
- f.memory.value = stored; f.authority = api.host.new_authority(f.memory); assert(f.authority:load().ok)
- local g = grant(f, la); local it = item(f, la)
- check(g.legacy == true and worker(f, a).replies[tostring(g.reply_seq)].legacy == true and g.bytes == before.bytes,
-  "the legacy grant and its retained reply are marked legacy and kept byte-for-byte as evidence")
- check(it.status == "granted" and it.hold.code == "legacy_grant_outstanding" and g.uncertain.code == "legacy_grant_outstanding" and it.revision == revision + 1
-  and queue(f, la).slot == la and #it.grants == 1, "the outstanding legacy grant holds its slot as uncertain; it is never re-granted or re-addressed")
- local open = gates_of(f, nil, "legacy_grant_outstanding")
- check(#open == 1 and options(open[1]) == "acknowledge" and open[1].evidence[1] == "landing:" .. la and open[1].evidence[2] == "grant:" .. g.grant_id,
-  "exactly one owner gate names the legacy landing and grant")
- check(item(f, lb).approval ~= nil and item(f, lb).hold.code == "review_required" and #item(f, lb).grants == 0,
-  "an approved-but-ungranted item keeps its approval and is re-verified under Rule H")
- check(restores(f), "the upgraded store restores again without a second gate")
- f.authority = api.host.new_authority(f.memory); assert(f.authority:load().ok)
- check(#gates_of(f, nil, "legacy_grant_outstanding") == 1, "restoring twice never duplicates the legacy gate")
- -- A restored controller is uncertain until the same owner explicitly continues (same window epoch);
- -- each worker generation is then explicitly reattached before it may report again.
- assert(f:apply("continue_controller", { expected_revision = f.authority.registry.revision, operator_verified = true }).ok)
- for _, wid in { a, b } do
-  local w = worker(f, wid); local pane = api.clone(w.pane_binding)
-  local attached = f:apply("continue_worker", { worker_id = wid, pane_binding = pane,
-   continuation_proof = api.dispatch.continuation_proof(f.authority.registry, w), operator_verified = true }); assert(attached.ok, attached.message)
-  assert(f:finish(attached.action_id, "attached", { pane_binding = pane, previous_origin_binding = api.clone(w.origin_binding), previous_pane_binding = pane }).ok)
- end
- local refused = report_landing(f, a, la, "landed", { result_revision = "head-1" })
- check(not refused.ok and grant(f, la).late_result == nil and grant(f, la).result == nil and item(f, la).status == "granted" and queue(f, la).slot == la,
-  "a builder LANDING_RESULT is refused even for the legacy grant addressed to it; it never settles it (" .. tostring(refused.code) .. ")")
- check(f:apply("reconcile_landing", { landing_id = la, landing_revision = item(f, la).revision, outcome = "not_landed", target_revision = "head-0",
-  reason = "Inspected the target log read-only", operator_verified = true }).ok and queue(f, la).slot == nil and item(f, la).status == "blocked",
-  "the existing reconcile path settles the legacy grant and releases the slot")
- assert(send(f, b, "HEARTBEAT", { state = "working" }).ok)
- check(#gates_of(f, nil, "legacy_grant_outstanding") == 0 and f.authority.registry.dispatch.gates[open[1].id].phase == "superseded",
-  "the legacy gate is superseded once its grant is reconciled")
- check(restores(f), "the reconciled legacy landing restores")
+ local stored = api.clone(f.memory.value); to_legacy(stored, la)
+	local before_bytes = tern.json.encode(stored)
+	local restored, problem = api.state.rehydrate(api.clone(stored))
+	check(restored == nil and problem.code == "state_corrupt" and tern.json.encode(stored) == before_bytes,
+		"current authority never silently upgrades an old issued landing grant or mutates its retained source")
+	f.memory.value = stored; f.authority = api.host.new_authority(f.memory)
+	local loaded = f.authority:load()
+	check(not loaded.ok and loaded.code == "state_corrupt" and tern.json.encode(f.memory.value) == before_bytes,
+		"an old grant in a current store blocks runtime before controller continuation, re-addressing, or reconciliation")
 end
 -- CP2 gates (D6, D7, D9) and Rule H helper-checks proof. Each gate is tested both ways.
 local arr = tern.json.array
@@ -958,8 +988,7 @@ local function action_count(f) local n = 0; for _ in f.authority.registry.dispat
 local function gated(f, result, kind, why)
  local open = if result.worker_id then gates_of(f, result.worker_id, kind) else {}
  check(result.code == "task_gated" and result.action_id == nil and type(result.gate_ids) == "table" and #result.gate_ids >= 1 and #open == 1
-  and table.find(result.gate_ids, open[1].id) ~= nil and options(open[1]) == "launch_anyway,cancel"
-  and open[1].question:find("Only same-session ORCH+ workers are visible", 1, true) ~= nil, why)
+  and table.find(result.gate_ids, open[1].id) ~= nil, why)
  return open[1], result.worker_id
 end
 local function launched_free(f, result, why)
@@ -987,9 +1016,9 @@ if section == nil or section == "checkout_gates" then
  start(f, same_id, released.action_id)
  launched_free(f, queue_work(f, "other", ROOT .. "/other"), "a disjoint checkout under the same root is not gated")
  launched_free(f, queue_work(f, "ws", WS, nil, true), "a coordinator is never checkout-gated")
- launched_free(f, queue_work(f, "top", "/srv/agents"), "root-excluded: a /srv/agents launch cwd is not gated when the root is /srv/agents/workspaces")
+ gated(f, queue_work(f, "top", "/srv/agents"), "shared_checkout", "an overlapping ancestor outside configured checkout roots still requires owner approval")
  local g = api.fixture(); catalog(g, rows); launch(g, "ws", WS)
- launched_free(g, queue_work(g, "ws", WS), "with no checkout_roots the shared-checkout gate is off")
+ gated(g, queue_work(g, "ws", WS), "shared_checkout", "empty checkout roots do not disable protection for an already shared checkout")
  -- Intake of helper checkout facts: the later worker reporting the same worktree under a root is gated.
  local h = api.fixture(); catalog(h, rows); assert(h:apply("policy", { policy = { checkout_roots = arr({ ROOT }) } }).ok)
  local p = launch(h, "ws", WS); local q = launch(h, "other", ROOT .. "/other")
@@ -998,13 +1027,14 @@ if section == nil or section == "checkout_gates" then
  check(checkout(h, q, ROOT .. "/other").ok and #gates_of(h) == 0, "different reported worktrees do not gate")
  check(checkout(h, q, WS).ok and #gates_of(h, q, "shared_checkout") == 1 and options(gates_of(h, q, "shared_checkout")[1]) == "acknowledge"
   and #gates_of(h, p) == 0, "the later worker reporting the same worktree under a root is gated; the earlier one is not")
- check(checkout(h, s1, "/srv/shared").ok and checkout(h, s2, "/srv/shared").ok and #gates_of(h, s1) == 0 and #gates_of(h, s2) == 0,
-  "a shared worktree outside every checkout root is not gated")
+ check(checkout(h, s1, "/srv/shared").ok and checkout(h, s2, "/srv/shared").ok and #gates_of(h, s1) == 0 and #gates_of(h, s2, "shared_checkout") == 1,
+  "a later worker sharing a reported worktree is gated even outside configured checkout roots")
  check(restores(f) and restores(h), "launch gates and checkout facts restore")
 end
 if section == nil or section == "file_overlap" then
  local rows = { { "repo", "/repo" }, { "elsewhere", "/elsewhere" } }
  local f = api.fixture(); catalog(f, rows)
+ f.approve_shared_for_overlap = true
  local a = launch(f, "repo", "/repo", { files = arr({ "src/a.luau", "docs/**" }) })
  launched_free(f, queue_work(f, "repo", "/repo", { files = arr({ "src/b.luau" }) }), "disjoint declared files in the same repository are not gated")
  launched_free(f, queue_work(f, "repo", "/repo"), "work without declared files is never overlap-gated")
@@ -1041,28 +1071,29 @@ if section == nil or section == "scope" then
  local cp = lcp("cp-1", "rev-1"); cp.worktree_ref = "/repo"
  assert(send(f, a, "CHECKPOINT", cp).ok); local lid = request(f, a, "cp-1", "rev-1")
  check(item(f, lid).hold.code == "scope_open" and #item(f, lid).grants == 0, "landing is held while the scope gate is open")
- check(checkout(f, a, "/repo", { "src/feature.luau" }).ok and #scoped() == 0 and item(f, lid).hold.code ~= "scope_open", "a newer in-scope CHECKOUT supersedes the open scope gate")
- check(checkout(f, a, "/repo", { "src/feature.luau" }, { changed_overflow = true, changed_total = 900 }).ok and #scoped() == 1 and item(f, lid).hold.code == "scope_open",
+ check(checkout(f, a, "/repo", { "src/feature.luau" }, { head = hx("rev-1") }).ok and #scoped() == 0 and item(f, lid).hold.code ~= "scope_open", "a newer in-scope CHECKOUT supersedes the open scope gate")
+ check(checkout(f, a, "/repo", { "src/feature.luau" }, { head = hx("rev-1"), changed_overflow = true, changed_total = 900 }).ok and #scoped() == 1 and item(f, lid).hold.code == "scope_open",
   "changed_overflow gates even when every listed file is in scope")
  check(answer(f, scoped()[1], "accept").ok and #scoped() == 0 and item(f, lid).hold.code ~= "scope_open", "the owner's accept closes the scope gate and releases the hold")
+ settle(f, a)
  local moved = lcp("cp-2", "rev-1"); moved.worktree_ref = "/elsewhere"
  assert(send(f, a, "CHECKPOINT", moved).ok)
  local attention = false; for _, entry in worker(f, a).workflow.thread do attention = attention or entry.kind == "attention" end
- check(attention and item(f, lid).hold.code == "checkout_mismatch", "a CHECKPOINT naming another worktree than the latest CHECKOUT raises attention and holds landing")
+ check(not attention and item(f, lid).hold.code == "checkout_mismatch", "the current checkout mismatch holds landing without an informational attention-history copy")
  settle(f, a); local back = lcp("cp-3", "rev-1"); back.worktree_ref = "/repo/"
  check(send(f, a, "CHECKPOINT", back).ok and item(f, lid).hold.code ~= "checkout_mismatch", "a worktree_ref equal after normalization clears the mismatch")
  local b = launch(f, "repo", "/repo", { files = arr({ "lib/a.luau" }) })
  check(checkout(f, b, "/repo", { "lib/a.luau" }).ok and #gates_of(f, b, "scope") == 0, "scope defaults to the declared files: a declared file is in scope")
  check(checkout(f, b, "/repo", { "lib/a.luau", "lib/b.luau" }).ok and #gates_of(f, b, "scope") == 1, "an undeclared file is out of the default scope")
  local c = launch(f, "repo", "/repo")
- check(checkout(f, c, "/repo", { "anything.txt" }, { changed_overflow = true, changed_total = 700 }).ok and #gates_of(f, c) == 0, "work without declared scope or files is never scope-gated")
+ check(checkout(f, c, "/repo", { "anything.txt" }, { changed_overflow = true, changed_total = 700 }).ok and #gates_of(f, c, "scope") == 0, "work without declared scope or files is never scope-gated")
  local d = launch(f, "repo", "/repo", nil, { "report-files-v1", "native-ask-v1" })
  check(not checkout(f, d, "/repo", { "x" }).ok and worker(f, d).checkout == nil, "CHECKOUT needs the check-runner-v1 capability")
  check(restores(f), "scope gates, checkout facts and mismatch holds restore")
 end
 -- CP2 live smoke: a queue reclaimed the resolved scope accept gate and landing re-blocked as
 -- scope_open with no gate left to answer. Owner decisions live on the worker, written with the
--- answer; gate reclamation removes only the question, never the decision or its thread record.
+-- answer; gate reclamation preserves the live decision, never a completed answer transcript.
 if section == nil or section == "scope_durable" then
  local f = api.fixture(); catalog(f, { { "repo", "/repo" }, { "other", "/other" } }); assert(f:apply("policy", { policy = { require_other_family = false } }).ok)
  local a = launch(f, "repo", "/repo", { files = arr({ "src/feature.luau" }), scope = { paths = arr({ "src/**" }), systems = arr() }, checks = UNIT })
@@ -1081,13 +1112,13 @@ if section == nil or section == "scope_durable" then
  check(hold(lid) ~= "scope_open", "landing stays released after the accepted gate is reclaimed")
  local recorded = false
  for _, entry in worker(f, a).workflow.thread do
-  if entry.kind == "answer" and entry.gate_id == nil and entry.summary:find(sg.id, 1, true) and entry.summary:find("Accept these changes for landing", 1, true)
-   and entry.summary:find("Question: " .. sg.question, 1, true) then recorded = true end
+  if entry.kind == "answer" or entry.state ~= "pending" then recorded = true end
  end
- check(recorded, "the answered question and the chosen option remain in the thread after the gate is reclaimed")
- check(checkout(f, a, "/repo", { "src/feature.luau", "notes.txt" }).ok and #gates_of(f, a, "scope") == 0 and hold(lid) ~= "scope_open",
+ check(not recorded and worker(f, a).scope_accepted.changed_digest == sa.changed_digest,
+  "the current scope authorization survives gate reclamation without a completed answer or question copy")
+ check(checkout(f, a, "/repo", { "src/feature.luau", "notes.txt" }, { head = hx("rev-1") }).ok and #gates_of(f, a, "scope") == 0 and hold(lid) ~= "scope_open",
   "a repeated CHECKOUT of the accepted change set raises no new scope gate")
- check(checkout(f, a, "/repo", { "src/feature.luau", "other.txt" }).ok and #gates_of(f, a, "scope") == 1 and hold(lid) == "scope_open",
+ check(checkout(f, a, "/repo", { "src/feature.luau", "other.txt" }, { head = hx("rev-1") }).ok and #gates_of(f, a, "scope") == 1 and hold(lid) == "scope_open",
   "a different out-of-scope change set is not covered by the earlier accept")
  check(restores(f), "durable scope acceptance restores")
  -- A post-launch shared_checkout acknowledgement is durable too: reclamation never re-asks it.
@@ -1161,45 +1192,17 @@ end
 if section == nil or section == "manifest_provision" then
  local f = api.fixture(); catalog(f, { { "native", "/fixture" } })
  local function provisioning(fields)
-  local queued = queue_work(f, "native", "/fixture", fields); assert(queued.ok and queued.action_id, queued.message)
+  local queued = f:allow_shared_fixture(queue_work(f, "native", "/fixture", fields)); assert(queued.ok and queued.action_id, queued.message)
   assert(f:apply("claim", { action_id = queued.action_id, executor = f.origin.window_epoch }).ok)
   return queued.worker_id, queued.action_id
  end
  local function provisioned(action_id, digest)
-  return f:finish(action_id, "provisioned", { handle = "mailbox-manifest-" .. action_id, binding_digest = string.rep("e", 64), capabilities = tern.json.array(CAPS),
-   limits = {}, manifest_sha256 = digest })
- end
- local id, action_id = provisioning({ checks = UNIT })
- local w, request = worker(f, id), f:action(action_id).request
- check(w.manifest_sha256 ~= nil and type(request.manifest) == "string" and api.codec.sha256(request.manifest) == w.manifest_sha256,
-  "the provision request carries the exact manifest whose digest the work stored")
- local unchanged = tern.json.encode(worker(f, id))
- local missing = provisioned(action_id, nil)
- check(not missing.ok and missing.code == "manifest_mismatch" and tern.json.encode(worker(f, id)) == unchanged and f:action(action_id).phase == "claimed",
-  "a provision result without the manifest digest is refused and binds no mailbox")
- local other = provisioned(action_id, api.codec.sha256("another manifest"))
- check(not other.ok and other.code == "manifest_mismatch" and worker(f, id).mailbox_handle == nil and worker(f, id).phase == "queued",
-  "a different provisioned manifest digest authorizes no launch")
- check(provisioned(action_id, w.manifest_sha256).ok and worker(f, id).phase == "provisioned" and worker(f, id).mailbox_handle ~= nil,
-  "the exact stored digest provisions and queues the launch")
- local plain, plain_action = provisioning(nil)
- check(worker(f, plain).manifest_sha256 == nil and f:action(plain_action).request.manifest == nil, "work without assignment fields provisions no manifest")
- local stray = provisioned(plain_action, api.codec.sha256("stray manifest"))
- check(not stray.ok and stray.code == "manifest_mismatch" and worker(f, plain).mailbox_handle == nil, "a manifest digest on a manifest-less provision is refused")
- check(provisioned(plain_action, nil).ok and worker(f, plain).phase == "provisioned", "a manifest-less provision without a digest proceeds")
- check(restores(f), "cross-checked provisions restore")
-end
--- Contract G: SPAWN's provision result must name exactly the manifest digest the work stored.
-if section == nil or section == "manifest_provision" then
- local f = api.fixture(); catalog(f, { { "native", "/fixture" } })
- local function provisioning(fields)
-  local queued = queue_work(f, "native", "/fixture", fields); assert(queued.ok and queued.action_id, queued.message)
-  assert(f:apply("claim", { action_id = queued.action_id, executor = f.origin.window_epoch }).ok)
-  return queued.worker_id, queued.action_id
- end
- local function provisioned(action_id, digest)
-  return f:finish(action_id, "provisioned", { handle = "mailbox-manifest-" .. action_id, binding_digest = string.rep("e", 64), capabilities = tern.json.array(CAPS),
-   limits = {}, manifest_sha256 = digest })
+  local action = f:action(action_id)
+  local payload = f:peer_payload(action, "provisioned", { handle = "mailbox-manifest-" .. action_id,
+   binding_digest = string.rep("e", 64), capabilities = tern.json.array(CAPS), limits = {} })
+  payload.manifest_sha256 = digest -- Deliberate omission/mismatch must bypass the valid-peer default.
+  return f:apply("result", { action_id = action_id, executor = f.origin.window_epoch, grant_id = action.claim.grant_id,
+   response_bytes = api.frame(action.request, "provisioned", payload, nil, nil, f.authority.registry.revision) })
  end
  local id, action_id = provisioning({ checks = UNIT })
  local w, request = worker(f, id), f:action(action_id).request

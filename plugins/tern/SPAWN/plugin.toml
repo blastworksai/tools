@@ -19,3 +19,9 @@ id = "dispatch"
 title = "SPAWN dispatch"
 icon = "sparkle"
 palette = false
+
+[[blocks]]
+id = "updater-recovery"
+title = "Updater legacy recovery"
+icon = "download"
+palette = false

@@ -1,0 +1,273 @@
+-- Real HOST blocks and canonical reducers; no production KV, native effects or copied host logic.
+local root, section = ...
+assert(section == nil or table.find({ "host_retirement", "host_stale_result", "host_withdrawal", "project_history" }, section), "unknown reclamation section")
+local runtime, environment = tern, getfenv()
+local fixture_chunk = assert(loadstring(runtime.fs.read(root .. "/tests/dispatch.luau"), "reclamation-fixture"))
+setfenv(fixture_chunk, setmetatable({}, { __index = environment }))
+local shared = fixture_chunk(root, "fixture")
+local clone, codec = shared.clone, shared.codec
+local checks = 0
+local function check(ok, message) assert(ok, message); checks += 1 end
+local function node(tree, key)
+	if type(tree) ~= "table" then return nil end
+	if tree.p and tree.p.key == key then return tree end
+	for _, child in tree.c or {} do local found = node(child, key); if found then return found end end
+	return nil
+end
+local function fixture()
+	local f = shared.fixture()
+	local fake, definition = table.clone(runtime), nil
+	local contexts, views, modules = {}, {}, {}
+	local channel_files, channel_dirs = {}, {}
+	fake.plugin = table.clone(runtime.plugin); fake.plugin.data = "/fixture/plugins/orchplus-reclamation"
+	fake.fs = {
+		exists = function(path) return channel_files[path] ~= nil or channel_dirs[path] == true end,
+		mkdir = function(path) channel_dirs[path] = true end,
+		read = function(path, maximum)
+			local bytes = assert(channel_files[path], "missing fixture file")
+			assert(type(maximum) == "number" and #bytes <= maximum, "carrier reads are bounded")
+			return bytes
+		end,
+		write = function(path, bytes) channel_files[path] = bytes end,
+		remove = function(path) channel_files[path] = nil; channel_dirs[path] = nil end,
+		list = function() error("carrier must not list directories") end,
+	}
+	fake.pane = { list = function() return {
+		{ pane = 42, program = "orchplus.orchestrator", title = "Reclamation owner" },
+		{ pane = 43, program = "orchplus.orchestrator", title = "Reclamation observer" },
+		{ pane = 44, program = "orchplus.orchestrator", title = "Reclamation creation observer" },
+	} end }
+	fake.kv = { get = f.memory.get, set = function(key, value)
+		f.memory.set(key, value)
+		if key == "authority_state" then f.authority.registry = f.memory.value end
+	end }
+	fake.block = { define = function(id, value)
+		if id == "orchestrator" then
+			assert(definition == nil, "orchestrator block must be defined once")
+			definition = value
+		end
+	end }
+	fake.on = function() end
+	fake.timer = function() return { cancel = function() end } end
+	local function load(name, base)
+		name = (base or "") .. name:gsub("^%./", "")
+		if modules[name] then return modules[name] end
+		local chunk = assert(loadstring(runtime.fs.read(root .. "/" .. name .. ".luau"), name))
+		setfenv(chunk, setmetatable({ tern = fake, require = function(path) return load(path, name:match("^(.*/)")) end }, { __index = environment }))
+		modules[name] = chunk(); return modules[name]
+	end
+	load("host")
+	assert(definition and type(definition.init) == "function" and type(definition.view) == "function"
+		and type(definition.event) == "function", "actual orchplus.orchestrator lifecycle is required")
+	for _, pane in { 42, 43, 44 } do
+		contexts[pane] = { pane = pane, render = function() if views[pane] then definition.view(views[pane], contexts[pane]) end end }
+		views[pane] = definition.init(contexts[pane], {}, { pane = pane, alias_nonce = if pane == 42 then f.origin.alias_nonce else "other-view",
+			orch_session_id = f.origin.logical_session_id, established = true })
+	end
+	local proxy = { registry = f.memory.value }
+	function proxy:apply(input)
+		local view = views[42]
+		local response
+		if input.kind == "dispatch" then
+			local effect = table.find({ "claim", "result", "spawn_claimed", "lost" }, input.command) ~= nil
+			local control = table.find({ "bridge_control", "bridge_result", "bridge_observe" }, input.command) ~= nil
+			definition.event(view, { ev = "action", act = if effect then "dispatch-command" else "dispatch-operator-command", value = runtime.json.encode(input) }, contexts[42])
+			response = if control then view.dispatch_control_result elseif effect then view.dispatch_result else view.dispatch_command_result
+		else
+			definition.event(view, { ev = "action", act = "authority-command", value = runtime.json.encode({ source_nonce = f.origin.alias_nonce,
+				origin = f.origin, event = input }) }, contexts[42])
+			response = view.dispatch_background_result
+		end
+		assert(response and response.request_id == input.request_id, "actual HOST callback must return this request's correlated result, not an earlier operator receipt")
+		return response
+	end
+	f.authority = proxy
+	-- Reload makes the owner uncertain; the actual owner command establishes this consumer.
+	local continued = f:apply("continue_controller", { expected_revision = f.authority.registry.revision, operator_verified = true })
+	assert(continued.ok, runtime.json.encode(continued))
+	assert(f:control("reconcile_session").ok)
+	function f:attest_stopped()
+		local view, cx = views[42], contexts[42]
+		definition.event(view, { ev = "action", act = "assistance-result", value = runtime.json.encode({
+			source_nonce = self.origin.alias_nonce, orch_session_id = self.origin.logical_session_id,
+			authority_namespace = self.authority.registry.authority_namespace, expected_revision = self.authority.registry.revision,
+			target = "controller", owner_id = self.origin.owner_id, generation = self.origin.owner_generation,
+			observation = "unavailable", message = "Synthetic owner stopped; no native executor was created",
+		}) }, cx)
+		-- Stopped-owner attestation is an explicit recovery operation, never an ordinary admission control.
+		for _, kind in { "advanced-toggle", "attest", "attest-confirm", "advanced-toggle" } do
+			definition.view(view, cx)
+			local key
+			for candidate, entry in view.actions do
+				if entry.kind == kind then key = candidate; break end
+			end
+			assert(key, "missing actual HOST control " .. kind .. ": " .. tostring(view.notice))
+			definition.event(view, { ev = "action", act = "control", value = key }, cx)
+		end
+		local owner = self.authority.registry.sessions[self.origin.logical_session_id].controller
+		assert(owner.owner_active == false and owner.pending_executors == 0
+			and owner.pending_executor_evidence == "operator_attested", tostring(view.notice))
+	end
+	function f:scope(action_id, pane) return node(definition.view(views[pane or 42], contexts[pane or 42]).main, "dispatch-action-" .. action_id) end
+	function f:retained()
+		local count = 0
+		for _, view in views do for _ in view.scoped_results or {} do count += 1 end end
+		return count
+	end
+	function f:deliver(action_id, bytes, envelope)
+		local a = assert(self:action(action_id))
+		local event = { ev = "action", act = "dispatch-result/" .. a.claim.grant_id .. "/" .. self.origin.window_epoch,
+			value = envelope or runtime.json.encode({ authority_namespace = self.authority.registry.authority_namespace,
+				expected_revision = self.authority.registry.revision, response_bytes = bytes }) }
+		definition.event(views[42], event, contexts[42])
+		return clone(views[42].dispatch_result), event
+	end
+	function f:catalog_delivery()
+		local queued = self:apply("catalog"); assert(queued.ok, queued.message)
+		local claimed = self:apply("claim", { action_id = queued.action_id, executor = self.origin.window_epoch }); assert(claimed.ok, claimed.message)
+		local request = self:action(queued.action_id).request
+		local bytes = shared.frame(request, "rejected", nil, { code = "storage_error", message = "Retained fixture failure; no native effect" })
+		return queued.action_id, bytes
+	end
+	function f:redraw() definition.view(views[43], contexts[43]) end
+	f.views = views
+	function f:create(pane, name)
+		definition.event(views[pane], { ev = "action", act = "orchestration-create", value = runtime.json.encode({
+			source_nonce = views[pane].alias_nonce, request_id = "create-" .. name, name = name,
+			authority_namespace = self.authority.registry.authority_namespace, expected_revision = self.authority.registry.revision,
+		}) }, contexts[pane])
+		return assert(views[pane].orchestration_result)
+	end
+	function f:release(input)
+		input.source_nonce = self.origin.alias_nonce
+		definition.event(views[42], { ev = "action", act = "dispatch-release-scope", value = runtime.json.encode(input) }, contexts[42])
+	end
+	return f
+end
+if section == nil or section == "host_stale_result" then
+	local f = fixture()
+	local id, bytes = f:catalog_delivery()
+	local original = runtime.json.encode({ authority_namespace = f.authority.registry.authority_namespace,
+		expected_revision = f.authority.registry.revision, response_bytes = bytes })
+	assert(f:apply("pause").ok)
+	local writes = f.memory.writes
+	local refused, event = f:deliver(id, bytes, original)
+	check(not refused.ok and refused.code == "stale_revision" and f.memory.writes == writes and f:action(id).phase == "claimed",
+		"actual HOST positively refuses the captured stale result without consuming its grant")
+	local replay = f:deliver(id, bytes, original)
+	check(replay.request_id == refused.request_id and not replay.ok and event.value == original and f.memory.writes == writes,
+		"exact immutable replay preserves refusal identity and writes nothing")
+	local committed = f:deliver(id, bytes)
+	check(committed.ok and committed.request_id ~= refused.request_id and f:action(id) == nil and f:scope(id) ~= nil,
+		"a distinct current observation of the same retained bytes commits under a distinct HOST request identity")
+end
+if section == nil or section == "host_retirement" then
+	local f = fixture()
+	local id, bytes = f:catalog_delivery(); assert(f:deliver(id, bytes).ok)
+	local writes = f.memory.writes
+	for _ = 1, 12 do f:redraw() end
+	check(f:scope(id) ~= nil and f.memory.writes == writes, "lost-ACK receipt-only action survives unrelated redraws without durable history")
+	assert(f:apply("pause").ok); assert(f:apply("resume").ok)
+	check(f:scope(id) ~= nil, "ordinary same-consumer commands never retire a delivery receipt")
+	local stale = f:event("continue_controller", { operator_verified = true })
+	stale.origin = clone(f.origin); stale.origin.window_epoch = "refused-consumer"
+	assert(f:apply("pause").ok)
+	check(f.authority:apply(stale).code == "stale_revision" and f:scope(id) ~= nil,
+		"a refused continuation is not retirement proof and cannot erase a live lost-ACK receipt")
+	assert(f:apply("continue_controller", { expected_revision = f.authority.registry.revision, operator_verified = true }).ok)
+	check(f:scope(id) ~= nil, "continuing the same native incarnation does not invent consumer retirement")
+	f.origin.window_epoch = "continued-consumer"
+	assert(f:apply("continue_controller", { expected_revision = f.authority.registry.revision, operator_verified = true }).ok)
+	f:redraw()
+	check(f:scope(id) == nil and f:retained() == 0, "actual HOST removes receipt-only action nodes and current bookkeeping after consumer continuation, including other-view redraws")
+	local closed = fixture()
+	local closed_id, closed_bytes = closed:catalog_delivery(); assert(closed:deliver(closed_id, closed_bytes).ok)
+	local sid, close_id = closed.origin.logical_session_id, "fixture-confirmed-close"
+	local survivor = closed:create(44, "Surviving creation"); assert(survivor.ok)
+	local survivor_session = runtime.json.encode(closed.authority.registry.sessions[survivor.orch_session_id])
+	local creation = { ok = true, orch_session_id = sid, request_id = "closed-creation" }
+	closed.views[42].orchestration_result = clone(creation)
+	closed.views[43].orchestration_result = clone(creation)
+	closed.views[43].orch_session_id = survivor.orch_session_id
+	local function begin_close()
+		return closed.authority:apply(closed:state_event("begin_close", { close_id = close_id,
+			control_origin = { kind = "closing", binding = clone(closed.origin), controller_pane = "9001", close_id = close_id } }))
+	end
+	local unconfirmed = begin_close()
+	check(not unconfirmed.ok and unconfirmed.code == "session_busy" and closed:scope(closed_id) ~= nil,
+		"unconfirmed restored executor evidence cannot close a session or retire its receipt")
+	closed:attest_stopped()
+	local begun = begin_close(); assert(begun.ok, runtime.json.encode(begun))
+	check(closed:scope(closed_id) ~= nil, "begin_close is not consumer retirement or proof of confirmed closure")
+	check(closed.views[42].orchestration_result ~= nil and closed.views[43].orchestration_result ~= nil,
+		"pending close preserves creation outcomes in selected and elsewhere-selected views")
+	assert(closed.authority:apply(closed:state_event("release_controller", { expected_owner_id = closed.origin.owner_id,
+		expected_generation = closed.origin.owner_generation })).ok)
+	assert(closed:control("close_session").ok)
+	assert(closed.authority:apply(closed:state_event("confirm_close", { close_id = close_id })).ok)
+	check(closed.authority.registry.sessions[sid] == nil and closed:scope(closed_id) == nil and closed:retained() == 0,
+		"actual HOST confirmed close removes receipt-only action nodes without a durable tombstone")
+	check(closed.views[42].orchestration_result == nil and closed.views[43].orchestration_result == nil,
+		"confirmed removal clears only that session's creation outcome across all view selections")
+	check(closed.views[44].orchestration_result == survivor
+		and runtime.json.encode(closed.authority.registry.sessions[survivor.orch_session_id]) == survivor_session,
+		"confirmed removal preserves unrelated creation results and current session ownership")
+end
+if section == nil or section == "host_withdrawal" then
+	local f = fixture(); f:catalog(0)
+	local queued = f:queue(false); assert(queued.ok)
+	assert(f:apply("pause").ok)
+	local refusal = f:apply("claim", { action_id = queued.action_id, executor = f.origin.window_epoch })
+	check(not refusal.ok and f:action(queued.action_id).claim == nil, "paused claim positively refuses before native issuance")
+	assert(f:apply("resume").ok)
+	local cancelled = f:apply("cancel_work", { worker_id = queued.worker_id }); assert(cancelled.ok, cancelled.message)
+	local scoped = assert(f:scope(queued.action_id), "withdrawn held scope owes its watching consumer a receipt")
+	local span = scoped.p.spans[1]
+	local machine = runtime.json.decode(if type(span) == "string" then span else span.t)
+	check(machine.action == nil and machine.receipt.worker_id == queued.worker_id,
+		"successful withdrawal renders a receipt-only scope for its exact grantless held worker")
+	f:release({ action_id = queued.action_id, worker_id = "other-worker", withdrawal_request_id = cancelled.request_id })
+	check(f:scope(queued.action_id) ~= nil, "unrelated withdrawal acknowledgement cannot erase a held consumer scope")
+	f:release({ action_id = queued.action_id, worker_id = queued.worker_id, withdrawal_request_id = cancelled.request_id })
+	check(f:scope(queued.action_id) == nil, "exact withdrawal consumption releases the ephemeral receipt without a tombstone")
+end
+if section == nil or section == "project_history" then
+	local f = shared.fixture(nil, { passive = true })
+	local first
+	for i = 1, 103 do
+		local created = f:apply("new_project", { name = "Completed project " .. tostring(i),
+			source = { kind = "manual", ref = "source:" .. tostring(i), revision = "observed-" .. tostring(i) } })
+		assert(created.ok, created.message); first = first or created.orch_project_id
+		local project = f.authority.registry.dispatch.projects[created.orch_project_id]
+		assert(f:apply("project_finish", { orch_project_id = project.orch_project_id, project_revision = project.revision,
+			result = "Owner finished the conversation-only work." }).ok)
+	end
+	local history = f.authority.registry.dispatch.finished_projects
+	check(#history == 100 and history[1].name == "Completed project 4" and history[100].name == "Completed project 103",
+		"history independently retains the newest hundred summaries without evicting authority")
+	local bounded = #runtime.json.encode(history) <= 512 * 1024
+	for _, summary in history do bounded = bounded and #runtime.json.encode(summary) <= 4096 end
+	check(bounded and f.authority.registry.dispatch.projects[first] ~= nil,
+		"presentation limits do not prune the corresponding live graph")
+	local source = clone(history[1].source)
+	local reopened = f:apply("project_reopen", { summary_index = 1 }); assert(reopened.ok, reopened.message)
+	local project = f.authority.registry.dispatch.projects[reopened.orch_project_id]
+	check(not project.started and runtime.json.encode(project.sources[1]) == runtime.json.encode(source)
+		and next(f.authority.registry.dispatch.workers) == nil and next(f.authority.registry.dispatch.actions) == nil,
+		"reopening copies only the source into a fresh unstarted project")
+	local detached = clone(f.authority.registry)
+	shared.dispatch.reclaim_session(detached, f.origin.logical_session_id)
+	check(#detached.dispatch.finished_projects == 100 and next(detached.dispatch.projects) == nil,
+		"session graph reclamation keeps independent finished summaries")
+	local before = runtime.json.encode(f.authority.registry.dispatch.projects)
+	assert(f:apply("delete_history").ok)
+	check(#f.authority.registry.dispatch.finished_projects == 0
+		and runtime.json.encode(f.authority.registry.dispatch.projects) == before, "deleting history leaves project authority unchanged")
+	local malformed = clone(f.authority.registry)
+	malformed.dispatch.projects[reopened.orch_project_id].associations = { bad = 1 }
+	local safe, valid = pcall(shared.state.valid, malformed)
+	check(safe and valid == false, "malformed association values are rejected without indexing untrusted scalars")
+	check(shared.state.rehydrate(clone(f.authority.registry)) ~= nil, "bounded history and reopened source restore")
+end
+
+return "reclamation/" .. tostring(section or "all") .. ": " .. tostring(checks) .. " checks passed"

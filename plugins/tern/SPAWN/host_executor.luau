@@ -50,7 +50,7 @@ local function powershell_invocation(words: any): string
 		.. "} catch { [Console]::Error.WriteLine($_.Exception.Message); return 1 } }))"
 end
 local function shell_kind(program: string, host_os: string): (string?, string?)
-	local shell = string.lower(program:gsub("\\", "/")):match("([^/]+)$") or ""
+	local shell = string.lower((program:gsub("\\", "/"))):match("([^/]+)$") or ""
 	if shell == "pwsh" or shell == "pwsh.exe" or shell == "powershell" or shell == "powershell.exe" then return "powershell", nil end
 	if host_os ~= "windows" and (shell == "bash" or shell == "zsh" or shell == "sh" or shell == "dash" or shell == "ksh") then return "posix", nil end
 	return nil, "The execution host's shell is not verified for safe invocation (" .. program .. "); review its shell settings"
@@ -453,6 +453,18 @@ function Executor.attach(binding)
 	if jobs == nil then attached[binding.session_key] = nil; notify(binding, err); return end
 	attached[binding.session_key] = true
 	for _, job in ipairs(jobs) do
+		-- Native-default setup is claimed/begun/bound through the same authority
+		-- by the window native API. It never enters shell-ticket interception,
+		-- command input, or executor recovery, including after plugin reload.
+		if job.backend == "setup-default" then
+			local expiry_key = key(binding, job.id)
+			if (job.stage == "admitted" or job.stage == "claimed") and not expiring[expiry_key] then
+				expiring[expiry_key] = true
+				local delay = math.max(1, job.admitted_at + Authority.ADMISSION_SECONDS + 1 - os.time())
+				tern.timer(delay * 1000, function() expiring[expiry_key] = nil; notify(binding) end)
+			end
+			continue
+		end
 		-- Managed reservations have no ticket and cannot enter this executor.
 		if type(job.ticket) ~= "string" then continue end
 		if job.stage == "admitted" and tracks[key(binding, job.id)] == nil then

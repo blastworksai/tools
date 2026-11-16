@@ -87,7 +87,7 @@ function M.verify_landing_proof(input: any): (any?, any?)
 	end
 	if input.require_other_family then
 		if input.builder_family == nil or review.reviewer_family == nil then
-			return nil, failure("family_unknown", "Declare both provider families in Config before cross-family proof can hold.")
+			return nil, failure("family_unknown", "Declare both underlying provider families in SPAWN before cross-family proof can hold.")
 		end
 		if input.builder_family == review.reviewer_family then
 			return nil, failure("family_same", "Cross-family review requires a different declared provider family.")
@@ -97,13 +97,15 @@ function M.verify_landing_proof(input: any): (any?, any?)
 		artifact_revision = revision, review_id = review.review_id, check_refs = refs }, nil
 end
 
--- D5 signer rule, the release-manager half of Proof rule H (Contract H): the landing grant's
--- recipient record must differ from the builder's record and from the approving reviewer's record.
--- input = { release_manager_record_id, builder_record_id?, reviewer_record_id? }. Pure; the reducer
--- decides which release-manager generation is live and never runs git.
+-- The reviewer is never a merge actor. Worker mode explicitly authorizes the existing builder;
+-- selected-record mode retains the separate signer restriction.
 function M.verify_signer(input: any): any?
 	local record = input.release_manager_record_id
-	if input.builder_record_id ~= nil and record == input.builder_record_id then
+	if input.mode ~= "worker" and input.mode ~= "selected_record" then return failure("merge_actor_mode", "Choose the existing worker or a selected release actor explicitly.") end
+	if input.mode == "worker" and (input.builder_record_id == nil or record ~= input.builder_record_id) then
+		return failure("merge_actor_not_builder", "Worker mode grants only the exact builder's configured record; another actor requires selected-record mode.")
+	end
+	if input.mode == "selected_record" and input.builder_record_id ~= nil and record == input.builder_record_id then
 		return failure("release_manager_is_builder", "The release manager's record " .. tostring(record) .. " is the builder's record; the signer must be another record, so no grant is issued.")
 	end
 	if input.reviewer_record_id ~= nil and record == input.reviewer_record_id then

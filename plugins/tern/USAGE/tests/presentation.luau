@@ -2,11 +2,12 @@
 local root = ...
 assert(type(root) == "string", "pass the plugin directory")
 local modules, environment = {}, getfenv()
+local module_runtime = tern
 local function load(name)
 	name = name:gsub("^%./", "")
 	if modules[name] ~= nil then return modules[name] end
 	local chunk = assert(loadstring(tern.fs.read(root .. "/" .. name .. ".luau"), name))
-	setfenv(chunk, setmetatable({ require = load }, { __index = environment }))
+	setfenv(chunk, setmetatable({ require = load, tern = module_runtime }, { __index = environment }))
 	modules[name] = chunk()
 	return modules[name]
 end
@@ -102,10 +103,33 @@ check(presentation.account_projection(muse_known, now).state == "last_known"
 local retained = table.clone(ordered[1])
 retained.windows = { window("weekly", 8) }
 retained.windows[1].last_known_reason = "local_login_unavailable"
-check(presentation.account_projection(retained, now).state == "last_known"
-	and presentation.account_projection(retained, now).used == 8
-	and retained.windows[1].observed_at_ms == now,
-	"failed headless refresh labels a retained numeric observation last-known without renewing its measurement time")
+retained.windows[1].observed_at_ms = now - (26 * 3600 + 5 * 60) * 1000
+local retained_value = presentation.account_projection(retained, now)
+check(retained_value.state == "login" and retained_value.used == 8 and retained_value.heat == nil
+	and retained.windows[1].observed_at_ms == now - (26 * 3600 + 5 * 60) * 1000,
+	"failed headless refresh keeps a retained numeric observation without renewing its measurement time")
+check(retained_value.text == "◔ 8% used · signed out · 1d 2h old" and retained_value.tone == "warn" and retained_value.style == "warning",
+	"a failed login warns with its cause and age instead of reading as an ordinary last-known value")
+retained.windows[1].last_known_reason = "web_login_expired"
+retained.windows[1].freshness = "stale"
+check(presentation.account_projection(retained, now).text == "◔ 8% used · login expired · 1d 2h old",
+	"an expired login outranks age: waiting does not fix it")
+local other_failure = table.clone(ordered[1])
+other_failure.windows = { window("weekly", 35) }
+other_failure.windows[1].last_known_reason = "server_sent_no_usage"
+other_failure.windows[1].observed_at_ms = now - 5 * 60000
+local other_value = presentation.account_projection(other_failure, now)
+check(other_value.state == "last_known" and other_value.tone == "muted" and other_value.style == "muted"
+	and other_value.text == "◔ 35% used last-known · 5m old" and presentation.login_problem(other_failure.windows[1]) == nil,
+	"a non-login failure stays an ordinary muted last-known value with its age")
+local failed_raw = { version = 3, publisher = "failed-publisher", as_of_ms = now, readings = {
+	reading("grok-old", "grok", { window("window", 35) }) } }
+failed_raw.readings[1].windows[1].resets_at_ms = now + 3600000
+failed_raw.readings[1].windows[1].last_known_reason = "server_sent_no_usage"
+local failed_source = assert(snapshot.decode(configure(failed_raw)))
+local aged = presentation.account_projection(snapshot.project({ [failed_source.publisher] = failed_source }, now + 900001).accounts[1], now + 900001)
+check(aged.state == "stale" and aged.text == "◔ 35% used last-known · stale · 15m old",
+	"an old last-known value is stale whatever kept it")
 local shuffled = table.clone(model)
 shuffled.accounts = {}
 for index = #ordered, 1, -1 do table.insert(shuffled.accounts, ordered[index]) end
@@ -162,7 +186,9 @@ local interval = 0
 local status_value = { state = "idle", completed = 0, total = 5 }
 local collector_health = nil
 local display_error = nil
+local releases, collector_stops = 0, 0
 modules.companion = {
+	unload = function() releases += 1 end,
 	request = function(operation, payload, done)
 		table.insert(log, operation)
 		if operation == "usage_refresh" then
@@ -185,20 +211,28 @@ modules.companion = {
 }
 modules.source_collect = {
 	start = function(callback) source_changed = callback end,
-	stop = function() end,
+	stop = function() collector_stops += 1 end,
 	flush = function() flushes += 1 end,
 	state = function() return collector_health end,
 }
--- The capacity block has its own suite (tests/capacity.luau); here only its host installation matters.
-local capacity_installs = 0
-modules.capacity = { install = function() capacity_installs += 1 end }
+-- Capacity, carrier and updater behavior have separate qualification; this fixture owns presentation.
+modules.capacity = { install = function() end }
+modules["updater/host"] = { register = function() end }
+modules["channel/channel"] = { open = function() return nil, { code = "fixture_carrier_unavailable" } end }
+local host_events = { spawn = true, command_started = true, command_finished = true,
+	cwd = true, title = true, pane_exited = true, unload = true }
 local runtime = {
 	ui = tern.ui, json = tern.json,
+	runtime = { os = "linux" },
+	plugin = { data = "/fixture/usage" },
 	pane = { list = function() return live end },
 	kv = { get = function() error("host must not read a duplicate layout/interval registry") end,
 		set = function() writes += 1; error("host must not replace companion preferences") end },
 	block = { define = function(id, value) defs[id] = value end },
-	on = function(name, callback) events[name] = callback end,
+	on = function(name, callback)
+		assert(host_events[name], "unknown host event " .. name)
+		events[name] = callback
+	end,
 	timer = function(delay, callback)
 		local timer = { delay = delay, callback = callback, active = true }
 		function timer:cancel() self.active = false end
@@ -211,11 +245,14 @@ local function context(pane)
 		toast = function() error("account detail must never be a toast") end }
 end
 local cx, detail_cx, config_cx = context(21), context(22), context(23)
+module_runtime = runtime
+local lifecycle = assert(loadstring(tern.fs.read(root .. "/companion.luau"), "companion lifecycle"))
+setfenv(lifecycle, setmetatable({ tern = runtime }, { __index = environment }))
+modules.companion.on_unload = lifecycle().on_unload
 local chunk = assert(loadstring(tern.fs.read(root .. "/host.luau"), "host"))
 setfenv(chunk, setmetatable({ tern = runtime, require = load }, { __index = environment }))
 chunk()
 local def, detail_def, config_def = defs.accounts, defs.account, defs.config
-check(capacity_installs == 1, "the host installs the read-only capacity block once")
 local state = def.init(cx, {}, nil)
 local function has_span(value, text, tone)
 	if type(value) ~= "table" then return false end
@@ -380,4 +417,12 @@ events.pane_exited({ pane = 23 })
 publish({ source })
 check(renders == before, "closed blocks receive no late source completion renders")
 check(#active(1000) == 0 and #active(15000) == 0, "with no USAGE block open the host neither polls nor ticks")
+live = { { pane = 21 } }
+def.init(cx, {}, nil)
+local logged = #log
+events.unload(cx)
+source_changed()
+check(releases == 1 and collector_stops == 1 and #log == logged,
+	"host unload releases its client, stops collection and rejects late source-driven requests")
+check(#active(1000) == 0 and #active(15000) == 0, "host unload cancels its render and polling timers")
 return "PASS presentation: " .. checks .. " checks"

@@ -8,32 +8,52 @@ local function row_id(scope: string, entry: string): string
 	return "spawn:" .. tostring(#scope) .. ":" .. scope .. ":" .. entry
 end
 
--- Latest definitions win as a whole. Only copies of that revision can contribute
--- local associations; an older revision cannot resurrect a removed entry.
-local function selected(snapshots: any): { any }
-	local winners, copies = {}, {}
+-- SPAWN revisions are ordered only within one authority. Publisher clocks do
+-- not order definitions; incomparable lists remain visible as conflicts.
+local function selected(snapshots: any): ({ any }, { any })
+	local copies = {}
 	for publisher, source in snapshots do
 		for _, scope in if source.roster ~= nil then source.roster.scopes else {} do
-			local item = { scope = scope, publisher = publisher, source = source }
-			local previous = winners[scope.id]
-			if previous == nil or scope.updated_at_ms > previous.scope.updated_at_ms
-				or (scope.updated_at_ms == previous.scope.updated_at_ms and publisher < previous.publisher) then
-				winners[scope.id] = item
-			end
 			if copies[scope.id] == nil then copies[scope.id] = {} end
-			table.insert(copies[scope.id], item)
+			table.insert(copies[scope.id], { scope = scope, publisher = publisher, source = source })
 		end
 	end
-	local result = {}
-	for id, winner in winners do
-		winner.copies = {}
-		for _, copy in copies[id] do
-			if copy.scope.revision == winner.scope.revision then table.insert(winner.copies, copy) end
+	local result, conflicts = {}, tern.json.array()
+	for id, candidates in copies do
+		local lineage, revision, conflict = nil, nil, nil
+		for _, candidate in candidates do
+			local join = candidate.scope.spawn_join
+			if join == nil then continue end
+			if lineage ~= nil and (join.namespace ~= lineage.namespace or join.host_key ~= lineage.host_key) then
+				conflict = "different_authorities"; break
+			end
+			lineage = join
+			revision = math.max(revision or 0, join.config_revision)
 		end
-		table.insert(result, winner)
+		local winner
+		if conflict == nil then
+			for _, candidate in candidates do
+				local join = candidate.scope.spawn_join
+				if join ~= nil and join.config_revision < revision then continue end
+				if winner ~= nil and candidate.scope.revision ~= winner.scope.revision then
+					conflict = "different_definitions"; break
+				end
+				if winner == nil or candidate.publisher < winner.publisher then winner = candidate end
+			end
+		end
+		if conflict ~= nil then
+			table.insert(conflicts, { scope_id = id, reason = conflict })
+		elseif winner ~= nil then
+			winner.copies = {}
+			for _, copy in candidates do
+				if copy.scope.revision == winner.scope.revision then table.insert(winner.copies, copy) end
+			end
+			table.insert(result, winner)
+		end
 	end
 	table.sort(result, function(a, b) return a.scope.id < b.scope.id end)
-	return result
+	table.sort(conflicts, function(a, b) return a.scope_id < b.scope_id end)
+	return result, conflicts
 end
 
 local function set(values: { string }): { [string]: boolean }
@@ -46,8 +66,11 @@ end
 local function matches_identity(reading: accounts.Reading, identity: string, tokens: { [string]: boolean }): boolean
 	if tokens[identity] or (reading.canonical_id ~= nil and tokens[reading.canonical_id])
 		or (reading.account_id ~= nil and tokens[reading.account_id]) then return true end
-	for _, alias in reading.account_aliases or {} do
-		if tokens[alias] then return true end
+	local aliases = reading.account_aliases
+	if aliases ~= nil then
+		for _, alias in aliases do
+			if tokens[alias] then return true end
+		end
 	end
 	return false
 end
@@ -95,8 +118,8 @@ end
 -- in definitions from different SPAWN host scopes is one account (the first scope
 -- in id order keeps the row and lists the others in `also_configured`). The same
 -- login under two definitions of one scope stays an identity_conflict.
-function roster.project(snapshots: any, readings: { accounts.Reading }, current: { accounts.Reading }, excluded: any?): (any, any, any)
-	local scopes = selected(snapshots)
+function roster.project(snapshots: any, readings: { accounts.Reading }, current: { accounts.Reading }, excluded: any?): (any, any, any, any)
+	local scopes, conflicts = selected(snapshots)
 	local all = {}
 	for _, reading in readings do table.insert(all, reading) end
 	for _, reading in current do table.insert(all, reading) end
@@ -258,7 +281,7 @@ function roster.project(snapshots: any, readings: { accounts.Reading }, current:
 	end
 	local unresolved = tern.json.array()
 	for _, reading in readings do if not matched[reading] then table.insert(unresolved, reading) end end
-	return rows, consumers, unresolved
+	return rows, consumers, unresolved, conflicts
 end
 
 return roster

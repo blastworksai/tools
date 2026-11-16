@@ -7,7 +7,9 @@ function M.new(api: any): any
 	local function persist(cx: WindowCx, source: number, data: any, state: string, summary: string, run: any?)
 		local request_id = api.id()
 		cx.session:event(source, { ev = "action", id = "main.setup-index", act = "setup-command", value = tern.json.encode({
-			kind = "setup_lifecycle", source_nonce = data.source_nonce, request_id = request_id, expected_revision = data.installation_defaults.revision,
+			kind = "setup_lifecycle", source_nonce = data.source_nonce, request_id = request_id,
+			authority_namespace = data.authority_namespace, expected_revision = data.authority_revision,
+			expected_config_revision = data.installation_defaults.revision,
 			readiness = { state = state, config_revision = data.installation_defaults.revision, summary = summary },
 			readiness_policy = if state == "passed" and run then { logical_session_id = run.origin.logical_session_id, revision = run.policy_revision } else nil }) })
 		return request_id
@@ -17,17 +19,15 @@ function M.new(api: any): any
 		return flow ~= nil and flow.policy_revision == revision and api.same(flow.policy, expected)
 	end
 	local function finish(cx: WindowCx, run: any, state: string, message: string)
-		if runs[run.source] ~= run then return end
+		if runs[run.source] ~= run or run.phase == "finishing" then return end
 		if not api.current(cx, run.source, run.origin) or not policy_current(cx, run.source, run.policy_revision, run.policy) then
 			state = "unavailable"; message = "Session policy or controller changed during readiness; the original policy was not qualified."
 		end
 		local data = api.setup(cx, run.source)
 		if data and data.source_nonce == run.nonce and data.installation_defaults.revision == run.revision then
 			local request = persist(cx, run.source, data, state, message, run)
-			if state == "passed" then
-				run.phase = "finishing"; run.result_request = request; run.result_message = message
-				return
-			end
+			run.phase = "finishing"; run.result_request = request; run.result_message = message; run.finishing_started = tern.now()
+			return
 		else message ..= " Configuration changed; this result was not attached to newer defaults." end
 		runs[run.source] = nil
 		toast(cx, message .. " Disposable repository retained at " .. run.path .. ". Live workers are not silently stopped or retried.")
@@ -38,6 +38,13 @@ function M.new(api: any): any
 		if not record or not record.eligible or record.enabled ~= true or not table.find(record.capabilities or {}, "check-runner-v1") then
 			return finish(cx, run, "unavailable", "Configured builder has no eligible check-runner route.")
 		end
+		local signer = if run.policy.merge_actor_mode == "worker" then record else nil
+		if run.policy.merge_actor_mode == "selected_record" then
+			for _, row in catalog.records do if row.id == run.policy.release_manager_record then signer = row end end
+		end
+		if not signer or not signer.enabled or not signer.eligible or not table.find(signer.capabilities or {}, "release-manager-v1") then
+			return finish(cx, run, "unavailable", "The configured merge actor needs managed merge capability. In Same agent as worker mode, the existing worker performs the merge; text and research do not need it.")
+		end
 		local task = "Optional ORCH readiness exercise. Operate ONLY in this disposable repository: " .. run.path
 			.. ". Your configured launch cwd is not the task repository. Do not modify it. Create and check out branch orch-readiness-work from refs/heads/main; do not leave main checked out during release-manager landing."
 			.. " Add readiness.txt containing ready and commit it. Run the packaged mailbox helper with its process working directory set to " .. run.path .. ": mode checkout publishes actual CHECKOUT; mode run-checks with check id readiness publishes CHECK_RESULT. Do not invent a --cwd helper flag."
@@ -47,46 +54,42 @@ function M.new(api: any): any
 			.. " The release manager must use that absolute repo_ref, not its configured launch cwd, and preserve the checked-out source branch while applying the ordinary expected-target guarded landing flow."
 			.. " Use the ordinary review, owner approval and release-manager landing flow; never claim checks/review/landing that did not happen. No deployment applies."
 		run.request = api.queue(cx, run.source, run.origin, { record_id = record.id, record_revision = record.revision, catalog_revision = catalog.revision,
-			coordinator = false, cwd = record.cwd, placement = record.placement, prompt = task, base_ref = "refs/heads/main",
+			coordinator = false, cwd = record.cwd, placement = record.placement, execution_cwd = run.repository.cwd,
+			presentation = "user_new_tab", orch_project_id = run.project, prompt = task, base_ref = "refs/heads/main",
 			files = tern.json.array({ "readiness.txt" }), checks = tern.json.array({ { check_id = "readiness", argv = tern.json.array({ "git", "-C", run.path, "cat-file", "-e", "HEAD:readiness.txt" }) } }) })
 		if not run.request then return finish(cx, run, "unavailable", "Controller changed before the exercise could be queued.") end
 		run.phase = "queued"
 		toast(cx, "Real provider task queued. Answer ordinary review/landing owner gates in ORCH+. Readiness passes only after a matching landed result and Git readback; observation stops after 15 minutes.")
 	end
 	local function prepare(cx: WindowCx, run: any)
-		local ok, problem = pcall(function() tern.fs.mkdir(run.path) end)
-		if not ok then return finish(cx, run, "unavailable", "Disposable directory creation failed: " .. tostring(problem):sub(1, 300)) end
-		local steps = {
-			{ "git", "init", "--initial-branch=main", run.path },
-			{ "git", "-C", run.path, "config", "--local", "user.name", "ORCH readiness" },
-			{ "git", "-C", run.path, "config", "--local", "user.email", "orch-readiness@localhost" },
-			{ "git", "-C", run.path, "-c", "user.name=ORCH readiness", "-c", "user.email=orch-readiness@localhost", "commit", "--allow-empty", "-m", "Readiness baseline" },
-		}
-		local function step(fresh: WindowCx, position: number)
-			if runs[run.source] ~= run then return end
-			if not policy_current(fresh, run.source, run.policy_revision, run.policy) then return finish(fresh, run, "unavailable", "Session policy changed before readiness launch.") end
-			if not api.current(fresh, run.source, run.origin) then return finish(fresh, run, "unavailable", "Native controller context changed before readiness launch.") end
-			if not steps[position] then run.phase = "catalog"; api.catalog(fresh, run.source, run.origin); return end
-			tern.process.run(steps[position], { timeout_ms = 10000 }, function(result: any, next_cx: WindowCx?)
-				if not next_cx then return end
-				if result.status ~= 0 then finish(next_cx, run, "failed", "Disposable Git initialization failed: " .. tostring(result.stderr):sub(1, 300))
-				else step(next_cx, position + 1) end
-			end)
+		if not policy_current(cx, run.source, run.policy_revision, run.policy) or not api.current(cx, run.source, run.origin) then
+			return finish(cx, run, "unavailable", "Settings or controller changed before exercise preparation.")
 		end
-		step(cx, 1)
+		run.phase, run.request = "repository_probe", api.id()
+		cx.session:event(run.source, { ev = "action", id = "main.setup-index", act = "setup-readiness-prepare",
+			value = tern.json.encode({ source_nonce = run.nonce, request_id = run.request }) })
 	end
-	local function start(cx: WindowCx, source: number)
+	local function start(cx: WindowCx, source: number, intent: any?)
 		if runs[source] then return toast(cx, "A readiness exercise is already observed in this window. It is never launched twice.") end
 		local data, origin = api.setup(cx, source), api.origin(cx, source)
 		if not data then return toast(cx, "Open ORCH+ and complete required setup first.") end
+		data = table.clone(data)
+		if intent and intent.authority_namespace ~= nil then
+			data.authority_namespace = intent.authority_namespace
+			data.authority_revision = intent.expected_revision
+		end
 		if not origin then
 			api.open_controller(cx, source)
-			return toast(cx, "Select/register a distinct logical session and explicitly claim/continue its controller in ORCH+, then run Optional readiness again. No controller was fabricated.")
+			return toast(cx, "Reconnect this orchestration before running the optional exercise. Unknown ownership has not been cleared.")
 		end
-		if cx.hosts:current().kind == "remote" then persist(cx, source, data, "unavailable", "Optional local readiness needs the same-user local execution host; remote setup remains completed."); return toast(cx, "This exercise requires the local execution host; remote configuration was not changed.") end
-		if data.setup.state ~= "completed" and data.setup.state ~= "adopted_existing" then return toast(cx, "Finish required setup first. Optional exercise cannot stand in for provisioning/probe attestation.") end
+		if data.setup.state ~= "completed" and data.setup.state ~= "adopted_existing" then return toast(cx, "Complete agent setup first. This optional exercise does not replace missing account or capability prerequisites.") end
 		local flow = api.flow(cx, source)
 		if not flow or type(flow.policy_revision) ~= "number" or not api.same(flow.policy, data.installation_defaults.policy) then return toast(cx, "This session has overrides different from installation defaults. Use a new session seeded from current defaults to exercise those defaults; overrides will not be overwritten.") end
+		if flow.policy.paused then return toast(cx, "This orchestration is paused. Resume explicitly before running a provider exercise; opening readiness never resumes work.") end
+		if flow.policy.merge_actor_mode == "selected_record" and (not flow.policy.release_manager_record or flow.policy.release_manager_record == "") then
+			persist(cx, source, data, "unavailable", "Choose the selected merge agent, or use Same agent as worker. Text and research setup remains complete.")
+			return toast(cx, "Select a merge agent in Settings or use Same agent as worker before exercising repository merging.")
+		end
 		cx:pick({ placeholder = "Optional readiness — consent to a real provider task and disposable Git landing", items = {
 			{ label = "Not now — keep completed setup", consent = false },
 			{ label = "Run real readiness exercise", detail = "Creates a disposable repository under plugin data, launches configured workers (provider costs), runs checks/review/landing. No production repository changes.", consent = true },
@@ -95,20 +98,21 @@ function M.new(api: any): any
 			local current = api.setup(fresh, source)
 			-- Visibility fences this delayed consent, not an already-consented exercise's observation.
 			if not current or current.source_nonce ~= data.source_nonce or current.installation_defaults.revision ~= data.installation_defaults.revision
+				or current.authority_namespace ~= data.authority_namespace or current.authority_revision ~= data.authority_revision
 				or not policy_current(fresh, source, flow.policy_revision, data.installation_defaults.policy)
 				or not api.consent_current(fresh, source, origin) then return toast(fresh, "Configuration/context changed during consent. Nothing launched.") end
-			if not choice.consent then persist(fresh, source, current, "not_run", "Owner declined optional exercise; required setup remains complete."); return end
+			if not choice.consent then persist(fresh, source, data, "not_run", "Owner declined optional exercise; required setup remains complete."); return end
 			local run = { source = source, origin = origin, nonce = current.source_nonce, revision = current.installation_defaults.revision,
 				policy_revision = flow.policy_revision, policy = data.installation_defaults.policy,
-				path = tern.plugin.data .. "/readiness-" .. api.id(), builder = current.installation_defaults.builder_record, started = tern.now(), phase = "consent" }
+				builder = current.installation_defaults.builder_record, started = tern.now(), phase = "consent" }
 			runs[source] = run
-			run.consent_request = persist(fresh, source, current, "unavailable", "Exercise consented; result unconfirmed. Reload/interruption never implies success. Repository: " .. run.path)
+			run.consent_request = persist(fresh, source, data, "unavailable", "Exercise consented; result unconfirmed. A private disposable checkout will be created on the current execution host. Reload/interruption never implies success.")
 		end)
 	end
 	local function tick(cx: WindowCx)
 		for _, run in runs do
-			if not api.current(cx, run.source, run.origin) then finish(cx, run, "unavailable", "Readiness observation lost its exact controller context."); continue end
-			if tern.now() - run.started > 900000 then finish(cx, run, "failed", "Readiness deadline elapsed without confirmed landing; inspect retained workflow and workers."); continue end
+			if run.phase ~= "finishing" and not api.current(cx, run.source, run.origin) then finish(cx, run, "unavailable", "Readiness observation lost its exact controller context."); continue end
+			if run.phase ~= "finishing" and tern.now() - run.started > 900000 then finish(cx, run, "unavailable", "Observation ended without a confirmed landing. The outcome is unknown; inspect retained work before another exercise."); continue end
 			if run.phase == "finishing" then
 				local data = api.setup(cx, run.source)
 				local result = if data then data.setup_result else nil
@@ -116,6 +120,9 @@ function M.new(api: any): any
 					runs[run.source] = nil
 					toast(cx, (if result.ok then run.result_message else "Readiness result was not saved: " .. tostring(result.code))
 						.. " Disposable repository retained at " .. run.path .. ".")
+				elseif tern.now() - run.finishing_started > 30000 then
+					runs[run.source] = nil
+					toast(cx, "The readiness result could not be confirmed as saved. The outcome is unknown; no exercise or result write was repeated.")
 				end
 				continue
 			end
@@ -127,9 +134,64 @@ function M.new(api: any): any
 					if result.ok and data.installation_defaults.revision == run.revision then run.phase = "prepare"; prepare(cx, run)
 					else runs[run.source] = nil; toast(cx, "Readiness consent could not be persisted; nothing launched.") end
 				end
-			elseif run.phase == "catalog" then
-				local observation = api.observation(cx, run.source)
-				if observation and observation.catalog then launch(cx, run, observation.catalog) end
+			elseif run.phase == "repository_probe" then
+				local data = api.setup(cx, run.source)
+				local result = if data then data.setup_result else nil
+				if result and result.request_id == run.request then
+					if not result.ok or type(result.repository) ~= "table" then
+						finish(cx, run, "unavailable", "Disposable repository verification failed: " .. tostring(result.message or result.code))
+					else
+						run.repository = table.clone(result.repository); run.repository.queue_route = "orch_queue"
+						run.path = run.repository.cwd
+						run.decision_fields = { name = "Optional readiness exercise" }; run.decision_command = "new_project"
+						run.request = api.decision(cx, run.source, run.origin, run.decision_command, run.decision_fields)
+						run.phase = "project_decision"
+						if not run.request then finish(cx, run, "unavailable", "Controller changed before reviewing the disposable exercise project.") end
+					end
+				end
+			elseif run.phase == "new_project" or run.phase == "project_repository" or run.phase == "project_start" then
+				local snapshot = api.snapshot(cx, run.source)
+				local result = if not snapshot then nil
+					elseif snapshot.command_result and snapshot.command_result.request_id == run.request then snapshot.command_result
+					elseif snapshot.driver_result and snapshot.driver_result.request_id == run.request then snapshot.driver_result
+					elseif snapshot.result and snapshot.result.request_id == run.request then snapshot.result else nil
+				if result and result.request_id == run.request then
+					if not result.ok then finish(cx, run, "unavailable", "Exercise preparation refused: " .. tostring(result.message or result.code)); continue end
+					if run.phase == "project_start" then
+						run.phase = "catalog"
+						api.catalog(cx, run.source, run.origin, function(fresh: WindowCx, catalog: any?, problem: string?)
+							if runs[run.source] ~= run or run.phase ~= "catalog" then return end
+							if not api.current(fresh, run.source, run.origin) or not policy_current(fresh, run.source, run.policy_revision, run.policy) then
+								return finish(fresh, run, "unavailable", "Readiness context changed while loading the agent catalog.")
+							end
+							if not catalog then return finish(fresh, run, "unavailable", problem or "The current agent catalog could not be loaded.") end
+							launch(fresh, run, catalog)
+						end)
+						continue
+					end
+					if run.phase == "new_project" then run.project = result.orch_project_id end
+					local context = if run.project then api.project_context(cx, run.source, run.origin, run.project) else nil
+					if not context then finish(cx, run, "unavailable", "The disposable exercise project has no current decision context."); continue end
+					local fields = { orch_project_id = run.project, project_revision = context.project_revision or context.revision }
+					if run.phase == "new_project" then
+						fields.repository = run.repository; run.phase = "project_decision"
+						run.decision_fields = fields; run.decision_command = "project_repository"
+					else
+						fields.decision_context = context.decision_context; run.phase = "project_start"
+					end
+					run.request = if run.phase == "project_decision" then api.decision(cx, run.source, run.origin, run.decision_command, fields)
+						else api.command(cx, run.source, run.origin, run.phase, fields)
+					if not run.request then finish(cx, run, "unavailable", "Controller changed before the next exercise step; no step was repeated.") end
+				end
+			elseif run.phase == "project_decision" then
+				local result = api.decision_result(cx, run.source)
+				if result and result.request_id == run.request then
+					if not result.decision_context then finish(cx, run, "unavailable", "The disposable project or repository decision changed."); continue end
+					run.decision_fields.decision_context = result.decision_context
+					run.request = api.command(cx, run.source, run.origin, run.decision_command, run.decision_fields)
+					run.decision_fields = nil; run.phase = run.decision_command; run.decision_command = nil
+					if not run.request then finish(cx, run, "unavailable", "Controller changed before saving the disposable project decision; nothing was repeated.") end
+				end
 			elseif run.phase == "queued" then
 				local snapshot = api.snapshot(cx, run.source)
 				local result = if snapshot then snapshot.driver_result else nil
@@ -144,11 +206,19 @@ function M.new(api: any): any
 					if item.status == "failed" or item.status == "cancelled" then finish(cx, run, "failed", "Readiness landing " .. item.status); break end
 					if item.status == "landed" then
 						run.phase = "readback"
-						tern.process.run({ "git", "-C", run.path, "show", "refs/heads/main:readiness.txt" }, { timeout_ms = 10000 }, function(result: any, fresh: WindowCx?)
-							if fresh then finish(fresh, run, if result.status == 0 and result.stdout:match("^ready%s*$") then "passed" else "failed", if result.status == 0 and result.stdout:match("^ready%s*$") then "Actual managed task, helper checks and policy-gated release-manager landing confirmed by Git readback." else "Landing reported but disposable target readback did not match readiness artifact.") end
-						end)
+						run.request = api.id()
+						cx.session:event(run.source, { ev = "action", id = "main.setup-index", act = "setup-readiness-verify",
+							value = tern.json.encode({ source_nonce = run.nonce, request_id = run.request, orch_project_id = run.project }) })
 						break
 					end
+				end
+			elseif run.phase == "readback" then
+				local data = api.setup(cx, run.source)
+				local result = if data then data.setup_result else nil
+				if result and result.request_id == run.request then
+					finish(cx, run, if result.ok and result.readiness_passed then "passed" else "failed",
+						if result.ok and result.readiness_passed then "Actual managed task, helper checks and policy-gated release-manager landing confirmed by execution-host Git readback."
+						else tostring(result.message or "The disposable target did not contain the readiness artifact."))
 				end
 			end
 		end

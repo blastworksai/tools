@@ -4,7 +4,7 @@
 Python 3.11 required. The companion supplies approved non-secret selectors over
 stdin; only normalized account fields, quota windows, the source UID/SID and
 fixed error codes leave. The provider's own CLI may renew its login while it
-reports quota; this helper never logs in, runs a shell or takes a model turn.
+reports quota; this helper never logs in, accepts shell commands or takes a model turn.
 """
 import sys
 sys.dont_write_bytecode = True
@@ -25,9 +25,9 @@ import re
 import shutil
 import signal
 import stat
-import subprocess
-import threading
 import urllib.request
+
+from usage_service.process_supervisor import run_bounded, resolve_executable, stop_owned_process
 
 MAX_BYTES = 1024 * 1024
 MAX_REQUEST = 65536
@@ -56,77 +56,12 @@ class SafeError(Exception):
     """Only fixed, nonsensitive diagnostics may be constructed here."""
 
 
-def stop_owned_process(process, grace=0):
-    """Reap only a process/session created by this helper, including its children."""
-    if grace and process.poll() is None:
-        if os.name == "posix":
-            try:
-                os.killpg(process.pid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
-        else:
-            process.terminate()
-        try:
-            process.wait(timeout=grace)
-        except subprocess.TimeoutExpired:
-            pass
-    if os.name == "posix":
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-    elif process.poll() is None:
-        process.kill()
-    process.wait()
-
-
 def bounded_process(argv, env, *, input_bytes=None, timeout=15):
     """Read at most MAX_BYTES, discard stderr, and kill on timeout/overflow."""
-    process = None
-    result = bytearray()
-    overflow = threading.Event()
-    try:
-        process = subprocess.Popen(argv, stdin=subprocess.PIPE if input_bytes is not None else subprocess.DEVNULL,
-                                   stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env, shell=False,
-                                   start_new_session=os.name == "posix", cwd=env.get("HOME"),
-                                   creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-        def drain():
-            try:
-                while True:
-                    chunk = process.stdout.read(8192)
-                    if not chunk:
-                        break
-                    if len(result) + len(chunk) > MAX_BYTES:
-                        overflow.set()
-                        process.kill()
-                        break
-                    result.extend(chunk)
-            except OSError:
-                overflow.set()
-        reader = threading.Thread(target=drain, daemon=True)
-        reader.start()
-        if input_bytes is not None:
-            def feed():
-                try:
-                    process.stdin.write(input_bytes)
-                    process.stdin.close()
-                except OSError:
-                    overflow.set()
-            threading.Thread(target=feed, daemon=True).start()
-        process.wait(timeout=timeout)
-        reader.join(timeout=1)
-        if process.returncode != 0 or overflow.is_set() or reader.is_alive():
-            raise SafeError("Source provider command is unavailable")
-        return bytes(result)
-    except (OSError, subprocess.SubprocessError):
-        raise SafeError("Source provider command is unavailable") from None
-    finally:
-        if process is not None:
-            stop_owned_process(process)
-            if process.stdout is not None:
-                process.stdout.close()
-            if process.stdin is not None and not process.stdin.closed:
-                process.stdin.close()
+    completed = run_bounded(argv, env, env.get("HOME"), timeout, input_bytes)
+    if completed.error is not None:
+        raise SafeError("Source provider command is unavailable")
+    return completed.stdout
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -242,9 +177,10 @@ class SourceIO:
                 raise SafeError(snapshot["error"]) from None
             if "result" in snapshot:
                 return snapshot["result"]
-        executable = shutil.which(argv[0], path=self.env.get("PATH", os.defpath))
-        if not executable:
-            raise SafeError("Source provider CLI is unavailable")
+        try:
+            executable = resolve_executable(argv[0], self.env, self.home)
+        except (OSError, ValueError):
+            raise SafeError("Source provider CLI is unavailable") from None
         execution_env = self.env
         if snapshot is not None:
             # Muse's launcher otherwise checks/downloads updates before

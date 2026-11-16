@@ -13,11 +13,11 @@
 -- Native pane IDs are display-only in Window snapshots and never Window API IDs.
 -- A bound native pane cannot be replaced on an existing attempt.
 --
--- Starting is a reservation, not proof of execution. An ordinary or setup attempt is
--- live only while its pane provably exists: classify() turns host evidence (pane gone,
--- ticket never claimed, host restart) into terminal history and settle() applies it,
--- with no human release. Managed attempts keep their reservation until the authority
--- proves them stopped. A retained failed shell never becomes a running provider.
+-- Starting is a reservation, not proof of execution. An ordinary or setup claim
+-- awaiting submission uses the executor's native membership/readiness/exit evidence,
+-- not absence from the host's pane inventory. After that boundary classify() turns
+-- host evidence (pane gone, ticket never claimed, host restart) into terminal history.
+-- Managed attempts keep their reservation until the authority proves them stopped.
 -- Every launch gets its own attempt, and IDs are never reused after cleanup.
 local M = {}
 
@@ -72,6 +72,7 @@ local MODES: { [string]: string } = {
 	["native-agent"] = "Native OMP",
 	["local-terminal"] = "Terminal",
 	["ssh-command"] = "SSH terminal",
+	["setup-default"] = "Setup default",
 }
 local CATEGORIES: { [string]: boolean } = {
 	["host-unavailable"] = true,
@@ -171,10 +172,11 @@ function M.validate(value: any): (State?, string?)
 			return nil, "invalid-attempt-identity"
 		end
 		if not integer(attempt.sequence, 0) then return nil, "invalid-sequence" end
-		if attempt.mode ~= "Native OMP" and attempt.mode ~= "Terminal" and attempt.mode ~= "SSH terminal" then
+		if attempt.mode ~= "Native OMP" and attempt.mode ~= "Terminal" and attempt.mode ~= "SSH terminal" and attempt.mode ~= "Setup default" then
 			return nil, "invalid-mode"
 		end
-		if attempt.purpose ~= nil and attempt.purpose ~= "managed" and (attempt.purpose ~= "setup" or attempt.mode ~= "Native OMP") then return nil, "invalid-purpose" end
+		if attempt.purpose ~= nil and attempt.purpose ~= "managed" and (attempt.purpose ~= "setup" or attempt.mode ~= "Native OMP" and attempt.mode ~= "Setup default") then return nil, "invalid-purpose" end
+		if attempt.mode == "Setup default" and (attempt.purpose ~= "setup" or attempt.record_id ~= "setup-default") then return nil, "invalid-setup-bootstrap" end
 		if type(attempt.phase) ~= "string" or PHASES[attempt.phase] ~= true then return nil, "invalid-phase" end
 		if type(attempt.unresolved) ~= "boolean" then return nil, "invalid-reservation" end
 		if (ACTIVE[attempt.phase] == true and not attempt.unresolved) or (terminal(attempt.phase) and attempt.unresolved) then
@@ -207,13 +209,14 @@ end
 function M.reserve(state: State, record: any, scope: string, observer_id: string, purpose: string?): (Attempt?, string?)
 	if purpose ~= nil and purpose ~= "launch" and purpose ~= "setup" and purpose ~= "managed" then return nil, "invalid-purpose" end
 	local setup = purpose == "setup"
-	if record.review_required == true or (setup and record.backend ~= "native-agent") then return nil, "review" end
+	if record.review_required == true or (setup and record.backend ~= "native-agent" and record.backend ~= "setup-default") then return nil, "review" end
 	if not setup and record.enabled == false then return nil, "skip" end
 	if not identity(record.id, 256) or not identity(scope, 2048) or not identity(observer_id, 256) then
 		return nil, "invalid-attempt-identity"
 	end
 	local mode = MODES[record.backend]
-	if mode == nil or (record.backend == "native-agent" and string.lower(record.provider) ~= "omp") then return nil, "review" end
+	if mode == nil then return nil, "review" end
+	if record.backend == "setup-default" and (not setup or record.id ~= "setup-default") then return nil, "invalid-setup-bootstrap" end
 	if #state.attempts >= MAX_ATTEMPTS or state.next_attempt >= MAX_INTEGER or state.revision >= MAX_INTEGER then
 		return nil, "capacity"
 	end
@@ -327,7 +330,10 @@ function M.classify(attempt: Attempt, evidence: any): (string?, string?)
 		if evidence.grace_used ~= true then return nil, nil end
 		return "Exited", "Host restarted"
 	end
-	if evidence.pane_present == false then return "Exited", "Pane closed" end
+	-- The claim precedes asynchronous native membership/readiness checks. An
+	-- inventory omission cannot cancel that pending check; its native failure or
+	-- pane_exited event still ends the claim, and restart rules above still apply.
+	if evidence.pane_present == false and evidence.submission_pending ~= true then return "Exited", "Pane closed" end
 	if evidence.pane_present == true and attempt.phase == "Unknown" and revivable then return "Running", nil end
 	return nil, nil
 end
@@ -347,6 +353,7 @@ end
 -- Only the authority can establish that a managed Exited attempt is no longer
 -- needed by an unsettled bridge reference. Missing evidence keeps it protected.
 local function removable(attempt: Attempt, settled: {[string]: boolean}?): boolean
+	if settled ~= nil and settled[attempt.id] == false then return false end
 	return not blocking(attempt) and (attempt.purpose ~= "managed"
 		or attempt.phase == "Exited" and settled ~= nil and settled[attempt.id] == true)
 end
@@ -446,6 +453,7 @@ local EXECUTION_FIELDS = {
 	backend = true, placement = true, cwd = true, pane_reused = true,
 	setup_run_id = true, initial_prompt = true, native_pane = true, native_window = true,
 	native_tab = true, shell_program = true,
+	setup = true, pending_bytes = true, pending_digest = true, setup_consumed = true, setup_discarded = true,
 }
 local EXECUTION_STAGES = {
 	admitted = true, claimed = true, submission_intent = true, submitted = true,
@@ -455,8 +463,25 @@ local function bounded_text(value: any, maximum: number): boolean
 	return type(value) == "string" and #value > 0 and #value <= maximum and not value:find("%z")
 end
 
--- The wire carries only immutable display/placement data and an exact inert
--- ticket. No command renderer or private approved-record copy crosses this seam.
+function M.validate_setup_projection(value: any): boolean
+	if type(value) ~= "table" or not fields(value, {
+		command=true,cwd=true,window=true,config_pane=true,host_config_pane=true,
+		result_path=true,binding=true,host_key=true,authority_id=true,request_sequence=true,
+		native_session=true,agent_pane=true,config_dir=true,
+	}) then return false end
+	return bounded_text(value.command,32000) and value.command:find("%S") ~= nil
+		and identity(value.cwd,8192) and type(value.window)=="string" and #value.window<=256 and not value.window:find("%c")
+		and integer(value.config_pane,1) and integer(value.host_config_pane,1)
+		and identity(value.result_path,8192) and identity(value.binding,256)
+		and identity(value.host_key,1024) and identity(value.authority_id,256)
+		and integer(value.request_sequence,1) and integer(value.native_session,0)
+		and (value.agent_pane==nil or integer(value.agent_pane,1))
+		and (value.config_dir==nil or identity(value.config_dir,8192))
+end
+-- Ordinary jobs carry immutable display/placement and an inert shell ticket,
+-- never a private saved-record copy or rendered provider command. Setup-default
+-- instead carries its immutable user-trusted native API command/context, without
+-- a shell ticket or raw result bytes.
 function M.validate_execution_projection(value: any): (any?, string?)
 	if type(value) ~= "table" or not fields(value, EXECUTION_FIELDS) then return nil, "invalid-execution-job" end
 	local digits = if type(value.id) == "string" then value.id:match("^attempt%-([1-9]%d*)$") else nil
@@ -467,7 +492,8 @@ function M.validate_execution_projection(value: any): (any?, string?)
 	if not identity(value.record_id, 96) or not identity(value.observer_id, 256)
 		or not identity(value.session_key, 2048) or not integer(value.native_session, 0)
 		or not integer(value.config_revision, 0) or not identity(value.token, 384)
-		or value.ticket ~= "exit 125 # SPAWN:" .. value.token then
+		or (value.backend ~= "setup-default" and value.ticket ~= "exit 125 # SPAWN:" .. value.token)
+		or (value.backend == "setup-default" and value.ticket ~= nil) then
 		return nil, "invalid-execution-identity"
 	end
 	if EXECUTION_STAGES[value.stage] ~= true or type(value.pane_reused) ~= "boolean" then
@@ -478,26 +504,45 @@ function M.validate_execution_projection(value: any): (any?, string?)
 		or MODES[value.backend] == nil then
 		return nil, "invalid-execution-display"
 	end
-	if value.backend == "native-agent" and string.lower(value.provider) ~= "omp" then return nil, "invalid-native-provider" end
 	if value.placement ~= "tab" and value.placement ~= "split" and value.placement ~= "replace_if_alone" then
 		return nil, "invalid-execution-placement"
 	end
 	if value.purpose == "setup" then
-		if value.backend ~= "native-agent" or value.placement ~= "tab"
-			or not identity(value.setup_run_id, 256) or not bounded_text(value.initial_prompt, 32000) then
+		if value.placement ~= "tab" or not identity(value.setup_run_id, 256) or not bounded_text(value.initial_prompt, 32000) then
 			return nil, "invalid-setup-execution"
 		end
-	elseif value.purpose ~= "launch" or value.setup_run_id ~= nil or value.initial_prompt ~= nil then
+		if value.backend == "setup-default" then
+			if value.record_id ~= "setup-default" or not M.validate_setup_projection(value.setup)
+				or value.setup.cwd ~= value.cwd or value.setup.native_session ~= value.native_session then return nil, "invalid-setup-bootstrap" end
+		elseif value.backend ~= "native-agent" or value.setup ~= nil then return nil, "invalid-setup-execution" end
+	elseif value.purpose ~= "launch" or value.setup_run_id ~= nil or value.initial_prompt ~= nil or value.setup ~= nil or value.backend == "setup-default" then
 		return nil, "invalid-execution-purpose"
 	end
+	if value.pending_digest ~= nil then
+		if value.backend ~= "setup-default" or type(value.pending_digest) ~= "string" or #value.pending_digest ~= 64
+			or not value.pending_digest:match("^[0-9a-f]+$") or not integer(value.pending_bytes,1) or value.pending_bytes>120000
+			or type(value.setup_consumed)~="boolean" then return nil, "invalid-setup-result" end
+		if value.setup_discarded~=nil and (value.setup_discarded~=true or value.setup_consumed~=true) then return nil,"invalid-discarded-setup-result" end
+	elseif value.pending_bytes~=nil or value.setup_consumed~=nil or value.setup_discarded~=nil then return nil, "invalid-setup-result" end
 	if value.native_pane ~= nil then
 		if not integer(value.native_pane, 0) or type(value.native_window) ~= "string"
 			or #value.native_window > 256 or value.native_window:find("%c")
-			or not bounded_text(value.shell_program, 8192) then return nil, "invalid-native-binding" end
+			or (value.backend ~= "setup-default" and not bounded_text(value.shell_program, 8192))
+			or (value.backend == "setup-default" and value.shell_program ~= nil) then return nil, "invalid-native-binding" end
 	elseif value.native_window ~= nil or value.shell_program ~= nil or value.native_tab ~= nil then
 		return nil, "incomplete-native-binding"
 	end
 	if value.native_tab ~= nil and not integer(value.native_tab, 0) then return nil, "invalid-native-tab" end
+	if value.backend=="setup-default" then
+		if (value.native_pane==nil)~=(value.setup.agent_pane==nil) or value.native_tab~=nil then return nil,"incomplete-setup-native-binding" end
+		if value.native_pane~=nil and (value.native_pane<1 or value.native_window~=value.setup.window) then return nil,"invalid-setup-native-binding" end
+		if value.stage=="admitted" or value.stage=="claimed" or value.stage=="submission_intent" or value.stage=="failed" then
+			if value.native_pane~=nil or value.pending_digest~=nil then return nil,"invalid-setup-stage-binding" end
+		elseif value.stage=="submitted" or value.stage=="running" or value.stage=="resolved" then
+			if value.native_pane==nil then return nil,"invalid-setup-stage-binding" end
+		elseif value.stage~="unknown" then return nil,"invalid-setup-stage" end
+		if value.pending_digest~=nil and value.native_pane==nil then return nil,"unbound-setup-result" end
+	end
 	return value, nil
 end
 

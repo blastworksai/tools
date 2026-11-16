@@ -22,7 +22,7 @@ from .listener import BoundedSite
 
 from .protocol import Authority, CLIENT_LEASE_SECONDS, MAX_BODY, ServiceError, decode, encode, identifier, integer, text
 from .capacity import Capacity
-from .display import Display
+from .display import Display, display_access
 from .refresh import Refresh, validate_preferences
 from .security import Security, bearer, ensure_certificate, tls_context, validate_invitation
 from .store import Store
@@ -96,6 +96,7 @@ class Companion:
         self.active_requests=0
         self.last_error=None
         self.started=time.monotonic()
+        self.had_client=self.store.has_live_clients()
 
     def middleware(self,local):
         @web.middleware
@@ -171,7 +172,13 @@ class Companion:
             if kind not in ("host","window"):
                 raise ServiceError("invalid_request")
             result=self.store.register_client(client_id,kind,payload.get("ttl_seconds",CLIENT_LEASE_SECONDS))
+            self.had_client=True
             return _response({"registered":True,"duration_ms":result["duration_ms"]})
+        if operation=="unregister_client":
+            if set(payload)!={"client_id"}:
+                raise ServiceError("invalid_request")
+            removed=self.store.unregister_client(text(payload.get("client_id"),256))
+            return _response({"unregistered":removed})
         if operation in {"usage_refresh","usage_status","usage_preferences"}:
             return _response(await self.usage_operation(operation,payload))
         if operation=="usage_results":
@@ -184,6 +191,8 @@ class Companion:
             return _response(self.display.page(authority,payload))
         if operation=="capacity":
             return _response(self.capacity.request(authority,payload))
+        if operation=="display_access":
+            return _response(display_access(self.store,authority,payload,self.refresh.configuration))
         if operation=="binding_candidates":
             if payload:
                 raise ServiceError("invalid_request")
@@ -291,6 +300,8 @@ class Companion:
             raise ServiceError("forbidden",403)
         if changes.get("capacity_enabled") is True and consent.get("capacity") is not True:
             raise ServiceError("forbidden",403)
+        if changes.get("display_enabled") is True and consent.get("display") is not True:
+            raise ServiceError("forbidden",403)
         binding=(desired.get("sharing_bind"),desired.get("sharing_port")) if desired.get("role")=="hub" else None
         old_binding=self.peer_binding
         # Only sharing changes (re)bind; a hub whose saved listener failed at start
@@ -319,7 +330,8 @@ class Companion:
                 self.store.set_local_state("setup_consent",{
                     "export":configured["export_enabled"],"recipient_group":configured["group_id"],
                     "fields":EXPORT_FIELDS if configured["export_enabled"] else [],
-                    "metadata":configured["metadata_enabled"],"capacity":configured["capacity_enabled"]})
+                    "metadata":configured["metadata_enabled"],"capacity":configured["capacity_enabled"],
+                    "display":configured["display_enabled"]})
         except BaseException:
             if prepared is not None:
                 await prepared[0].cleanup()
@@ -404,6 +416,22 @@ class Companion:
         await self.refresh.start()
         publish_ready(self.root,"http://"+self.expected_host,self.store.identity()["device_id"],self.stamp)
 
+    def expire_idle_clients(self):
+        """Only this authenticated service retires itself; never signal a PID.
+
+        Unload is best effort. Expiry also handles vanished VMs and late bounded
+        launchers, without clearing readings, upgrade journals or other clients.
+        """
+        self.store.expire_clients()
+        if self.store.has_live_clients():
+            return False
+        if not self.had_client and time.monotonic()-self.started<CLIENT_LEASE_SECONDS:
+            return False
+        if self.active_requests or (self.refresh.job is not None and not self.refresh.job.done()):
+            return False
+        self.stop_event.set()
+        return True
+
     async def close(self):
         self.stop_event.set()
         await self.refresh.close()
@@ -432,9 +460,7 @@ async def serve(root:Path,stamp:dict):
             try:
                 await asyncio.wait_for(companion.stop_event.wait(),timeout=5)
             except TimeoutError:
-                companion.store.expire_clients()
-                if time.monotonic()-companion.started>=90 and not companion.store.has_live_clients():
-                    companion.stop_event.set()
+                companion.expire_idle_clients()
     finally:
         await companion.close()
         for signum in signals:

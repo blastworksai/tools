@@ -1,7 +1,47 @@
 --!strict
 local ui = tern.ui
 local quota = require("./quota")
+local provider_display = require("./provider_display")
 local M = {}
+local STATUS_MESSAGES = {
+	task_queued = "Agent session queued. It has not joined yet.",
+	attachment_queued = "Reconnecting your agent…",
+	catalog_queued = "Loading available agents…",
+	enrolment_queued = "Agent attachment queued. It has not joined yet.",
+	task_held = "Work added and held. Choose START when you are ready.",
+	task_gated = "Work needs your decision before it can start.",
+	project_start_pending = "Waiting for your orchestrator to start the new work.",
+	project_start_retry_queued = "Trying to send START again. Your new work is still on hold.",
+	project_start_delivery_failed = "Could not send START. Your new work is still on hold.",
+	project_start_inspection = "START status checked. Your new work is still on hold.",
+	project_start_claimed = "Your orchestrator has started the approved work.",
+	pending = "The action is still pending. No second request was sent.",
+	effect_uncertain = "The previous action's outcome is not confirmed. Check its status in Advanced; do not start it again.",
+	bridge_rejected = "The agent action could not be completed. Check its retained status in Advanced.",
+	transport_backpressure = "The agent connection is busy. The existing request remains retained.",
+	backpressure = "The agent connection is busy. The existing request remains retained.",
+	control_observed = "Status checked.",
+	controller_continued = "Orchestration restored.",
+	bridge_committed = "Agent information updated.",
+	policy_updated = "Settings saved.",
+	project_repository_updated = "Project settings saved.",
+	plan_imported = "Plan added.",
+	catalog_cleared = "Agent list inspection closed.",
+	catalog_requested = "Checking available agents.",
+}
+local ERROR_RESULTS = { effect_uncertain = true, bridge_rejected = true, transport_backpressure = true,
+	backpressure = true, publication_uncertain = true, project_start_delivery_failed = true }
+local SAVED_RESULTS = { policy_updated = true, project_repository_updated = true, plan_imported = true,
+	controller_continued = true, control_observed = true }
+local TASK_STATUS = {
+	queued_plan = "Waiting to start",
+	source_done = "Completed in source",
+	held = "Needs attention",
+	running = "In progress",
+	done = "Done",
+	failed = "Failed",
+	cancelled = "Cancelled",
+}
 
 -- Rendered text never shows raw JSON null or Lua nil: empty values get readable words.
 local function shown(value: any, empty: string): string
@@ -27,6 +67,7 @@ local function keyed(text: string, key: string, role: string): any
 	local node = ui.text(text)
 	node.p.key = key
 	node.p.role = role
+	node.p.hidden = true
 	return node
 end
 -- Bound: the recorded controller pane binding is this exact pane and alias. Admitted: bound and active.
@@ -40,7 +81,7 @@ end
 local function enabled_records(catalog: any): { any }
 	local list, seen = {}, {}
 	for _, record in (if catalog then catalog.records else {}) do
-		if record.eligible and record.enabled == true and not seen[record.id] then
+		if record.eligible == true and record.enabled == true and not seen[record.id] then
 			seen[record.id] = true
 			table.insert(list, record)
 		end
@@ -94,11 +135,57 @@ local function sweep_rows(sweep: any, limit: number): { any }
 	if listed == 0 then table.insert(rows, ui.text("Nothing was kept or queued: every mailbox was already retired, or none exist.")) end
 	return rows
 end
+local function same(left: any, right: any): boolean
+	if type(left) ~= type(right) then return false end
+	if type(left) ~= "table" then return left == right end
+	for key, value in left do if not same(value, right[key]) then return false end end
+	for key in right do if left[key] == nil then return false end end
+	return true
+end
+-- Dispatch requests are value snapshots; native JSON arrays need their marker
+-- preserved, not table.clone's unsupported copy of a protected metatable.
+local function copy_request(value: any): any
+	if type(value) ~= "table" or value == tern.json.null then return value end
+	local out = if getmetatable(value) ~= nil then tern.json.array() else {}
+	for key, child in value do out[key] = copy_request(child) end
+	return out
+end
 -- `attrs` are display-only `data-*` hints for automation that locates a control; the click
--- still resolves only through the host-side entry its render-scoped token names.
+-- still resolves only through the host-side entry its current token names.
 local function button(view: any, label: string, entry: any, attrs: any?): any
-	view.action_serial += 1
-	local token = tostring(view.action_serial)
+	-- Navigation does not authorize an effect. Capture its revision when clicked;
+	-- effect/confirmation controls retain their exact displayed revision.
+	local navigation = entry.navigation or entry.kind == "config-open" or entry.kind == "config-close"
+		or entry.kind == "project-select" or entry.kind == "advanced-toggle" or entry.kind == "finished-toggle"
+	entry.authority_namespace = view.authority_namespace
+	entry.expected_revision = if navigation then nil else view.authority_revision
+	if navigation then entry.navigation_scope = view.navigation_scope end
+	entry.orch_session_id = entry.orch_session_id or view.orch_session_id
+	if entry.request then
+		entry.request.authority_namespace = entry.authority_namespace
+		entry.request.expected_revision = entry.expected_revision
+	end
+	-- Read-only navigation keeps its current semantic target across unrelated row
+	-- insertions. Effects remain ordinal-bound; removed controls retain no history.
+	local ordinal = #view.action_order + 1
+	local request = entry.request
+	local navigation_key = if navigation then entry.kind .. "\0" .. tostring(request and request.command or "")
+		.. "\0" .. tostring(entry.orch_project_id or (request and request.orch_project_id) or "") .. "\0" .. tostring(request and request.conversation_id or "") else nil
+	local previous = view.action_previous
+	local token = if previous then (if navigation_key then previous.navigation[navigation_key] else previous.order[ordinal]) else nil
+	local retained = if token then previous.actions[token] else nil
+	if retained == nil or entry.intent ~= retained.intent or not same(entry, retained) then
+		view.action_serial += 1
+		token = view.alias_nonce .. ":" .. tostring(view.action_serial)
+		-- Confirmation intents intentionally keep identity with the armed host view.
+		-- Request and navigation snapshots may borrow nested projection tables.
+		if entry.request then entry.request = copy_request(entry.request) end
+		if navigation then entry.navigation_scope = copy_request(entry.navigation_scope) end
+	else
+		entry = retained
+	end
+	view.action_order[ordinal] = token
+	if navigation_key then view.navigation_actions[navigation_key] = token end
 	view.actions[token] = entry
 	return ui.el("button", { text = label, actions = { click = "control=" .. token }, attrs = attrs })
 end
@@ -108,8 +195,8 @@ local function refusal_rows(view: any, rows: { any }, result: any)
 	table.insert(rows, button(view, "Acknowledge command refusal", { kind = "dispatch-acknowledge", request_id = result.request_id }))
 end
 -- Dispatch machine-node fields copied from a projected action and from a command outcome.
-local ACTION_KEYS = "phase claim worker_id retry_count wake_status execution_origin execution_pane_binding execution_controller_pane reconciliation_only"
-local RESULT_KEYS = "ok code request_id grant_id worker_id work_id wake_status"
+local ACTION_KEYS = "phase claim worker_id retry_count retry_after_serial wake_status execution_origin execution_pane_binding execution_controller_pane reconciliation_only authority_namespace authority_revision logical_session_id admission_seq request_serial request_sha256"
+local RESULT_KEYS = "ok code command request_id grant_id worker_id work_id wake_status"
 local function owner_entry(kind: string, target: string, owner: any, revision: number): any
 	return { kind = kind, target = target, owner_id = owner.owner_id, generation = owner.generation, revision = revision }
 end
@@ -168,20 +255,23 @@ local function owner_card(view: any, target: string, owner: any, generation: num
 end
 -- Window-side dispatch control, published like `assistance`; the request table stays host-side
 -- until clicked, so large policy/adopt payloads are never size-limited by a URL.
+local NAVIGATION_COMMANDS = { project_menu = true, orchestration_menu = true, association_menu = true, open_plan = true }
 local function dispatch_link(view: any, command: string, label: string, extra: any?): any
 	local request = { command = command, source_nonce = view.alias_nonce, orch_session_id = view.orch_session_id }
 	for key, value in extra or {} do request[key] = value end
 	local attrs = { ["data-orchplus-command"] = command }
 	if type(request.worker_id) == "string" then attrs["data-orchplus-worker"] = request.worker_id end
-	return button(view, label, { kind = "operator-intent", request = request }, attrs)
+	return button(view, label, { kind = "operator-intent", request = request, navigation = NAVIGATION_COMMANDS[command] }, attrs)
 end
 local function pause_link(view: any, policy: any): any
 	return dispatch_link(view, if policy.paused then "resume" else "pause", if policy.paused then "Resume scheduling" else "Pause new work")
 end
 -- `orchplus.worker` node fields copied verbatim from the projected workflow worker.
-local WORKER_KEYS = "worker_id work_id worker_generation origin_binding pane_binding due_poll due_report report_request_pending active_action_id"
+local WORKER_KEYS = "worker_id work_id worker_generation origin_binding pane_binding due_poll poll_continuation due_report report_request_pending active_action_id cleanup_ready"
+	.. " activation_received"
 	.. " finish_requested coordinator_owner_id launch_origin_binding launch_pane_binding continuation_required continuation_proof"
-	.. " orchestration_excluded context_used_pct phase due_rollover rollover restored adopt_pane_binding withdrawal role family review_id"
+	.. " orchestration_excluded context_used_pct context_seq context_rollover phase due_rollover rollover restored adopt_pane_binding withdrawal role family review_id"
+	.. " orch_project_id open_conversation presentation execution_cwd record_id checks backend allocation_target"
 -- Why an account USAGE delta (or one of its windows) is not comparable.
 local USAGE_WHY = { reset_crossed = "a quota reset happened in between", stale = "a reading is stale or missing",
 	unbound = "a reading has no bound account", different_account = "the readings are from different accounts" }
@@ -247,24 +337,24 @@ local function dispatch_view(view: any, projection: any, selected: any): (any, a
 	local d = projection.dispatch or { actions = {}, workers = {} }
 	local owner, bound, admitted = controller(view, selected)
 	local rows = { ui.text("SPAWN owns launch/configuration and mailbox target access. Display identity is configured metadata, not verified account isolation.") }
+	if bound then
+		table.insert(rows, ui.row({ dispatch_link(view, "bridge_admit", "Admit this session to SPAWN"),
+			dispatch_link(view, "bridge_reconcile", "Reconcile current SPAWN control"),
+			dispatch_link(view, "close_session", "Close logical session…") }))
+		table.insert(rows, ui.text("Close fences new work. Owners, uncertain effects, deliveries and document writes must settle before removal; source documents and Git are untouched."))
+	end
+	local closing = if d.session_control and d.session_control.close then d.session_control.close.control_origin else nil
+	if not bound and closing and closing.binding.alias_nonce == view.alias_nonce and closing.controller_pane == tostring(view.pane) then
+		table.insert(rows, ui.row({ dispatch_link(view, "bridge_reconcile", "Read current closure status"),
+			dispatch_link(view, "close_session", "Continue explicit close…") }))
+	end
 	table.insert(rows, ui.text("Host scope: local workers use local ORCH+. For remote workers, open ORCH+ on that attached remote Tern host. Controller, workers, mailbox and SPAWN authority stay on the same execution host; managed SSH hops are not supported. Ordinary SPAWN SSH launches are unchanged."))
 	if admitted then
-		table.insert(rows, ui.row({ dispatch_link(view, "catalog", "Load configured SPAWN catalog"), dispatch_link(view, "start_work", "Start work…") }))
-		table.insert(rows, ui.text("Start work imports a /glitch-plan file (read by the execution host), uses the Tern board in Config, or starts a saved template with your input. The board and the intake inbox are polled by this desktop window; inbox files are archived to .orchplus-taken/ only after their intake is accepted."))
-	else table.insert(rows, ui.text("This panel is inert for dispatch: only this registration's admitted active controller can claim effects.")) end
+		table.insert(rows, dispatch_link(view, "catalog", "Refresh configured agents"))
+	else table.insert(rows, ui.text("Agent connection is being checked automatically. Existing conversations and held work are preserved.")) end
 	if bound then
-		table.insert(rows, dispatch_link(view, "continue_controller", "Continue controller after reload…", { expected_revision = projection.revision }))
-		table.insert(rows, dispatch_link(view, "recovery_guide", "Guided reload recovery — next step…"))
-		table.insert(rows, ui.text("After a reload, run the palette command ORCH+ Continue controller in this window, then ORCH+ Reload recovery guide, in the window you are using. A button click does not say which window it came from, so the two buttons above act only in the window that already is this controller's continued origin; every other window ignores them."))
-		table.insert(rows, ui.text("Reload recovery: first verify old executors and continue this exact controller; then recover the previous SPAWN owner in SPAWN's own Config when it still binds an earlier window; then explicitly reattach each worker. The guide lists every remaining step and opens each explicit, attested control in order; it never attests, retries or reactivates anything by itself."))
-		local guide = view.recovery_steps
-		if type(guide) == "table" and type(guide.steps) == "table" then
-			local checklist = { ui.text(if #guide.steps == 0 then "No reload recovery step remains (as last checked)." else "Remaining steps, in order (as last checked; open the guide to refresh):") }
-			for index, step in guide.steps do
-				table.insert(checklist, ui.text(tostring(index) .. ". " .. step.label .. (if step.detail then " — " .. step.detail else "")))
-			end
-			table.insert(rows, ui.card("Reload recovery checklist", checklist))
-		end
+		table.insert(rows, dispatch_link(view, "recovery_guide", "Connection details and exceptional recovery"))
+		table.insert(rows, ui.text("Routine reloads and compatible updates reconnect automatically. Uncertain effects are checked without launching another copy. Only conflicts or unconfirmed outcomes need a decision here."))
 	end
 	local routing_policy = if d.workflow then d.workflow.policy else nil
 	local evidence = if d.workflow then d.workflow.capacity else nil
@@ -306,27 +396,50 @@ local function dispatch_view(view: any, projection: any, selected: any): (any, a
 			.. " · receipt " .. shown(worker.accepted_seq, "none yet") .. " / confirmed " .. shown(worker.compacted_floor, "none yet")))
 		if worker.reason then table.insert(rows, ui.text(tern.json.encode(worker.reason))) end
 		routing_rows(view, rows, worker, admitted)
-		local fenced = worker.withdrawal
-		if fenced then
-			table.insert(rows, ui.text(ui.span("Never launched: " .. (if fenced.evidence == "spawn_rejected" then "SPAWN rejected its " .. fenced.op .. " (" .. fenced.action_id .. ") before any effect"
-				else "explicit continuation fenced its " .. fenced.op .. " (" .. fenced.action_id .. ", " .. fenced.evidence .. ") as unexecuted")
-				.. ". Nothing re-issues it and the old request is never re-sent; cancel this work and queue the assignment again.", "warning")))
-			if fenced.mailbox_retire == "retiring" then
+		local withdrawal = worker.withdrawal
+		if withdrawal then
+			if withdrawal.evidence == "failed_startup" then
+				table.insert(rows, ui.text("This coordinator really launched but never accepted or activated. Its owner was recovered. Removal first asks SPAWN to check the exact original native pane in this authorized window; only proved exit/absence and an unused producer journal permit retirement."))
+				if withdrawal.mailbox_retire == "retiring" then
+					table.insert(rows, ui.text("Failed-startup retirement is " .. tostring(worker.mailbox_status) .. ". Keep its original pane, launch and mailbox target until SPAWN confirms retirement; an uncertain outcome is never re-issued."))
+				elseif admitted then
+					table.insert(rows, dispatch_link(view, "cancel_work", "Remove failed startup…", { worker_id = worker.worker_id }))
+					table.insert(rows, ui.text("No native stop, acceptance or release is fabricated. Live, restored, unknown or consumed generations remain retained. Across a continued window epoch, only genuine original-pane absence is accepted; an existing restored target is refused."))
+				end
+			else
+			local effect = withdrawal.op .. (if withdrawal.action_id then " (" .. withdrawal.action_id .. ")" else "")
+			if withdrawal.allocation_target then
+				table.insert(rows, ui.text(ui.span("Startup failed without a confirmed mailbox handle. Cancellation first checks the exact retained allocation; unknown allocation stays held. No startup is repeated.", "warning")))
+			elseif withdrawal.status_required then
+				table.insert(rows, ui.text(ui.span("Startup outcome unconfirmed: " .. effect .. " may have run. Nothing re-issues it. Inspect its retained SPAWN outcome; cancellation requires positive proof of nonexecution.", "warning")))
+			elseif withdrawal.pending_startup then
+				table.insert(rows, ui.text("Startup pending: " .. effect .. " has not been sent. Approved work starts automatically while this group is running; cancellation is optional."))
+			elseif withdrawal.mailbox_retire ~= "retiring" then
+				table.insert(rows, ui.text(ui.span(if withdrawal.evidence == "spawn_rejected"
+					then "Startup rejected: SPAWN refused " .. effect .. ". Cancellation settles only its verified unused resources; startup is not retried."
+					else "Startup held" .. (if worker.continuation_required then " after continuation" else "")
+						.. ": " .. effect .. " did not execute. Inspect the retained refusal or cancellation; this is not permission to repeat an uncertain effect.", "warning")))
+			end
+			if withdrawal.mailbox_retire == "retiring" then
 				table.insert(rows, ui.text("Cancelled by the owner: its unused mailbox is being retired (" .. tostring(worker.mailbox_status) .. "). The worker is removed once SPAWN confirms retirement; an uncertain retirement is never re-issued, so inspect its retained outcome."))
 			elseif admitted then
-				table.insert(rows, dispatch_link(view, "cancel_work", "Cancel never-launched work…", { worker_id = worker.worker_id }))
-				local retire_sentence = if fenced.mailbox_provisioned
+				local label = if withdrawal.allocation_target then "Cancel failed work…"
+					elseif withdrawal.pending_startup then "Cancel queued work…"
+					elseif withdrawal.status_required then "Check before cancelling work…" else "Cancel never-launched work…"
+				table.insert(rows, dispatch_link(view, "cancel_work", label, { worker_id = worker.worker_id }))
+				local retire_sentence = if withdrawal.mailbox_provisioned
 					then " Its provisioned, never-used mailbox is then retired through the exact retirement path; the worker is removed once SPAWN confirms retirement. Nothing native is stopped."
 					else " Nothing native is stopped or retired."
-				table.insert(rows, ui.text(if fenced.mailbox_retire == "refused" then "SPAWN refused the previous retirement of this work's unused mailbox (reason above); nothing was removed. Cancel again to issue one fresh retirement."
-					elseif fenced.status_required
-					then "SPAWN received that exact request, so cancel first reads its retained SPAWN status. The worker is removed and its reservations released only when the request can never run: SPAWN has no record of it, rejected it, or reports a pre-effect refusal such as an expired window challenge. A live challenge refuses until it expires (30 s)." .. retire_sentence
-					elseif fenced.mailbox_retire ~= nil then (if fenced.evidence == "spawn_rejected" then "SPAWN's rejection is terminal and no producer ever ran"
-						else "Continuation proved this request never ran")
+				table.insert(rows, ui.text(if withdrawal.mailbox_retire == "refused" then "SPAWN refused the previous retirement of this work's unused mailbox (reason above); nothing was removed. Cancel again to issue one fresh retirement."
+					elseif withdrawal.allocation_target then "Cancel observes the exact allocation target. Only verified absence releases work directly; an existing unused mailbox follows normal verified retirement. Unknown observations never delete work or relaunch an agent."
+					elseif withdrawal.status_required
+					then "Cancel first reads SPAWN's retained status of that exact request. Missing after reclamation is not proof of nonexecution; only positive pre-effect refusal permits withdrawal." .. retire_sentence
+					elseif withdrawal.mailbox_retire ~= nil then (if withdrawal.evidence == "spawn_rejected" then "SPAWN's retained startup rejection is terminal"
+						elseif withdrawal.evidence == "unissued" then "This request was never sent" else "SPAWN proved this request did not execute")
 						.. ", so cancel retires the unused mailbox through the exact retirement path. The worker and its reservations are released once SPAWN confirms retirement; a refused or uncertain retirement keeps the worker here with that outcome."
-					elseif fenced.evidence == "spawn_rejected" then "SPAWN's retained rejection is terminal and no mailbox was created, so cancel removes the worker and releases its reservations directly. Nothing native is stopped or retired."
-					elseif fenced.mailbox_provisioned then "That exact request was never sent." .. retire_sentence
-					else "That exact request was never sent, so cancel removes the worker and releases its reservations directly. Nothing native is stopped or retired."))
+					elseif withdrawal.evidence == "spawn_rejected" then "SPAWN's retained startup rejection is terminal. Cancellation releases reservations only after allocation is verified and any unused mailbox is retired. Nothing native is stopped."
+					else "Cancel removes this unexecuted work and releases its reservations directly. Nothing native is stopped or retired."))
+			end
 			end
 		end
 		if worker.rejected_report then
@@ -349,6 +462,7 @@ local function dispatch_view(view: any, projection: any, selected: any): (any, a
 				elseif worker.mailbox_status == "retired" then "mailbox retired — settle normal owner release"
 				elseif worker.stop_status == "absent" or worker.stop_status == "exited" then "native stopped — retire mailbox"
 				elseif worker.release_seq then "quiescent release committed — drain final ACKs/replies and confirm watermark before native stop"
+				elseif worker.start_retirement_requested then "owner withdrew pending START — stopping the idle orchestrator, then retiring its mailbox"
 				elseif worker.retirement_requested then "retirement requested — waiting for authenticated quiescent release"
 				elseif worker.activation_received then "activated — explicit release required when finished"
 				elseif worker.activation_issued then "activation issued — awaiting durable reply receipt"
@@ -358,6 +472,10 @@ local function dispatch_view(view: any, projection: any, selected: any): (any, a
 				.. " · contiguous replies " .. shown(worker.reply_floor, "0") .. "/" .. shown(worker.reply_seq, "0")))
 			if admitted and worker.activation_issued and not worker.retirement_requested and not worker.release_seq and not worker.owner_released then
 				table.insert(rows, dispatch_link(view, "retire", "Request graceful coordinator retirement", { worker_id = worker.worker_id }))
+				if worker.start_retirement_ready then
+					table.insert(rows, dispatch_link(view, "withdraw_start_retire", "Withdraw pending START and retire idle orchestrator", { worker_id = worker.worker_id }))
+					table.insert(rows, ui.text("This permanently cancels only the pending START approval. Its work stays held. Retirement still requires a verified idle or exited orchestrator and settled communication; unknown activity or other unfinished obligations block it."))
+				end
 			end
 		end
 		if not worker.coordinator_owner_id and worker.stop_status ~= nil and worker.stop_status ~= "not_requested" and not (admitted and worker.finish_requested) then
@@ -384,7 +502,7 @@ local function dispatch_view(view: any, projection: any, selected: any): (any, a
 		end
 	end
 	local active = d.actions[view.dispatch_action]
-	if active == nil or active.phase == "complete" then
+	if active == nil then
 		for _, a in d.actions do if a.phase == "ready" then active = a; break end end
 	end
 	-- Newly selected queued work must not hide a live grant from its executor.
@@ -395,6 +513,10 @@ local function dispatch_view(view: any, projection: any, selected: any): (any, a
 	-- grant addressable even when another UI command selects newly queued work.
 	for _, a in d.actions do if a.wake_pending then active = a; break end end
 	for id, a in d.actions do
+		local start, start_project
+		for key, project in d.projects or {} do if project.start and project.start.delivery_action_id == id then
+			start, start_project = project.start, key
+		end end
 		local scoped = if view.scoped_results then view.scoped_results[id] else nil
 		if scoped and scoped.result and scoped.result.ok == false then
 			table.insert(rows, ui.text(ui.span("Held " .. a.request.op .. " / " .. id .. ": "
@@ -411,13 +533,16 @@ local function dispatch_view(view: any, projection: any, selected: any): (any, a
 		if a.phase == "backpressure" and retry_stopped then
 			table.insert(rows, ui.text(ui.span("Retries of " .. a.request.op .. " / " .. id .. " stopped by the owner (loop cap). It stays unexecuted; cancel the work to end it.", "warning")))
 		elseif admitted and a.phase == "backpressure" then
-			table.insert(rows, dispatch_link(view, "retry", "Recheck unexecuted capacity refusal: " .. a.request.op, { action_id = id }))
+			if start then
+				table.insert(rows, dispatch_link(view, "project_start_retry", "Retry original START delivery",
+					{ orch_project_id = start_project, start_id = start.start_id, project_revision = start.project_revision, decision_context = start.decision_context }))
+			else table.insert(rows, dispatch_link(view, "retry", "Recheck unexecuted capacity refusal: " .. a.request.op, { action_id = id })) end
 		end
 		if a.phase == "claimed" or a.phase == "uncertain" then
 			table.insert(rows, ui.text("Retained " .. a.request.op .. " · " .. a.request.request_id .. " / " .. id .. " · " .. a.phase
 				.. " · executor " .. tostring(if a.claim then a.claim.executor else "none")))
 			if admitted then table.insert(rows, dispatch_link(view, "reconcile", "Read retained SPAWN outcome (never relaunch)", { action_id = id })) end
-			if admitted and a.phase == "uncertain" and (a.request.op == "mailbox_publish_ack" or a.request.op == "mailbox_publish_reply") then
+			if admitted and not start and a.phase == "uncertain" and (a.request.op == "mailbox_publish_ack" or a.request.op == "mailbox_publish_reply") then
 				table.insert(rows, dispatch_link(view, "readback_publication", "Read back and re-publish the exact same bytes", { action_id = id }))
 				table.insert(rows, ui.text("Immutable ACK/reply bytes are idempotent: SPAWN reads them back first and publishes the same bytes only if absent. Native effects are never repeated."))
 			end
@@ -432,7 +557,7 @@ local function dispatch_view(view: any, projection: any, selected: any): (any, a
 	if view.executor_confirmation then
 		table.insert(rows, ui.text("I independently stopped/reconciled action " .. view.executor_confirmation.action_id .. ", executor "
 			.. view.executor_confirmation.executor .. ", including any delayed native launch. This does not retry it or clear ownership."))
-		table.insert(rows, button(view, "Confirm exact retained executor reconciliation", { kind = "executor-confirm" }))
+		table.insert(rows, button(view, "Confirm exact retained executor reconciliation", { kind = "executor-confirm", intent = view.executor_confirmation }))
 	end
 	local outcome = view.dispatch_result
 	local command_result = view.dispatch_command_result
@@ -444,34 +569,59 @@ local function dispatch_view(view: any, projection: any, selected: any): (any, a
 	for id, a in d.actions do if a.phase == "uncertain" and a.claim then table.insert(uncertain_ids, id) end end
 	table.sort(uncertain_ids)
 	while #uncertain_ids > 16 do table.remove(uncertain_ids) end
-	local machine = { version = 1, source_nonce = view.alias_nonce, host_pane_id = tostring(view.pane), orch_session_id = view.orch_session_id,
+	local machine = { version = 2, authority_version = projection.version, name = selected.name, source_nonce = view.alias_nonce, host_pane_id = tostring(view.pane), orch_session_id = view.orch_session_id,
 		owner_id = if bound then owner.owner_id else nil, owner_generation = if bound then owner.generation else nil,
+		protocol = d.protocol, phase = d.phase, authority_namespace = projection.authority_namespace, authority_revision = projection.revision,
+		next_admission_seq = d.next_admission_seq,
+		spawn_namespace = d.spawn_namespace, compatibility = d.compatibility, sessions = d.sessions, control = d.control,
+		session_control = if d.session_control then pick(d.session_control, "phase admission_seq admitted generation_floor request_floor next_request_serial last_authority_revision close") else nil,
+		reconcile_progress = d.reconcile_progress,
+		control_result = if view.dispatch_control_result then pick(view.dispatch_control_result, "request_id command ok code message") else nil,
 		controller_phase = if bound then owner.phase else nil, revision = projection.revision, command_cursor = d.command_cursor,
 		action = if active then pick(active, ACTION_KEYS, { action_id = active.request.action_id }) else nil,
 		result = if outcome then pick(outcome, RESULT_KEYS, { action_id = outcome.action_id }) else nil,
-		command_result = if command_result then pick(command_result, "request_id command action_id ok code message acknowledged") else nil,
-		driver_result = if driver_result then pick(driver_result, "request_id command action_id worker_id ok code message") else nil,
+		command_result = if command_result then pick(command_result, "request_id command action_id ok code message acknowledged orch_project_id orch_session_id") else nil,
+		driver_result = if driver_result then pick(driver_result, "request_id command action_id worker_id ok code message orch_project_id") else nil,
+		poll_result = if view.dispatch_poll_result then pick(view.dispatch_poll_result, "request_id command action_id worker_id ok code message") else nil,
+		allocation_result = if view.dispatch_allocation_result then pick(view.dispatch_allocation_result, "request_id command worker_id ok code message") else nil,
 		receipt = view.dispatch_receipt, uncertain_actions = uncertain_ids }
-	local request_node = if active then keyed(active.request_bytes, "dispatch-request", "orchplus.request") else nil
+	local request_node = if not active then nil elseif active.request_bytes then keyed(active.request_bytes, "dispatch-request", "orchplus.request")
+		else keyed(tern.json.encode(active.request), "dispatch-draft", "orchplus.draft")
 	local bytes = tern.json.encode(machine)
-	if #bytes > 8192 then
-		bytes = tern.json.encode({ version = 1, source_nonce = view.alias_nonce, error = "Dispatch projection exceeds 8192 bytes; no grant exposed." })
+	if #bytes > 65536 then
+		bytes = tern.json.encode({ version = 2, source_nonce = view.alias_nonce, error = "Current control projection exceeds 65536 bytes; no grant exposed." })
 	end
 	local bridge = keyed(bytes, "dispatch-state", "orchplus.dispatch")
 	local scoped_nodes = {}
 	for id, a in d.actions do
 		local scoped = table.clone(machine)
+		scoped.sessions = nil; scoped.control = nil; scoped.session_control = nil; scoped.compatibility = nil
 		scoped.action = pick(a, ACTION_KEYS, { action_id = id })
 		local retained = if view.scoped_results then view.scoped_results[id] else nil
 		local response = if retained then retained.result elseif outcome and outcome.action_id == id then outcome else nil
 		scoped.result = if response then pick(response, RESULT_KEYS, { action_id = id }) else nil
 		scoped.receipt = if retained then retained.receipt elseif view.dispatch_receipt and view.dispatch_receipt.action_id == id then view.dispatch_receipt else nil
 		scoped.command_result = nil
+		scoped.allocation_result = nil
 		local encoded = tern.json.encode(scoped)
 		if #encoded <= 8192 then
 			table.insert(scoped_nodes, keyed(encoded, "dispatch-action-" .. id, "orchplus.dispatch"))
-			table.insert(scoped_nodes, keyed(a.request_bytes, "dispatch-request-" .. id, "orchplus.request"))
+			if a.request_bytes then table.insert(scoped_nodes, keyed(a.request_bytes, "dispatch-request-" .. id, "orchplus.request"))
+			else table.insert(scoped_nodes, keyed(tern.json.encode(a.request), "dispatch-draft-" .. id, "orchplus.draft")) end
 		else table.insert(rows, ui.text(ui.span("Exact action surface unavailable: " .. id .. " exceeds 8192 bytes. No grant exposed.", "error"))) end
+	end
+	-- Consumed actions are absent. A live delivery receipt remains visible until its window ACKs it,
+	-- without retaining the completed request, response or a runnable action.
+	for id, retained in view.scoped_results or {} do
+		if d.actions[id] == nil and retained.receipt then
+			local scoped = table.clone(machine)
+			scoped.sessions = nil; scoped.control = nil; scoped.session_control = nil; scoped.compatibility = nil
+			scoped.action = nil; scoped.command_result = nil
+			scoped.allocation_result = nil
+			scoped.result = pick(retained.result, RESULT_KEYS, { action_id = id })
+			scoped.receipt = retained.receipt
+			table.insert(scoped_nodes, keyed(tern.json.encode(scoped), "dispatch-action-" .. id, "orchplus.dispatch"))
+		end
 	end
 	return ui.card("Managed dispatch", rows), bridge, request_node, scoped_nodes
 end
@@ -490,7 +640,7 @@ local function workflow_view(view: any, projection: any, selected: any): (any, a
 	end
 	local policy = flow.policy
 	table.insert(rows, ui.text((if policy.paused then "Paused — new work held; receipts, reports and answers still settle." else "Scheduling enabled")
-		.. " · poll " .. tostring(policy.poll_ms) .. "ms · heartbeat " .. tostring(policy.heartbeat_ms) .. "ms · stale " .. tostring(policy.stale_ms) .. "ms"
+		.. " · report polling " .. tostring(math.floor(policy.poll_ms / 1000)) .. "s · automatic-report interval " .. tostring(math.floor(policy.report_request_ms / 1000)) .. "s · stale after " .. tostring(math.floor(policy.stale_ms / 1000)) .. "s"
 		.. " · automatic reports " .. (if policy.automatic_reports then "enabled" else "off")))
 	local wake = view.idle_wake
 	if type(wake) == "table" and wake.state == "active" then
@@ -519,6 +669,7 @@ local function workflow_view(view: any, projection: any, selected: any): (any, a
 		local projected = if projection.dispatch.workers then projection.dispatch.workers[worker.worker_id] else nil
 		machine("workflow-worker-" .. worker.worker_id, "orchplus.worker", pick(worker, WORKER_KEYS, {
 			report_held = worker.rejected_report ~= nil, reattach_needed = worker.reattach_needed == true,
+			receipt_unconfirmed = projected ~= nil and projected.accepted_seq > projected.compacted_floor,
 			routing = if worker.routing then pick(worker.routing, "phase mode evidence_revision") else nil,
 			review = if worker.review then pick(worker.review, "review_id round status findings_count reviewer_family") else nil,
 			held_reason = if projected and projected.reason and worker.phase ~= "accepted" then pick(projected.reason, "code message") else nil,
@@ -538,9 +689,14 @@ local function workflow_view(view: any, projection: any, selected: any): (any, a
 				{ "Report request", if worker.report_request_pending then "Pending worker response; not duplicated"
 					elseif worker.report_loop and worker.report_loop.state == "stopped" then "Automatic requests stopped by the owner (loop cap); a new report from the worker resumes them"
 					elseif worker.due_report then "Due; safe delivery required" else "Not due" },
-				{ "Context", if worker.context_used_pct ~= nil then "context " .. tostring(worker.context_used_pct) .. "% (worker-reported) · report seq " .. shown(worker.context_seq, "unknown") else "not reported" },
+				{ "Context", if worker.context_used_pct ~= nil then tostring(worker.context_used_pct) .. "% measured · report " .. shown(worker.context_seq, "unknown") else "Unknown — reliable context measurement is unavailable." },
+				{ "Rollover threshold", if worker.context_rollover and worker.context_rollover.mode == "percentage" then
+					tostring(worker.context_rollover.threshold_pct) .. "% override"
+					else "Calculated default — first-turn context plus 55% of the remaining window" },
+				{ "Rollover measurement", if worker.context_rollover then worker.context_rollover.status else "unknown" },
 				{ "Orchestration", if worker.orchestration_excluded then "Excluded in Config — skipped by automatic reports and automatic rollover; not stopped" else "Eligible" } }),
 		}
+		if admitted then table.insert(details, dispatch_link(view, "associate_document", "Associate existing ruling document…", { worker_id = worker.worker_id })) end
 		if (worker.wake_pending_count or 0) > 0 then
 			table.insert(details, ui.text("Durably published notifications: " .. tostring(worker.wake_pending_count)
 				.. " pending · " .. tostring(worker.wake_unstarted_count or 0) .. " not started (no native effect begun)"
@@ -609,6 +765,10 @@ local function workflow_view(view: any, projection: any, selected: any): (any, a
 			table.insert(details, ui.row({ dispatch_link(view, "inspect_worker", "Inspect native facts", { worker_id = worker.worker_id }),
 				dispatch_link(view, "open_worker", "Open exact relevant pane", { worker_id = worker.worker_id }) }))
 		end
+		if bound and worker.cleanup_ready then
+			table.insert(details, dispatch_link(view, "poll", "Settle positively stopped worker mailbox…", { worker_id = worker.worker_id }))
+			table.insert(details, ui.text("Cleanup only: fresh mailbox read/retirement under current admission, never reattach or launch the absent pane."))
+		end
 		-- Only a launched generation left without the continued route needs continuation; a
 		-- never-launched or freshly launched worker has nothing to reattach.
 		if bound and worker.pane_binding ~= nil and (worker.continuation_required or worker.reattach_needed) then
@@ -620,11 +780,9 @@ local function workflow_view(view: any, projection: any, selected: any): (any, a
 			if worker.rollover and candidate.id == worker.rollover.id then rollover = candidate end
 		end
 		if rollover then
-			local phases = {}
-			for _, edge in rollover.history do table.insert(phases, edge.phase .. "@" .. tostring(edge.revision)) end
 			table.insert(details, ui.text("Rollover " .. rollover.id .. " · " .. worker.rollover.role .. " · " .. rollover.phase .. " · trigger " .. rollover.trigger
 				.. " · predecessor " .. rollover.predecessor_worker_id .. " · successor " .. tostring(rollover.successor_worker_id or "not granted")))
-			table.insert(details, ui.text("Durable edges: " .. table.concat(phases, " → ")))
+			table.insert(details, ui.text("Current handover revision " .. shown(rollover.revision, "unknown") .. " · " .. shown(rollover.updated_at, "time unavailable")))
 			-- An owner-stopped checkpoint loop (loop_cap "Keep it stopped") offers no re-request.
 			local checkpoint_stopped = rollover.checkpoint_loop ~= nil and rollover.checkpoint_loop.state == "stopped"
 			if checkpoint_stopped then
@@ -637,8 +795,9 @@ local function workflow_view(view: any, projection: any, selected: any): (any, a
 			if admitted and rollover.rerequestable and not checkpoint_stopped and worker.rollover.role == "predecessor" then
 				table.insert(details, dispatch_link(view, "rollover", "Request the checkpoint again…", { worker_id = worker.worker_id }))
 			end
-			if admitted and rollover.cancellable and worker.rollover.role == "predecessor" then
-				table.insert(details, dispatch_link(view, "cancel_rollover", "Cancel rollover…", { worker_id = worker.worker_id }))
+			if admitted and (rollover.cancellable or rollover.close_without_successor) and worker.rollover.role == "predecessor" then
+				table.insert(details, dispatch_link(view, "close_handover", "Close handover without successor…", { worker_id = worker.worker_id }))
+				table.insert(details, ui.text("Only after predecessor retirement and before any successor effect may have begun. Otherwise use fenced recovery; no cancel/relaunch."))
 			end
 		end
 		local rolling = rollover and rollover.phase ~= "complete" and rollover.phase ~= "cancelled"
@@ -661,7 +820,7 @@ local function workflow_view(view: any, projection: any, selected: any): (any, a
 		table.insert(rows, ui.card("Worker health", details))
 	end
 	local gates = {}
-	for _, gate in flow.gates do if chosen and gate.worker_id == chosen.worker_id then table.insert(gates, gate) end end
+	for _, gate in flow.gates do table.insert(gates, gate) end
 	-- Open questions first, then settled history; each group in creation order (numeric gate serial).
 	local function open_gate(gate: any): boolean return not GATE_SETTLED[gate.phase] end
 	local function serial(gate: any): number return tonumber(gate.id:match("(%d+)$")) or 0 end
@@ -669,15 +828,22 @@ local function workflow_view(view: any, projection: any, selected: any): (any, a
 		if open_gate(a) ~= open_gate(b) then return open_gate(a) end
 		return serial(a) < serial(b) or (serial(a) == serial(b) and a.id < b.id)
 	end)
-	local gate_page = math.min(view.workflow_gates or 0, math.max(0, math.ceil(#gates / 2) - 1))
-	page_controls(rows, "gates", gate_page, #gates, 2)
-	for index = gate_page * 2 + 1, math.min(#gates, gate_page * 2 + 2) do
-		local gate = gates[index]
-		machine("workflow-gate-" .. gate.id, "orchplus.gate", pick(gate, "id revision worker_id worker_generation kind phase"))
-		machine("workflow-gate-content-" .. gate.id, "orchplus.gate-content", pick(gate, "id revision worker_id worker_generation question options", { version = 1 }), 65536)
-		local fields = { gate_id = gate.id, gate_revision = gate.revision, worker_id = gate.worker_id }
+	for _, gate in gates do
+		machine("workflow-gate-" .. gate.id, "orchplus.gate", pick(gate, "id revision worker_id worker_generation kind phase ruling decision_context source_request"))
+		machine("workflow-gate-content-" .. gate.id, "orchplus.gate-content", pick(gate, "id revision worker_id worker_generation question options decision_context proposal", { version = 1 }), 65536)
+		local fields = { gate_id = gate.id, gate_revision = gate.revision, worker_id = gate.worker_id, decision_context = gate.decision_context }
 		local details = { ui.text(gate.id .. " / revision " .. tostring(gate.revision) .. " · " .. gate.kind .. " · " .. gate.phase),
 			ui.text(gate.question), ui.text("Evidence: " .. shown(gate.evidence, "none supplied")) }
+		if gate.ruling then
+			table.insert(details, ui.text("Existing-document ruling: " .. gate.ruling.path .. " · " .. gate.ruling.state))
+			table.insert(details, ui.text(gate.ruling.entry))
+			if admitted then
+				table.insert(details, ui.row({ dispatch_link(view, "ruling_write", "Record ruling in existing document…", fields),
+					dispatch_link(view, "ruling_observe", "Reconcile ruling buffer and disk", fields),
+					dispatch_link(view, "ruling_remote", "Record through existing authorized worker…", fields) }))
+				if gate.ruling.intent then table.insert(details, dispatch_link(view, "ruling_reissue", "Inspect ended writer before enabling a new write", fields)) end
+			end
+		end
 		for _, option in gate.options do table.insert(details, ui.text(option.id .. " · " .. option.label)) end
 		if gate.answer then
 			local source = gate.answer.source
@@ -726,12 +892,22 @@ local function workflow_view(view: any, projection: any, selected: any): (any, a
 		end
 		table.insert(rows, ui.card("Durable ORCH+ thread · " .. thread.work_id, entries))
 	end
-	-- Landing queues: FIFO per project/repository/target with one granted slot. Owners reorder or
-	-- cancel only ungranted items; uncertain results hold the slot until explicit reconciliation.
+	-- Session-owned controls show their positions in the shared canonical repository/target queue.
+	-- Repository-side queues retain exact grant outcomes without taking a competing local slot.
 	for _, queue in flow.landing or {} do
+		local external = queue.repository and queue.repository.queue_route == "repository_queue"
+		machine("workflow-repository-" .. queue.id, "orchplus.repository", { queue_id = queue.id, identity = queue.repository,
+			slot = queue.repository_slot, first = queue.repository_first, count = queue.repository_count })
 		local entries = { ui.text(queue.repo_ref .. " · " .. queue.target_ref .. " · project " .. queue.project_id
 			.. " · head " .. (if queue.head then queue.head.revision .. " (" .. queue.head.source .. ")" else "unknown until a recorded result")
-			.. " · slot " .. (queue.slot or "free")) }
+			.. (if external then " · repository_queue · no local slot" else " · local slot " .. (queue.repository_slot or queue.slot or "free"))) }
+		if queue.repository then
+			table.insert(entries, ui.text("Verified " .. queue.repository.host_key .. ":" .. queue.repository.common_dir .. " · " .. queue.repository.target_ref
+				.. " · " .. tostring(queue.repository_count or #queue.items) .. " outstanding across local sessions."
+				.. " Coordination covers this authority/data directory, not other machines or unmanaged agents."))
+		else
+			table.insert(entries, ui.text(ui.span("Pre-cutover request without verified repository identity: settle its existing grant, or cancel and submit a fresh checkout-backed request. No automatic replay.", "warning")))
+		end
 		for _, item in queue.items do
 			machine("workflow-landing-" .. item.id, "orchplus.landing",
 				pick(item, "id revision status worker_id uncertain cancellable move_up move_down markable_lost reconcilable", { queue_id = queue.id }))
@@ -742,7 +918,7 @@ local function workflow_view(view: any, projection: any, selected: any): (any, a
 			-- the rebased revision needs a fresh review and LANDING_REQUEST before any new approval.
 			local hold_code = if item.hold then item.hold.code else nil
 			local void = item.refresh_required or (item.approved and (hold_code == "refresh_required" or hold_code == "target_moved"))
-			table.insert(entries, ui.text((if item.position then "#" .. tostring(item.position) .. " " else "") .. item.id .. " · " .. item.status .. " · " .. item.work_id
+			table.insert(entries, ui.text((if item.position then "#" .. tostring(item.repository_position or item.position) .. " " else "") .. item.id .. " · " .. item.status .. " · " .. item.work_id
 				.. " · " .. r.source_ref .. "@" .. r.source_revision .. " → expects " .. r.target_revision
 				.. (if void then " · approval void — awaiting fresh review/request"
 					elseif item.approved then " · owner approved" elseif item.gate_id then " · approval gate " .. item.gate_id else "")))
@@ -791,7 +967,8 @@ local function workflow_view(view: any, projection: any, selected: any): (any, a
 				local controls = {}
 				if item.move_up then table.insert(controls, dispatch_link(view, "move_landing", "Move up", { landing_id = item.id, landing_revision = item.revision, direction = "up" })) end
 				if item.move_down then table.insert(controls, dispatch_link(view, "move_landing", "Move down", { landing_id = item.id, landing_revision = item.revision, direction = "down" })) end
-				if item.cancellable then table.insert(controls, dispatch_link(view, "cancel_landing", "Cancel…", fields)) end
+				if item.cancellable then table.insert(controls, dispatch_link(view, "cancel_landing",
+					if item.status == "landed" and item.deploy and item.deploy.status == "pending" and item.deploy.attempts == 0 then "Stop pending deployment" else "Cancel…", fields)) end
 				if item.markable_lost then table.insert(controls, dispatch_link(view, "landing_lost", "Result lost — hold slot…", fields)) end
 				if item.reconcilable then table.insert(controls, dispatch_link(view, "reconcile_landing", "Reconcile observed outcome…", fields)) end
 				if #controls > 0 then table.insert(entries, ui.row(controls)) end
@@ -800,25 +977,39 @@ local function workflow_view(view: any, projection: any, selected: any): (any, a
 		table.insert(entries, ui.text("The release manager performs the repository's approved merge and deploy workflow; ORCH+ never runs git or deploys and never infers landing from REVIEW_READY, DONE or a closed pane."))
 		table.insert(rows, ui.card("Landing queue · " .. queue.target_ref, entries))
 	end
-	-- Imported /glitch-plan files (D10): each checkpoint and task with its state and parser flags,
-	-- eight rows per page (per plan), in plan order.
-	local function flagged(flags: any): string return if type(flags) == "table" and #flags > 0 then " · flags " .. table.concat(flags, ", ") else "" end
+	-- A checkpoint is never split across arbitrary pages. Large plans disclose real groups.
+	local plan_ids = {}
 	for _, plan in flow.plans or {} do
-		local lines = {}
+		table.insert(plan_ids, plan.plan_id)
+		local count = 0
+		for _, cp in plan.checkpoints do count += #cp.tasks end
+		local entries = {}
 		for _, cp in plan.checkpoints do
-			table.insert(lines, "Checkpoint " .. tostring(cp.n) .. " — " .. preview(cp.title, 120) .. " · " .. tostring(#cp.tasks) .. " task(s)" .. flagged(cp.flags))
-			for _, t in cp.tasks do
-				table.insert(lines, "Task " .. t.id .. " — " .. preview(t.title, 120) .. " · " .. t.state .. (if t.independent then " · independent" else "")
-					.. (if t.worker_id then " · " .. t.worker_id else "") .. (if t.hold then " · held " .. t.hold.code else "") .. flagged(t.flags))
+			local tasks = {}
+			for _, task in cp.tasks do
+				table.insert(tasks, ui.text(task.title .. " · " .. (TASK_STATUS[task.state] or "Status unavailable")
+					.. (if task.hold then " — " .. tostring(task.hold.message or "See Advanced for details.") else "")))
 			end
+			local group = ui.card(cp.title .. " · " .. tostring(#cp.tasks) .. (if #cp.tasks == 1 then " task" else " tasks"), tasks)
+			group.p.collapsible = count > 100
+			group.p.collapsed = count > 100
+			table.insert(entries, group)
 		end
-		local entries = { ui.text(plan.plan_id .. " · revision " .. plan.plan_revision:sub(1, 12) .. " · " .. plan.status .. " · " .. plan.path .. flagged(plan.flags)) }
-		local page = math.clamp((view.workflow_plans or {})[plan.plan_id] or 0, 0, math.max(0, math.ceil(#lines / 8) - 1))
-		page_controls(entries, "plan " .. plan.plan_id, page, #lines, 8)
-		for index = page * 8 + 1, math.min(#lines, page * 8 + 8) do table.insert(entries, ui.text(lines[index])) end
-		table.insert(rows, ui.card("Imported plan · " .. preview(plan.title, 80), entries))
+		table.insert(rows, ui.card(plan.title, entries))
+		machine("workflow-plan-" .. plan.plan_id, "orchplus.plan", plan, 65536)
 	end
-	machine("workflow-index", "orchplus.workflow", { policy = policy, policy_revision = flow.policy_revision, policy_sha256 = flow.policy_sha256, worker_ids = ids, sweep_last_date = if type(flow.sweep) == "table" then flow.sweep.last_date else nil }, 65536)
+	machine("project-index", "orchplus.projects", { version = 5, projects = projection.dispatch.projects or {},
+		finished_projects = projection.dispatch.finished_projects or projection.finished_projects or {} }, 65536)
+	local source_requests = {}
+	for _, gate in flow.gates or {} do
+		if gate.source_request then table.insert(source_requests, { gate_id = gate.id, gate_revision = gate.revision }) end
+	end
+	machine("workflow-index", "orchplus.workflow", { policy = policy, policy_revision = flow.policy_revision, policy_sha256 = flow.policy_sha256,
+		worker_ids = ids, plan_ids = plan_ids, source_requests = source_requests,
+		family_migrations = flow.family_migrations, family_migration_scope = flow.family_migration_scope,
+		class_choices = require("./source_adapter").class_choices(flow.plans or {}, policy.templates),
+		cleanup_notice_date = flow.cleanup_notice_date,
+		sweep_last_date = if type(flow.sweep) == "table" then flow.sweep.last_date else nil }, 65536)
 	local readiness_landings = {}
 	for _, queue in flow.landing or {} do
 		for _, item in queue.items do table.insert(readiness_landings, { worker_id = item.worker_id, status = item.status, repo_ref = queue.repo_ref }) end
@@ -870,421 +1061,418 @@ local function workflow_view(view: any, projection: any, selected: any): (any, a
 		evidence = if evidence then pick(evidence, "revision auth_revision expires_at_ms") else nil,
 		refresh_due = policy.quota_routing and catalog ~= nil and catalog.namespace ~= nil and (evidence == nil or evidence.expires_at_ms <= now + 15000 or pending),
 		workers = routed }, 65536)
-	-- Config record pickers: every eligible, enabled record of the loaded catalog page, in catalog order,
-	-- with its capabilities (the release-manager picker lists only release-manager-v1 records).
+	-- Config pickers retain page identity and availability even when filtering leaves no choices.
 	local listed = {}
-	for _, record in enabled_records(catalog) do table.insert(listed, pick(record, "id revision provider account_label capabilities")) end
-	machine("catalog-index", "orchplus.catalog", { version = 1, revision = if catalog then catalog.revision else nil, records = listed }, 65536)
+	for _, record in enabled_records(catalog) do table.insert(listed, pick(record, "id revision provider account_label capabilities cwd placement backend label eligible enabled definition_revision")) end
+	machine("catalog-index", "orchplus.catalog", { version = 1, loaded = catalog ~= nil, catalog_complete = projection.dispatch.catalog_complete == true,
+		namespace = if catalog then catalog.namespace else nil, host_key = if catalog then catalog.host_key else nil,
+		config_revision = if catalog then catalog.config_revision else nil, revision = if catalog then catalog.revision else nil,
+		catalog_version = if catalog then catalog.catalog_version else nil, setup = if catalog then catalog.setup else nil,
+		next_cursor = if catalog then catalog.next_cursor else nil, total = if catalog then #catalog.records else 0,
+		records = listed }, 65536)
 	return ui.card("Health, owner inbox and durable threads", rows), nodes
 end
-local EDITABLE = { "poll_ms", "heartbeat_ms", "stale_ms", "automatic_reports", "auto_rollover", "rollover_threshold_pct",
-	"rollover_include_coordinator", "quota_routing", "excluded_workers", "quota_reserve_pct", "quota_max_age_ms",
-	"initial_dispatch_records", "initial_dispatch_provider", "initial_dispatch_account", "initial_dispatch_model", "sweep_enabled", "sweep_time",
-	"worker_rollover_records", "worker_rollover_provider", "worker_rollover_account", "worker_rollover_model",
-	"coordinator_rollover_records", "coordinator_rollover_provider", "coordinator_rollover_account", "coordinator_rollover_model", "concurrency_limit",
-	"loop_cap", "review_rounds", "stale_claim_min", "require_code_review", "require_other_family", "family_map", "reviewer_records", "release_manager_record",
-	"checkout_roots", "auto_approve_kinds", "glitch_integration", "default_work_source", "board_path", "board_lanes", "inbox_folder",
-	"auto_launch_intake", "routes", "labeller_record", "role_guidance", "templates" }
--- Lists in Config show at most this many rows per page; the rest page explicitly.
-local CONFIG_PAGE = 8
-local APPROVE_KINDS = { "dispatch", "report", "review", "landing" }
-local GUIDANCE_ROLES = { { key = "builder", label = "Builder" }, { key = "reviewer", label = "Reviewer" },
-	{ key = "release_manager", label = "Release manager" }, { key = "labeller", label = "Labeller" }, { key = "coordinator", label = "Coordinator" } }
-local BOARD_LANES = { { key = "queued", label = "Queued lane" }, { key = "running", label = "Running lane" },
-	{ key = "review", label = "Review lane" }, { key = "done", label = "Done lane" } }
--- Optional policy values: the reducer stores "none" as the empty string.
-local function present(value: any): boolean return type(value) == "string" and value ~= "" end
-local function same(left: any, right: any): boolean
-	if type(left) ~= type(right) then return false end
-	if type(left) ~= "table" then return left == right end
-	for key, value in left do if not same(value, right[key]) then return false end end
-	for key in right do if left[key] == nil then return false end end
-	return true
+local function conversation_row(provider: string, link: any): any
+	local icon = provider_display.icon(provider)
+	local label = link.p.text
+	link.p.text = nil
+	link.c = { ui.node("text", { text = label, truncate = "end", title = label, min = { w = 0 } }) }
+	return ui.row(if icon then { ui.node("icon", { name = icon, shrink = 0 }), link } else { link })
 end
-local function checkbox(name: string, checked: boolean, enabled: boolean, label: string): any
-	return ui.row({ ui.el("input", { type = "checkbox", name = name, checked = checked, disabled = not enabled }), ui.text(label) })
-end
--- Config renders the saved policy, or this view's unsaved draft over it. Only the admitted
--- controller gets editing controls; saving goes through the ordinary policy command.
-local function config_view(view: any, projection: any, selected: any): { any }
-	local head = {
-		ui.text("Session overrides — settings for this logical session only. Installation defaults seed new sessions; changing them never overwrites this session. Launch records remain in SPAWN Config."),
-		button(view, "Open ORCH+ controller", { kind = "config-close" }),
-	}
-	local cards = {}
-	local function finish(): { any } table.insert(cards, 1, ui.card("ORCH+ Config", head)); return cards end
-	if selected == nil then
-		table.insert(head, ui.text(ui.span("No logical session is selected in this view. Select an existing registration below or register a distinct one, then claim its controller to edit these settings.", "warning")))
-		return finish()
+
+local function project_panel(view: any, projection: any, selected: any): any
+	local d = projection.dispatch or {}
+	local flow = d.workflow or { workers = {}, gates = {}, plans = {}, policy = {} }
+	local _, _, admitted = controller(view, selected)
+	local rows = { ui.text(ui.span(selected.name, "strong")) }
+	local creation, completion = view.orchestration_result, view.conversation_result
+	local current_creation = creation and creation.ok == true and creation.orch_session_id == selected.orch_session_id
+		and type(creation.request_id) == "string"
+	local ready = view.creation_ready
+	local creation_pending = current_creation and not (ready and ready.source_nonce == view.alias_nonce
+		and ready.orch_session_id == selected.orch_session_id and ready.creation_request_id == creation.request_id)
+	if creation_pending and completion and completion.source_nonce == view.alias_nonce
+		and completion.orch_session_id == selected.orch_session_id and completion.creation_request_id == creation.request_id
+		and type(completion.result) == "table"
+		and completion.result.command == "new_project" and type(completion.result.request_id) == "string"
+		and type(completion.result.ok) == "boolean" then
+		-- This is only presentation readiness, not execution authority. Retain its source
+		-- and creation token so later unrelated results cannot re-hide established controls.
+		view.creation_ready = { source_nonce = view.alias_nonce, orch_session_id = selected.orch_session_id,
+			creation_request_id = creation.request_id, project_request_id = completion.result.request_id }
+		creation_pending = false
 	end
-	table.insert(head, ui.text(ui.span(selected.name .. " · " .. selected.orch_session_id, "strong")))
-	local owner, bound, admitted = controller(view, selected)
-	if owner ~= nil and not bound then table.insert(head, assistance(view, "controller", owner, projection.revision, "reveal", "Reveal recorded controller pane")) end
-	local reason = if admitted then nil
-		elseif owner == nil then "Read-only: no controller is claimed for this session. Open the controller and claim it to edit settings."
-		elseif not bound then "Read-only: this view is not the session's controller (" .. tostring(owner.owner_id) .. "). Edit settings from that controller."
-		else "Read-only: this controller is " .. tostring(owner.phase) .. "; continue or recover it before editing."
-	if reason then table.insert(head, ui.text(ui.span(reason, "warning"))) end
-	-- A refused Config save (e.g. policy_too_large) uses the dispatch card's refusal display.
-	local command_result = view.dispatch_command_result
-	if command_result and command_result.command == "policy" and command_result.ok == false and not command_result.acknowledged then refusal_rows(view, head, command_result) end
-	local flow = if projection.dispatch then projection.dispatch.workflow else nil
-	if not flow then
-		table.insert(head, ui.text("Session policy unavailable; nothing can be edited."))
-		return finish()
-	end
-	local saved, catalog = flow.policy, projection.dispatch.catalog
-	-- Config links fence on the saved policy's digest, never a copy of the policy itself.
-	local saved_sha256 = if admitted then flow.policy_sha256 else nil
-	local draft = view.policy_draft
-	if draft and (draft.session ~= view.orch_session_id or not same(draft.base, saved)) then
-		local landed = true
-		for _, key in EDITABLE do if not same(draft.values[key], saved[key]) then landed = false end end
-		if not landed then table.insert(head, ui.text(ui.span("Saved Config changed; unsaved edits were discarded. Review the current values and repeat your change.", "warning"))) end
-		view.policy_draft = nil; draft = nil
-	end
-	local values = if draft then draft.values else saved
-	local changed, dirty = {}, false
-	for _, key in EDITABLE do if not same(values[key], saved[key]) then changed[key] = values[key]; dirty = true end end
-	local function stepper(field: string, label: string, unit: string, steps: { number }): any
-		local row = { ui.text(label .. ": " .. tostring(values[field]) .. unit) }
-		if admitted then
-			for _, delta in steps do
-				table.insert(row, button(view, (if delta > 0 then "+" else "−") .. tostring(math.abs(delta)), { kind = "config-step", field = field, delta = delta }))
-			end
-			-- Exact entry saves one field immediately, so offer it only without an unsaved draft.
-			if not dirty then table.insert(row, dispatch_link(view, "policy", "Enter value…", { field = field, expected_sha256 = saved_sha256 })) end
-		end
-		return ui.row(row)
-	end
-	local rollover = { checkbox("auto_rollover", values.auto_rollover, admitted, "Automatic worker rollover") }
-	if values.auto_rollover then table.insert(rollover, stepper("rollover_threshold_pct", "Roll over at", "% of worker-reported context (1–99)", { -10, -1, 1, 10 })) end
-	table.insert(rollover, checkbox("rollover_include_coordinator", values.rollover_include_coordinator, admitted, "Include the orchestrator (coordinator) in rollover"))
-	table.insert(rollover, ui.text("Worker and coordinator rollover are active: when enabled, an idle accepted worker whose latest self-reported context reaches the threshold is asked for a verified checkpoint; every later step still needs its own evidence, and excluded workers are skipped. The activated coordinator is included only when its setting is on; its successor starts only after the predecessor's native stop and slot release, so two coordinators never overlap."))
-	table.insert(cards, ui.card("Rollover", rollover))
-	local routing = {
-		checkbox("quota_routing", values.quota_routing, admitted, "Use remaining quota and weekly reset as a task-routing consideration"),
-		ui.text("Active when on (requires USAGE's owner-enabled capacity export): each new task or coordinator start is decided on a validated USAGE snapshot. The record you choose launches only if its identity-bound quota is fresh and strictly above the reserve on every bound window. Otherwise an allowed alternative below is used, a substitution Config does not permit becomes an owner decision, and missing, stale, revoked or unbound evidence holds the work. Among alternatives, the earlier weekly reset is used first; a passed reset needs fresh evidence. USAGE re-confirms the exact evidence revision immediately before each launch. Off: dispatch is exactly the record you choose."),
-		stepper("quota_reserve_pct", "Keep in reserve", "% on every bound window (0–99)", { -10, -1, 1, 10 }),
-		stepper("quota_max_age_ms", "Evidence max age", " ms (60000–900000)", { -60000, 60000 }),
-		stepper("concurrency_limit", "Concurrent routed launches", " per session (0 = no limit configured; 1–32)", { -1, 1 }),
-		ui.text("The concurrency limit counts this session's routed work from reservation until verified stop/retirement or a definitive launch failure (an uncertain launch keeps its slot). It serializes this session only, not other sessions' use of the same quota."),
-	}
-	local offered, offered_ids = enabled_records(catalog), {}
-	for _, record in offered do offered_ids[record.id] = true end
-	-- Strict routing schema: each scope has its own explicit allowlist and substitution permissions.
-	for _, scope in { { key = "initial_dispatch", prefix = "route", title = "initial dispatch (new tasks and coordinator starts)" },
-		{ key = "worker_rollover", prefix = "wroute", title = "worker rollover successors" },
-		{ key = "coordinator_rollover", prefix = "croute", title = "coordinator rollover successors" } } do
-		local list = values[scope.key .. "_records"]
-		table.insert(routing, ui.text(ui.span("Allowed alternatives for " .. scope.title .. " (explicit records; none by default)", "strong")))
-		for _, record in offered do
-			table.insert(routing, checkbox(scope.prefix .. ":" .. record.id, table.find(list, record.id) ~= nil, admitted,
-				record.id .. " · provider " .. tostring(record.provider or "unset") .. " · account " .. tostring(record.account_label or "unset")
-					.. " · model " .. tostring(record.model_variant or "unset") .. " · selector unverified"))
-		end
-		for _, record_id in list do
-			if not offered_ids[record_id] then table.insert(routing, checkbox(scope.prefix .. ":" .. record_id, true, admitted, record_id .. " · not in the loaded catalog page (never used until it is)")) end
-		end
-		table.insert(routing, checkbox(scope.key .. "_provider", values[scope.key .. "_provider"], admitted, "Allow switching to a different provider"))
-		table.insert(routing, checkbox(scope.key .. "_account", values[scope.key .. "_account"], admitted, "Allow switching to a different account/profile"))
-		table.insert(routing, checkbox(scope.key .. "_model", values[scope.key .. "_model"], admitted, "Allow switching to a different model"))
-	end
-	if not catalog then table.insert(routing, ui.text("Load the SPAWN catalog in the controller to choose alternatives.")) end
-	table.insert(routing, ui.text("Unticked permissions turn an otherwise usable alternative into a one-action owner decision. A rollover successor prefers its predecessor's record; a switch needs that rollover kind's allowlist and permission or an owner decision on the predecessor, and the running predecessor never changes. Landing is unaffected. Model/profile selectors are reported unverified: SPAWN exposes no typed selector status, so ORCH+ does not claim enforcement. Quota is never reserved with the provider."))
-	table.insert(cards, ui.card("Task routing", routing))
-	local scheduling = {
-		checkbox("automatic_reports", values.automatic_reports, admitted, "Automatic progress-report requests"),
-		stepper("poll_ms", "Poll interval", " ms (1000–60000)", { -1000, 1000 }),
-		stepper("heartbeat_ms", "Heartbeat", " ms (5000–3600000)", { -60000, -5000, 5000, 60000 }),
-		stepper("stale_ms", "Stale after", " ms (heartbeat–86400000)", { -600000, -60000, 60000, 600000 }),
-	}
-	if values.stale_ms < values.heartbeat_ms then table.insert(scheduling, ui.text(ui.span("Stale must be at least the heartbeat; Save will be refused.", "warning"))) end
-	table.insert(scheduling, ui.text(if saved.paused then "Scheduling paused — new work held; receipts, reports and answers still settle." else "Scheduling enabled."))
-	if admitted then table.insert(scheduling, pause_link(view, saved)) end
-	table.insert(cards, ui.card("Scheduling and health", scheduling))
-	local sweep = { checkbox("sweep_enabled", values.sweep_enabled == true, admitted, "Nightly orphan mailbox sweep") }
-	local at = { ui.text("Runs once per local day at " .. shown(values.sweep_time, "03:00") .. " (24-hour, this window's local time)") }
-	if admitted and not dirty then table.insert(at, dispatch_link(view, "policy", "Enter time…", { field = "sweep_time", expected_sha256 = saved_sha256 })) end
-	table.insert(sweep, ui.row(at))
-	table.insert(sweep, ui.text("Each run checks every worker mailbox in this session. It queues the normal mailbox retirement only for a worker whose exact native stop was observed, whose receipts, replies and notifications are settled and that no rollover, landing or review references; queues pending compaction for live workers; and keeps everything else with its reason. It never stops a worker. A missed time (no window attached, host asleep) runs once on the next attach; one run per scheduled day, recorded durably."))
-	for _, row in sweep_rows(flow.sweep, 16) do table.insert(sweep, row) end
-	table.insert(cards, ui.card("Mailbox sweep", sweep))
-	do
-		-- Config v4 cards. Numeric/boolean keys edit the draft; list, text and record keys save one
-		-- field through the window's bounded prompt, offered only without an unsaved draft.
-		local pages = view.config_pages or {}
-		local function field_link(label: string, field: string, extra: any?): any?
-			if not admitted or dirty then return nil end
-			local request: any = { field = field, expected_sha256 = saved_sha256 }
-			for key, value in extra or {} do request[key] = value end
-			return dispatch_link(view, "policy", label, request)
-		end
-		local function add(rows: { any }, node: any?) if node then table.insert(rows, node) end end
-		local function line(text: string, ...: any): any
-			local row = { ui.text(text) }
-			for index = 1, select("#", ...) do
-				local node = select(index, ...)
-				if node then table.insert(row, node) end
-			end
-			return ui.row(row)
-		end
-		local function config_card(title: string, rows: { any }, single_field: boolean)
-			if reason then table.insert(rows, 1, ui.text(ui.span(reason, "warning")))
-			elseif single_field and dirty then table.insert(rows, 1, ui.text(ui.span("Save or discard unsaved changes first; this field saves on its own.", "warning"))) end
-			table.insert(cards, ui.card(title, rows))
-		end
-		local function paged(rows: { any }, name: string, total: number, each: (number) -> ())
-			local last = math.max(0, math.ceil(total / CONFIG_PAGE) - 1)
-			local page = math.clamp(pages[name] or 0, 0, last)
-			for index = page * CONFIG_PAGE + 1, math.min(total, (page + 1) * CONFIG_PAGE) do each(index) end
-			if total > CONFIG_PAGE then
-				table.insert(rows, ui.text(tostring(total) .. " entries · page " .. tostring(page + 1) .. "/" .. tostring(last + 1)))
-				if page > 0 then table.insert(rows, button(view, "Previous page", { kind = "config-page", name = name, page = page - 1 })) end
-				if page < last then table.insert(rows, button(view, "Next page", { kind = "config-page", name = name, page = page + 1 })) end
-			end
-		end
-		config_card("Loops", {
-			stepper("loop_cap", "Loop cap", " attempts per loop (1–10)", { -1, 1 }),
-			stepper("review_rounds", "Review rounds", " per piece of work (1–2)", { -1, 1 }),
-			stepper("stale_claim_min", "Stale-claim alert after", " minutes (0 = off; 0–1440)", { -30, -5, 5, 30 }),
-			ui.text("Every loop that re-engages a model or a worker stops at the cap with one loop_cap owner decision naming the loop; allowing more resets only that loop's counter. Code-only waits stay time-bounded. A claim older than the stale-claim limit raises one stale_claim decision; ORCH+ never takes over a claim."),
-		}, false)
-		local review = {
-			checkbox("require_code_review", values.require_code_review == true, admitted, "Require code review before landing"),
-			checkbox("require_other_family", values.require_other_family == true, admitted and values.require_code_review == true, "Require a different declared provider family"),
-			ui.text("Every declared check independently requires successful current-revision helper evidence in all review modes. Turning review off also turns the family requirement off; turning it on does not restore a previous family preference."),
-			ui.text(if values.require_code_review then "Review enabled: builder and reviewer remain separate roles."
-				else "Review disabled: no automatic reviewer, reviewer-availability gate or explicit review proposal execution."),
-		}
-		table.insert(review, ui.text(ui.span("Family map (owner-declared, not verified)", "strong")))
-		local mapped = {}
-		for record_id in values.family_map do table.insert(mapped, record_id) end
-		table.sort(mapped)
-		paged(review, "family_map", #mapped, function(index: number)
-			local record_id = mapped[index]
-			table.insert(review, line(record_id .. " → " .. tostring(values.family_map[record_id]) .. " (declared)", field_link("Set family…", "family_map", { item = record_id })))
-		end)
-		table.insert(review, ui.text("Unmapped records use their provider: Claude → anthropic, Codex → openai, Kimi → moonshot, Agy → google, Grok → xai, Muse → muse. OMP and unknown providers have no family until mapped; cross-family checks on them raise family_unknown."))
-		if #mapped < 24 then add(review, field_link("Set family…", "family_map")) end
-		table.insert(review, ui.text(ui.span("Reviewer records (tried in order)", "strong")))
-		local reviewers = values.reviewer_records
-		paged(review, "reviewer_records", #reviewers, function(index: number)
-			table.insert(review, line(tostring(index) .. ". " .. reviewers[index],
-				if admitted and index > 1 then button(view, "Move up", { kind = "config-move", field = "reviewer_records", item = reviewers[index] }) else nil,
-				field_link("Remove", "reviewer_records", { op = "remove", item = reviewers[index] })))
-		end)
-		if #reviewers == 0 then table.insert(review, ui.text(if values.require_code_review then "No reviewer records: review requests hold as reviewer_unavailable." else "No reviewer required while review is disabled.")) end
-		if #reviewers < 8 then add(review, field_link("Add reviewer record…", "reviewer_records", { op = "add" })) end
-		config_card("Review & proof", review, true)
-		local manager = values.release_manager_record
-		config_card("Release", {
-			line("Release manager record: " .. (if present(manager) then tostring(manager) else "none"), field_link("Choose release manager…", "release_manager_record")),
-			ui.text("The release manager is the only merging actor: landing and deploy grants go to it, never to builders. With none configured, landing items hold release_manager_missing."),
-		}, true)
-		local roots = values.checkout_roots
-		local checkouts = { ui.text("Absolute checkout roots (up to 8). Two same-session ORCH+ workers sharing a checkout at or under a root raise shared_checkout; other sessions' workers are not visible.") }
-		paged(checkouts, "checkout_roots", #roots, function(index: number)
-			table.insert(checkouts, line(roots[index], field_link("Remove", "checkout_roots", { op = "remove", item = roots[index] })))
-		end)
-		if #roots == 0 then table.insert(checkouts, ui.text("No roots: the shared-checkout gate is off.")) end
-		if table.find(roots, "/") then table.insert(checkouts, ui.text(ui.span("Root / covers every path: every worker checkout is gated.", "warning"))) end
-		if #roots < 8 then add(checkouts, field_link("Add root…", "checkout_roots", { op = "add" })) end
-		config_card("Checkouts", checkouts, true)
-		local AUTONOMY_LABELS = { dispatch = "Dispatch — start the proposed worker on the proposed record",
-			report = "Report — request a progress report", review = "Review — request a review",
-			landing = "Landing — queue the release manager's merge without asking you (proof rule still required)" }
-		local autonomy = { ui.text("Approve in-scope coordinator proposals by policy: work from a plan or board with declared scope paths and no open scope, file-overlap or shared-checkout gate. Policy approval never bypasses loop caps, proof, capacity or pause, and every policy answer is recorded and visible.") }
-		for _, kind in APPROVE_KINDS do
-			table.insert(autonomy, checkbox("approve:" .. kind, table.find(values.auto_approve_kinds, kind) ~= nil, admitted, AUTONOMY_LABELS[kind]))
-		end
-		config_card("Autonomy", autonomy, false)
-		local sources = { checkbox("glitch_integration", values.glitch_integration == true, admitted, "Glitch integration (offer /glitch-plan files as a work source)") }
-		if values.glitch_integration == true then
-			table.insert(sources, ui.text("Default work source (choose one):"))
-			table.insert(sources, checkbox("work_source:glitch_plan", values.default_work_source == "glitch_plan", admitted, "/glitch-plan file"))
-			table.insert(sources, checkbox("work_source:board", values.default_work_source == "board", admitted, "Tern board"))
-		end
-		table.insert(sources, line("Board: " .. (if present(values.board_path) then tostring(values.board_path) else "none"), field_link("Set board path…", "board_path")))
-		for _, lane in BOARD_LANES do
-			table.insert(sources, line(lane.label .. ": " .. tostring(values.board_lanes[lane.key]), field_link("Set title…", "board_lanes", { item = lane.key })))
-		end
-		table.insert(sources, line("Inbox folder: " .. (if present(values.inbox_folder) then tostring(values.inbox_folder) else "none"), field_link("Set inbox folder…", "inbox_folder")))
-		table.insert(sources, checkbox("auto_launch_intake", values.auto_launch_intake == true, admitted, "Launch new board cards and inbox files automatically (off: each waits for your intake decision)"))
-		table.insert(sources, ui.text("The board is read by the desktop window: when this window is attached to a remote host, the board path is on the desktop, not the execution host, and the board is not polled until you confirm it once via Start work…. The inbox folder is listed by the desktop window too, so it is polled only when this window runs on the execution host."))
-		config_card("Work sources", sources, true)
-		local routes = values.routes
-		local by_class = { ui.text("Work without a class is labelled by the labeller record; the label's class picks the route's record. Model and effort are whatever that SPAWN record runs; ORCH+ never sets CLI flags.") }
-		paged(by_class, "routes", #routes, function(index: number)
-			local route = routes[index]
-			table.insert(by_class, line(tostring(route.class) .. " → " .. tostring(route.record_id), field_link("Remove", "routes", { op = "remove", index = index })))
-		end)
-		if #routes == 0 then table.insert(by_class, ui.text("No routes configured.")) end
-		if #routes < 16 then add(by_class, field_link("Add route…", "routes", { op = "add" })) end
-		local labeller = values.labeller_record
-		table.insert(by_class, line("Labeller record: " .. (if present(labeller) then tostring(labeller) else "none"), field_link("Choose labeller…", "labeller_record")))
-		config_card("Routing", by_class, true)
-		local guidance = { ui.text("guidance only — restrict tools in the SPAWN record's own CLI flags") }
-		for _, role in GUIDANCE_ROLES do
-			table.insert(guidance, line(role.label .. ": " .. preview(values.role_guidance[role.key], 80), field_link("Edit…", "role_guidance", { item = role.key })))
-		end
-		config_card("Role guidance", guidance, true)
-		local templates = values.templates
-		local chain = { ui.text("Each template's prompt holds one {input}; its output file feeds the next template. A chain stops at its bound with a loop_cap decision.") }
-		paged(chain, "templates", #templates, function(index: number)
-			local template = templates[index]
-			table.insert(chain, line(tostring(template.id) .. " · " .. preview(template.title, 80) .. " → " .. tostring(template.output)
-				.. (if present(template.next) then " · then " .. tostring(template.next) else " · last")
-				.. (if present(template.class) then " · class " .. tostring(template.class) else ""),
-				if admitted then dispatch_link(view, "start_work", "Start…", { template_id = template.id }) else nil,
-				field_link("Edit…", "templates", { op = "edit", index = index }), field_link("Remove", "templates", { op = "remove", index = index })))
-		end)
-		if #templates == 0 then table.insert(chain, ui.text("No templates.")) end
-		if #templates < 16 then add(chain, field_link("Add template…", "templates", { op = "add" })) end
-		config_card("Templates", chain, true)
-	end
-	local panes = view.session_panes
-	local pane_for = {}
-	for _, row in (if panes then panes.panes else {}) do if row.worker_id then pane_for[row.worker_id] = row.pane end end
-	local list = {
-		ui.text("Every agent pane in this native session, ticked by default. Ticked means eligible for orchestration; unticked means excluded. Pane numbers and titles are never identity proof."),
-		ui.text(ui.span("Managed workers (durable, identified by worker ID)", "strong")),
-	}
+	local coordinator_pending = false
 	for _, worker in flow.workers do
-		local label = worker.work_id .. " / " .. worker.worker_id .. (if worker.coordinator_owner_id then " · coordinator" else "")
-			.. (if pane_for[worker.worker_id] then " · pane " .. tostring(pane_for[worker.worker_id]) else " · no exact pane in this window")
-		table.insert(list, checkbox("worker:" .. worker.worker_id, table.find(values.excluded_workers, worker.worker_id) == nil, admitted, label))
+		local lifecycle = d.workers and d.workers[worker.worker_id]
+		if worker.role == "coordinator" and (not lifecycle or lifecycle.mailbox_status ~= "retired") then coordinator_pending = true; break end
 	end
-	if #flow.workers == 0 then table.insert(list, ui.text("No managed workers in this session.")) end
-	table.insert(list, ui.text("Unticked managed workers are skipped by automatic report scheduling. Nothing is stopped or retired by a tick change."))
-	table.insert(list, ui.text(ui.span("Hand-opened agent panes (window-scoped)", "strong")))
-	if not panes then
-		table.insert(list, ui.text("Waiting for this window's agent-pane observation…"))
-	else
-		-- Explicit verified attach offers only eligible native-agent records with report-files-v1.
-		local adoptable = {}
-		for _, record in (if catalog then catalog.records else {}) do
-			if record.eligible and record.enabled == true and record.backend == "native-agent" and table.find(record.capabilities or {}, "report-files-v1") and #adoptable < 8 then
-				table.insert(adoptable, { record_id = record.id, record_revision = record.revision, catalog_revision = catalog.revision,
-					label = record.id .. " · " .. tostring(record.provider or "") .. " · " .. tostring(record.account_label or "") })
+	local connection_held = view.spawn_relay and (view.spawn_relay.held or view.spawn_relay.error)
+	local uncertain_starts = {}
+	for _, action in d.actions or {} do
+		local op = action.request.op
+		if action.phase == "uncertain" and action.worker_id and (op == "launch" or op == "adopt" or op == "enrol" or op == "mailbox_provision") then
+			uncertain_starts[action.worker_id] = true
+		end
+	end
+	if connection_held or next(uncertain_starts) then
+		local recovery = { ui.text(ui.span(if next(uncertain_starts) then "An agent session's startup is not confirmed."
+			else "The agent connection needs attention.", "error")),
+			ui.text("Existing sessions will not be restarted. Open Advanced to check the retained outcome.") }
+		table.insert(rows, ui.card("Check agent connection", recovery))
+	end
+	if flow.policy.paused then table.insert(rows, ui.text(ui.span("Paused — new work waits. You can still discuss and add projects.", "warning"))) end
+	if admitted and creation_pending then
+		table.insert(rows, ui.text("Finishing orchestration setup. No agent has started."))
+	end
+	if admitted and not creation_pending then
+		if selected.orchestrator == nil and not coordinator_pending then
+			table.insert(rows, ui.col({ dispatch_link(view, "start_orchestrator", "Start orchestrator pane"),
+				ui.text("Discuss your goals before starting project work.") }))
+		end
+		table.insert(rows, ui.col({ dispatch_link(view, "new_conversation", "New Agent Session"), ui.text("Open one new agent pane.") }))
+		table.insert(rows, ui.col({ dispatch_link(view, "attach_conversation", "Attach Existing Agent Session"),
+			ui.text("Keep its current conversation. Attaching does not start project work.") }))
+		if flow.policy.glitch_integration and flow.policy.work_on_enabled then
+			table.insert(rows, ui.col({ dispatch_link(view, "work-on", "WORK ON"), ui.text("Choose a Glitch project or plan in WORK.") }))
+		end
+		table.insert(rows, ui.row({ pause_link(view, flow.policy), dispatch_link(view, "orchestration_menu", "Orchestration menu") }))
+	end
+	local catalog, pane_titles, native_titles, native_workers, workers = {}, {}, {}, {}, {}
+	for _, record in (if d.catalog then d.catalog.records else {}) do catalog[record.id] = record end
+	for _, pane in (if view.session_panes then view.session_panes.panes else {}) do
+		local title = if pane.title ~= "" then pane.title else nil
+		native_titles[tostring(pane.pane)] = title
+		if pane.worker_id then pane_titles[pane.worker_id], native_workers[pane.worker_id] = title, pane end
+	end
+	for _, worker in flow.workers do workers[worker.worker_id] = worker end
+	local projects = {}
+	for _, project in d.projects or {} do if not project.finished then table.insert(projects, project) end end
+	table.sort(projects, function(a, b) return a.orch_project_id < b.orch_project_id end)
+	for _, project in projects do
+		local selected_project = view.orch_project_id == project.orch_project_id or (view.orch_project_id == nil and projects[1] == project)
+		local start = project.start
+		local pending_start = start ~= nil and start.state ~= "claimed" and not start.restartable
+		local children = { ui.row({
+			button(view, project.name, { kind = "project-select", orch_project_id = project.orch_project_id }),
+			if project.status == "ACTIVE" then ui.text(ui.span("ACTIVE", "success"))
+				elseif pending_start then ui.text(ui.span(if start.state == "failed" then "Needs attention" else "Waiting to start", if start.state == "failed" then "warning" else "info"))
+				else dispatch_link(view, "project_start", "START", { orch_project_id = project.orch_project_id,
+					project_revision = project.revision, decision_context = project.decision_context }),
+			dispatch_link(view, "project_menu", "…", { orch_project_id = project.orch_project_id }),
+		}) }
+		if selected_project and start then
+			if start.source and start.source.kind == "policy" then table.insert(children, ui.text("Automatic start is on for this source.")) end
+			local states = { publishing = "Sending START to your orchestrator. New work is still on hold.",
+				queued = "Waiting for your orchestrator to start the new work.",
+				delivered = "Waiting for your orchestrator to begin.",
+				claimed = "Your orchestrator has started the approved work.",
+				failed = "Could not start the new work. It is still on hold." }
+			local status = ui.text(if start.state == "failed" then ui.span(
+				if start.restartable then "The project or orchestrator changed. Review this project and choose START again." else states.failed, "error")
+				else states[start.state] or "Check START before trying again.")
+			status.p.key = "project-start-status-" .. project.orch_project_id; status.p.role = "orchplus.project.start"
+			status.p.state = start.state; status.p.source = if start.source then start.source.kind else nil
+			status.p.restartable = start.restartable == true
+			table.insert(children, status)
+			if start.failure then
+				if view.advanced_open then table.insert(children, ui.text(start.failure.message))
+				elseif start.failure.code == "start_publication_uncertain" then table.insert(children, ui.text("We could not confirm that START was sent. Check its status before trying again.")) end
+			end
+			if pending_start then
+				table.insert(children, dispatch_link(view, "project_start_retry",
+					if start.failure and start.failure.retryable then "Try sending START again" else "Check START",
+					{ orch_project_id = project.orch_project_id, start_id = start.start_id, project_revision = start.project_revision,
+						decision_context = start.decision_context }))
+			elseif start.restartable then
+				table.insert(children, dispatch_link(view, "project_start", "Review and START", { orch_project_id = project.orch_project_id,
+					project_revision = project.revision, decision_context = project.decision_context }))
 			end
 		end
-		local hand = 0
-		for _, row in panes.panes do
-			if row.worker_id == nil then
-				hand += 1
-				table.insert(list, checkbox("pane:" .. row.key, not (view.pane_exclusions or {})[row.key], admitted,
-					"Pane " .. tostring(row.pane) .. (if row.title ~= "" then " · " .. row.title else "") .. " · " .. row.state
-						.. " · eligibility only; orchestration requires an explicit attach"))
-				if admitted and not (view.pane_exclusions or {})[row.key] and row.state == "idle" then
-					if #adoptable > 0 then
-						table.insert(list, dispatch_link(view, "adopt", "Attach pane " .. tostring(row.pane) .. " as ORCH+ worker…",
-							{ pane = row.pane, window_epoch = panes.window_epoch, records = adoptable }))
-					else
-						table.insert(list, ui.text("Attach needs a loaded SPAWN catalog with an eligible native-agent record (Load configured SPAWN catalog in the controller)."))
-					end
+		local conversations = {}
+		if selected_project and project.paused and project.started then table.insert(children, ui.text("Waiting for orchestration to resume.")) end
+		for _, worker_id in project.members or {} do
+			local worker = workers[worker_id]
+			if not worker then continue end
+			local record = catalog[worker.record_id] or {}
+			local provider = worker.provider or record.provider or "Agent"
+			local account = worker.account_label or record.account_label or "account unknown"
+			local title = pane_titles[worker_id]
+			local observed = native_workers[worker_id]
+			local ended = (worker.health and worker.health.latest_exit ~= nil) or (observed and observed.state == "exited")
+			local pending_title = if ended then "Agent pane ended"
+				elseif connection_held or uncertain_starts[worker_id] then "Startup not confirmed"
+				elseif worker.phase == "held" then "Needs attention"
+				elseif worker.phase == "accepted" then "Agent session unavailable"
+				elseif flow.policy.paused or worker.project_held then "Queued — not started"
+				elseif worker.phase == "awaiting_acceptance" then "Waiting to join" else "Agent session queued"
+			local label = provider_display.name(provider) .. " · " .. account .. " — " .. (title or pending_title)
+			table.insert(conversations, conversation_row(provider,
+				if worker.pane_binding or worker.launch_pane_binding then dispatch_link(view, "open_worker", label, { worker_id = worker_id })
+				else ui.text(label)))
+			if selected_project and ended then
+				table.insert(conversations, ui.text(ui.span("Agent pane ended"
+					.. (if observed and observed.exit_code ~= nil then " (exit " .. tostring(observed.exit_code) .. ")" else "")
+					.. ". Its launch and any unread messages remain retained.", if observed and observed.exit_code == 0 then "info" else "error")))
+				table.insert(conversations, dispatch_link(view, "inspect_worker", "Check agent status", { worker_id = worker_id }))
+			elseif selected_project and worker.phase ~= "accepted" and not connection_held and not uncertain_starts[worker_id] then
+				local held = (d.workers or {})[worker_id]
+				if held and held.reason then table.insert(conversations, ui.text(tostring(held.reason.message)))
+				elseif worker.phase == "awaiting_acceptance" then
+					table.insert(conversations, ui.text("The pane opened, but the agent has not joined yet."))
+					table.insert(conversations, dispatch_link(view, "inspect_worker", "Check agent status", { worker_id = worker_id }))
+				elseif title then table.insert(conversations, ui.text("Agent startup is pending.")) end
+			end
+		end
+		for id, association in project.associations or {} do
+			local observed = view.session_panes
+			local binding = association.pane_binding
+			local same_native = observed and binding and observed.window_epoch == binding.window_epoch
+				and observed.native_session_id == binding.native_session_id and observed.window_host_id == binding.window_host_id
+			local title = if same_native then native_titles[binding.pane_id] else nil
+			local provider = association.provider or "Agent"
+			table.insert(conversations, conversation_row(provider, dispatch_link(view, "association_menu",
+				provider_display.name(provider) .. " · " .. (association.account_label or "account unknown") .. " — " .. (title or "Conversation unavailable"),
+				{ orch_project_id = project.orch_project_id, conversation_id = id })))
+		end
+		if #conversations > 0 then
+			table.insert(children, ui.el("div", { class = "orch-project-conversations" }, { ui.col(conversations) }))
+		end
+		if selected_project then
+			for _, plan in flow.plans or {} do
+				if plan.orch_project_id ~= project.orch_project_id then continue end
+				local count = 0
+				for _, cp in plan.checkpoints do count += #cp.tasks end
+				table.insert(children, ui.row({ ui.text(ui.span(plan.title or plan.plan_id, "strong")),
+					dispatch_link(view, "open_plan", "Open plan", { plan_id = plan.plan_id, orch_project_id = project.orch_project_id }) }))
+				for _, cp in plan.checkpoints do
+					local tasks = {}
+					for _, task in cp.tasks do table.insert(tasks, ui.text(task.title .. " · " .. (TASK_STATUS[task.state] or "Status unavailable")
+						.. (if task.hold then " — " .. tostring(task.hold.message or "See Advanced for details.") else ""))) end
+					local group = ui.card(cp.title .. " · " .. tostring(#cp.tasks) .. (if #cp.tasks == 1 then " task" else " tasks"), tasks)
+					group.p.collapsible, group.p.collapsed = count > 100, count > 100
+					table.insert(children, group)
 				end
 			end
 		end
-		if hand == 0 then table.insert(list, ui.text("No other agent panes in this native session.")) end
-		if panes.more > 0 then table.insert(list, ui.text("… " .. tostring(panes.more) .. " more agent panes not listed")) end
-		table.insert(list, ui.text("Hand-opened pane marks are not durable: after reload they reappear ticked. Ticking never adopts a pane; only the explicit, owner-attested attach enrolls an idle native agent, and nothing is typed into terminals or shells."))
+		table.insert(rows, ui.el("div", { class = "orch-project" }, { ui.col(children) }))
 	end
-	table.insert(cards, ui.card("Pane orchestration list", list))
-	if admitted then
-		if dirty then
-			table.insert(cards, ui.card("Unsaved changes", {
-				dispatch_link(view, "policy", "Save session settings", { policy = changed, expected_sha256 = saved_sha256 }),
-				button(view, "Discard unsaved changes", { kind = "config-discard" }),
-			}))
-		else
-			table.insert(cards, ui.text("All settings saved."))
+	if #projects == 0 then table.insert(rows, ui.text("Add an agent session or discuss a project with your orchestrator. Use a project's START action when its work is ready.")) end
+	for _, gate in flow.gates do
+		if gate.source_request then
+			table.insert(rows, dispatch_link(view, "source-proposal", "Read approved board source", { gate_id = gate.id, gate_revision = gate.revision }))
+			continue
+		end
+		if gate.phase ~= "pending" then continue end
+		local question = { ui.text(gate.question) }
+		for _, option in gate.options do table.insert(question, ui.text(option.label)) end
+		if admitted then table.insert(question, dispatch_link(view, if gate.kind == "native_input" then "open_worker" else "answer", if gate.kind == "native_input" then "Open conversation" else "Review decision…", {
+			gate_id = gate.id, gate_revision = gate.revision, worker_id = gate.worker_id, decision_context = gate.decision_context })) end
+		table.insert(rows, ui.card("Your decision", question))
+	end
+	local finished = d.finished_projects or projection.finished_projects or {}
+	if #finished > 0 then
+		table.insert(rows, button(view, "Finished projects (" .. tostring(#finished) .. ")", { kind = "finished-toggle" }))
+		if view.finished_open then
+			for index, summary in finished do
+				local details = { ui.text(summary.result) }
+				for _, link in summary.links or {} do table.insert(details, dispatch_link(view, "summary_link", link.label, { summary_index = index, link = link })) end
+				table.insert(details, dispatch_link(view, "project_reopen", "Reopen as new project", { summary_index = index }))
+				table.insert(rows, ui.card(summary.name, details))
+			end
+			table.insert(rows, ui.text("Recent summaries are retained independently of open orchestrations, up to 100. Conversation links work only while the native conversation remains available."))
 		end
 	end
-	return finish()
+	local panel = ui.col(rows)
+	panel.p.role = "orchplus-project-list"
+	return panel
 end
 function M.render(view: any, projection: any, status: string, diagnostic: string?): any
-	view.actions = {}
-	local rows = {
-		ui.text(ui.span("ORCH+ · ownership and managed dispatch", "strong")),
-		ui.text("Host-persisted claims, explicit assignments and durable mailbox receipts. Missing capability is a visible prerequisite, never a raw-command fallback."),
+	-- Keep the previous current map only while rebuilding; no retired control history survives.
+	view.action_previous = if view.action_incarnation == view.alias_nonce and view.action_order ~= nil
+		then { actions = view.actions, order = view.action_order, navigation = view.navigation_actions or {} } else nil
+	view.actions, view.action_order, view.navigation_actions = {}, {}, {}
+	view.action_incarnation = view.alias_nonce
+	view.authority_namespace = if projection then projection.authority_namespace elseif view.migration then view.migration.authority_namespace else nil
+	view.authority_revision = if projection then projection.revision elseif view.migration then view.migration.authority_revision else nil
+	local selected = nil
+	for _, session in (if projection then projection.sessions or {} else {}) do
+		if session.orch_session_id == view.orch_session_id then selected = session; break end
+	end
+	local owner = if selected then selected.controller else nil
+	local flow = if projection and projection.dispatch then projection.dispatch.workflow else nil
+	view.navigation_scope = {
+		controller = if owner then pick(owner, "owner_id generation phase pane_binding") else nil,
+		policy_revision = if flow then flow.policy_revision else nil,
+		policy_sha256 = if flow then flow.policy_sha256 else nil,
 	}
+	local rows = { ui.text(ui.span("ORCHESTRATED WORK", "strong")) }
+	for _, peer in { "spawn", "usage" } do
+		local relay = view[peer .. "_relay"]
+		if relay then
+			table.insert(rows, keyed(tern.json.encode(relay), "orchplus-" .. peer .. "-relay", "orchplus." .. peer .. "-relay"))
+			if (peer ~= "spawn" or view.advanced_open) and (relay.held or relay.error) then
+				table.insert(rows, ui.text(ui.span((if peer == "spawn" then "Agent connection" else "Usage connection")
+					.. " needs attention: " .. tostring(relay.error or "unavailable"):gsub("_", " ") .. ". Existing work remains held.", "warning")))
+			end
+		end
+	end
+	for lane_id, frames in view.spawn_relay_frames or {} do
+		for kind, bytes in frames do table.insert(rows, keyed(bytes, "spawn-relay-" .. lane_id .. "-" .. kind, "orchplus.spawn-" .. kind)) end
+	end
+	for kind, bytes in view.usage_relay_frames or {} do
+		table.insert(rows, keyed(bytes, "usage-relay-" .. kind .. "-response", "orchplus.usage-" .. kind .. "-response"))
+	end
+	if view.source_discovery then table.insert(rows, keyed(tern.json.encode(view.source_discovery), "source-discovery", "orchplus.sources")) end
+	if view.inbox_observation then table.insert(rows, keyed(tern.json.encode(view.inbox_observation), "inbox-observation", "orchplus.inbox")) end
+	if view.decision_context_result then table.insert(rows, keyed(tern.json.encode(view.decision_context_result), "decision-context-result", "orchplus.decision")) end
+	if view.orchestration_result then table.insert(rows, keyed(tern.json.encode(view.orchestration_result), "orchestration-result", "orchplus.orchestration.result")) end
+	if view.conversation_result then
+		local bytes = tern.json.encode(view.conversation_result)
+		if #bytes <= 65536 then table.insert(rows, keyed(bytes, "conversation-result", "orchplus.conversation.result")) end
+	end
+	if view.migration then
+		local migration = view.migration
+		local bytes = tern.json.encode(migration)
+		if #bytes <= 65536 then table.insert(rows, keyed(bytes, "migration-state", "orchplus.migration"))
+		else table.insert(rows, ui.text(ui.span("Compact migration evidence exceeds 65536 bytes; pairing remains blocked.", "error"))) end
+		if view.advanced_open and (migration.phase ~= "stable" or migration.compatibility == nil or migration.compatibility.kind ~= "current") then
+			table.insert(rows, ui.card("Connection needs attention", {
+				ui.text("The automatic compatible update could not finish. Review retained connection evidence; existing work and uncertain effects stay held."),
+				button(view, "Inspect compatible update", { kind = "setup-intent", command = "migration_update", source_sha256 = migration.source_sha256 }),
+			}))
+		end
+	end
+	if view.ruling_result then
+		local bytes = tern.json.encode(view.ruling_result)
+		if #bytes <= 65536 then table.insert(rows, keyed(bytes, "ruling-result", "orchplus.ruling.result")) end
+	end
 	if status == "ready" and projection.setup and projection.installation_defaults then
 		local setup, defaults = projection.setup, projection.installation_defaults
-		local policy, repository = defaults.policy, defaults.repository
 		local function control(label: string, command: string): any
 			return button(view, label, { kind = "setup-intent", command = command }, { ["data-orchplus-setup"] = command })
 		end
-		table.insert(rows, ui.card("Installation defaults", {
-			ui.text("Host-wide defaults for NEW sessions only. Session overrides below remain separate and unchanged."),
-			ui.text("Setup: " .. setup.state .. (if setup.review_existing then " · Review existing setup — adoption required" else "") .. " · configuration revision " .. tostring(defaults.revision)),
-			ui.text("Review: " .. (if not policy.require_code_review then "disabled" elseif policy.require_other_family then "required, different declared family" else "required, same family allowed") .. " · declared checks always required"),
-			ui.text("Repository: " .. (if repository then repository.repo_root .. " · target " .. repository.target_ref .. " · " .. repository.queue_route else "not verified")),
-			ui.text("Builder: " .. shown(defaults.builder_record, "none") .. " · release manager: " .. shown(policy.release_manager_record, "none")),
-			ui.text("Optional readiness: " .. setup.readiness.state .. (if setup.readiness_stale then " (stale configuration revision)" else "") .. " · " .. setup.readiness.summary),
-			ui.text("Role text is guidance; declared provider family is not identity isolation. Native tool flags and repository protection are the real permission controls. Coordinator, labeller and USAGE are optional."),
-			ui.row({ control(if setup.review_existing then "Review existing setup…" else "Setup wizard…", "wizard"),
-				control("Edit Installation defaults…", "defaults"), control("SPAWN managed setup…", "spawn"),
-				control("Optional readiness exercise…", "readiness"), control("Dismiss setup", "dismiss") }),
-		}))
+		if view.config_open then
+			table.insert(rows, ui.card("Settings", {
+				ui.text("Reusable defaults apply only to new orchestrations. Projects keep their own repository and target; text and research need neither."),
+				control(if defaults.defined == true then "Edit Default Settings" else "Define Default Settings", "defaults"),
+				control("Open SPAWN", "spawn"),
+				button(view, "Back to work", { kind = "config-close" }),
+			}))
+		end
 		if view.setup_result and view.setup_result.ok == false then
-			table.insert(rows, ui.text(ui.span("Setup refused: " .. tostring(view.setup_result.message or view.setup_result.code), "error")))
+			table.insert(rows, ui.text(ui.span(if view.advanced_open then "Setup refused: " .. tostring(view.setup_result.message or view.setup_result.code)
+				else "Setup could not be completed. Check the open settings or agent setup screen.", "error")))
 		end
 		table.insert(rows, keyed(tern.json.encode({ version = 1, source_nonce = view.alias_nonce, host_pane_id = tostring(view.pane),
+			authority_namespace = projection.authority_namespace, authority_revision = projection.revision,
 			setup = setup, installation_defaults = defaults, setup_result = view.setup_result, setup_repository = view.setup_repository }), "setup-index", "orchplus.setup"))
-		if view.setup_catalog_request then table.insert(rows, keyed(tern.json.encode(view.setup_catalog_request), "setup-catalog-request", "orchplus.setup.request")) end
 	end
-	if diagnostic ~= nil then table.insert(rows, ui.text(ui.span(diagnostic, "error"))) end
-	if view.notice ~= nil then table.insert(rows, ui.text(ui.span(view.notice, "info"))) end
+	if view.setup_catalog_request then table.insert(rows, keyed(tern.json.encode(view.setup_catalog_request), "setup-catalog-request", "orchplus.setup.request")) end
+	if diagnostic ~= nil and view.advanced_open then table.insert(rows, ui.text(ui.span(diagnostic, "error"))) end
+	local result = view.dispatch_command_result
+	local notice = view.notice
+	local explicit = if type(notice) == "table" then notice else nil
+	local notice_message = if explicit then explicit.message else notice
+	local catalog_notice = explicit and explicit.context == "catalog"
+	local superseded = explicit and result and (result.message == notice_message
+		or (catalog_notice and (result.command == "catalog" or result.code == "catalog_queued" or result.code == "catalog_requested")))
+	if result and (not superseded or view.advanced_open) and (result.code ~= "task_queued" or view.advanced_open) then
+		local message = if view.advanced_open or result.code == "cleanup_summary" then result.message or STATUS_MESSAGES[result.code]
+			else STATUS_MESSAGES[result.code] or (if result.ok and not ERROR_RESULTS[result.code] then "Action recorded."
+				else "The action could not be completed. Open Advanced to check its retained status.")
+		local level = if not result.ok or ERROR_RESULTS[result.code] then "error"
+			elseif SAVED_RESULTS[result.code] then "success" else "info"
+		message = tostring(message or (if result.ok then "Action recorded." else "The action could not be completed."))
+		table.insert(rows, ui.text(if level == "info" then message else ui.span(message, level)))
+	end
+	if notice_message ~= nil and (view.advanced_open or notice_message ~= "task_queued")
+		and (explicit or result == nil or notice_message ~= result.message) then
+		local message = if explicit then notice_message else STATUS_MESSAGES[notice_message] or notice_message
+		local level = if explicit then explicit.level elseif ERROR_RESULTS[notice_message] then "error" else "info"
+		table.insert(rows, ui.text(if level == "info" then message else ui.span(message, level)))
+		if explicit and view.advanced_open and explicit.detail then table.insert(rows, ui.text(explicit.detail)) end
+		if catalog_notice and explicit.code == "catalog_unconfirmed" and selected then
+			local _, bound = controller(view, selected)
+			if bound then
+				local action = if projection.dispatch then projection.dispatch.actions[view.dispatch_action] else nil
+				local target = if action and action.request.op == "catalog" then action.request.action_id else nil
+				table.insert(rows, dispatch_link(view, "check_connection", "Check connection", { action_id = target }))
+			end
+		end
+	end
 	-- Host-bounded one-shot window intent. Native page entry can expose prerequisites before authority exists;
 	-- the consuming window validates its live scope, and controller operations still require their owner origin.
 	if type(view.operator_intent) == "table" then table.insert(rows, keyed(tern.json.encode(view.operator_intent), "operator-intent", "orchplus.intent")) end
 	if status ~= "ready" then
-		table.insert(rows, ui.text("Authority store: " .. status .. ". Existing ownership is never silently reset."))
-		table.insert(rows, button(view, "SPAWN managed setup…", { kind = "setup-intent", command = "spawn" }, { ["data-orchplus-setup"] = "spawn" }))
-		table.insert(rows, button(view, "Recheck restored store", { kind = "recheck-store" }))
+		if view.migration or view.setup_preview then
+			local preview = view.setup_preview or {}
+			table.insert(rows, keyed(tern.json.encode({ version = 1, source_nonce = view.alias_nonce, host_pane_id = tostring(view.pane),
+				authority_namespace = if view.migration then view.migration.authority_namespace else nil,
+				authority_revision = if view.migration then view.migration.authority_revision else nil,
+				setup = preview.setup, installation_defaults = preview.installation_defaults, setup_result = view.setup_result }), "setup-index", "orchplus.setup"))
+		end
+		if status ~= "missing" then table.insert(rows, ui.text("Your saved orchestration needs attention before it can continue. Open Advanced for the retained details; no work has been restarted.")) end
+		table.insert(rows, button(view, if view.advanced_open then "Hide Advanced" else "Advanced", { kind = "advanced-toggle" }))
+		if view.advanced_open then table.insert(rows, button(view, "Check for restored orchestration data", { kind = "recheck-store" })) end
 		if status == "missing" then
-			table.insert(rows, ui.text("First installation only: initialize after verifying that there is no previous ownership store or active ORCH+ owner. Otherwise restore the backup and recheck."))
-			table.insert(rows, button(view, "Initialize first-use authority…", { kind = "initialize-arm" }))
-			if view.initialize_armed then
-				table.insert(rows, button(view, "Confirm first use — no prior owners or lost store", { kind = "initialize-confirm" }))
-			end
+			table.insert(rows, ui.text("Set up a new orchestration. ORCH+ checks your SPAWN agent setup before creating it."))
+			local defaults = if view.setup_preview then view.setup_preview.installation_defaults else nil
+			table.insert(rows, button(view, if defaults and defaults.defined == true then "Edit Default Settings" else "Define Default Settings", { kind = "setup-intent", command = "defaults" }))
+			table.insert(rows, button(view, "New orchestration", { kind = "setup-intent", command = "new_orchestration" }))
 		end
 		-- View identity only: an inert page may ask its window to show prerequisites before authority exists.
-		table.insert(rows, keyed(tern.json.encode({ version = 2, alias_nonce = view.alias_nonce,
+		table.insert(rows, keyed(tern.json.encode({ version = 2, host_pane_id = tostring(view.pane), alias_nonce = view.alias_nonce,
 			owners = {}, config_open = view.config_open == true }), "ownership-alias", "orchplus.alias"))
+		view.action_previous = nil
 		return ui.col(rows)
 	end
-	table.insert(rows, ui.text("Committed registry revision " .. tostring(projection.revision) .. " · all controller blocks share this host authority."))
-	local selected = nil
-	for _, session in projection.sessions do if session.orch_session_id == view.orch_session_id then selected = session end end
-	if view.config_open then
-		for _, card in config_view(view, projection, selected) do table.insert(rows, card) end
-	else
-		table.insert(rows, button(view, "Config", { kind = "config-open" }))
+	local navigation = {}
+	if not view.config_open then table.insert(navigation, button(view, "Settings", { kind = "config-open" })) end
+	table.insert(navigation, button(view, if view.advanced_open then "Hide Advanced" else "Advanced", { kind = "advanced-toggle" }))
+	table.insert(rows, ui.row(navigation))
+	if view.config_open and selected then
+		local _, bound, admitted = controller(view, selected)
+		if admitted then
+			table.insert(rows, dispatch_link(view, "settings", "This orchestration's settings"))
+			table.insert(rows, dispatch_link(view, "save_defaults", "Save as my default settings"))
+		elseif bound then table.insert(rows, ui.text("Checking this orchestration's verified connection. Settings become available here when it is ready; existing work stays retained."))
+		else table.insert(rows, ui.text("Open this orchestration's controlling view to change its settings.")) end
 	end
-	if not view.config_open or selected == nil then
-		table.insert(rows, ui.text("Choose an existing logical session. Names and native IDs are observations, never automatic identity or an excuse for another owner."))
+	if selected == nil and not view.config_open then
+		table.insert(rows, ui.text("Create a new orchestration or open one below."))
+		table.insert(rows, button(view, if projection.installation_defaults and projection.installation_defaults.defined == true then "Edit Default Settings" else "Define Default Settings", { kind = "setup-intent", command = "defaults" }))
+		table.insert(rows, button(view, "New orchestration", { kind = "setup-intent", command = "new_orchestration" }))
+		local sessions = {}
 		for _, session in projection.sessions do
-			table.insert(rows, button(view, (if session.orch_session_id == view.orch_session_id then "Selected: " else "Select: ") .. session.name .. " · " .. session.orch_session_id,
-				{ kind = "select", orch_session_id = session.orch_session_id }))
+			table.insert(sessions, button(view, session.name, { kind = "select", orch_session_id = session.orch_session_id }))
 		end
-		table.insert(rows, button(view, "Register a distinct logical session…", { kind = "register-arm" }))
-		if view.register_armed then
-			table.insert(rows, ui.text("Only create a separate registration for genuinely distinct work. If this is the same native session or an ambiguous restored pane, select its existing registration above."))
-			table.insert(rows, button(view, "Confirm distinct session registration", { kind = "register-confirm" }))
-		end
+		if #sessions > 0 then table.insert(rows, ui.card("Your orchestrations", sessions)) end
 	end
 	if selected ~= nil then
+		local current = if projection.dispatch then projection.dispatch.session_control else nil
+		if view.advanced_open and selected.controller == nil and selected.orchestrator == nil and current and current.admission_seq == nil then
+			table.insert(rows, button(view, "Close unused logical session…", { kind = "close-unowned-arm" }))
+			if view.close_armed and view.close_armed.orch_session_id == selected.orch_session_id then
+				table.insert(rows, button(view, "Confirm close — no owner or peer admission", { kind = "close-unowned-confirm", intent = view.close_armed }))
+			end
+		end
 		local card, dispatch_node, request_node, scoped_nodes = dispatch_view(view, projection, selected)
 		local workflow, workflow_nodes = workflow_view(view, projection, selected)
-		if not view.config_open then
-			table.insert(rows, ui.text(ui.span(selected.name .. " · " .. selected.orch_session_id, "strong")))
+		if not view.config_open then table.insert(rows, project_panel(view, projection, selected)) end
+		if view.advanced_open then
 			table.insert(rows, owner_card(view, "controller", selected.controller, selected.controller_generation, projection.revision))
-			if selected.controller == nil then table.insert(rows, button(view, "Claim controller in this pane", { kind = "admit" })) end
+			if selected.controller == nil then
+				table.insert(rows, button(view, "Recover this view for review only", { kind = "admit" }))
+				table.insert(rows, ui.text("Recover only this existing orchestration after verified retirement. Saved work and pending evidence stay retained; connection is checked automatically afterwards."))
+			end
 			table.insert(rows, owner_card(view, "orchestrator", selected.orchestrator, selected.orchestrator_generation, projection.revision))
-			table.insert(rows, card)
-			table.insert(rows, workflow)
+			local connection_details = ui.card("Advanced · Connection and retained outcomes", { card })
+			connection_details.p.collapsible, connection_details.p.collapsed = true, true
+			local work_details = ui.card("Advanced · Workers, rulings and merging", { workflow })
+			work_details.p.collapsible, work_details.p.collapsed = true, true
+			table.insert(rows, connection_details)
+			table.insert(rows, work_details)
 		end
 		-- Config is a display mode: scheduling and effect drivers still need every machine node.
 		for _, node in workflow_nodes do table.insert(rows, node) end
@@ -1299,12 +1487,12 @@ function M.render(view: any, projection: any, status: string, diagnostic: string
 		if view.attestation.kind == "attest-executors" then
 			table.insert(rows, ui.card("Separate retained-executor verification", {
 				ui.text("The stored count of " .. tostring(view.attestation.pending_executors) .. " executors is retained but unconfirmed after restore. I independently verified that the unavailable owner AND every retained executor have stopped or been reconciled. Missing observations alone do not prove this. No currently observed pending executor can be overridden."),
-				button(view, "Confirm owner stopped AND every retained executor reconciled", { kind = "attest-executors-confirm" }),
+				button(view, "Confirm owner stopped AND every retained executor reconciled", { kind = "attest-executors-confirm", intent = view.attestation }),
 			}))
 		else
 			table.insert(rows, ui.card("Explicit operator attestation", {
 				ui.text("I independently checked this unavailable owner has stopped. There are no pending executors. A missing window or pane alone is NOT stop proof; this assertion cannot override known active or pending facts and is not authenticated human provenance."),
-				button(view, "Record my verification (does not clear ownership)", { kind = "attest-confirm" }),
+				button(view, "Record my verification (does not clear ownership)", { kind = "attest-confirm", intent = view.attestation }),
 			}))
 		end
 	end
@@ -1312,7 +1500,7 @@ function M.render(view: any, projection: any, status: string, diagnostic: string
 		table.insert(rows, ui.card("Recovery confirmation", {
 			ui.text("Clear only " .. view.recovery.target .. " " .. view.recovery.owner_id .. " / generation " .. tostring(view.recovery.generation)
 				.. " at registry revision " .. tostring(view.recovery.revision) .. ". Any intervening change invalidates this confirmation. Nothing will start."),
-			button(view, "Confirm verified recovery — clear this owner only", { kind = "confirm-recovery" }),
+			button(view, "Confirm verified recovery — clear this owner only", { kind = "confirm-recovery", intent = view.recovery }),
 		}))
 	end
 	-- Only this exact keyed native plugin node is an alias handshake, not terminal/report text.
@@ -1325,10 +1513,10 @@ function M.render(view: any, projection: any, status: string, diagnostic: string
 			end
 		end
 	end
-	-- config_open only asks this window for the display-only session agent-pane list.
-	table.insert(rows, ui.text("Window alias diagnostic (not identity or authorization)"))
-	table.insert(rows, keyed(tern.json.encode({ version = 2, alias_nonce = view.alias_nonce, orch_session_id = view.orch_session_id,
-		revision = projection.revision, owners = owners, config_open = view.config_open == true }), "ownership-alias", "orchplus.alias"))
+	table.insert(rows, keyed(tern.json.encode({ version = 2, host_pane_id = tostring(view.pane), authority_version = projection.version, alias_nonce = view.alias_nonce, orch_session_id = view.orch_session_id,
+		authority_namespace = projection.authority_namespace, revision = projection.revision, owners = owners, config_open = view.config_open == true,
+		session_closed = selected == nil and view.orch_session_id ~= nil }), "ownership-alias", "orchplus.alias"))
+	view.action_previous = nil
 	return ui.col(rows)
 end
 return M

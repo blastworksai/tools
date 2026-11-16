@@ -1,6 +1,6 @@
 --!strict
 -- Each window reads its local companion; source hosts collect without any block.
--- Reload replaces this VM and its timers, so no stop path is needed.
+-- Unload releases this VM's lease; expiry covers unload/callback loss.
 local companion = require("./companion")
 local aggregate = require("./aggregate").new()
 local view_layout = require("./view_layout")
@@ -20,20 +20,25 @@ local inflight = false
 local ready = false
 local window: string? = nil
 local diagnostics_generation = 0
+local unloaded = false
 
 local function render()
+	if unloaded then return end
 	local model = aggregate:project(math.floor(os.time() * 1000))
+	local hold = setup_module.platform_hold()
 	-- Until the companion has answered, an empty model says nothing about SPAWN.
-	status_segments = if #model.accounts > 0 or phase == "ready" then presentation.segments(model) else {}
-	if phase ~= "ready" then
+	status_segments = if hold ~= nil then {
+		{ text = "USAGE hold · " .. hold, icon = "gauge", tone = "warning", command = DIAGNOSTICS },
+	} elseif #model.accounts > 0 or phase == "ready" then presentation.segments(model) else {}
+	if hold == nil and phase ~= "ready" then
 		table.insert(status_segments, { text = if phase == "loading" then "USAGE loading" elseif phase == "setup_required" then "USAGE setup required" else "USAGE unavailable · last known",
 			icon = "gauge", tone = "muted", command = DIAGNOSTICS })
 	end
-	if phase == "ready" and aggregate.diagnostics ~= nil and (aggregate.diagnostics.stale_sources or 0) > 0 then
+	if hold == nil and phase == "ready" and aggregate.diagnostics ~= nil and (aggregate.diagnostics.stale_sources or 0) > 0 then
 		table.insert(status_segments, { text = "USAGE partial · " .. tostring(aggregate.diagnostics.stale_sources) .. " sources not current",
 			icon = "gauge", tone = "muted", command = DIAGNOSTICS })
 	end
-	if refresh ~= nil and (refresh.requesting or refresh.problem ~= nil or (refresh.progress and refresh.progress.state == "running")) then
+	if hold == nil and refresh ~= nil and (refresh.requesting or refresh.problem ~= nil or (refresh.progress and refresh.progress.state == "running")) then
 		table.insert(status_segments, { text = refresh:text(), icon = "gauge", tone = "muted", command = DETAILS })
 	end
 	tern.chrome.refresh()
@@ -48,12 +53,14 @@ local poll: (any?) -> ()
 local setup = setup_module.new(function(cx) poll(cx) end)
 local function schedule(delay: number)
 	if timer ~= nil then timer:cancel() end
+	if unloaded then return end
 	timer = tern.timer(delay, function(cx)
 		timer = nil
 		poll(cx)
 	end)
 end
 poll = function(cx: any?)
+	if unloaded then return end
 	if inflight then return end
 	if cx == nil then schedule(250); return end
 	if window == nil then
@@ -63,12 +70,14 @@ poll = function(cx: any?)
 	if timer ~= nil then timer:cancel(); timer = nil end
 	inflight = true
 	local function finished()
+		if unloaded then return end
 		inflight = false
 		render()
 		schedule(POLL_MS)
 	end
 	local function display()
 		aggregate:refresh(function(ok, err)
+			if unloaded then return end
 			if ok then phase, problem = "ready", nil else set_problem(err) end
 			finished()
 			if ok then refresh:poll() end
@@ -76,12 +85,14 @@ poll = function(cx: any?)
 	end
 	if not ready then
 		companion.ensure(function(value, err)
+			if unloaded then return end
 			if value == nil then set_problem(err); finished(); return end
 			ready = true
 			display()
 		end)
 	else
-		companion.request("register_client", { client_id = "window:" .. (window :: string), kind = "window", ttl_seconds = 90 }, function(value, err)
+		companion.renew(function(value, err)
+			if unloaded then return end
 			if value == nil then ready = false; set_problem(err); finished(); return end
 			display()
 		end)
@@ -98,12 +109,19 @@ local function diagnostics(cx: any?)
 	local function show(fresh: any, remote: any?, err: any?)
 		if fresh == nil or request_generation ~= diagnostics_generation then return end
 		local hidden = fresh.settings:get("status_bar") ~= true
-		local items = {
-			{ label = "Companion: " .. phase, detail = if problem ~= nil then problem.message else "Original observation times retained; missing quotas are not zero." },
-			{ label = refresh:text(), detail = "The companion runs headless usage reads. No owner-pane input or synthetic turns." },
-			{ label = if hidden then "Summary hidden (status bar off)" else "Summary enabled", detail = "Show Summary turns on Tern's status bar; USAGE never changes it on its own.", action = "summary" },
-			{ label = "Open USAGE Setup", detail = "Runtime, pairing, export and headless-read permission. Accounts come from SPAWN.", action = "setup" },
-		}
+		local items = {}
+		for _, item in setup_module.diagnostic_items() do table.insert(items, item) end
+		table.insert(items, { label = "Companion: " .. phase, detail = if problem ~= nil then problem.message elseif setup_module.platform_hold() ~= nil then "Companion process state only; this is not platform qualification or healthy usage evidence." else "Original observation times retained; missing quotas are not zero." })
+		table.insert(items, { label = refresh:text(), detail = "The companion runs headless usage reads. No owner-pane input or synthetic turns." })
+		table.insert(items, { label = if hidden then "Summary hidden (status bar off)" else "Summary enabled", detail = "Show Summary turns on Tern's status bar; USAGE never changes it on its own.", action = "summary" })
+		table.insert(items, { label = "Open USAGE Setup", detail = "Runtime, pairing, export and headless-read permission. Accounts come from SPAWN.", action = "setup" })
+		if refresh.progress ~= nil then
+			for _, failure in refresh.progress.failures or {} do
+				if type(failure.code) == "string" then
+					for _, item in setup_module.failure_diagnostics(failure.account, failure.code) do table.insert(items, item) end
+				end
+			end
+		end
 		if err ~= nil then table.insert(items, { label = "Local diagnostics unavailable", detail = err.message }) end
 		if remote ~= nil then
 			table.insert(items, { label = "Sync: " .. tostring(remote.sync.state), detail = tostring(remote.sync.error or "No sync error") })
@@ -140,7 +158,7 @@ local function host_refresh(cx: any, host: string)
 	cx:toast("error", title, "No USAGE pane is open in this session. Open USAGE Details, then Refresh; the host refreshes through it.")
 end
 tern.command({ id = "refresh", title = "USAGE Refresh", icon = "gauge", group = "USAGE", run = function(cx)
-	local host = if cx ~= nil then setup_module.attached(cx) else nil
+	local host = setup_module.attached(cx)
 	if host ~= nil then host_refresh(cx, host); return end
 	refresh:refresh(function(problem, fresh)
 		if problem ~= nil and fresh ~= nil then fresh:toast("error", "USAGE refresh failed", problem) end
@@ -195,9 +213,18 @@ tern.route.link(function(link, cx)
 end)
 tern.command({ id = "diagnostics", title = "USAGE Diagnostics", icon = "gauge", group = "USAGE", run = diagnostics })
 tern.command({ id = "setup", title = "USAGE Setup", icon = "gauge", group = "USAGE", run = function(cx) setup:open(cx) end })
-tern.command({ id = "show_summary", title = "USAGE Show Summary", icon = "gauge", group = "USAGE", run = function(cx) if cx ~= nil then setup:show_summary(cx) end end })
+tern.command({ id = "show_summary", title = "USAGE Show Summary", icon = "gauge", group = "USAGE", run = function(cx) setup:show_summary(cx) end })
+local function unload(_cx: any)
+	unloaded = true
+	diagnostics_generation += 1
+	prompt_generation += 1
+	if timer ~= nil then timer:cancel(); timer = nil end
+	companion.unload()
+end
 tern.on("window_start", function(cx) poll(cx) end)
 render()
 schedule(0)
 
 require("./updater/window").register({ name = "USAGE", dir = "USAGE", title_prefix = "USAGE " })
+
+companion.on_unload(unload)

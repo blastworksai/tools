@@ -8,8 +8,8 @@ local MAX_ARGUMENTS = 256
 local REVIEW_COMMAND = "Review this account's launch command"
 
 local FIELDS = {
-	id = true, provider = true, account_label = true, backend = true,
-	enabled = true, include_all = true, placement = true,
+	id = true, provider = true, provider_family = true, account_label = true, backend = true,
+	enabled = true, placement = true,
 	command = true, arguments = true, cwd = true, prompt = true,
 	host = true, user = true, key_path = true, review_required = true, review_reason = true,
 	fresh_executable = true, fresh_arguments = true, fresh_native_default = true, task_argument_index = true,
@@ -24,7 +24,7 @@ local LEGACY_FIELDS = {
 }
 -- Retired fields: accepted from stored records, imports and setup results, then
 -- dropped, so older rosters and setup prompts keep working and nothing re-emits them.
-local RETIRED_FIELDS = { duplicate_policy = true }
+local RETIRED_FIELDS = { duplicate_policy = true, include_all = true }
 
 local function nonblank(value: string): boolean
 	return string.find(value, "%S") ~= nil
@@ -32,6 +32,23 @@ end
 
 local function text(value: any, limit: number): boolean
 	return type(value) == "string" and #value <= limit and string.find(value, "%z") == nil
+end
+
+-- Declaration describes the underlying provider, never the running account/model.
+local PROVIDER_FAMILIES = {
+	claude = "anthropic", anthropic = "anthropic", codex = "openai", openai = "openai",
+	kimi = "moonshot", grok = "xai", agy = "google", antigravity = "google", muse = "meta",
+}
+function Config.provider_family(provider: any, declaration: any): (string?, string?)
+	local known = if type(provider) == "string" then PROVIDER_FAMILIES[string.lower(provider)] else nil
+	if declaration == nil or declaration == "" then return known, nil end
+	if not text(declaration, 96) or not nonblank(declaration) or declaration:find("%c") or utf8.len(declaration)==nil then
+		return nil, "Underlying provider must be nonblank text of at most 96 bytes without control characters"
+	end
+	local normalized = string.lower((declaration:gsub("^%s+", ""):gsub("%s+$", "")))
+	normalized = PROVIDER_FAMILIES[normalized] or normalized
+	if type(provider)=="string" and string.lower(provider)=="omp" and normalized=="omp" then return nil,"OMP requires its underlying AI provider, not the wrapper name" end
+	return normalized, nil
 end
 
 local function array_length(value: any, limit: number): (number?, string?)
@@ -264,9 +281,9 @@ local function managed_fields(source: any, record: any): string?
 			end
 		end
 		if value.capabilities ~= nil then
-			local length, err = array_length(value.capabilities, 7)
+			local length, err = array_length(value.capabilities, 8)
 			if length == nil then return err end
-			local allowed = { ["report-files-v1"] = true, ["native-ask-v1"] = true, ["worker-poll-v1"] = true, ["argv-v1"] = true, ["coordinator-control-v1"] = true, ["check-runner-v1"] = true, ["release-manager-v1"] = true }
+			local allowed = { ["report-files-v1"] = true, ["native-ask-v1"] = true, ["worker-poll-v1"] = true, ["argv-v1"] = true, ["coordinator-control-v1"] = true, ["check-runner-v1"] = true, ["release-manager-v1"] = true, ["project-start-v1"] = true }
 			local seen = {}
 			mailbox.capabilities = {}
 			for index = 1, length do
@@ -297,6 +314,11 @@ local function normalize(source: any, legacy: boolean): (any?, string?)
 		return nil, "Choose Native OMP, Terminal, or SSH terminal"
 	end
 	local record: any = { id = source.id, provider = source.provider, backend = backend }
+	if source.provider_family~=nil and source.provider_family~="" then
+		local family, family_error = Config.provider_family(source.provider, source.provider_family)
+		if family_error then return nil, family_error end
+		record.provider_family = family
+	end
 	for _, field in ipairs({ "account_label", "command", "cwd", "prompt", "host", "user", "key_path", "placement", "review_reason" }) do
 		local value = source[field]
 		if value ~= nil then
@@ -305,11 +327,10 @@ local function normalize(source: any, legacy: boolean): (any?, string?)
 		end
 	end
 	if record.account_label == nil then record.account_label = source.provider end
-	for _, field in ipairs({ "enabled", "include_all", "review_required" }) do
+	for _, field in ipairs({ "enabled", "review_required" }) do
 		if source[field] ~= nil and type(source[field]) ~= "boolean" then return nil, field .. " must be true or false" end
 	end
 	record.enabled = if source.enabled == nil then true else source.enabled
-	record.include_all = if source.include_all == nil then true else source.include_all
 	if source.review_required == true then record.review_required = true end
 	if record.review_reason ~= nil and not record.review_required then return nil, "A review reason requires a blocked record" end
 	if record.review_required and (record.review_reason == nil or not nonblank(record.review_reason)) then
@@ -361,8 +382,6 @@ local function normalize(source: any, legacy: boolean): (any?, string?)
 		elseif kind ~= "ordinary" then
 			mark_review(record, REVIEW_COMMAND)
 		end
-	elseif backend == "native-agent" and not native_omp then
-		return nil, "Only OMP can use Native OMP; review and select an ordinary command"
 	end
 
 	local kind = invocation(record.command, record.arguments)
@@ -484,60 +503,25 @@ function Config.migrate(saved: any, host_key: any): (any?, string?)
 		review_required = review_required, changed = changed,
 	}, nil
 end
-
-local SETUP_PROMPT = [[
-You are the guided setup assistant for SPAWN. Configure only the execution host and
-session identified in the run context below. Never change host or start the saved accounts.
-1. Ask which providers: Claude, Codex, Kimi, Muse, Agy, Grok, OMP, Other/custom.
-2. Ask the number of separate accounts for each provider BEFORE labels.
-3. Ask each account's label suffix (Work, Personal, Client, Research, not the provider
-   name again). Thereafter use Provider — suffix in every question and approval.
-4. Discover each normal executable on the execution host (command -v on Unix,
-   Get-Command on Windows; for SSH, discover on the destination). Show the exact
-   executable and ask for approval or a command override. Keep arguments separate.
-5. Ask the existing isolation method. Labels do not isolate accounts. This plugin
-   creates no OS users, profiles, or credential directories. Do not continue until
-   the user has chosen existing Unix users, provider profiles/configuration, or hosts.
-6. Ask each account's working directory separately; save its exact path as cwd.
-7. Guide that provider's own login, with secrets entered only into its CLI. Never
-   request/store passwords, tokens, private keys, or passphrases. For Kimi ask
-   mainland-cn/global and run kimi login --region <region>; that is not a runtime flag.
-8. Ask optional runtime arguments and account/profile selectors supported by that
-   provider. For Kimi explain --yolo and --auto and save only the approved choice.
-9. Choose Native OMP only for OMP, Terminal for other normal local commands, SSH
-   terminal for a remote CLI. Native OMP needs an explicitly approved startup prompt;
-   preserve any custom instruction. Never invent a global role or silently add a task.
-10. Ask include-all, enabled, and tab/split/replace_if_alone.
-    Preserve each explicit choice. Show the WHOLE configuration for confirmation.
-After explicit user confirmation, emit one JSON object between the existing markers:
-SPAWN_RESULT_BEGIN
-{"schema":2,"setup_run_id":"COPY THE EXACT RUN ID BELOW","confirmed":true,"agents":[{"id":"provider-account-id","provider":"Provider","account_label":"Work","backend":"local-terminal","enabled":true,"include_all":false,"command":"provider-command","arguments":["--profile","work"],"cwd":"~","placement":"tab"}]}
-SPAWN_RESULT_END
-Use canonical fields only: id, provider, account_label, backend, enabled, include_all,
-command, arguments (array), cwd, prompt (OMP only), host, user, key_path,
-placement. Backend values: native-agent, local-terminal, ssh-command.
-Reuse exact existing account IDs; never create suffix IDs to avoid a conflict.
-The plugin reads only your assistant result for this run, asks the user to review
-all records, then saves to the ORIGINAL host's Config. Nothing is launched by import.
-If automatic import fails, explain SPAWN → Config → Paste JSON import; keep the full
-result available for that manual route. Never claim a partial or failed save succeeded.
-]]
-
--- Pure admission input: the exact existing template plus immutable run context.
--- Encoding does not read host/window state or execute the selected OMP record.
-function Config.setup_prompt(records: any, run_id: any, host_key: any, session_key: any): (string?, string?)
-	local canonical, err = Config.validate_records(records)
-	if not canonical then return nil, err end
-	if not text(run_id, 256) or not nonblank(run_id)
-		or not text(host_key, 1024) or not nonblank(host_key)
-		or not text(session_key, 2048) or not nonblank(session_key) then
-		return nil, "Guided setup needs its original run, execution host and session"
+-- Native JSON omits null object members. Like WORK's raw configuration door,
+-- reject unquoted null rather than allowing an unknown field to disappear.
+function Config.decode_setup_json(bytes: any): (any?, string?)
+	if type(bytes)~="string" or #bytes==0 or #bytes>120000 or bytes:find("%z") or utf8.len(bytes)==nil then
+		return nil,"Setup JSON must be complete UTF-8 within 120000 bytes"
 	end
-	local prompt = SETUP_PROMPT .. "\nRun context: " .. tern.json.encode({
-		setup_run_id = run_id, host_key = host_key, session_key = session_key, existing_records = canonical,
-	})
-	if #prompt > MAX_TEXT then return nil, "Guided setup context exceeds 32000 bytes; use Config → Paste JSON import" end
-	return prompt, nil
+	local ok,value=pcall(tern.json.decode,bytes)
+	if not ok or type(value)~="table" then return nil,"Setup result is not a JSON object" end
+	local quoted,escaped=false,false
+	for index=1,#bytes do
+		local byte=string.byte(bytes,index)
+		if quoted then
+			if escaped then escaped=false
+			elseif byte==92 then escaped=true
+			elseif byte==34 then quoted=false end
+		elseif byte==34 then quoted=true
+		elseif byte==110 and bytes:sub(index,index+3)=="null" then return nil,"Setup JSON must omit unused fields, not contain null values" end
+	end
+	return value,nil
 end
 
 return Config

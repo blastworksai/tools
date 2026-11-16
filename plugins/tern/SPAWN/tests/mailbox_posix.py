@@ -28,6 +28,7 @@ SEVEN = ["report-files-v1", "native-ask-v1", "worker-poll-v1", "argv-v1", "coord
          "check-runner-v1", "release-manager-v1"]
 CHECKS = ["report-files-v1", "check-runner-v1"]
 RELEASE = ["report-files-v1", "release-manager-v1"]
+START = ["report-files-v1", "coordinator-control-v1", "project-start-v1"]
 MANIFEST_BYTES = 4096
 
 
@@ -68,7 +69,7 @@ def until(predicate, timeout=10):
 
 class Mailbox:
     def __init__(self, root, handle="box", enrolment_token="enrolment_aaaaaaaa", handover=None,
-                 manifest=None, capabilities=None, binding=None):
+                 manifest=None, capabilities=None, binding=None, initialize=True):
         self.root, self.handle = root, handle
         self.box = root / handle
         self.operation = 0
@@ -92,7 +93,8 @@ class Mailbox:
         # The target receives the manifest as a second Base64 line and writes it verbatim.
         extra = [manifest] if manifest is not None else []
         assert self.target("provision", "provision.json", encode(provision), extra=extra).stdout == b"provisioned\n"
-        self.worker("init", check=True)
+        if initialize:
+            self.worker("init", check=True)
 
     @property
     def journal_path(self):
@@ -113,21 +115,24 @@ class Mailbox:
             raise AssertionError(result.stderr.decode())
         return result
 
-    def retire_authorized(self, report_floor, reply_floor, chain, binding=None, owner=OWNER):
+    def retire_authorized(self, report_floor, reply_floor, chain, binding=None, owner=OWNER, withdrawn=None, env=None):
         argv = self.worker_argv("retire-authorized", poll=5, seconds=30)
         argv[4] = owner
         expected = self.binding if binding is None else binding
         encoded = base64.b64encode(encode(expected)).decode()
-        return subprocess.run(argv + [str(report_floor), str(reply_floor), chain, encoded],
-                              capture_output=True, timeout=20)
+        extra = [] if withdrawn is None else [base64.b64encode(encode(withdrawn)).decode()]
+        return subprocess.run(argv + [str(report_floor), str(reply_floor), chain, encoded] + extra,
+                              capture_output=True, timeout=20, env=env)
 
-    def target(self, mode, selected="-", data=b"", report_floor=0, reply_floor=0, extra=()):
+    def target(self, mode, selected="-", data=b"", report_floor=0, reply_floor=0, extra=(), withdrawn=None, env=None):
         self.operation += 1
         argv = ["/bin/sh", str(TARGET), str(self.root), self.handle, mode, selected,
                 "operation_" + str(self.operation), pwd.getpwuid(os.getuid()).pw_name,
                 str(report_floor), str(reply_floor), str(WORKER)]
+        if withdrawn is not None:
+            argv.append(base64.b64encode(encode(withdrawn)).decode())
         stdin = base64.b64encode(data) + b"".join(b"\n" + base64.b64encode(part) for part in extra)
-        result = subprocess.run(argv, input=stdin + (b"\n" if extra else b""), capture_output=True, timeout=20)
+        result = subprocess.run(argv, input=stdin + (b"\n" if extra else b""), capture_output=True, timeout=20, env=env)
         if result.returncode:
             raise AssertionError(result.stderr.decode())
         return result
@@ -164,7 +169,7 @@ class Mailbox:
         if result.stdout != b"published\n":
             raise AssertionError(result.stdout)
 
-    def acknowledge_pending(self):
+    def acknowledge_pending(self, collect=True):
         journal = self.journal()
         chain = journal["receipt_chain"]
         binding = {key: value for key, value in self.binding.items()
@@ -179,7 +184,9 @@ class Mailbox:
             result = self.target("publish", f"acks/{seq}.json", encode(ack))
             if result.stdout != b"published\n":
                 raise AssertionError(result.stdout)
-        self.worker("receipts", check=True)
+        if collect:
+            self.worker("receipts", check=True)
+        return chain
 
     def usage(self):
         files = [path for path in self.box.rglob("*") if path.is_file()]
@@ -210,6 +217,26 @@ class PosixMailboxTests(unittest.TestCase):
         self.root = Path(self.temp.name).resolve()
         self.mailbox = Mailbox(self.root)
 
+    def test_inventory_observes_file_age_without_writing_or_following_links(self):
+        box = self.mailbox.box
+        paths = [path for path in box.rglob("*") if path.is_file()]
+        before = {path: (path.read_bytes(), path.stat().st_mtime_ns) for path in paths}
+        old = box / "staging" / "old.json"
+        old.write_text("{}")
+        os.utime(old, (time.time() - 3600, time.time() - 3600))
+        fresh = box / "staging" / "fresh.json"
+        fresh.write_text("{}")
+        result = json.loads(self.mailbox.target("inventory", "60000").stdout)
+        self.assertEqual(result["open_files"], len(paths) + 2)
+        self.assertEqual(result["stale_files"], 1)
+        self.assertLessEqual(abs(result["observed_at_ms"] - time.time() * 1000), 2000)
+        self.assertFalse((box / "capacity.lock").exists())
+        for path, evidence in before.items():
+            self.assertEqual((path.read_bytes(), path.stat().st_mtime_ns), evidence)
+        (box / "staging" / "foreign").symlink_to(self.root, target_is_directory=True)
+        self.assertEqual(self.mailbox.target("inventory", "60000").stdout, b"binding_mismatch\n")
+        self.assertEqual(self.mailbox.target("inventory", "0").stdout, b"binding_mismatch\n")
+
     def assert_full(self, wire, resource):
         lines = wire.decode().splitlines()
         self.assertEqual(len(lines), 4)
@@ -220,6 +247,180 @@ class PosixMailboxTests(unittest.TestCase):
         self.assertGreater(int(lines[3]), 0)
         self.assertLessEqual(int(lines[2]), 9007199254740991)
         self.assertLessEqual(int(lines[3]), 9007199254740991)
+
+    def test_coordinator_proposals_publish_and_reject(self):
+        root = self.root / "coordinator space 雪"
+        root.mkdir()
+        mailbox = Mailbox(root, capabilities=SEVEN)
+        identity = dict(owner_id="owner", owner_generation=1, activation_token="a" * 64,
+                        proposal_id="proposal")
+        work = dict(identity, kind="new_work", new_project_name="雪 project",
+                    record_id="configured native", record_revision=0, prompt="Discuss 雪 work",
+                    scope=dict(paths=["src/雪 file"], systems=["editor"]),
+                    checks=[dict(check_id="review", argv=["check", "雪 argument"])])
+        source = dict(identity, kind="add_source", orch_project_id="existing",
+                      source=dict(kind="plan_file", path="/plans/雪 plan.md", revision="rev-1"))
+        valid = [work, dict(work, repository_id="repo", target_ref="main",
+                            target_revision="b" * 40, base_ref="base"),
+                 dict(work, new_project_name="é" * 80, scope=dict(paths=[], systems=[]), checks=[]),
+                 source,
+                 dict(source, source=dict(kind="board", path="C:\\plans\\雪 board", revision="rev-2")),
+                 dict(source, source=dict(kind="board", path="\\\\server\\share\\雪", revision="rev-3")),
+                 dict(source, source=dict(kind="template", template_id="template", revision="rev-4",
+                                          input="Describe the proposed work"))]
+        # Both unions retain their exact old shapes.
+        for kind in ("dispatch", "report", "review", "rollover", "landing"):
+            old = dict(identity, kind=kind, work_id="old_work", project_id="old_project")
+            if kind == "dispatch":
+                old.update(record_id="record", record_revision=0, prompt="Old task")
+            elif kind != "report":
+                old["checkpoint_id"] = "checkpoint"
+            valid.append(old)
+        for payload in valid:
+            with self.subTest(valid=payload):
+                mailbox.worker("report", dict(kind="COORDINATOR_PROPOSAL", payload=payload), check=True)
+                pending = mailbox.journal()["pending"][-1]
+                raw = base64.b64decode(pending["bytes"])
+                logical = json.loads(raw)
+                self.assertEqual(logical["payload"], payload)
+                self.assertEqual(logical["work_id"], mailbox.binding["work_id"])
+                self.assertEqual(logical["kind"], "COORDINATOR_PROPOSAL")
+                folder = mailbox.box / "reports" / str(pending["seq"])
+                manifest = json.loads((folder / "manifest.json").read_bytes())
+                chunks = b"".join(base64.b64decode(json.loads(
+                    (folder / f"chunk-{index}.json").read_bytes())["data_b64"])
+                    for index in range(1, manifest["count"] + 1))
+                self.assertEqual(chunks, raw)
+                self.assertEqual(manifest["message_sha256"], digest(raw))
+                before = {path: path.read_bytes() for path in folder.iterdir()}
+                mailbox.worker("replay", check=True)
+                self.assertEqual({path: path.read_bytes() for path in folder.iterdir()}, before)
+                mailbox.acknowledge_pending()
+        invalid = []
+        for original in (work, source):
+            for key, value in (("work_id", "forged"), ("project_id", "forged"),
+                               ("checkpoint_id", "forged"), ("argv", ["sh"]),
+                               ("account_id", "account"), ("pane_id", "pane"),
+                               ("execution_cwd", "/override"), ("executable", "sh")):
+                invalid.append(dict(original, **{key: value}))
+            both = dict(original, orch_project_id="existing", new_project_name="new")
+            neither = {key: value for key, value in original.items()
+                       if key not in ("orch_project_id", "new_project_name")}
+            invalid.extend([both, neither, dict(original, owner_generation=0),
+                            dict(original, activation_token="bad")])
+        invalid.extend([
+            dict(work, prompt=" \t\n"), dict(work, new_project_name="é" * 81),
+            dict(work, checks=work["checks"] * 2),
+            dict(work, checks=[dict(check_id=f"c{i}", argv=["check"]) for i in range(17)]),
+            dict(work, checks=[dict(check_id="c", argv=[])]),
+            dict(work, checks=[dict(check_id="c", argv=["x"] * 17)]),
+            dict(work, checks=[dict(check_id="c", argv=["é" * 257])]),
+            dict(work, checks=[dict(check_id="c", argv=["x"], command="override")]),
+            dict(work, scope=dict(paths=["x"] * 65, systems=[])),
+            dict(work, scope=dict(paths=[], systems=["x"] * 17)),
+            dict(work, scope=dict(paths=["é" * 129], systems=[])),
+            dict(work, scope=dict(paths=[], systems=["é" * 41])),
+            dict(work, scope=dict(paths=["a\0b"], systems=[])),
+            dict(work, scope=dict(paths=[], systems=[], cwd="/override")),
+            dict(work, target_ref="main"), dict(work, target_revision="b" * 40),
+            dict(work, target_ref="main", target_revision="b" * 40),
+            dict(work, repository_id="repo", target_ref="main", target_revision="HEAD"),
+            dict(source, source=dict(kind="plan_file", path="relative.md", revision="r")),
+            dict(source, source=dict(kind="plan_file", path="/a\0b", revision="r")),
+            dict(source, source=dict(kind="plan_file", path="/plan", revision=" \t")),
+            dict(source, source=dict(kind="board", path="/board", revision="r", input="extra")),
+            dict(source, source=dict(kind="template", template_id="t", revision="r", input=" ")),
+            dict(source, source=dict(kind="template", template_id="t", revision="r\0", input="text")),
+            dict(source, source=dict(kind="shell", path="/plan", revision="r")),
+        ])
+        before = mailbox.journal_path.read_bytes()
+        published_before = {path: path.read_bytes() for path in (mailbox.box / "reports").rglob("*.json")}
+        for payload in invalid:
+            with self.subTest(invalid=payload):
+                result = mailbox.worker("report", dict(kind="COORDINATOR_PROPOSAL", payload=payload))
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(b"invalid_schema", result.stderr)
+                self.assertEqual(mailbox.journal_path.read_bytes(), before)
+        # The actual lexical gate must reject aliases before jq can erase them.
+        duplicate = encode(dict(kind="COORDINATOR_PROPOSAL", payload=work))
+        duplicate = duplicate.replace(b'"scope":', b'"\\u0073cope":{},"scope":')
+        result = mailbox.worker("report", duplicate)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(b"invalid_schema", result.stderr)
+        self.assertEqual(mailbox.journal_path.read_bytes(), before)
+        self.assertEqual({path: path.read_bytes() for path in (mailbox.box / "reports").rglob("*.json")},
+                         published_before)
+
+
+    def test_enrol_cancellation_delayed_paste_and_producer_races(self):
+        accepted = dict(kind="ACCEPTED", payload=dict(assignment_sha256="a" * 64))
+        for initialized in (False, True):
+            with self.subTest(initialized=initialized):
+                mailbox = Mailbox(self.root, f"cancel_{initialized}", enrolment_token=OWNER,
+                                  initialize=initialized)
+                chain = digest(f"report-files-v1\n{mailbox.handle}\n".encode())
+                result = mailbox.retire_authorized(0, 0, chain)
+                expected = b"producer_retired\n" if initialized else b"producer_absent\n"
+                self.assertEqual((result.returncode, result.stdout), (0, expected))
+                self.assertEqual(mailbox.target("retire").stdout, b"retired\n")
+                self.assertFalse(mailbox.box.exists())
+                # No terminal process is stopped: an old pasted token simply has no mailbox.
+                for mode, value in (("init", None), ("report", accepted)):
+                    self.assertNotEqual(mailbox.worker(mode, value).returncode, 0)
+                    self.assertFalse(mailbox.box.exists())
+        for after_cleanup in (False, True):
+            mailbox = Mailbox(self.root, f"winner_{after_cleanup}", enrolment_token=OWNER)
+            chain = mailbox.journal()["receipt_chain"]
+            if after_cleanup:
+                self.assertEqual(mailbox.retire_authorized(0, 0, chain).stdout, b"producer_retired\n")
+                mailbox.worker("init", check=True)
+                # Recreated empty journal alone prevents positive target retirement.
+                self.assertEqual(mailbox.target("retire").stdout, b"incomplete\n")
+                self.assertTrue(mailbox.journal_path.exists())
+            mailbox.worker("report", accepted, check=True)
+            before = mailbox.journal_path.read_bytes()
+            reports = {p: p.read_bytes() for p in (mailbox.box / "reports").rglob("*.json")}
+            result = mailbox.retire_authorized(0, 0, chain)
+            self.assertEqual((result.returncode, result.stdout), (0, b"producer_unsettled\n"))
+            self.assertEqual(mailbox.target("retire").stdout, b"incomplete\n")
+            self.assertEqual(mailbox.journal_path.read_bytes(), before)
+            self.assertEqual({p: p.read_bytes() for p in (mailbox.box / "reports").rglob("*.json")}, reports)
+            self.assertTrue((mailbox.box / "provision.json").exists())
+        # Even an absent producer can lose the gap before target retirement.
+        mailbox = Mailbox(self.root, "absent_winner", enrolment_token=OWNER, initialize=False)
+        chain = digest(f"report-files-v1\n{mailbox.handle}\n".encode())
+        self.assertEqual(mailbox.retire_authorized(0, 0, chain).stdout, b"producer_absent\n")
+        mailbox.worker("init", check=True)
+        mailbox.worker("report", accepted, check=True)
+        before = mailbox.journal_path.read_bytes()
+        self.assertEqual(mailbox.target("retire").stdout, b"incomplete\n")
+        self.assertEqual(mailbox.journal_path.read_bytes(), before)
+
+    def test_absent_producer_requires_exact_empty_authorization(self):
+        mailbox = Mailbox(self.root, "absent_guards", enrolment_token=OWNER, initialize=False)
+        chain = digest(f"report-files-v1\n{mailbox.handle}\n".encode())
+        for report, reply, proof in ((1, 0, chain), (0, 1, chain), (0, 0, "0" * 64)):
+            result = mailbox.retire_authorized(report, reply, proof)
+            self.assertEqual((result.returncode, result.stdout), (0, b"producer_unsettled\n"))
+            self.assertFalse(mailbox.journal_path.exists())
+        wrong = dict(mailbox.binding, worker_id="wrong")
+        self.assertNotEqual(mailbox.retire_authorized(0, 0, chain, binding=wrong).returncode, 0)
+        self.assertNotEqual(mailbox.retire_authorized(0, 0, chain, owner="different_owner_1234").returncode, 0)
+        for lane in ("reports", "replies", "acks", "watermarks"):
+            evidence = mailbox.box / lane / ".retained"
+            evidence.write_bytes(b"retained evidence")
+            result = mailbox.retire_authorized(0, 0, chain)
+            self.assertEqual((result.returncode, result.stdout), (0, b"producer_unsettled\n"))
+            self.assertEqual(evidence.read_bytes(), b"retained evidence")
+            evidence.unlink()
+        for lane in ("producer/lock", "capacity.lock"):
+            lock = mailbox.box / lane
+            lock.mkdir()
+            result = mailbox.retire_authorized(0, 0, chain)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertTrue(lock.is_dir())
+            lock.rmdir()
+        self.assertEqual(mailbox.retire_authorized(0, 0, chain).stdout, b"producer_absent\n")
 
     def test_raw_nul_reply_rejected_without_consumption(self):
         mailbox = self.mailbox
@@ -242,6 +443,7 @@ class PosixMailboxTests(unittest.TestCase):
     def test_shared_wire_corpus(self):
         corpus = json.loads((SOURCE.parents[2] / "shared/report-files-v1/corpus.json").read_bytes())
         exercised = set()
+        ruling_cases = set()
         for case in corpus["cases"]:
             if "posix" not in case.get("helpers", []):
                 continue
@@ -287,6 +489,19 @@ class PosixMailboxTests(unittest.TestCase):
                     else:
                         result = mailbox.worker("consume")
                     self.assertEqual(result.returncode == 0, case["expect"]["ok"], result.stderr)
+                    if case["id"].startswith("c3-ruling-"):
+                        ruling_cases.add(case["id"])
+                        if case["expect"]["ok"]:
+                            journal = mailbox.journal()
+                            self.assertEqual(journal["consumed"][0]["execution"], "unclaimed")
+                            self.assertEqual(base64.b64decode(journal["consumed"][0]["bytes"]), raw)
+                            ack = json.loads(base64.b64decode(journal["pending"][0]["bytes"]))
+                            self.assertEqual(ack["kind"], "reply_ack")
+                            self.assertEqual(ack["payload"], dict(message_id=envelope["message_id"],
+                                             reply_seq=envelope["reply_seq"], reply_sha256=digest(raw),
+                                             status="recorded"))
+                        else:
+                            self.assertEqual(list((mailbox.box / "reports").iterdir()), [])
                     if case["expect"]["ok"]:
                         if case["op"] == "decode_reply":
                             self.assertEqual(result.stdout, raw)
@@ -308,6 +523,8 @@ class PosixMailboxTests(unittest.TestCase):
                          ("decode_reply", False), ("decode_reply", True),
                          ("decode_report", False), ("decode_report", True),
                          ("decode_object", False), ("decode_object", True)} <= exercised)
+        self.assertEqual(ruling_cases, {case["id"] for case in corpus["cases"]
+                                       if case["id"].startswith("c3-ruling-")})
 
     def stop_process(self, process, release):
         release.touch()
@@ -825,6 +1042,363 @@ sys.exit(result.returncode)
         self.assertEqual((self.mailbox.box / "reports/1/manifest.json").read_bytes(), manifest)
         self.assertEqual(base64.b64decode(self.mailbox.journal()["pending"][0]["bytes"]), raw)
 
+    def project_start_payload(self):
+        return dict(owner_id="owner", owner_generation=1, activation_token="a" * 64,
+                    orch_project_id="project", project_revision=1, decision_context="b" * 64)
+
+    def withdrawn_fixture(self, handle, count=2):
+        mailbox = Mailbox(self.root, handle, enrolment_token=OWNER, capabilities=START)
+        # Keep a real settled transport prefix so failed target preflight must
+        # preserve more than the unread START slots.
+        mailbox.reply(1)
+        mailbox.worker("consume", check=True)
+        mailbox.worker("claim", message="message_1", check=True)
+        mailbox.acknowledge_pending()
+        mailbox.worker("resolve", message="message_1", check=True)
+        records = []
+        for seq in range(2, 2 + count):
+            raw = mailbox.reply(seq, transform=lambda reply: reply.update(
+                kind="project_start", payload=self.project_start_payload()))
+            records.append(dict(reply_seq=seq, message_id=f"message_{seq}", message_sha256=digest(raw)))
+        return mailbox, records, mailbox.journal()["receipt_chain"]
+
+    def snapshot_mailbox(self, mailbox):
+        return {str(path.relative_to(mailbox.box)): path.read_bytes()
+                for path in mailbox.box.rglob("*") if path.is_file()}
+
+    def test_withdrawn_starts_physical_tail_retirement(self):
+        for count in (1, 2, 8):
+            with self.subTest(count=count):
+                mailbox, records, chain = self.withdrawn_fixture(f"withdraw_positive_{count}", count)
+                physical = self.snapshot_mailbox(mailbox)
+                self.assertEqual(mailbox.target("reconcile_retire", report_floor=1, reply_floor=1,
+                                                withdrawn=records).stdout, b"incomplete\n")
+                self.assertEqual(self.snapshot_mailbox(mailbox), physical)
+                for mode in ("compact", "reconcile_compact"):
+                    self.assertEqual(mailbox.target(mode, report_floor=1, reply_floor=1,
+                                                    withdrawn=records).stdout, b"binding_mismatch\n")
+                    self.assertEqual(self.snapshot_mailbox(mailbox), physical)
+                before = mailbox.journal()
+                self.assertEqual((before["receipt_seq"], before["consumed_reply_floor"],
+                                  before["reply_next"]), (1, 1, 2))
+                # Ordinary compaction remains limited to the genuine consumed floor.
+                self.assertEqual(mailbox.target("compact", report_floor=1, reply_floor=1).stdout,
+                                 b"compacted\n")
+                self.assertTrue((mailbox.box / "replies/2/manifest.json").exists())
+                result = mailbox.retire_authorized(1, 1, chain, withdrawn=records)
+                self.assertEqual((result.returncode, result.stdout), (0, b"producer_retired\n"), result.stderr)
+                self.assertFalse(mailbox.journal_path.exists())
+                self.assertEqual(mailbox.target("retire", report_floor=1, reply_floor=1,
+                                                withdrawn=records).stdout, b"retired\n")
+                self.assertFalse(mailbox.box.exists())
+                self.assertEqual(mailbox.target("reconcile_retire", report_floor=1, reply_floor=1,
+                                                withdrawn=records).stdout, b"retired\n")
+
+    def test_withdrawn_starts_reject_before_any_destruction(self):
+        cases = ("empty", "reversed", "duplicate", "extra_key", "wrong_hash", "wrong_id", "missing_record",
+                 "missing_chunk", "extra_chunk", "hidden", "missing_manifest", "changed_chunk", "duplicate_json",
+                 "foreign_binding", "wrong_kind", "bad_payload", "missing_control", "missing_start",
+                 "unknown_slot", "foreign_manifest", "pending", "unresolved", "wrong_floor", "wrong_chain")
+        for stage in ("worker", "target"):
+            for index, case in enumerate(cases):
+                if stage == "target" and case in ("pending", "unresolved", "wrong_floor", "wrong_chain"):
+                    continue
+                with self.subTest(stage=stage, case=case):
+                    mailbox, records, chain = self.withdrawn_fixture(f"withdraw_{stage}_{index}")
+                    if stage == "target":
+                        result = mailbox.retire_authorized(1, 1, chain, withdrawn=records)
+                        self.assertEqual(result.stdout, b"producer_retired\n", result.stderr)
+                    slot = mailbox.box / "replies/2"
+                    if case == "empty": records = []
+                    elif case == "reversed": records.reverse()
+                    elif case == "duplicate": records[1] = records[0].copy()
+                    elif case == "extra_key": records[0]["unknown"] = True
+                    elif case == "wrong_hash": records[0]["message_sha256"] = "0" * 64
+                    elif case == "wrong_id": records[0]["message_id"] = "different"
+                    elif case == "missing_record": records.pop()
+                    elif case == "missing_chunk": (slot / "chunk-1.json").unlink()
+                    elif case == "extra_chunk": (slot / "chunk-32.json").write_bytes(b"{}")
+                    elif case == "hidden": (slot / ".unknown").write_bytes(b"retain")
+                    elif case == "missing_manifest": (slot / "manifest.json").unlink()
+                    elif case == "changed_chunk":
+                        part = slot / "chunk-1.json"
+                        value = json.loads(part.read_bytes()); value["data_b64"] = "eA=="
+                        part.write_bytes(encode(value))
+                    elif case == "duplicate_json":
+                        part = slot / "manifest.json"
+                        part.write_bytes(part.read_bytes().replace(b'{', b'{"version":1,', 1))
+                    elif case in ("foreign_binding", "wrong_kind", "bad_payload"):
+                        def mutate(reply):
+                            reply.update(kind="project_start", payload=self.project_start_payload())
+                            if case == "foreign_binding": reply["worker_id"] = "foreign"
+                            elif case == "wrong_kind": reply.update(kind="assignment", payload=dict(
+                                assignment_ref="task", assignment_sha256="a" * 64, instructions="not START"))
+                            else: reply["payload"]["unknown"] = True
+                        for part in slot.iterdir(): part.unlink()
+                        raw = mailbox.reply(2, transform=mutate)
+                        records[0]["message_sha256"] = digest(raw)
+                    elif case in ("missing_control", "missing_start"):
+                        part = mailbox.box / "provision.json"; provision = json.loads(part.read_bytes())
+                        provision["capabilities"].remove("coordinator-control-v1" if case == "missing_control" else "project-start-v1")
+                        part.write_bytes(encode(provision))
+                    elif case == "unknown_slot": (mailbox.box / "replies/4").mkdir()
+                    elif case == "foreign_manifest":
+                        part = slot / "manifest.json"; value = json.loads(part.read_bytes())
+                        value["mailbox_handle"] = "foreign"; part.write_bytes(encode(value))
+                    elif case == "pending": mailbox.worker("report", dict(kind="REGISTER", payload=dict(capabilities=START)), check=True)
+                    elif case == "unresolved": mailbox.worker("consume", check=True)
+                    before = self.snapshot_mailbox(mailbox)
+                    if stage == "worker":
+                        result = mailbox.retire_authorized(1, 0 if case == "wrong_floor" else 1,
+                            "0" * 64 if case == "wrong_chain" else chain, withdrawn=records)
+                        if case in ("pending", "unresolved", "wrong_chain"):
+                            self.assertEqual((result.returncode, result.stdout), (0, b"producer_unsettled\n"), result.stderr)
+                        else:
+                            self.assertNotEqual(result.returncode, 0, result.stdout)
+                    else:
+                        self.assertNotEqual(mailbox.target("retire", report_floor=1, reply_floor=1,
+                                                          withdrawn=records).stdout, b"retired\n")
+                    self.assertEqual(self.snapshot_mailbox(mailbox), before)
+
+    def test_withdrawn_namespace_preflight_preserves_settled_prefix(self):
+        locations = ("consumer/unknown", "producer/unknown", "staging/.held", "unknown",
+                     "reports/1/.unknown", "acks/.unknown", "watermarks/.unknown", "reports/2/manifest.json",
+                     "acks/2.json", "replies/.unknown/manifest.json")
+        for stage in ("worker", "target"):
+            for index, location in enumerate(locations):
+                with self.subTest(stage=stage, location=location):
+                    mailbox, records, chain = self.withdrawn_fixture(f"withdraw_namespace_{stage}_{index}")
+                    if stage == "target":
+                        self.assertEqual(mailbox.retire_authorized(1, 1, chain, withdrawn=records).stdout,
+                                         b"producer_retired\n")
+                    path = mailbox.box / location
+                    path.parent.mkdir(exist_ok=True)
+                    path.write_bytes(b"retain")
+                    before = self.snapshot_mailbox(mailbox)
+                    if stage == "worker":
+                        result = mailbox.retire_authorized(1, 1, chain, withdrawn=records)
+                        if location in ("consumer/unknown", "producer/unknown", "staging/.held",
+                                        "reports/2/manifest.json", "acks/2.json"):
+                            self.assertEqual((result.returncode, result.stdout), (0, b"producer_unsettled\n"), result.stderr)
+                        else:
+                            self.assertNotEqual(result.returncode, 0, result.stdout)
+                    else:
+                        self.assertNotEqual(mailbox.target("retire", report_floor=1, reply_floor=1,
+                                                          withdrawn=records).stdout, b"retired\n")
+                    self.assertEqual(self.snapshot_mailbox(mailbox), before)
+
+    def test_withdrawn_starts_ingests_only_real_final_ack(self):
+        for case in ("accepted", "missing", "event", "hash", "chain", "floor"):
+            with self.subTest(case=case):
+                mailbox, records, _ = self.withdrawn_fixture(f"withdraw_final_ack_{case}")
+                mailbox.worker("report", dict(kind="READY", payload=dict(state="idle")), check=True)
+                chain = mailbox.acknowledge_pending(collect=False)
+                ack_path = mailbox.box / "acks/2.json"
+                if case == "missing":
+                    ack_path.unlink()
+                elif case in ("event", "hash", "chain"):
+                    ack = json.loads(ack_path.read_bytes())
+                    field = {"event": "event_id", "hash": "event_sha256", "chain": "receipt_chain_sha256"}[case]
+                    ack[field] = "wrong_event" if case == "event" else "0" * 64
+                    ack_path.write_bytes(encode(ack))
+                before = self.snapshot_mailbox(mailbox)
+                self.assertEqual(mailbox.journal()["receipt_seq"], 1)
+                self.assertEqual(len(mailbox.journal()["pending"]), 1)
+                result = mailbox.retire_authorized(1 if case == "floor" else 2, 1, chain, withdrawn=records)
+                if case == "accepted":
+                    self.assertEqual((result.returncode, result.stdout), (0, b"producer_retired\n"), result.stderr)
+                    self.assertFalse(mailbox.journal_path.exists())
+                    self.assertTrue((mailbox.box / "watermarks/2.json").exists())
+                    self.assertEqual(mailbox.target("retire", report_floor=2, reply_floor=1,
+                                                   withdrawn=records).stdout, b"retired\n")
+                    self.assertFalse(mailbox.box.exists())
+                else:
+                    if case in ("missing", "floor"):
+                        self.assertEqual((result.returncode, result.stdout), (0, b"producer_unsettled\n"), result.stderr)
+                    else:
+                        self.assertNotEqual(result.returncode, 0, result.stdout)
+                    self.assertEqual(self.snapshot_mailbox(mailbox), before)
+
+    def test_withdrawn_invalid_preflight_never_ingests_existing_ack(self):
+        for case in ("proof", "tail", "namespace", "link"):
+            with self.subTest(case=case):
+                mailbox, records, _ = self.withdrawn_fixture(f"withdraw_ack_preflight_{case}")
+                mailbox.worker("report", dict(kind="READY", payload=dict(state="idle")), check=True)
+                chain = mailbox.acknowledge_pending(collect=False)
+                if case == "proof":
+                    records[0]["message_sha256"] = "0" * 64
+                elif case == "tail":
+                    (mailbox.box / "replies/4").mkdir()
+                elif case == "namespace":
+                    (mailbox.box / "staging/held").write_bytes(b"retain")
+                else:
+                    (mailbox.box / "staging/link").symlink_to(mailbox.box / "acks/2.json")
+                before = self.snapshot_mailbox(mailbox)
+                result = mailbox.retire_authorized(2, 1, chain, withdrawn=records)
+                if case == "namespace":
+                    self.assertEqual((result.returncode, result.stdout), (0, b"producer_unsettled\n"), result.stderr)
+                else:
+                    self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertEqual(self.snapshot_mailbox(mailbox), before)
+
+    def test_project_start_receipt_claim_report_replay_and_resolution(self):
+        mailbox = Mailbox(self.root, "project_start", capabilities=START)
+        mailbox.worker("report", dict(kind="REGISTER", payload=dict(capabilities=SEVEN + ["project-start-v1"])),
+                       check=True)
+        mailbox.acknowledge_pending()
+        payload = self.project_start_payload()
+        raw = mailbox.reply(1, transform=lambda reply: reply.update(kind="project_start", payload=payload))
+        self.assertEqual(mailbox.worker("consume", check=True).stdout, raw)
+        fact = mailbox.journal()["consumed"][0]
+        self.assertEqual((fact["execution"], fact["sha256"]), ("unclaimed", digest(raw)))
+        ack = json.loads(base64.b64decode(mailbox.journal()["pending"][0]["bytes"]))
+        self.assertEqual((ack["action_id"], ack["action_revision"]), ("action_1", 1))
+        self.assertEqual(ack["payload"]["reply_sha256"], digest(raw))
+        mailbox.acknowledge_pending()
+        self.assertEqual(mailbox.target("compact", report_floor=2, reply_floor=1).stdout, b"compacted\n")
+        self.assertEqual(mailbox.worker("wait", check=True).stdout, raw)
+        self.assertEqual(mailbox.journal()["next_seq"], 3)
+        mailbox.worker("claim", message="message_1", check=True)
+        self.assertNotEqual(mailbox.worker("claim", message="message_1").returncode, 0)
+        self.assertEqual(mailbox.worker("consume", check=True).stdout, b"")
+        claim = dict(kind="PROJECT_START_CLAIM", action_id="action_1", action_revision=1, payload=payload)
+        mailbox.worker("report", claim, check=True)
+        pending = mailbox.journal()["pending"][0]
+        logical = base64.b64decode(pending["bytes"])
+        published = json.loads(logical)
+        self.assertEqual({key: published[key] for key in claim}, claim)
+        self.assertEqual(pending["sha256"], digest(logical))
+        manifest = (mailbox.box / "reports/3/manifest.json").read_bytes()
+        mailbox.worker("replay", check=True)
+        self.assertEqual((mailbox.box / "reports/3/manifest.json").read_bytes(), manifest)
+        self.assertEqual(base64.b64decode(mailbox.journal()["pending"][0]["bytes"]), logical)
+        mailbox.acknowledge_pending()
+        mailbox.worker("resolve", message="message_1", check=True)
+        self.assertEqual(mailbox.journal()["consumed"], [])
+
+    def test_project_start_closed_payload_and_action_correlation(self):
+        payload = self.project_start_payload()
+        mutations = [{key: value for key, value in payload.items() if key != missing} for missing in payload]
+        for field, value in [("owner_id", "bad id"), ("owner_generation", 0), ("owner_generation", True),
+                             ("activation_token", "A" * 64), ("orch_project_id", ""),
+                             ("project_revision", 0), ("project_revision", -1), ("project_revision", True),
+                             ("project_revision", 1.5), ("project_revision", "1"),
+                             ("project_revision", 9007199254740992), ("decision_context", "b" * 63),
+                             ("decision_context", "B" * 64), ("instructions", "execute arbitrary work"),
+                             ("extra", True)]:
+            mutations.append(dict(payload, **{field: value}))
+        for index, invalid in enumerate(mutations):
+            with self.subTest(index=index):
+                mailbox = Mailbox(self.root, f"start_invalid_{index}", capabilities=START)
+                mailbox.reply(1, transform=lambda reply: reply.update(kind="project_start", payload=invalid))
+                before = mailbox.journal_path.read_bytes()
+                self.assertEqual(mailbox.worker("consume").stderr, b"invalid_schema\n")
+                self.assertEqual(mailbox.journal_path.read_bytes(), before)
+                report = dict(kind="PROJECT_START_CLAIM", action_id="action", action_revision=1, payload=invalid)
+                self.assertEqual(mailbox.worker("report", report).stderr, b"invalid_schema\n")
+                self.assertEqual(mailbox.journal_path.read_bytes(), before)
+                self.assertEqual(list((mailbox.box / "reports").iterdir()), [])
+        mailbox = Mailbox(self.root, "start_correlation", capabilities=START)
+        valid = dict(kind="PROJECT_START_CLAIM", action_id="action", action_revision=1, payload=payload)
+        invalid = [{key: value for key, value in valid.items() if key != missing}
+                   for missing in ("action_id", "action_revision")]
+        invalid += [dict(kind="PROJECT_START_CLAIM", payload=payload)]
+        invalid += [dict(valid, action_id="bad id"), dict(valid, action_revision=0),
+                    dict(valid, action_revision=True), dict(valid, action_revision=1.5),
+                    dict(valid, handover_id="h", handover_token="x" * 16), dict(valid, extra=True)]
+        before = mailbox.journal_path.read_bytes()
+        for report in invalid:
+            with self.subTest(report=report):
+                self.assertEqual(mailbox.worker("report", report).stderr, b"invalid_schema\n")
+                self.assertEqual(mailbox.journal_path.read_bytes(), before)
+
+    def test_project_start_requires_both_capabilities_on_fresh_retained_and_report_replay(self):
+        payload = self.project_start_payload()
+        for index, capabilities in enumerate((None, ["report-files-v1"],
+                                               ["report-files-v1", "coordinator-control-v1"],
+                                               ["report-files-v1", "project-start-v1"])):
+            for retained in (False, True):
+                with self.subTest(capabilities=capabilities, retained=retained):
+                    mailbox = Mailbox(self.root, f"start_caps_{index}_{int(retained)}", capabilities=START)
+                    raw = mailbox.reply(1, transform=lambda reply: reply.update(kind="project_start", payload=payload))
+                    if retained:
+                        self.assertEqual(mailbox.worker("consume", check=True).stdout, raw)
+                    # Simulate a descriptor losing one permission across restart.
+                    provision_path = mailbox.box / "provision.json"
+                    provision = json.loads(provision_path.read_bytes())
+                    if capabilities is None:
+                        provision.pop("capabilities")
+                    else:
+                        provision["capabilities"] = capabilities
+                    provision_path.write_bytes(encode(provision))
+                    before = mailbox.journal_path.read_bytes()
+                    for mode in ("consume", "wait"):
+                        result = mailbox.worker(mode)
+                        self.assertEqual((result.returncode, result.stdout, result.stderr),
+                                         (1, b"", b"unsupported_capability\n"))
+                        self.assertEqual(mailbox.journal_path.read_bytes(), before)
+                    report = dict(kind="PROJECT_START_CLAIM", action_id="action", action_revision=1, payload=payload)
+                    self.assertEqual(mailbox.worker("report", report).stderr, b"unsupported_capability\n")
+                    self.assertEqual(mailbox.journal_path.read_bytes(), before)
+            mailbox = Mailbox(self.root, f"start_report_replay_{index}", capabilities=START)
+            mailbox.worker("report", report, check=True)
+            provision_path = mailbox.box / "provision.json"
+            provision = json.loads(provision_path.read_bytes())
+            provision["capabilities"] = capabilities or []
+            provision_path.write_bytes(encode(provision))
+            before = mailbox.journal_path.read_bytes()
+            objects = {path: path.read_bytes() for path in (mailbox.box / "reports/1").iterdir()}
+            self.assertEqual(mailbox.worker("replay").stderr, b"unsupported_capability\n")
+            self.assertEqual(mailbox.journal_path.read_bytes(), before)
+            self.assertEqual({path: path.read_bytes() for path in objects}, objects)
+
+    def test_project_start_darwin_base64_and_shasum_paths(self):
+        # Exercise the shipped fallback paths even on a Linux regression host.
+        # macOS /bin/sh, awk and iconv still run natively when this suite runs there.
+        mailbox = Mailbox(self.root, "start_darwin", capabilities=START)
+        payload = self.project_start_payload()
+        raw = mailbox.reply(1, transform=lambda reply: reply.update(kind="project_start", payload=payload))
+        env = self.shim("base64", """args = sys.argv[1:]
+if '-d' in args:
+    sys.exit(1)
+if '-D' in args and sys.platform != 'darwin':
+    args[args.index('-D')] = '-d'
+sys.exit(subprocess.run([actual] + args).returncode)
+""")
+        farm = self.root / "darwin-tools"
+        farm.mkdir()
+        for directory in env["PATH"].split(os.pathsep):
+            if not os.path.isdir(directory):
+                continue
+            for entry in os.listdir(directory):
+                source, link = os.path.join(directory, entry), farm / entry
+                if entry != "sha256sum" and not os.path.lexists(link) and os.path.isfile(source) and os.access(source, os.X_OK):
+                    link.symlink_to(source)
+        self.assertIsNotNone(shutil.which("shasum", path=str(farm)))
+        env["PATH"] = str(farm)
+        retiring, withdrawn, chain = self.withdrawn_fixture("withdraw_darwin")
+        # The exact same shipped seam must use BSD base64 -D and shasum.
+        result = retiring.retire_authorized(1, 1, chain, withdrawn=withdrawn, env=env)
+        self.assertEqual((result.returncode, result.stdout), (0, b"producer_retired\n"), result.stderr)
+        part = retiring.box / "replies/2/chunk-1.json"
+        original = part.read_bytes()
+        part.write_bytes(b"{}")
+        before = self.snapshot_mailbox(retiring)
+        self.assertNotEqual(retiring.target("retire", report_floor=1, reply_floor=1,
+                                           withdrawn=withdrawn, env=env).stdout, b"retired\n")
+        self.assertEqual(self.snapshot_mailbox(retiring), before)
+        part.write_bytes(original)
+        self.assertEqual(retiring.target("retire", report_floor=1, reply_floor=1,
+                                        withdrawn=withdrawn, env=env).stdout, b"retired\n")
+        self.assertEqual(mailbox.worker("consume", env=env, check=True).stdout, raw)
+        self.assertEqual(mailbox.worker("consume", env=env, check=True).stdout, raw)
+        mailbox.worker("claim", message="message_1", env=env, check=True)
+        mailbox.worker("report", dict(kind="PROJECT_START_CLAIM", action_id="action_1",
+                                     action_revision=1, payload=payload), env=env, check=True)
+        mailbox.worker("replay", env=env, check=True)
+        published = json.loads(base64.b64decode(mailbox.journal()["pending"][-1]["bytes"]))
+        self.assertEqual(published["payload"], payload)
+
     def test_coordinator_grant_entrypoints_closed_schema_and_exact_bytes(self):
         for kind, field, limit in [("coordinator_activation", "instructions", 32768),
                                    ("coordinator_retirement", "reason", 1024)]:
@@ -864,6 +1438,93 @@ sys.exit(result.returncode)
                     before = rejected.journal_path.read_bytes()
                     self.assertNotEqual(rejected.worker("consume").returncode, 0)
                     self.assertEqual(rejected.journal_path.read_bytes(), before)
+
+    def test_record_ruling_durable_receipt_is_not_document_completion(self):
+        document = self.root / "owner's existing plan.md"
+        original = b"Plan\r\nProgress without final newline"
+        document.write_bytes(original)
+        payload = dict(path=str(document), marker="orchplus-ruling:authority:gate",
+                       entry="> Owner: approve &lt;literal&gt; &#96;work&#96;\n> Context: café",
+                       expected_document_sha256=digest(original),
+                       expected_non_rulings_sha256=digest(original))
+        def ruling(reply):
+            reply.update(kind="record_ruling", gate_id="gate", gate_revision=1, payload=payload.copy())
+
+        # Neither a legacy descriptor nor an unrelated permission can grant writing.
+        for suffix, capabilities in (("legacy", None), ("release", RELEASE)):
+            mailbox = Mailbox(self.root, "ruling_" + suffix, capabilities=capabilities)
+            mailbox.reply(1, transform=ruling)
+            before = mailbox.journal_path.read_bytes()
+            descriptor = (mailbox.box / "provision.json").read_bytes()
+            result = mailbox.worker("consume")
+            self.assertEqual((result.returncode, result.stdout, result.stderr),
+                             (1, b"", b"unsupported_capability\n"))
+            self.assertEqual(mailbox.journal_path.read_bytes(), before)
+            self.assertEqual((mailbox.box / "provision.json").read_bytes(), descriptor)
+            self.assertEqual(list((mailbox.box / "reports").iterdir()), [])
+
+        mailbox = Mailbox(self.root, "ruling_control",
+                          capabilities=["report-files-v1", "coordinator-control-v1"])
+        raw = mailbox.reply(1, transform=ruling)
+        self.assertEqual(mailbox.worker("consume", check=True).stdout, raw)
+        self.assertEqual(document.read_bytes(), original)
+        fact = mailbox.journal()["consumed"][0]
+        self.assertEqual((fact["execution"], fact["ack_seq"]), ("unclaimed", 1))
+        ack = json.loads(base64.b64decode(mailbox.journal()["pending"][0]["bytes"]))
+        self.assertEqual(ack["payload"]["status"], "recorded")
+        self.assertEqual(ack["payload"]["reply_sha256"], digest(raw))
+        mailbox.acknowledge_pending()
+        self.assertEqual(mailbox.target("compact", report_floor=1, reply_floor=1).stdout, b"compacted\n")
+        self.assertEqual(mailbox.worker("wait", check=True).stdout, raw)
+        self.assertEqual(mailbox.journal()["next_seq"], 2)
+        self.assertEqual(mailbox.journal()["consumed"][0]["execution"], "unclaimed")
+        mailbox.worker("claim", message="message_1", check=True)
+        self.assertNotEqual(mailbox.worker("claim", message="message_1").returncode, 0)
+        self.assertEqual(mailbox.worker("consume", check=True).stdout, b"")
+        # Only the existing writer could perform the effect after claim. The helper
+        # neither appends nor mistakes transport acknowledgement for that effect.
+        self.assertEqual(document.read_bytes(), original)
+        mailbox.worker("resolve", message="message_1", check=True)
+        self.assertEqual(mailbox.journal()["consumed"], [])
+        self.assertEqual(document.read_bytes(), original)
+
+    def test_record_ruling_literal_and_utf8_bounds(self):
+        corpus = json.loads((SOURCE.parents[2] / "shared/report-files-v1/corpus.json").read_bytes())
+        valid = json.loads(base64.b64decode(next(case["bytes_b64"] for case in corpus["cases"]
+                                               if case["id"] == "c3-ruling-valid")))
+        mutations = [
+            ("payload", "entry", "> "),  # An empty quoted line is literal content.
+            ("payload", "entry", "> " + "é" * 4095),
+            ("payload", "path", r"\\server\share\existing.md"),
+            ("payload", "entry", "> " + "é" * 4095 + "x"),
+            ("payload", "entry", "> text\n"),
+            ("payload", "entry", "> text\r\n> text"),
+            ("payload", "entry", "> text\x00"),
+            ("payload", "entry", "> `command`"),
+            ("payload", "entry", "> nested > quote"),
+            ("payload", "path", "/existing\x00.md"),
+            ("payload", "marker", "orchplus-ruling:" + "a" * 237 + ":gate"),
+            ("payload", "marker", "orchplus-ruling:authority:gate\n"),
+            ("envelope", "gate_revision", True),
+            ("envelope", "gate_revision", 0),
+            ("envelope", "gate_id", "Gate"),
+        ]
+        for index, (location, field, value) in enumerate(mutations):
+            with self.subTest(location=location, field=field, value=value[:80] if isinstance(value, str) else value):
+                mailbox = Mailbox(self.root, f"ruling_literal_{index}",
+                                  capabilities=["report-files-v1", "coordinator-control-v1"])
+                reply = json.loads(json.dumps(valid))
+                (reply["payload"] if location == "payload" else reply)[field] = value
+                raw = encode(reply)
+                mailbox.install_reply(raw, 1, reply["message_id"])
+                before = mailbox.journal_path.read_bytes()
+                result = mailbox.worker("consume")
+                if index < 3:
+                    self.assertEqual((result.returncode, result.stdout), (0, raw), result.stderr)
+                else:
+                    self.assertEqual((result.returncode, result.stdout), (1, b""))
+                    self.assertEqual(mailbox.journal_path.read_bytes(), before)
+                    self.assertEqual(list((mailbox.box / "reports").iterdir()), [])
 
     def test_landing_grant_entrypoint_closed_schema_and_exact_bytes(self):
         payload = dict(landing_id="landing", grant_id="grant", project_id="project", checkpoint_id="checkpoint",

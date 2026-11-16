@@ -181,12 +181,44 @@ class RuntimeBoundaryTests(unittest.TestCase):
             self.assertTrue(options["start_new_session"])
             self.assertNotIn("creationflags", options)
 
-    def test_environment_name_keeps_the_pre_2_0_key_format(self):
-        stamp = {"lock_digest": "a" * 64}
-        interpreter = {"implementation": sys.implementation.name, "version": list(sys.version_info[:3]),
-                       "platform": sys.platform, "cache_tag": sys.implementation.cache_tag}
-        self.assertEqual(runtime._environment_name(stamp),
-                         "a" * 64 + "-" + hashlib.sha256(encode(interpreter)).hexdigest()[:16])
+    def stage_environment(self, stamp, platform):
+        def create_interpreter(argv, *_args, **_kwargs):
+            if "venv" in argv:
+                python = runtime._python(Path(argv[-1]))
+                private_directory(python.parent)
+                write_private(python, b"")
+
+        with patch.object(runtime.sysconfig, "get_platform", return_value=platform), \
+                patch.object(runtime, "_run_setup", side_effect=create_interpreter):
+            name = runtime._stage_environment(self.root, self.root, stamp, True)
+            self.assertEqual(runtime._environment(self.root, name, stamp).name, name)
+        return name
+
+    def assert_architecture_environments_are_distinct(self, first_platform, second_platform):
+        private_directory(self.root)
+        stamp = runtime.source_stamp()
+        first = self.stage_environment(stamp, first_platform)
+        first_marker = self.root / "environments" / first / "environment.json"
+        original = first_marker.read_bytes()
+        second = self.stage_environment(stamp, second_platform)
+
+        self.assertNotEqual(first, second)
+        self.assertEqual(first_marker.read_bytes(), original)
+        self.assertEqual({path.name for path in (self.root / "environments").iterdir()}, {first, second})
+        first_identity = decode(original)["interpreter"]
+        second_identity = decode((self.root / "environments" / second / "environment.json").read_bytes())["interpreter"]
+        self.assertEqual(first_identity["version"], second_identity["version"])
+        self.assertNotEqual(first_identity["sysconfig_platform"], second_identity["sysconfig_platform"])
+        with patch.object(runtime.sysconfig, "get_platform", return_value=second_platform):
+            with self.assertRaises(runtime.RuntimeFailure) as caught:
+                runtime._environment(self.root, first, stamp)
+        self.assertEqual(caught.exception.state, "environment_invalid")
+
+    def test_same_version_mac_arm64_and_x64_use_fresh_environments(self):
+        self.assert_architecture_environments_are_distinct("macosx-14.0-arm64", "macosx-14.0-x86_64")
+
+    def test_same_version_windows_32_and_64_bit_use_fresh_environments(self):
+        self.assert_architecture_environments_are_distinct("win32", "win-amd64")
 
     def test_loopback_endpoint_rejects_dns_redirect_targets_and_port_aliases(self):
         for endpoint in ("http://localhost:42", "http://127.0.0.1:0042", "http://127.0.0.1:42/",
@@ -280,6 +312,42 @@ class RuntimeLifecycleTests(unittest.TestCase):
         self.assertEqual(self.ensure("setup:fourth", "setup")["error"]["code"], "invalid_request")
         self.assertEqual(self.invoke("doctor")["device_id"], first["device_id"])
         self.assertEqual(list(self.package.rglob("__pycache__")), [])
+
+
+    def test_unregister_retains_other_clients_then_stops_owned_service_without_data_loss(self):
+        with closing(Store(self.root)) as store:
+            saved = store.local_publish("host", {
+                "version": 3, "publisher": "replaced", "as_of_ms": 1234, "readings": [
+                    {"id": "retained", "provider": "synthetic", "provider_label": "Synthetic",
+                     "source_label": "Fixture", "usage_source": "passive", "windows": []}]})
+        unrelated = self.parent / "provider login"
+        unrelated.write_bytes(b"untouched provider state")
+        first = self.ensure("window:old")
+        self.assertTrue(first["ok"], first)
+        for client, kind in (("window:new", "window"), ("host:live", "host")):
+            self.assertTrue(self.ensure(client, kind)["ok"])
+        launch = (self.root / "launch.json").read_bytes()
+        token = (self.root / "local.token").read_bytes()
+        def unregister(client):
+            return self.invoke("rpc", {"operation": "unregister_client", "payload": {"client_id": client}})
+        self.assertTrue(unregister("window:old")["unregistered"])
+        self.assertFalse(unregister("window:old")["unregistered"])
+        self.assertTrue(self.invoke("doctor")["ok"])
+        self.assertTrue(unregister("window:new")["unregistered"])
+        self.assertTrue(self.invoke("doctor")["ok"])
+        with closing(sqlite3.connect(self.root / "state.sqlite3")) as db:
+            self.assertEqual(db.execute("SELECT client_id FROM local_clients").fetchall(), [("host:live",)])
+        self.assertTrue(unregister("host:live")["unregistered"])
+        with runtime.OSLock(self.root / "instance.lock", timeout=15):
+            pass
+        self.assertFalse(runtime._running(self.root))
+        self.assertEqual((self.root / "launch.json").read_bytes(), launch)
+        self.assertEqual((self.root / "local.token").read_bytes(), token)
+        self.assertEqual(unrelated.read_bytes(), b"untouched provider state")
+        with closing(Store(self.root)) as store:
+            self.assertEqual(store.local_records(), [saved])
+        self.assertEqual(self.invoke("rpc", {"operation": "unregister_client",
+                         "payload": {"client_id": "window:old"}})["state"], "stopped")
 
     def test_stale_pid_metadata_cannot_suppress_a_fresh_daemon(self):
         write_private(self.root / "runtime.json", encode({"pid": os.getpid(), "endpoint": "http://127.0.0.1:1"}))

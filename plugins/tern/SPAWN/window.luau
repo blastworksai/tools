@@ -2,32 +2,30 @@
 -- Window aliases are usable only inside the verified native client incarnation.
 -- The host owns configuration, execution, replies and all durable launch outcomes.
 local Config = require("./config")
+local Codec = require("./wire/codec")
 local Launch = require("./launch_state")
 local Native = require("./native_cli")
 local DispatchWindow = require("./dispatch_window")
-local ManagedRoute = require("./managed_route_window")
+-- Setup-only modules must not consume the native window-load budget.
+local ManagedRoute: any = nil
 local PageNavigation = require("./page_navigation")
+local WindowJournal = require("./window_journal")
 local BLOCK = "spawn.spawner"
 local PREFIX = "SPAWN_STATE_V2 "
 local MAX_QUEUE = 64
 local POLL_MS = 250
--- Spawn all starts each submitted launch this far apart so start-up memory spikes don't stack.
-local BATCH_INTERVAL_MS = 5000
 -- Config › Spawn agents / Setup clicks: the host block publishes a queue node of pending intents,
--- oldest first. This window runs each once, in click order (journal shared by every window of this
--- client), and acks it.
+-- oldest first. HOST assigns one incarnation before this window journals and runs a click.
 local INTENT_NODE, INTENT_ROLE, INTENT_JOURNAL = "spawn-launch-intent", "spawn.launch.intent", "spawn.intents.v1"
-local INTENT_KINDS = { all = true, record = true, setup = true, result = true, readiness = true, route_probe = true }
--- Last saved-record count seen per host, so the menu knows setup is done while no Config is open.
-local RECORDS_SEEN = "spawn.records-seen.v1"
+local INTENT_KINDS = { record = true, setup = true, result = true, readiness = true, discard = true }
 -- Upgrade boundary: manual release requests from older versions are dropped, never replayed.
 local OBSOLETE_OPS = { resolve_attempt = true, resolve_lost_attempts = true }
 local OBSOLETE_NOTICE = "An old Mark-no-longer-running request was cleared; SPAWN now does this automatically"
-local MODES = { ["native-agent"] = "Native OMP", ["local-terminal"] = "Terminal", ["ssh-command"] = "SSH terminal" }
-local COLORS = { claude = "orange", codex = "green", kimi = "teal", muse = "blue", agy = "red", grok = "yellow", omp = "purple" }
-local ICONS = { claude = "provider-anthropic", codex = "provider-openai-codex", kimi = "provider-kimi-code", muse = "provider-meta", agy = "provider-google-antigravity", grok = "provider:xai", omp = "pi-mark" }
+local MODES = { ["native-agent"] = "Native OMP", ["local-terminal"] = "Terminal", ["ssh-command"] = "SSH terminal", ["setup-default"] = "Setup default" }
+local COLORS: { [string]: string } = { claude = "orange", codex = "green", kimi = "teal", muse = "blue", agy = "red", grok = "yellow", omp = "purple" }
+local ICONS: { [string]: string } = { claude = "provider-anthropic", codex = "provider-openai-codex", kimi = "provider-kimi-code", muse = "provider-meta", agy = "provider-google-antigravity", grok = "provider:xai", omp = "pi-mark" }
 local icon_errors = {}
-local ARTWORK = {
+local ARTWORK: { [string]: string } = {
 	kimi = "light-dark(url(assets/icons/kimi-light.svg), url(assets/icons/kimi-dark.svg))",
 	muse = "url(assets/icons/muse.svg)",
 	agy = "url(assets/icons/agy.svg)",
@@ -37,13 +35,16 @@ local artwork_css = ""
 for program, icon in pairs(ICONS) do
 	-- POSIX launch lines start with SPAWN_PROVIDER=<p>, which Tern reports as the command name.
 	for _, name in ipairs({ program, "SPAWN_PROVIDER=" .. program }) do
-		local ok, err = pcall(tern.chrome.program_icon, name, icon)
+		local ok, err = pcall(function()
+			tern.chrome.program_icon(name, icon)
+			return nil
+		end)
 		if not ok then table.insert(icon_errors, name .. ": " .. tostring(err)) end
 	end
 end
 
 local observer: any = nil
-local observer_key: string? = nil
+local observer_store: any = nil
 local observer_loading = false
 local observer_waiters = {}
 local queues: any = {}
@@ -51,7 +52,6 @@ local authority_panes: any = {}
 -- Config panes SPAWN itself opened to carry a launch; closed again once their batch settles.
 -- A Config the user opened (SPAWN: Config, or clicked a launch in it) is never in this set.
 local opened_for_batch: any = {}
-local records_seen: any = nil
 -- with_authority calls still resolving their Config; a queued Config launch waits for them.
 local starting = 0
 local tracked: any = {}
@@ -66,6 +66,16 @@ local collect_setup: any
 local function nonempty(value: any): string?
 	if type(value) ~= "string" or not value:find("%S") then return nil end
 	return value
+end
+local function effective_default(cx: any): (string?, string?)
+	local ok, command = pcall(function() return cx.settings:get("agent_command") end)
+	if not ok then return nil, "Could not read Tern's effective default agent: " .. tostring(command) end
+	if command == nil or command == tern.json.null or (type(command) == "string" and not command:find("%S")) then
+		return nil, "Set a default agent in Tern settings, then try setup again."
+	end
+	if type(command) ~= "string" then return nil, "Tern's effective default agent is not a command string; no setup was started" end
+	-- This is an opaque native setting, not an argv or shell ticket to reinterpret.
+	return command, nil
 end
 local function integer(value: any): boolean
 	return type(value) == "number" and value >= 0 and value % 1 == 0 and value <= 9007199254740991
@@ -160,6 +170,22 @@ local function ticket_association(cx: any, origin: any, ticket: string, inventor
 	if matched == nil then return nil, "The execution ticket has no visible pane in the captured host/session", nil end
 	return matched.pane, nil, matched
 end
+local function job_association(cx: any, origin: any, job: any, inventory: any?): (number?, string?, any?)
+	if job.backend ~= "setup-default" then return ticket_association(cx, origin, job.ticket, inventory) end
+	local binding = job.setup
+	if binding == nil or binding.window ~= cx:window_key() or not integer(binding.agent_pane) or job.pane_reused or not pane_member(cx, origin, binding.agent_pane) then return nil, "The original native setup pane is unavailable", nil end
+	local ok, agents = pcall(function() return inventory or cx.agents:list() end)
+	if not ok or type(agents) ~= "table" then return nil, "Native setup inventory is unavailable", nil end
+	local found = nil
+	for _, agent in agents do
+		if agent.pane == binding.agent_pane then
+			if found ~= nil or agent.command ~= binding.command then return nil, "Native setup pane association changed", nil end
+			found = agent
+		end
+	end
+	if found == nil then return nil, "The original native setup pane closed", nil end
+	return found.pane, nil, found
+end
 local function native_detail(cx: any, pane: number, agent: any): string?
 	local ok, tree = pcall(function() return cx.session:surface(pane, { as = "table", nodes = 1, depth = 1, max_chars = 1024 }) end)
 	if not ok or type(tree) ~= "table" or type(tree.surface) ~= "table" or tree.surface.role ~= "omp.session" then return nil end
@@ -197,35 +223,12 @@ local function refresh_artwork(cx: any)
 		artwork_css = source
 	end
 end
--- tern.kv cannot list keys: a per-namespace index bounds per-connection journals.
--- Drop this window's older incarnations and keep the 8 most recently saved keys.
-local observer_index: string? = nil
-local observer_window: string? = nil
-local function prune_journals()
-	if observer_index == nil or observer_key == nil then return end
-	local index = tern.kv.get(observer_index)
-	if type(index) ~= "table" then index = {} end
-	index[observer_key] = { window = observer_window, saved = os.time() }
-	local keys = {}
-	for key, entry in index do
-		if type(key) ~= "string" or key:sub(1, 16) ~= "window-observer:" or type(entry) ~= "table" or type(entry.saved) ~= "number" then index[key] = nil
-		elseif key ~= observer_key and entry.window == observer_window then tern.kv.set(key, nil); index[key] = nil
-		else table.insert(keys, key) end
-	end
-	table.sort(keys, function(a, b)
-		if a == observer_key or b == observer_key then return a == observer_key and b ~= observer_key end
-		return index[a].saved > index[b].saved
-	end)
-	for position = 9, #keys do tern.kv.set(keys[position], nil); index[keys[position]] = nil end
-	tern.kv.set(observer_index, index)
-end
 local function save_observer(cx: any): boolean
-	if observer == nil or observer_key == nil then fail(cx, "The window observer identity is unavailable"); return false end
+	if observer == nil or observer_store == nil then fail(cx, "The window observer identity is unavailable"); return false end
 	observer.tracked = tracked
 	observer.setup = setup
-	local ok, err = pcall(tern.kv.set, observer_key, observer)
+	local ok, err = pcall(WindowJournal.save, observer_store, observer)
 	if not ok then fail(cx, "Could not persist this window's launch journal: " .. tostring(err)) end
-	if ok then pcall(prune_journals) end
 	return ok
 end
 
@@ -239,40 +242,17 @@ local function ensure_observer(cx: any, callback: any)
 	observer_loading = true
 	local window = cx:window_key()
 	local started, start_error = pcall(function()
+		local retirement = WindowJournal.capture()
 		Native.inspect(window, { timeout_ms = 5000 }, function(result, err, fresh)
 			if fresh == nil then return end
 			local problem = err
-			local client = nil
-			if problem == nil and (result == nil or result.status ~= 0 or result.timed_out) then problem = "Could not inspect this native client incarnation" end
-			if problem == nil then
-				local decoded, inventory = pcall(tern.json.decode, result.stdout)
-				if not decoded or type(inventory) ~= "table" or type(inventory.clients) ~= "table" then problem = "Native client inventory is invalid"
-				else
-					for _, entry in inventory.clients do
-						if entry.kind == "window" and entry.window == window then
-							if client ~= nil then problem = "Native client incarnation is ambiguous"; break end
-							client = entry
-						end
-					end
-				end
-			end
-			if problem == nil and (client == nil or not integer(client.conn) or not integer(client.since)) then problem = "Native client incarnation is unavailable; nothing was launched" end
+			local store = nil
+			if problem == nil then store, problem = WindowJournal.open(window, result, retirement) end
 			if problem == nil then
 				local cleared = false
 				local loaded, data = pcall(function()
-					local namespace = tern.kv.get("window-observer-namespace")
-					if namespace == nil then
-						namespace = tostring(os.time()) .. "-" .. tostring(math.random(1, 2147483647))
-						tern.kv.set("window-observer-namespace", namespace)
-					end
-					if not identity(namespace, 96) then error("Invalid client observer namespace") end
-					local id = "window-" .. namespace .. "-" .. tostring(client.conn) .. "-" .. string.format("%.0f", client.since) .. "-" .. window
-					if not identity(id, 200) then error("Native observer identity exceeds the supported length") end
-					observer_key = "window-observer:" .. id
-					observer_index, observer_window = "window-observer-index:" .. namespace, window
-					pcall(prune_journals)
-					local saved = tern.kv.get(observer_key)
-					if saved == nil then saved = { version = 2, id = id, transports = {}, tracked = {}, next_run = 1 } end
+					observer_store = store
+					local id, saved = store.id, store.observer
 					if type(saved) ~= "table" or saved.version ~= 2 or saved.id ~= id or type(saved.transports) ~= "table" or type(saved.tracked) ~= "table" or not integer(saved.next_run) then error("Unsupported or invalid window launch journal; expected version 2. The saved journal was preserved, not reset or replayed") end
 					for authority_id, state in saved.transports do
 						if not identity(authority_id, 256) or type(state) ~= "table" or not integer(state.sequence) or type(state.acknowledgments) ~= "table" then error("Invalid saved authority transport; no request was replayed") end
@@ -284,7 +264,7 @@ local function ensure_observer(cx: any, callback: any)
 						end
 						if count ~= #state.acknowledgments then error("Invalid sparse request acknowledgment journal") end
 						if state.pending ~= nil then
-							local ops = { refresh = true, import_records = true, launch_record = true, start_setup = true }
+							local ops = { refresh = true, import_records = true, discard_setup_result = true, launch_record = true, start_setup = true, setup_claim = true, setup_begin = true, setup_bind = true, setup_uncertain = true }
 							if type(state.pending) ~= "table" or not identity(state.pending.request_id, 512) or not (ops[state.pending.op] or OBSOLETE_OPS[state.pending.op]) then error("Invalid pending request journal; inspect Config without replaying it") end
 							if OBSOLETE_OPS[state.pending.op] then
 								-- Acknowledge it so the host may drop any retained reply; it is never sent again.
@@ -299,7 +279,11 @@ local function ensure_observer(cx: any, callback: any)
 						if type(key) ~= "string" or type(track) ~= "table" or not valid_attempt(track.attempt) or Launch.validate_execution_projection(track.job) == nil or not valid_origin(track.origin) or type(track.allocation_intent) ~= "boolean" or (track.pane ~= nil and not integer(track.pane)) then error("Invalid saved launch association; preserved for inspection") end
 						if key ~= track.attempt.id .. "@" .. track.origin.authority_id or track.job.attempt_id ~= track.attempt.id or track.job.record_id ~= track.attempt.record_id or track.job.session_key ~= track.origin.session_key or track.attempt.scope ~= track.origin.session_key then error("Saved execution association identity mismatch") end
 					end
-					if saved.setup ~= nil and (type(saved.setup) ~= "table" or not identity(saved.setup.id, 256) or not valid_origin(saved.setup.origin) or not identity(saved.setup.job_id, 96) or not identity(saved.setup.ticket, 512) or type(saved.setup.initial_prompt) ~= "string" or #saved.setup.initial_prompt > 120000 or (saved.setup.pane ~= nil and not integer(saved.setup.pane))) then error("Invalid saved setup run; use Config paste recovery") end
+					if saved.setup ~= nil and (type(saved.setup) ~= "table" or not identity(saved.setup.id, 256) or not valid_origin(saved.setup.origin) or not identity(saved.setup.job_id, 96) or (saved.setup.command == nil and not identity(saved.setup.ticket, 512)) or type(saved.setup.initial_prompt) ~= "string" or #saved.setup.initial_prompt > 120000 or (saved.setup.pane ~= nil and not integer(saved.setup.pane))) then error("Invalid saved setup run; use Config paste recovery") end
+					if saved.setup ~= nil and saved.setup.command ~= nil then
+						local run = saved.setup
+						if nonempty(run.command) == nil or nonempty(run.cwd) == nil or type(run.window) ~= "string" or not identity(run.binding, 256) or not identity(run.token, 384) or not identity(run.executor, 256) or not Launch.validate_setup_projection(run.bootstrap) or not integer(run.config_revision) or not integer(run.sequence) or (run.native_pane ~= nil and not integer(run.native_pane)) or (run.effect_intent ~= nil and type(run.effect_intent) ~= "boolean") then error("Invalid saved native setup binding; use Advanced manual recovery") end
+					end
 					-- Optional, additive within version 2: one shown host-restart notice per session.
 					if saved.restart_notices ~= nil then
 						if type(saved.restart_notices) ~= "table" then error("Invalid saved host restart notices") end
@@ -332,6 +316,7 @@ local function validate_snapshot(value: any): (any?, string?)
 	if type(value) ~= "table" or value.version ~= 2 or type(value.ready) ~= "boolean" then return nil, "Unsupported authority snapshot" end
 	if not identity(value.host_key, 2048) or not identity(value.authority_id, 256) or not identity(value.session_key, 2048) then return nil, "Authority identity is invalid" end
 	if value.namespace ~= nil and not identity(value.namespace, 256) then return nil, "Authority namespace is invalid" end
+	if value.host_cwd~=nil and not identity(value.host_cwd,8192) then return nil,"Execution-host working folder is invalid" end
 	if not integer(value.config_revision) or not integer(value.attempt_revision) then return nil, "Authority revision is invalid" end
 	local records, err = Config.validate_records(value.records)
 	if records == nil then return nil, "Invalid authority roster: " .. tostring(err) end
@@ -381,9 +366,9 @@ local function validate_snapshot(value: any): (any?, string?)
 	local notice = value.host_restart_notice
 	value.host_restart_notice = nil
 	if type(notice) == "table" and identity(notice.restart_id, 64) then
-		local count = notice.count
-		if count == nil and type(notice.attempts) == "table" then count = #notice.attempts end
-		if integer(count) and count >= 1 then value.host_restart_notice = { restart_id = notice.restart_id, count = count } end
+		local restart_count = notice.count
+		if restart_count == nil and type(notice.attempts) == "table" then restart_count = #notice.attempts end
+		if integer(restart_count) and restart_count >= 1 then value.host_restart_notice = { restart_id = notice.restart_id, count = restart_count } end
 	end
 	value.records = records
 	return value, nil
@@ -414,24 +399,6 @@ local function read_snapshot(cx: any, pane_id: number): (any?, string?)
 	if not decoded then return nil, "The authority snapshot is incomplete or invalid JSON" end
 	return validate_snapshot(raw)
 end
-local function records_cache(): any
-	if records_seen == nil then
-		local ok, saved = pcall(tern.kv.get, RECORDS_SEEN)
-		records_seen = if ok and type(saved) == "table" then saved else {}
-	end
-	return records_seen
-end
-local function remember_records(host: string, count: number)
-	local seen = records_cache()
-	if seen[host] == count then return end
-	if seen[host] == nil then
-		local entries = 0
-		for _ in seen do entries += 1 end
-		if entries >= 64 then seen[(next(seen))] = nil end
-	end
-	seen[host] = count
-	pcall(tern.kv.set, RECORDS_SEEN, seen)
-end
 local function snapshot(cx: any, origin: any, readonly: boolean?): (any?, string?)
 	local problem = context_error(cx, origin, false)
 	if problem ~= nil then return nil, problem end
@@ -452,7 +419,6 @@ local function snapshot(cx: any, origin: any, readonly: boolean?): (any?, string
 	-- The persisted roster key is not this client's display/route alias.
 	-- Verified pane membership and canonical authority/session IDs bind scope.
 	if origin.authority_id ~= nil and (value.authority_id ~= origin.authority_id or value.session_key ~= origin.session_key) then return nil, "The authority identity changed; choose the action again" end
-	remember_records(origin.host_key, #value.records)
 	if not readonly and not value.ready then return nil, value.error or "Config requires review before this host is ready" end
 	if not readonly and value.error ~= nil then return nil, value.error end
 	return value, nil
@@ -468,6 +434,49 @@ local function block_args(cx: any, origin: any): { string }
 end
 local navigation_hooks = { capture = capture, context_error = context_error, member = pane_member }
 local page_context_attempts: any = {}
+local native_account_attempts: any = {}
+local device_attempts: any = {}
+local function poll_setup_devices(cx: any,pane: number,origin: any)
+	if not PageNavigation.visible(cx,pane,BLOCK,origin,navigation_hooks,true) then return end
+	local bytes=DispatchWindow.read_node(cx,pane,BLOCK,"spawn-setup-topology","spawn.setup.topology",32000)
+	if bytes==nil then device_attempts[pane]=nil;return end
+	local ok,topology=pcall(tern.json.decode,bytes)
+	local request=if ok and type(topology)=="table" then topology.request else nil
+	if type(request)~="table" or type(request.nonce)~="string" or #request.nonce>256 or topology.window~=cx:window_key() or device_attempts[pane]==request.nonce then return end
+	device_attempts[pane]=request.nonce
+	local listed,hosts,current=pcall(function()return cx.hosts:list(),cx.hosts:current()end)
+	local observation,why
+	local SetupDiscovery = require("./setup_discovery")
+	if listed then observation,why=SetupDiscovery.devices(hosts,current) else why="Tern device discovery is unavailable. Attach the execution machine in Tern, then find devices again." end
+	if context_error(cx,origin,true)~=nil or not pane_member(cx,origin,pane) then return end
+	cx.session:event(pane,{ev="action",id="main",act="spawn.setup-devices",value=tern.json.encode({nonce=request.nonce,window=cx:window_key(),devices=if observation then observation.devices else nil,current=if observation then current else nil,error=why})})
+end
+local function poll_native_accounts(cx: any, pane: number, origin: any)
+	if not PageNavigation.visible(cx,pane,BLOCK,origin,navigation_hooks,true) then return end
+	local bytes=DispatchWindow.read_node(cx,pane,BLOCK,"spawn-native-accounts","spawn.native.accounts",2048)
+	if bytes==nil then native_account_attempts[pane]=nil;return end
+	local ok,request=pcall(tern.json.decode,bytes)
+	if not ok or type(request)~="table" or type(request.nonce)~="string" or #request.nonce>256 or request.window~=cx:window_key() or native_account_attempts[pane]==request.nonce then return end
+	native_account_attempts[pane]=request.nonce
+	local choices,seen={},{}
+	local function add(command: any,label: string)
+		if type(command)~="string" or #command==0 or #command>8192 or command:find("%c") or seen[command] or #choices>=32 then return end
+		seen[command]=true;table.insert(choices,{command=command,label=label})
+	end
+	local command,why=effective_default(cx)
+	if command then add(command,"Tern default agent") end
+	local listed,agents=pcall(function()return cx.agents:list()end)
+	if listed and type(agents)=="table" then
+		for _,agent in ipairs(agents) do
+			if pane_member(cx,origin,agent.pane) then add(agent.command,"Native agent pane "..tostring(agent.pane)) end
+		end
+	end
+	if context_error(cx,origin,true)~=nil or not PageNavigation.visible(cx,pane,BLOCK,origin,navigation_hooks,true) then return end
+	local payload=tern.json.encode({nonce=request.nonce,window=cx:window_key(),choices=choices,error=if #choices==0 then why or "No configured default or native agent route was observed" else nil})
+	if #payload>100000 then payload=tern.json.encode({nonce=request.nonce,window=cx:window_key(),choices={},error="Native account discovery exceeds its bound; choose an existing account explicitly"}) end
+	local sent,problem=pcall(function()cx.session:event(pane,{ev="action",id="main",act="spawn.native-accounts",value=payload})end)
+	if not sent then fail(cx,"Could not report native account discovery: "..tostring(problem)) end
+end
 local function poll_page_context(cx: any, pane: number, origin: any)
 	if not PageNavigation.visible(cx,pane,BLOCK,origin,navigation_hooks,true) then return end
 	local bytes=DispatchWindow.read_node(cx,pane,BLOCK,"spawn-page-context","spawn.page.context",2048)
@@ -531,25 +540,71 @@ end
 local function valid_intent(intent: any): boolean
 	if type(intent) ~= "table" or not identity(intent.intent_id, 256) or not INTENT_KINDS[intent.kind] or not integer(intent.config_revision) then return false end
 	if intent.kind == "record" then return identity(intent.record_id, 96) end
-	if (intent.kind == "readiness" or intent.kind == "route_probe") and (type(intent.native_window) ~= "string" or #intent.native_window > 256 or intent.native_window:find("[%z\1-\31\127]")) then return false end
+	if intent.kind=="discard" then return identity(intent.record_id,96) and type(intent.native_window)=="string" and #intent.native_window<=256 and not intent.native_window:find("[%z\1-\31\127]") end
+	if intent.kind == "readiness" and (type(intent.native_window) ~= "string" or #intent.native_window > 256 or intent.native_window:find("[%z\1-\31\127]")) then return false end
 	return intent.record_id == nil
 end
 local function intent_journal(): any
-	local ok, saved = pcall(tern.kv.get, INTENT_JOURNAL)
-	return if ok and type(saved) == "table" then saved else {}
+	if observer_store == nil then error("The native window intent journal is unavailable") end
+	return WindowJournal.cache(observer_store, INTENT_JOURNAL)
 end
--- The intents queued on a Config's launch node, oldest first; empty when unreadable.
-local function intent_queue(cx: any, pane: number): { any }
+-- A missing/unreadable node is unknown, never an empty durable HOST queue.
+local function intent_queue(cx: any, pane: number): any
 	local read_ok, bytes = pcall(DispatchWindow.read_node, cx, pane, BLOCK, INTENT_NODE, INTENT_ROLE, 16384)
-	if not read_ok or bytes == nil then return {} end
+	if not read_ok or bytes == nil then return nil end
 	local decoded, node = pcall(tern.json.decode, bytes)
-	if not decoded or type(node) ~= "table" or node.schema ~= 1 or type(node.intents) ~= "table" or #node.intents > 64 then return {} end
-	return node.intents
+	if not decoded or type(node) ~= "table" or node.schema ~= 1 or type(node.intents) ~= "table" or #node.intents > 64 then return nil end
+	for key in pairs(node) do if key ~= "schema" and key ~= "queue_id" and key ~= "intents" then return nil end end
+	local count, ids = 0, {}
+	for index, intent in pairs(node.intents) do
+		count += 1
+		if not integer(index) or index < 1 or index > #node.intents or not valid_intent(intent) or ids[intent.intent_id] then return nil end
+		ids[intent.intent_id] = true
+	end
+	if count ~= #node.intents then return nil end
+	if node.queue_id ~= nil and not identity(node.queue_id, 256) then return nil end
+	return node
+end
+local function intent_source(entry: any, queue: any, origin: any, pane: number): boolean
+	return type(entry) == "table" and queue.queue_id ~= nil and entry.queue_id == queue.queue_id
+		and entry.host_key == origin.host_key and entry.session == origin.session and entry.pane == pane
+		and WindowJournal.same_recipient(entry.recipient, observer_store.recipient)
+end
+local function intent_seen(journal: any, id: string, queue: any, origin: any, pane: number): boolean
+	for _, entry in pairs(journal) do
+		-- Unqualified legacy IDs remain exclusion evidence; never guess their issuer.
+		if entry == id or (intent_source(entry, queue, origin, pane) and entry.intent_id == id) then return true end
+	end
+	return false
+end
+local function reclaimable_intent(entry: any): boolean
+	if type(entry) ~= "table" or not identity(entry.intent_id, 256) or type(entry.recipient) ~= "table" then return false end
+	for key in pairs(entry) do
+		if key ~= "intent_id" and key ~= "queue_id" and key ~= "host_key" and key ~= "session" and key ~= "pane" and key ~= "recipient" then return false end
+	end
+	for key in pairs(entry.recipient) do
+		if key ~= "observer_id" and key ~= "window_key" and key ~= "conn" and key ~= "since" then return false end
+	end
+	return true
+end
+local function reclaim_intents(journal: any, queue: any, origin: any, pane: number)
+	local pending, changed = {}, false
+	for _, intent in ipairs(queue.intents) do pending[intent.intent_id] = true end
+	for index = #journal, 1, -1 do
+		local entry = journal[index]
+		if reclaimable_intent(entry) and intent_source(entry, queue, origin, pane) and not pending[entry.intent_id] then
+			table.remove(journal, index)
+			changed = true
+		end
+	end
+	if changed then WindowJournal.save_cache(observer_store, INTENT_JOURNAL, journal) end
 end
 local function unrun_intent(cx: any, pane: number): boolean
+	local queue, origin = intent_queue(cx, pane), capture(cx)
+	if queue == nil or origin == nil then return true end
 	local journal = intent_journal()
-	for _, intent in ipairs(intent_queue(cx, pane)) do
-		if valid_intent(intent) and not contains(journal, intent.intent_id) then return true end
+	for _, intent in ipairs(queue.intents) do
+		if not intent_seen(journal, intent.intent_id, queue, origin, pane) then return true end
 	end
 	return false
 end
@@ -639,7 +694,7 @@ local function open_config(cx: any, page: string?)
 		close_parked(cx, origin)
 		local args=block_args(cx,origin)
 		if page then local context=tern.json.decode(args[1]);context.page=page;args[1]=tern.json.encode(context) end
-		return cx:new_block(BLOCK, args, "beside", { focus = true })
+		return cx:new_block(BLOCK, args, "beside", { focus = true, dir = "right" })
 	end)
 	if not ok or pane == nil then fail(cx, "Could not open Config: " .. tostring(pane))
 	else
@@ -655,11 +710,11 @@ local function transport(origin: any): any
 	if value == nil then value = { sequence = 0, acknowledgments = {} }; observer.transports[origin.authority_id] = value end
 	return value
 end
-local function request(cx: any, origin: any, op: string, data: any, callback: any)
+local function request(cx: any, origin: any, op: string, data: any, callback: any, preflight: any?)
 	local queue = queues[origin.authority_id]
 	if queue == nil then queue = { items = {}, busy = false }; queues[origin.authority_id] = queue end
 	if #queue.items >= MAX_QUEUE then callback(cx, nil, "The authority request queue is full"); return end
-	table.insert(queue.items, { origin = origin, expected_config_revision = origin.config_revision, op = op, data = data, callback = callback })
+	table.insert(queue.items, { origin = origin, expected_config_revision = origin.config_revision, op = op, data = data, callback = callback, preflight = preflight })
 	pump(cx, queue)
 end
 pump = function(cx: any, queue: any)
@@ -684,25 +739,29 @@ pump = function(cx: any, queue: any)
 	local value, err = snapshot(cx, origin)
 	if item.op ~= "refresh" then
 		local changed = context_error(cx, origin, true)
-		if changed ~= nil then finish(cx, nil, changed); return end
+		if changed ~= nil then finish(cx, nil, changed); return nil end
 	end
-	if value == nil then finish(cx, nil, err); return end
+	if value == nil then finish(cx, nil, err); return nil end
 	local state = transport(origin)
-	if type(state) ~= "table" or not integer(state.sequence) or type(state.acknowledgments) ~= "table" then finish(cx, nil, "The saved observer transport is invalid"); return end
+	if type(state) ~= "table" or not integer(state.sequence) or type(state.acknowledgments) ~= "table" then finish(cx, nil, "The saved observer transport is invalid"); return nil end
 	if state.pending ~= nil then
 		local pending, prior_acknowledgments = state.pending, state.acknowledgments
 		local refused = value.replies[pending.request_id]
 		if not Launch.refused_pending(pending, refused, observer.id) then
-			finish(cx, nil, "An earlier " .. tostring(pending.op) .. " request has an unreviewed outcome. Open SPAWN: Running agents → Transport review → acknowledge it, then try again."); return
+			finish(cx, nil, "An earlier " .. tostring(pending.op) .. " request has an unreviewed outcome. Open SPAWN: Running agents → Transport review → acknowledge it, then try again."); return nil
 		end
 		-- A definitive refusal executed nothing; settle it exactly as the poll does.
 		state.acknowledgments = { pending.request_id }
 		state.pending = nil
 		if not save_observer(cx) then
 			state.pending, state.acknowledgments = pending, prior_acknowledgments
-			finish(cx, nil, "An earlier " .. tostring(pending.op) .. " request has an unreviewed outcome. Open SPAWN: Running agents → Transport review → acknowledge it, then try again."); return
+			finish(cx, nil, "An earlier " .. tostring(pending.op) .. " request has an unreviewed outcome. Open SPAWN: Running agents → Transport review → acknowledge it, then try again."); return nil
 		end
 		cx:toast("info", "Cleared an earlier refused SPAWN request", "The host refused " .. tostring(pending.op) .. " (" .. tostring(refused.error) .. "); nothing ran. Continuing with your new request.")
+	end
+	if item.preflight ~= nil then
+		local why = item.preflight(cx, value)
+		if why ~= nil then finish(cx, nil, why); return nil end
 	end
 	state.sequence = math.max(state.sequence, value.request_sequences[observer.id] or 0) + 1
 	local id = observer.id .. ":" .. tostring(state.sequence)
@@ -710,13 +769,13 @@ pump = function(cx: any, queue: any)
 	for index, request_id in ipairs(state.acknowledgments) do acknowledged[index] = request_id end
 	local payload = { version = 2, request_id = id, authority_id = origin.authority_id, observer_id = observer.id, request_sequence = state.sequence, acknowledged_requests = acknowledged, expected_config_revision = item.expected_config_revision, op = item.op, data = item.data }
 	state.pending = { request_id = id, op = item.op }
-	if not save_observer(cx) then finish(cx, nil, "Request was not sent because its journal could not be saved"); return end
+	if not save_observer(cx) then finish(cx, nil, "Request was not sent because its journal could not be saved"); return nil end
 	local sent, send_error = pcall(function()
 		local encoded = tern.json.encode(payload)
 		if #encoded > 120000 then error("Request exceeds the authority byte limit") end
 		cx.session:event(origin.pane, { ev = "action", id = "main", act = "spawn.request", value = encoded })
 	end)
-	if not sent then finish(cx, nil, "Request delivery is uncertain: " .. tostring(send_error) .. "; inspect Config before another launch"); return end
+	if not sent then finish(cx, nil, "Request delivery is uncertain: " .. tostring(send_error) .. "; inspect Config before another launch"); return nil end
 	local polls = 0
 	local function poll(fresh: any)
 		if fresh == nil or finished then return end
@@ -725,24 +784,26 @@ pump = function(cx: any, queue: any)
 		if latest ~= nil then
 			local reply = latest.replies[id]
 			if reply ~= nil then
-				if reply.request_id ~= id or reply.observer_id ~= observer.id or reply.request_sequence ~= payload.request_sequence then finish(fresh, nil, "Authority reply identity mismatch"); return end
+				if reply.request_id ~= id or reply.observer_id ~= observer.id or reply.request_sequence ~= payload.request_sequence then finish(fresh, nil, "Authority reply identity mismatch"); return nil end
 				-- A rejected stale action stays rejected. Retain the host's revision
 				-- only for the next deliberate action, including saved setup recovery.
 				origin.config_revision = reply.config_revision
 				state.acknowledgments = { id }
 				state.pending = nil
-				if not save_observer(fresh) then finish(fresh, nil, "Reply consumption could not be persisted; no launch was authorized"); return end
+				if not save_observer(fresh) then finish(fresh, nil, "Reply consumption could not be persisted; no launch was authorized"); return nil end
 				finish(fresh, reply, if reply.ok then nil else reply.error or "Authority rejected the request")
-				return
+				return nil
 			end
 		end
 		polls += 1
-		if polls >= 240 then finish(fresh, nil, "Authority acknowledgment timed out: " .. tostring(read_error or "no matching durable reply") .. ". No automatic resend; inspect Config for the retained result."); return end
+		if polls >= 240 then finish(fresh, nil, "Authority acknowledgment timed out: " .. tostring(read_error or "no matching durable reply") .. ". No automatic resend; inspect Config for the retained result."); return nil end
 		tern.timer(POLL_MS, poll)
+		return nil
 		end)
 		if not read_ok then finish(fresh, nil, "Authority reply handling failed; request outcome remains uncertain and was not replayed: " .. tostring(read_failure)) end
 	end
 	tern.timer(POLL_MS, poll)
+	return nil
 	end)
 	if not prepared then finish(cx, nil, "Authority request handling failed; no request was replayed. Inspect Config before another launch: " .. tostring(prepare_error)) end
 end
@@ -790,11 +851,13 @@ local function sync_snapshot(cx: any, origin: any, value: any)
 		local old_job, old_attempt = track.job, track.attempt
 		local progressed = old_attempt.sequence ~= attempt.sequence or old_job.stage ~= job.stage or old_job.pane_reused ~= job.pane_reused or old_job.native_pane ~= job.native_pane or old_job.native_window ~= job.native_window or old_job.native_tab ~= job.native_tab or old_job.shell_program ~= job.shell_program
 		if progressed or track.authority_error ~= nil then changed = true end
-		if track.origin.host == origin.host and track.origin.session == origin.session and track.origin.pane ~= origin.pane then track.origin.pane = origin.pane; changed = true end
+		if job.purpose ~= "setup" and track.origin.host == origin.host and track.origin.session == origin.session and track.origin.pane ~= origin.pane then track.origin.pane = origin.pane; changed = true end
 		track.job, track.attempt, track.authority_error = job, attempt, nil
 		if progressed and track.batch ~= nil then changed_batches[track.batch] = true end
-		local pane, association_error, agent = nil, "This window's ticket inventory is unavailable", nil
-		if inventory_ok then pane, association_error, agent = ticket_association(cx, track.origin, job.ticket, inventory) end
+		local pane: number? = nil
+		local association_error: string? = "This window's ticket inventory is unavailable"
+		local agent = nil
+		if inventory_ok then pane, association_error, agent = job_association(cx, track.origin, job, inventory) end
 		if pane ~= nil and track.pane ~= nil and pane ~= track.pane then
 			pane, association_error = nil, "The ticket no longer matches this window's retained SDK pane; no identity was rebound"
 		end
@@ -806,10 +869,6 @@ local function sync_snapshot(cx: any, origin: any, value: any)
 			track.pane, track.closed = pane, false
 			if track.allocation_error ~= nil and job.native_pane ~= nil then track.allocation_error = nil; changed = true; if track.batch ~= nil then changed_batches[track.batch] = true end end
 			if active(attempt) and not job.pane_reused and job.backend == "native-agent" then track.native_detail = native_detail(cx, pane, agent) end
-			if setup ~= nil and setup.job_id == job.id and setup.origin.authority_id == origin.authority_id and setup.ticket == job.ticket then
-				if setup.pane ~= pane or setup.closed then changed = true end
-				setup.pane, setup.closed = pane, false
-			end
 		end
 	end
 	-- An explicit host history cleanup is authoritative; it is not a launch.
@@ -860,20 +919,21 @@ local function await_submission(cx: any, track: any, complete: any)
 		if fresh == nil or finished then return end
 		local ok, err = pcall(function()
 			local changed = context_error(fresh, track.origin, true)
-			if changed ~= nil then finish(fresh, changed .. "; already accepted host work stays in its original session"); return end
+			if changed ~= nil then finish(fresh, changed .. "; already accepted host work stays in its original session"); return nil end
 			local value, read_error = snapshot(fresh, track.origin, true)
 			if value ~= nil then
 				sync_snapshot(fresh, track.origin, value)
 				local current = tracked[track.attempt.id .. "@" .. track.origin.authority_id]
-				if current == nil then finish(fresh, "The admitted execution history is unavailable; no allocation was repeated"); return end
-				if value.config_revision ~= current.job.config_revision then finish(fresh, "Saved configuration changed; later batch records were not admitted. Already accepted host work stays in its original session."); return end
-				if SUBMISSION_BOUNDARY[current.job.stage] then finish(fresh, nil); return end
+				if current == nil then finish(fresh, "The admitted execution history is unavailable; no allocation was repeated"); return nil end
+				if value.config_revision ~= current.job.config_revision then finish(fresh, "Saved configuration changed; later batch records were not admitted. Already accepted host work stays in its original session."); return nil end
+				if SUBMISSION_BOUNDARY[current.job.stage] then finish(fresh, nil); return nil end
 			else
 				track.authority_error = read_error
 			end
 			polls += 1
-			if polls >= 240 then finish(fresh, "Host submission was not confirmed within the bounded wait. Later batch records were not admitted; inspect Running agents. The ticket will not be allocated again."); return end
+			if polls >= 240 then finish(fresh, "Host submission was not confirmed within the bounded wait. Later batch records were not admitted; inspect Running agents. The ticket will not be allocated again."); return nil end
 			tern.timer(POLL_MS, poll)
+			return nil
 		end)
 		if not ok then finish(fresh, "Host submission observation failed; no launch was replayed: " .. tostring(err)) end
 	end
@@ -928,7 +988,6 @@ local function allocate_ticket(cx: any, origin: any, job: any, attempt: any, rep
 		end
 		if not integer(pane) then error("Layout did not return a Window SDK pane") end
 		track.pane = pane
-		if setup ~= nil and setup.job_id == job.id and setup.origin.authority_id == origin.authority_id then setup.pane = pane end
 		if not save_observer(cx) then error("The returned pane could not be journaled; allocation will not be repeated") end
 		if not pane_member(cx, origin, pane) then error("The returned pane's captured host/session membership is unavailable") end
 		if replacement ~= nil then
@@ -961,91 +1020,41 @@ local function allocate_ticket(cx: any, origin: any, job: any, attempt: any, rep
 	end
 	await_submission(cx, track, complete)
 end
-local function run_batch(cx: any, origin: any, records: any)
+local function launch_one(cx: any, origin: any, record: any)
 	next_local_id += 1
-	local batch = { id = tostring(next_local_id), origin = origin, config_revision = origin.config_revision, attempts = {}, failed = 0, skipped = 0, record_ids = {} }
-	for _, record in records do batch.record_ids[record.id] = true end
+	local batch = { id = tostring(next_local_id), origin = origin, config_revision = origin.config_revision, attempts = {}, failed = 0, skipped = 0, record_ids = { [record.id] = true } }
 	batches[batch.id] = batch
-	local index = 0
-	local admit: any
-	-- paced is true only after a record reached the host submission boundary.
-	-- Skipped (disabled) records continue at once; the first
-	-- record is never delayed. No ticket or admission exists during the wait.
-	local function next_record(fresh: any, stop: string?, paced: boolean?)
-		if stop ~= nil then batch.stopped = true; fail(fresh, stop); batch_summary(fresh, batch); return end
-		index += 1
-		if index > #records then batch.completed = true; batch_summary(fresh, batch); return end
-		if paced then
-			tern.timer(BATCH_INTERVAL_MS, function(next_cx)
-				if next_cx == nil then batch.stopped = true; return end
-				admit(next_cx)
-			end)
-			return
+	local changed = context_error(cx, origin, true)
+	if changed then batch.stopped = true; fail(cx, changed); batch_summary(cx, batch); return end
+	request(cx, origin, "launch_record", { record_id = record.id }, function(admitted_cx, reply, err)
+		if err ~= nil then
+			if err == "skip" or err == "disabled" then batch.skipped += 1 else batch.failed += 1 end
+			fail(admitted_cx, label(record) .. ": " .. tostring(err) .. ". Inspect Current agents for unresolved work.")
+			batch.completed = true; batch_summary(admitted_cx, batch); return
 		end
-		admit(fresh)
-	end
-	admit = function(fresh: any)
-		local changed = context_error(fresh, origin, true)
-		if origin.config_revision ~= batch.config_revision then changed = "Saved configuration changed during this batch; choose Spawn again after review" end
-		if changed ~= nil then batch.stopped = true; fail(fresh, changed); batch_summary(fresh, batch); return end
-		local record = records[index]
-		request(fresh, origin, "launch_record", { record_id = record.id }, function(admitted_cx, reply, err)
-			if err ~= nil then
-				if err == "skip" or err == "disabled" then batch.skipped += 1 else batch.failed += 1 end
-				fail(admitted_cx, label(record) .. ": " .. tostring(err) .. ". Inspect Running agents for unresolved work.")
-				next_record(admitted_cx); return
-			end
-			local job, attempt, admission_error = admission_result(reply, origin, record.id, "launch", nil)
-			if job == nil then batch.failed += 1; next_record(admitted_cx, admission_error); return end
-			allocate_ticket(admitted_cx, origin, job, attempt, reply.result.replayed, batch, function(done_cx: any, problem: string?)
-				next_record(done_cx, problem, true)
-			end)
+		local job, attempt, admission_error = admission_result(reply, origin, record.id, "launch", nil)
+		if job == nil then batch.failed += 1; batch.stopped = true; fail(admitted_cx, admission_error); batch_summary(admitted_cx, batch); return end
+		allocate_ticket(admitted_cx, origin, job, attempt, reply.result.replayed, batch, function(done_cx: any, problem: string?)
+			if problem then batch.stopped = true; fail(done_cx, problem) else batch.completed = true end
+			batch_summary(done_cx, batch)
 		end)
-	end
-	next_record(cx)
+	end)
 end
--- target: the Config pane a launch was clicked in; nil finds or opens one.
-local function spawn_all(cx: any, target: number?)
+-- Launch only the exact saved-agent row clicked in its real SPAWN pane.
+local function start_saved_agent(cx: any, target: number, record_id: string)
 	with_authority(cx, function(fresh, origin, value)
-		local selected = {}
-		for _, record in value.records do if record.enabled and record.include_all then table.insert(selected, record) end end
-		if #selected == 0 then fresh:toast("info", "SPAWN", "No enabled saved records are included in Spawn all"); dismiss_opened(fresh, origin); return end
-		run_batch(fresh, origin, selected)
-	end, nil, target)
-end
--- record_id: launch exactly this saved agent (Config › Spawn agents row) instead of asking.
-local function spawn_specific(cx: any, target: number?, record_id: string?)
-	with_authority(cx, function(fresh, origin, value)
-		local items = {}
-		for _, record in value.records do
-			if record.enabled and not record.review_required and (record.backend ~= "native-agent" or nonempty(record.prompt) ~= nil) then table.insert(items, { label = label(record) .. " [" .. record.id .. "]", detail = MODES[record.backend], record = record }) end
+		for _,record in value.records do
+			if record.id~=record_id then continue end
+			if record.enabled and not record.review_required and (record.backend~="native-agent" or nonempty(record.prompt)) then launch_one(fresh,origin,record);return end
+			break
 		end
-		if record_id ~= nil then
-			for _, item in items do
-				if item.record.id == record_id then run_batch(fresh, origin, { item.record }); return end
-			end
-			fresh:toast("info", "SPAWN", "This saved agent is disabled, needs review or no longer exists; review Config")
-			return
-		end
-		if #items == 0 then fresh:toast("info", "SPAWN", "No enabled reviewed records are available; review Config"); dismiss_opened(fresh, origin); return end
-		fresh:pick({ items = items, placeholder = "Choose a saved agent", icon = "sparkle" }):next(function(item, err, next_cx)
-			if next_cx == nil then return end
-			if err ~= nil then fail(next_cx, err); return end
-			if item ~= nil then run_batch(next_cx, origin, { item.record }) else dismiss_opened(next_cx, origin) end
-		end)
-	end, nil, target)
+		fresh:toast("info","SPAWN","This saved agent is disabled, needs review or no longer exists; review Agent settings")
+	end,nil,target)
 end
 
 local function startup_delivered(cx: any, pane: number, prompt: string): boolean
-	-- The transcript API is specific to native OMP, but its flattened text can
-	-- contain reaction chrome. Compare the full raw message body, not that text.
-	local ok, messages = pcall(function() return cx.agents:transcript(pane, { last = 1000 }) end)
-	if not ok or type(messages) ~= "table" then return false end
-	local native_user = false
-	for _, message in messages do
-		if message.role == "user" and type(message.text) == "string" then native_user = true; break end
-	end
-	if not native_user then return false end
+	-- Managed route diagnostics still compare the first complete native user body.
+	-- Guided setup never reads assistant messages or infers a result from a transcript.
 	local read_ok, tree = pcall(function()
 		return cx.session:surface(pane, { as = "table", nodes = 1000, depth = 20, max_chars = 128000 })
 	end)
@@ -1119,12 +1128,18 @@ tern.on("pane_closed", function(event, cx)
 	for _, track in tracked do
 		if track.pane == event.pane then track.closed = true; track.native_detail = nil; changed = true end
 	end
-	if setup ~= nil and setup.pane == event.pane then setup.closed = true; changed = true end
+	if setup ~= nil and (setup.pane == event.pane or setup.origin.pane == event.pane) then setup.closed = true; changed = true end
 	if changed then save_observer(cx) end
 	refresh_artwork(cx)
 end)
 
-open_running = function(cx: any)
+type RunningItem =
+	{ kind: "attempt", group: string, label: string, icon: string?, detail: string, attempt: Launch.Attempt, job: { id: string }, verified: boolean }
+	| { kind: "info", group: string, label: string, icon: string?, detail: string? }
+	| { kind: "advanced", group: string, label: string, detail: string? }
+	| { kind: "transport", group: string, label: string, detail: string, busy: boolean, pending_id: string, reply: { request_id: string, observer_id: string }? }
+
+open_running = function(cx: any, advanced: boolean?)
 	local current, active_error = capture(cx)
 	if current == nil then
 		ensure_observer(cx, function(fresh, err)
@@ -1132,11 +1147,14 @@ open_running = function(cx: any)
 			local items = {}
 			for _, track in tracked do
 				local terminal = track.attempt.phase == "Failed" or track.attempt.phase == "Exited"
-				table.insert(items, { group = if terminal then "Failed/exited history" else "SPAWN launches", label = label(track.job) .. " · " .. (if terminal then track.attempt.phase else "Unknown"), detail = "Cached host history only · " .. track.origin.host_key .. " · " .. track.origin.session_key .. " · " .. (track.attempt.diagnostic or "") })
+				if terminal and not advanced then continue end
+				table.insert(items, { group = if terminal then "Failed/exited history" else "Current agents", label = label(track.job) .. " · " .. (if terminal then track.attempt.phase else "Unknown"), icon = ICONS[string.lower(track.job.provider)] or "sparkle", detail = "Host unavailable; last-known observation only" .. (if advanced then " · "..track.origin.host_key.." · "..track.origin.session_key else "") })
 			end
 			table.insert(items, { group = "Other Tern sessions", label = "Observation unavailable", detail = active_error })
-			fresh:pick({ items = items, placeholder = "Running agents — host unavailable; no liveness or resolution inferred" }):next(function(_item, pick_error, next_cx)
-				if next_cx ~= nil and pick_error ~= nil then fail(next_cx, pick_error) end
+			if not advanced then table.insert(items,{kind="advanced",label="Advanced",detail="Retained history; nothing is cleared"}) end
+			fresh:pick({ items = items, placeholder = "Current agents — host unavailable" }):next(function(item, pick_error, next_cx)
+				if next_cx ~= nil and pick_error ~= nil then fail(next_cx, pick_error)
+				elseif next_cx ~= nil and item and item.kind=="advanced" then open_running(next_cx,true) end
 			end)
 		end)
 		return
@@ -1144,27 +1162,39 @@ open_running = function(cx: any)
 	with_authority(cx, function(fresh, origin, value)
 		-- This refresh reads host outcomes and establishes only local UI aliases.
 		sync_snapshot(fresh, origin, value)
-		local items, owned, groups = {}, {}, {}
+		local items: { RunningItem } = {}
+		local owned, groups = {}, {}
 		local state = transport(origin)
 		for _, track in tracked do
-			if not track.closed and track.association_error == nil and track.pane ~= nil and ticket_association(fresh, track.origin, track.job.ticket) == track.pane then owned[track.pane] = true end
+			if not track.closed and track.association_error == nil and track.pane ~= nil and job_association(fresh, track.origin, track.job) == track.pane then owned[track.pane] = true end
 		end
 		for _, attempt in value.attempts do
 			local history = attempt.phase == "Failed" or attempt.phase == "Exited"
+			if history and not advanced then continue end
 			local track = tracked[attempt.id .. "@" .. origin.authority_id]
+			if track==nil then
+				local display
+				for _,job in value.jobs do if job.attempt_id==attempt.id then display=job;break end end
+				if not display then for _,record in value.records do if record.id==attempt.record_id then display=record;break end end end
+				table.insert(items,{kind="info",group="Current agents",label=(if display then label(display) else "Saved agent").." · "..attempt.phase,icon=if display then ICONS[string.lower(display.provider)] or "sparkle" else "sparkle",detail="No local window association; inspect the original conversation."..(if advanced then " · "..attempt.record_id else "")})
+				groups["Current agents"]=true
+				continue
+			end
 			local verified = track ~= nil and not track.closed and track.association_error == nil and track.pane ~= nil and track.origin.host == origin.host and track.origin.session == origin.session and pane_member(fresh, origin, track.pane)
-			local group = if history then "Failed/exited history" else "SPAWN launches"
-			local detail = attempt.mode .. " · " .. attempt.id .. " · host stage " .. track.job.stage .. " · " .. value.host_key .. " · " .. value.session_key .. " · " .. (attempt.diagnostic or "")
+			local group = if history then "Failed/exited history" else "Current agents"
+			local detail = if advanced then attempt.mode.." · "..attempt.id.." · host stage "..track.job.stage.." · "..value.host_key.." · "..value.session_key else "This Tern session"
+			if attempt.diagnostic then detail..=" · "..attempt.diagnostic end
 			if track.allocation_error ~= nil then detail ..= " · Window allocation: " .. track.allocation_error end
 			if track.association_error ~= nil then detail ..= " · Window association: " .. track.association_error end
 			if active(attempt) and verified and track.native_detail ~= nil then detail ..= " · " .. track.native_detail end
 			groups[group] = true
-			table.insert(items, { group = group, label = label(track.job) .. " · Host " .. attempt.phase, detail = detail, attempt = attempt, job = track.job, verified = verified })
+			table.insert(items, { kind = "attempt", group = group, label = label(track.job) .. " · " .. attempt.phase, icon = ICONS[string.lower(track.job.provider)] or "sparkle", detail = detail, attempt = attempt, job = track.job, verified = verified })
 		end
 		-- Informational: the host already ended the attempts its restart lost.
 		if value.host_restart_notice ~= nil then
 			local count = value.host_restart_notice.count
-			table.insert(items, 1, { group = "Host restart", label = "Host restarted: " .. tostring(count) .. " SPAWN " .. (if count == 1 then "agent" else "agents") .. " ended (cleared automatically)", other = true })
+			local notice: RunningItem = { kind = "info", group = "Host restart", label = "Host restarted: " .. tostring(count) .. " SPAWN " .. (if count == 1 then "agent" else "agents") .. " ended (cleared automatically)" }
+			table.insert(items, 1, notice)
 		end
 		local pane_hosts, tab_sessions = {}, {}
 		for _, host in fresh.hosts:list() do for _, pane in host.panes do pane_hosts[pane] = host end end
@@ -1175,23 +1205,26 @@ open_running = function(cx: any)
 				local scope = if host ~= nil then tostring(host.name or host.id) .. " · session " .. tostring(tab_sessions[pane.tab]) else "Unknown host membership"
 				local phase = if host == nil or host.state ~= "connected" then "Unknown" else "Window-observed pane"
 				groups["Other Tern sessions"] = true
-				table.insert(items, { group = "Other Tern sessions", label = tostring(pane.title or pane.pane) .. " · " .. phase, detail = "Read-only client observation, not a SPAWN provider outcome · " .. scope .. " · pane " .. tostring(pane.pane), other = true })
+				table.insert(items, { kind = "info", group = "Other Tern sessions", label = tostring(pane.title or pane.pane) .. " · " .. phase, detail = "Read-only client observation, not a SPAWN provider outcome · " .. scope .. " · pane " .. tostring(pane.pane) })
 			end
 		end
-		for _, group in ipairs({ "SPAWN launches", "Failed/exited history", "Other Tern sessions" }) do
-			if not groups[group] then table.insert(items, { group = group, label = "None observed", other = true }) end
+		for _, group in ipairs(if advanced then { "Current agents", "Failed/exited history", "Other Tern sessions" } else { "Current agents", "Other Tern sessions" }) do
+			if not groups[group] then table.insert(items, { kind = "info", group = group, label = "None observed" }) end
 		end
-		if value.error ~= nil then table.insert(items, { group = "Host configuration", label = value.error, detail = "Review Config; existing host history remains read-only", other = true }) end
-		if state.pending ~= nil then
+		if value.error ~= nil then table.insert(items, { kind = "info", group = "Host configuration", label = value.error, detail = "Review Config; existing host history remains read-only" }) end
+		if advanced and state.pending ~= nil then
 			local reply = value.replies[state.pending.request_id]
 			local busy = queues[origin.authority_id] ~= nil and queues[origin.authority_id].busy
-			table.insert(items, { group = "Transport review", label = (if busy then "Awaiting " else "Review interrupted ") .. state.pending.op, detail = if reply ~= nil then tern.json.encode(reply) else "No retained reply is visible. Inspect Config before clearing the local wait; any admitted job remains unresolved.", transport = not busy, other = busy, pending_id = state.pending.request_id, reply = reply })
+			table.insert(items, { kind = "transport", group = "Transport review", label = (if busy then "Awaiting " else "Review interrupted ") .. state.pending.op, detail = if reply ~= nil then tern.json.encode(reply) else "No retained reply is visible. Inspect Config before clearing the local wait; any admitted job remains unresolved.", busy = busy, pending_id = state.pending.request_id, reply = reply })
 		end
-		fresh:pick({ items = items, placeholder = "Running agents — observations, not saved configuration", icon = "sparkle" }):next(function(item, err, next_cx)
+		if not advanced then table.insert(items,{kind="advanced",group="Options",label="Advanced",detail=if state.pending then "An unfinished request needs attention; inspect its retained outcome without repeating it." else "History and request recovery"}) end
+		fresh:pick({ items = items, placeholder = if advanced then "Advanced — history and recovery" else "Current agents", icon = "sparkle" }):next(function(item: RunningItem?, err: string?, next_cx)
 			if next_cx == nil then return end
 			if err ~= nil then fail(next_cx, err); return end
-			if item == nil or item.other then dismiss_opened(next_cx, origin); return end
-			if item.transport then
+			if item and item.kind=="advanced" then open_running(next_cx,true);return end
+			if item == nil or item.kind == "info" then dismiss_opened(next_cx, origin); return end
+			if item.kind == "transport" then
+				if item.busy then dismiss_opened(next_cx, origin); return end
 				next_cx:pick({ items = {
 					{ label = "Keep waiting state", action = "keep" },
 					{ label = "I reviewed the outcome; acknowledge without launching", detail = item.detail, action = "acknowledge" },
@@ -1214,19 +1247,19 @@ open_running = function(cx: any)
 			local attempt = item.attempt
 			local choices = { { label = "Back", action = "keep" } }
 			if item.verified then table.insert(choices, { label = "Inspect retained pane", action = "inspect" }) end
-			if item.verified and item.job.purpose == "setup" then table.insert(choices, { label = "Review this setup result", action = "setup" }) end
+			if item.verified and setup ~= nil and setup.job_id == item.job.id and setup.origin.authority_id == origin.authority_id then table.insert(choices, { label = "Review this setup result", action = "setup" }) end
 			next_cx:pick({ items = choices, placeholder = attempt.record_id .. " · " .. attempt.phase }):next(function(choice, choice_error, decision_cx)
 				if decision_cx == nil then return end
 				if choice_error ~= nil then fail(decision_cx, choice_error); return end
 				if choice == nil then return end
 				if choice.action == "inspect" or choice.action == "setup" then
 					local track = tracked[attempt.id .. "@" .. origin.authority_id]
-					local pane, association_error = ticket_association(decision_cx, origin, item.job.ticket)
+					local pane, association_error = job_association(decision_cx, origin, item.job)
 					if track == nil or track.closed or context_error(decision_cx, origin, true) ~= nil or pane == nil or pane ~= track.pane then fail(decision_cx, association_error or "The captured ticket association changed"); return end
 					if choice.action == "inspect" then decision_cx.layout:focus(pane)
 					else
-						setup = { id = item.job.setup_run_id, job_id = item.job.id, ticket = item.job.ticket, initial_prompt = item.job.initial_prompt, origin = origin, pane = pane }
-						if save_observer(decision_cx) then collect_setup(decision_cx) end
+						if setup == nil or setup.job_id ~= item.job.id or setup.origin.authority_id ~= origin.authority_id then fail(decision_cx, "This window has no original setup binding; use Advanced manual recovery"); return end
+						collect_setup(decision_cx)
 					end
 				end
 			end)
@@ -1234,158 +1267,392 @@ open_running = function(cx: any)
 	end, true)
 end
 
-local function review_setup(cx: any, run: any, result: any)
-	if type(result) ~= "table" or result.schema ~= 2 or result.setup_run_id ~= run.id or result.confirmed ~= true then fail(cx, "Setup result is not confirmed for this active run; use Config → Paste JSON import for manual recovery"); return end
-	local records, err = Config.validate_records(result.agents)
-	if records == nil then fail(cx, "The whole setup result was rejected: " .. tostring(err)); return end
-	run.reviewing = true
-	local items = {}
-	for _, record in records do
-		table.insert(items, { label = label(record) .. " [" .. record.id .. "]", detail = tern.json.encode(record), action = "record" })
+-- Setup's native effect and review retain one original Config and one opaque default.
+-- Neither a ticket lookup nor a replacement Config can recover automatic provenance.
+local function setup_source(cx: any, run: any, supplied: any?): (any?, any?, string?)
+	if setup ~= run or run.closed or run.imported or run.command == nil then return nil, nil, "The original setup source is unavailable; use Advanced manual recovery on its original host/session" end
+	if cx:window_key() ~= run.window then return nil, nil, "Setup belongs to another window" end
+	local changed = context_error(cx, run.origin, true)
+	if changed ~= nil then return nil, nil, changed end
+	local command, default_error = effective_default(cx)
+	if command ~= run.command then return nil, nil, default_error or "The effective default agent changed; review cannot be reused" end
+	local value, err = supplied, nil
+	if value == nil then value, err = snapshot(cx, run.origin) end
+	if value == nil then return nil, nil, err end
+	if value.config_revision ~= run.config_revision then return nil, nil, "Configuration changed; start a new review" end
+	local state = transport(run.origin)
+	if state.pending ~= nil or state.sequence ~= run.sequence or value.request_sequences[observer.id] ~= run.sequence then return nil, nil, "The setup observer sequence changed; start a new review" end
+	local job, attempt = nil, nil
+	for _, candidate in value.jobs do
+		if candidate.id == run.job_id then job = candidate end
 	end
-	table.insert(items, { label = "Import all reviewed records", detail = "Conflicting existing IDs require an explicit Config edit; nothing will launch", action = "import" })
-	table.insert(items, { label = "Copy complete JSON for Config paste recovery", action = "copy" })
+	for _, candidate in value.attempts do
+		if candidate.id == run.job_id then attempt = candidate end
+	end
+	if job == nil or attempt == nil or job.backend ~= "setup-default" or job.purpose ~= "setup" or job.setup_run_id ~= run.id
+		or job.observer_id ~= observer.id or job.token ~= run.token or job.initial_prompt ~= run.initial_prompt
+		or attempt.observer_id ~= run.executor or attempt.scope ~= run.origin.session_key or attempt.record_id ~= "setup-default"
+		or job.config_revision ~= run.config_revision or job.pane_reused or job.session_key ~= run.origin.session_key
+		or type(job.setup) ~= "table" or job.setup.command ~= run.command or job.setup.cwd ~= run.cwd
+		or job.setup.window ~= run.window or job.setup.config_pane ~= run.origin.pane or job.setup.binding ~= run.binding then
+		return nil, nil, "The exact admitted setup binding changed; no source was retargeted"
+	end
+	for _, key in { "host_config_pane", "result_path", "host_key", "authority_id", "request_sequence", "native_session", "config_dir" } do
+		if job.setup[key] ~= run.bootstrap[key] then return nil, nil, "The immutable host setup context changed" end
+	end
+	if run.pane ~= nil then
+		if job.setup.agent_pane ~= run.pane or run.native_pane == nil or job.native_pane ~= run.native_pane or job.native_window ~= run.window or not pane_member(cx, run.origin, run.pane) then return nil, nil, "The original setup pane closed or its binding changed" end
+		if attempt.pane ~= job.native_pane or not active(attempt) then return nil, nil, "The retained attempt no longer owns an active native setup pane" end
+		local ok, agents = pcall(function() return cx.agents:list() end)
+		if not ok or type(agents) ~= "table" then return nil, nil, "The native setup agent inventory is unavailable" end
+		local count = 0
+		for _, agent in agents do
+			if agent.pane == run.pane then
+				count += 1
+				-- The desktop may format a remote POSIX cwd as a Windows path.
+				-- The host checks the exact native command/cwd before binding and import.
+				if agent.command ~= run.command or agent.state == "exited" or nonempty(agent.delivery_error) ~= nil then return nil, nil, "The setup pane was reused, exited or failed native prompt delivery" end
+			end
+		end
+		if count ~= 1 then return nil, nil, "The setup pane association is not unique" end
+		for _, other in value.jobs do
+			if other.id ~= job.id and other.native_window == job.native_window and other.native_pane == job.native_pane then return nil, nil, "Another attempt owns the setup pane" end
+		end
+	end
+	return job, attempt, nil
+end
+local PENDING_RESULT_UNAVAILABLE = "The complete pending result is unavailable; no truncated result can be reviewed"
+local function pending_setup(cx: any, run: any, value: any?, reviewed: any?): (any?, string?)
+	local job, attempt, err = setup_source(cx, run, value)
+	if job == nil then return nil, err end
+	if run.pane == nil or job.stage ~= "submitted" or job.setup_consumed ~= false or not integer(job.pending_bytes) or job.pending_bytes == 0 or type(job.pending_digest) ~= "string" then
+		return nil, "No complete explicit submission is available for this bound run"
+	end
+	-- Surface framing needs headroom beyond the raw result's independent byte cap.
+	local bytes = DispatchWindow.read_node(cx, run.origin.pane, BLOCK, "spawn-setup-result", "spawn.setup.result", 128000)
+	if bytes == nil then return nil, PENDING_RESULT_UNAVAILABLE end
+	if #bytes > 120000 then return nil, "The submitted result exceeds the 120000-byte limit" end
+	if #bytes ~= job.pending_bytes then return nil, "Pending result byte count changed; select the original submitted result again" end
+	if reviewed ~= nil then
+		if bytes ~= reviewed.bytes or job.pending_digest ~= reviewed.digest or run.sequence ~= reviewed.sequence or attempt.sequence ~= reviewed.attempt_sequence then return nil, "The reviewed bytes or setup authority changed; review again" end
+		return reviewed, nil
+	end
+	if Codec.sha256(bytes) ~= job.pending_digest then return nil, "The pending bytes do not match the retained submission" end
+	local result, decode_error = Config.decode_setup_json(bytes)
+	if result == nil then return nil, decode_error end
+	local Review = require("./setup_review")
+	local review, review_error = Review.prepare(result, run.id)
+	if review == nil then return nil, review_error end
+	return { bytes = bytes, digest = job.pending_digest, sequence = run.sequence, attempt_sequence = attempt.sequence, review = review }, nil
+end
+local discard_setup_result
+local route_hooks: any
+type SetupReviewItem =
+	{ action: "record", label: string, detail: string, row: { id: string, label: string, fields: { { label: string, value: string } } } }
+	| { action: "import" | "prepare", label: string, detail: string }
+	| { action: "cancel", label: string }
+	| { action: "discard", label: string, detail: string }
+
+local function review_setup(cx: any, run: any, pending: any)
+	ManagedRoute = ManagedRoute or require("./managed_route_window")
+	run.reviewing = true
+	local items: { SetupReviewItem } = {}
+	for _, row in pending.review.rows do
+		local fields = {}
+		for _, field in row.fields do table.insert(fields, field.label .. ": " .. field.value) end
+		table.insert(items, { label = row.label, detail = table.concat(fields, "\n"), action = "record", row = row })
+	end
+	local prepare_allowed,native_names=true,{}
+	local enabled_count=0
+	for _,record in ipairs(pending.review.records) do
+		if record.enabled then
+			enabled_count+=1
+			if record.review_required or record.backend=="ssh-command" then prepare_allowed=false end
+			if record.backend=="native-agent" then table.insert(native_names,record.provider.." — "..record.account_label.." (model: "..tostring(record.model or "saved CLI settings/default")..(if record.profile then "; profile: "..record.profile else "").."; arguments: "..Config.render_arguments(record.fresh_arguments or record.arguments or {})..")") end
+		end
+	end
+	if prepare_allowed and enabled_count>0 then
+		table.insert(items,{label=if #native_names>0 then "Save and prepare — uses model credits" else "Save and prepare these agents",action="prepare",detail="Approve the exact settings above and prepare "..tostring(enabled_count).." enabled accounts. Account/resource checks, offline terminal verification, owned cleanup and final save/readback run automatically. Disabled agents stay unchanged. No orchestration task starts."..(if #native_names>0 then " One harmless native model message each for: "..table.concat(native_names,", ")..". Uses the selected permissions; may cost credits and is not a sandbox. No extra setup-helper message is sent." else " No provider/model task is launched.")})
+	end
+	table.insert(items, { label = "Save settings only", detail = "Save the exact settings above without preparing resources or starting checks. ORCH+ preparation remains incomplete.", action = "import" })
+	table.insert(items, { label = "Discard this setup result", detail = "Consume only this exact pending submission; import nothing and preserve other history", action = "discard" })
 	table.insert(items, { label = "Cancel without saving", action = "cancel" })
-	cx:pick({ items = items, placeholder = "Review the complete setup result (" .. tostring(#records) .. " records)" }):next(function(item, pick_error, fresh)
+	cx:pick({ items = items, placeholder = "Review the complete submitted configuration" }):next(function(item: SetupReviewItem?, pick_error: string?, fresh)
 		if fresh == nil then return end
 		run.reviewing = false
 		if pick_error ~= nil then fail(fresh, pick_error); return end
-		if item == nil or item.action == "cancel" then run.cancelled = true; save_observer(fresh); return end
-		if item.action == "copy" then fresh:copy(tern.json.encode(result)); fresh:toast("info", "SPAWN", "Complete JSON copied; open Config → Paste JSON import on the original host"); return end
-		if item.action == "record" then fresh:toast("info", item.label, item.detail); review_setup(fresh, run, result); return end
-		local changed = context_error(fresh, run.origin, true)
-		if changed ~= nil then fail(fresh, changed .. "; result remains in the setup conversation for manual Config paste recovery"); return end
-		request(fresh, run.origin, "import_records", { setup_run_id = run.id, records = records }, function(import_cx, reply, import_error)
-			if import_error ~= nil then fail(import_cx, "Import failed: " .. tostring(import_error) .. ". Use Config → Paste JSON import on the original host; no account was launched."); return end
-			if type(reply.result) ~= "table" or not integer(reply.result.imported) then fail(import_cx, "Import acknowledgment is invalid; inspect Config before repeating it"); return end
-			run.imported = true; setup = run; save_observer(import_cx)
-			import_cx:toast("success", "SPAWN", "Saved " .. tostring(reply.result.imported) .. " reviewed records. Review Config before spawning.")
-			open_config(import_cx)
+		if item == nil or item.action == "cancel" then return end
+		if item.action=="discard" then discard_setup_result(fresh,run.origin.pane,run.job_id);return end
+		if item.action == "record" then
+			local fields = {}
+			for _, field in item.row.fields do table.insert(fields, { label = field.label, detail = field.value }) end
+			fresh:pick({ items = fields, placeholder = item.label }):next(function(_, field_error, next_cx)
+				if next_cx == nil then return end
+				if field_error ~= nil then fail(next_cx, field_error); return end
+				review_setup(next_cx, run, pending)
+			end)
+			return
+		end
+		if item.action ~= "import" and item.action~="prepare" then return end
+		local captured
+		if item.action=="prepare" then
+			local latest,why=snapshot(fresh,run.origin)
+			local exact,source_error
+			if latest then exact,source_error=pending_setup(fresh,run,latest,pending) else source_error=why end
+			if not exact then fail(fresh,source_error or "The exact reviewed setup changed; save and preparation were not accepted.");return end
+			if type(latest.setup)~="table" then fail(fresh,"The preparation state is unavailable; save settings only or reopen the original SPAWN setup.");return end
+			local added=false
+			for _,record in ipairs(pending.review.records) do
+				local found=false;for _,saved in ipairs(latest.records) do if saved.id==record.id then found=true;break end end
+				if not found then added=true end
+			end
+			local begin_required=latest.setup.state=="not_started" or latest.setup.state=="dismissed"
+			local capture_error
+			captured,capture_error=ManagedRoute.capture_reviewed(fresh,run.origin.pane,run.bootstrap.host_config_pane,pending.review.records,latest.config_revision+(if added then 1 else 0),begin_required,route_hooks)
+			if not captured then fail(fresh,capture_error);return end
+		end
+		local import_data={setup_run_id=run.id,attempt_id=run.job_id,pending_digest=pending.digest,confirmed=true,preparation=if captured then ManagedRoute.reviewed_payload(captured) else nil}
+		request(fresh, run.origin, "import_records", import_data, function(import_cx, reply, import_error)
+			if import_error ~= nil then
+				ManagedRoute.cancel_reviewed(captured)
+				local message="SPAWN setup save was not confirmed: "..tostring(import_error)..". Inspect the saved roster in the right-hand SPAWN pane first. Resolve conflicting saved IDs in Agent settings, or explicitly choose Discard this setup result to approve a fresh run. Do not claim success, resubmit or repeat Import blindly."
+				fail(import_cx,message)
+				return
+			end
+			if type(reply.result) ~= "table" or not integer(reply.result.imported) then ManagedRoute.cancel_reviewed(captured);fail(import_cx, "Import acknowledgment is invalid; inspect Config before repeating it"); return end
+			run.imported = true
+			save_observer(import_cx)
+			import_cx:toast(if captured then "info" else "success", "SPAWN", if captured then "Agents saved. Required preparation is starting; setup is not yet complete." else "Agents saved — " .. tostring(reply.result.imported) .. " reviewed agents. Prepare them for ORCH+ in SPAWN to finish setup.")
+			local navigated,navigation_error=pcall(function()import_cx.session:event(run.origin.pane,{ev="action",id="main",act="page",value="managed"})end)
+			if not navigated then fail(import_cx,"Agents are saved. Open SPAWN Setup to prepare them for ORCH+: "..tostring(navigation_error)) end
+			if captured then
+				if reply.config_revision~=captured.manifest.revision then ManagedRoute.cancel_reviewed(captured);fail(import_cx,"Agents were saved, but their revision differs from the approved preparation. No model check was started.");return end
+				local started,why=ManagedRoute.start_reviewed(import_cx,captured,{setup_run_id=run.id,attempt_id=run.job_id,pending_digest=pending.digest,import_request_id=reply.request_id},route_hooks)
+				if not started then fail(import_cx,why) end
+				return
+			end
+		end, function(check_cx, value)
+			-- Runs immediately before the durable request, even if the queue waited.
+			local current, why = pending_setup(check_cx, run, value, pending)
+			if current == nil then ManagedRoute.cancel_reviewed(captured);return why end
+			return nil
 		end)
 	end)
 end
-collect_setup = function(cx: any, manual: boolean?)
-	if setup == nil or setup.imported or setup.reviewing or (setup.cancelled and not manual) then return end
-	if manual then setup.cancelled = nil end
-	if setup.closed then fail(cx, "The original setup pane closed; use its saved result through Config paste recovery"); return end
-	local pane, association_error = ticket_association(cx, setup.origin, setup.ticket)
-	if pane == nil or (setup.pane ~= nil and setup.pane ~= pane) then fail(cx, association_error or "Setup's exact ticket association changed; use Config paste recovery on the original host"); return end
-	if setup.pane == nil then setup.pane = pane; if not save_observer(cx) then return end end
-	local track = tracked[setup.job_id .. "@" .. setup.origin.authority_id]
-	if track ~= nil and track.job.pane_reused then fail(cx, "The setup wrapper was reused for another command; use the original saved result through Config paste recovery"); return end
-	if nonempty(setup.initial_prompt) == nil or not startup_delivered(cx, pane, setup.initial_prompt) then
-		fail(cx, "The first complete native OMP user body is not verified for this host-issued setup run; use Config → Paste JSON import")
-		return
-	end
-	local ok, messages = pcall(function() return cx.agents:transcript(pane, { last = 1000 }) end)
-	if not ok or type(messages) ~= "table" then fail(cx, "Could not read the verified OMP setup conversation; use Config → Paste JSON import"); return end
-	for index = #messages, 1, -1 do
-		local message = messages[index]
-		if message.role ~= "assistant" or type(message.text) ~= "string" then continue end
-		local text = message.text
-		local begin_marker, end_marker = "SPAWN_RESULT_BEGIN", "SPAWN_RESULT_END"
-		local first = text:find(begin_marker, 1, true)
-		local last = if first ~= nil then text:find(end_marker, first + #begin_marker, true) else nil
-		if first ~= nil and last ~= nil then
-			local decoded, result = pcall(tern.json.decode, text:sub(first + #begin_marker, last - 1))
-			if not decoded then fail(cx, "Setup returned invalid JSON; use Config → Paste JSON import after correcting the complete result"); return end
-			review_setup(cx, setup, result)
+collect_setup = function(cx: any)
+	local run = setup
+	if run == nil or run.imported or run.reviewing then return end
+	local value, read_error = snapshot(cx, run.origin)
+	if value == nil then fail(cx, read_error); return end
+	local state = transport(run.origin)
+	if state.pending ~= nil or value.request_sequences[observer.id] ~= state.sequence then fail(cx, "An authority request is unsettled; acknowledge its outcome before reviewing"); return end
+	-- A new explicit review may follow an acknowledged refresh, but the picker
+	-- retains this exact watermark and refuses any subsequent change.
+	local previous = run.sequence
+	run.sequence = state.sequence
+	local job, _, why = setup_source(cx, run, value)
+	if job == nil then run.sequence = previous; fail(cx, why); return end
+	if previous ~= run.sequence and not save_observer(cx) then return end
+	local ok, err = pcall(function()
+		cx.session:event(run.origin.pane, { ev = "action", id = "main", act = "spawn.setup-result-select", value = tern.json.encode({ attempt_id = run.job_id }) })
+	end)
+	if not ok then fail(cx, "Could not select the submitted result: " .. tostring(err)); return end
+	run.reviewing = true
+	local polls = 0
+	local function read_result(fresh: any)
+		if fresh == nil then return end
+		local pending, problem = pending_setup(fresh, run)
+		if pending == nil then
+			polls += 1
+			-- Selection verifies native host context asynchronously. Observe it,
+			-- never resend selection, submission, import or a native effect.
+			if problem == PENDING_RESULT_UNAVAILABLE and polls < 40 then tern.timer(POLL_MS, read_result); return end
+			run.reviewing = false
+			fail(fresh, problem)
 			return
 		end
+		review_setup(fresh, run, pending)
 	end
+	tern.timer(POLL_MS, read_result)
 end
-local function start_setup(cx: any, target: number?)
+local function launch_setup(cx: any, target: number?)
+	if setup~=nil and not setup.imported then fail(cx,"Finish, review or explicitly discard the original Guided setup first; no second helper was started.");return end
+	-- Resolve before opening Config; a blank default never becomes an account picker.
+	local command, command_error = effective_default(cx)
+	if command == nil then fail(cx, command_error); return end
 	with_authority(cx, function(fresh, origin, value)
-		local choices = {}
-		for _, record in value.records do
-			if record.backend == "native-agent" and string.lower(record.provider) == "omp" and not record.review_required then table.insert(choices, { label = label(record), record = record }) end
-		end
-		if #choices == 0 then fail(fresh, "No verified OMP setup command is available. Use Config → Paste JSON import or add a reviewed OMP record; the default Tern agent is not assumed to be OMP."); open_config(fresh); return end
-		fresh:pick({ items = choices, placeholder = "Choose the reviewed OMP command for guided setup" }):next(function(item, pick_error, next_cx)
-			if next_cx == nil then return end
-			if pick_error ~= nil then fail(next_cx, pick_error); return end
-			if item == nil then return end
-			local changed = context_error(next_cx, origin, true)
-			if changed ~= nil then fail(next_cx, changed); return end
-			local run_id = observer.id .. ":setup:" .. tostring(observer.next_run)
-			observer.next_run += 1
-			if not save_observer(next_cx) then return end
-			request(next_cx, origin, "start_setup", { record_id = item.record.id, setup_run_id = run_id }, function(admitted_cx, reply, admission_error)
-				if admission_error ~= nil then fail(admitted_cx, "Setup admission failed: " .. tostring(admission_error) .. ". Use Config → Paste JSON import or inspect Running agents."); return end
-				local job, attempt, result_error = admission_result(reply, origin, item.record.id, "setup", run_id)
-				if job == nil then fail(admitted_cx, tostring(result_error) .. "; no ticket was allocated. Use Config paste recovery."); return end
-				setup = { id = run_id, job_id = job.id, ticket = job.ticket, initial_prompt = job.initial_prompt, origin = origin }
-				if not save_observer(admitted_cx) then return end
-				allocate_ticket(admitted_cx, origin, job, attempt, reply.result.replayed, nil, function(done_cx, allocation_error)
-					if allocation_error ~= nil then fail(done_cx, allocation_error .. ". Use Config paste recovery on the original host."); return end
-					local track = tracked[attempt.id .. "@" .. origin.authority_id]
-					if track == nil or not active(track.attempt) then
-						fail(done_cx, "Setup helper is not active: " .. (if track then track.attempt.diagnostic or track.attempt.phase else "host history unavailable") .. ". Inspect its retained pane or use Config paste recovery.")
+		local current, why = effective_default(fresh)
+		if current ~= command then fail(fresh, why or "The effective default agent changed; choose setup again"); return end
+		local cwd = nonempty(value.host_cwd)
+		if cwd == nil then fail(fresh, "The captured Config host directory is unavailable; no setup was started"); return end
+		local window = fresh:window_key()
+		local run_id = observer.id .. ":setup:" .. tostring(observer.next_run)
+		observer.next_run += 1
+		opened_for_batch[origin.pane] = nil
+		if not save_observer(fresh) then return end
+		request(fresh, origin, "start_setup", { setup_run_id = run_id, command = command, cwd = cwd, window = window, config_pane = origin.pane }, function(admitted_cx, reply, admission_error)
+			if admission_error ~= nil then fail(admitted_cx, "Setup admission failed: " .. tostring(admission_error)); return end
+			local job, attempt, result_error = admission_result(reply, origin, "setup-default", "setup", run_id)
+			if job == nil or type(job.setup) ~= "table" then fail(admitted_cx, result_error or "Setup bootstrap is missing; nothing started"); return end
+			local run = { id = run_id, job_id = job.id, token = job.token, executor = attempt.observer_id, bootstrap = table.clone(job.setup), initial_prompt = job.initial_prompt, origin = table.clone(origin),
+				command = command, cwd = cwd, window = window, binding = job.setup.binding, config_revision = value.config_revision, sequence = reply.request_sequence }
+			setup = run
+			if not save_observer(admitted_cx) then return end
+			if reply.result.replayed then fail(admitted_cx, "Retained setup admission is observation-only; native start was not repeated"); return end
+			local function phase(phase_cx: any, op: string, expected: string, callback: any)
+				request(phase_cx, run.origin, op, { attempt_id = run.job_id, setup_run_id = run.id }, function(next_cx, response, err)
+					if err ~= nil then fail(next_cx, "Setup stopped: " .. tostring(err) .. "; nothing was retried"); return end
+					run.sequence = response.request_sequence
+					if not save_observer(next_cx) then return end
+					callback(next_cx, response)
+				end, function(check_cx, latest)
+					local current_job, _, err = setup_source(check_cx, run, latest)
+					if current_job == nil then return err end
+					if current_job.stage ~= expected then return "Setup phase changed; native effect was not repeated" end
+					return nil
+				end)
+			end
+			phase(admitted_cx, "setup_claim", "admitted", function(claimed_cx)
+				phase(claimed_cx, "setup_begin", "claimed", function(effect_cx)
+					local current_job, _, err = setup_source(effect_cx, run)
+					if current_job == nil or current_job.stage ~= "submission_intent" then fail(effect_cx, err or "Native setup permission changed"); return end
+					run.effect_intent = true
+					if not save_observer(effect_cx) then return end
+					local started, created = pcall(function()
+						return effect_cx.agents:start({ command = command, cwd = cwd, prompt = run.initial_prompt, how = current_job.placement })
+					end)
+					if not started or not integer(created) then
+						request(effect_cx, run.origin, "setup_uncertain", { attempt_id = run.job_id, setup_run_id = run.id }, function(done_cx, _, uncertain_error)
+							fail(done_cx, "Native setup start is uncertain and will not be repeated: " .. tostring(created) .. (if uncertain_error then "; " .. uncertain_error else ""))
+						end)
 						return
 					end
-					done_cx:toast("info", "SPAWN", "Host setup command submitted. Complete guided setup; only its verified native OMP conversation and confirmed assistant result can be reviewed for import.")
+					run.pane = created
+					local arranged, arrangement_error = pcall(function()
+						if not effect_cx.layout:move(created, origin.pane, "left", { focus = true }) then error("Native layout refused the setup split") end
+					end)
+					if not arranged then fail(effect_cx, "Setup started once, but its left-hand split could not be arranged: "..tostring(arrangement_error)) end
+					if not save_observer(effect_cx) then return end
+					request(effect_cx, run.origin, "setup_bind", { attempt_id = run.job_id, setup_run_id = run.id, pane = created }, function(bound_cx, bound_reply, bind_error)
+						if bind_error ~= nil then fail(bound_cx, "Native setup started but binding failed; it will not be repeated: " .. tostring(bind_error)); return end
+						local bound = if type(bound_reply.result) == "table" then bound_reply.result.job else nil
+						if Launch.validate_execution_projection(bound) == nil or bound.backend ~= "setup-default" or bound.id ~= run.job_id or bound.token ~= run.token or bound.setup.agent_pane ~= created or not integer(bound.native_pane) then fail(bound_cx, "Native setup binding acknowledgment is invalid; no start was repeated"); return end
+						run.native_pane = bound.native_pane
+						run.sequence = bound_reply.request_sequence
+						if not save_observer(bound_cx) then return end
+						bound_cx:toast("info", "SPAWN", "Answer the setup questions. SPAWN will show the exact proposed settings for your approval, then open the required preparation step.")
+					end)
 				end)
 			end)
+		end, function(check_cx, latest): string?
+			local selected, err = effective_default(check_cx)
+			if selected ~= command then return err or "The effective default agent changed before admission" end
+			if check_cx:window_key() ~= window or latest.config_revision ~= value.config_revision then return "Setup origin changed before admission" end
+			if latest.host_cwd ~= cwd then return "The execution-host working folder changed before setup; nothing started" end
+			return nil
 		end)
 	end, nil, target)
 end
-tern.on("agent_finished", function(event, cx)
-	if setup ~= nil and event.pane == setup.pane then collect_setup(cx) end
-	reconcile(cx)
-end)
-tern.on("agent_state", function(_event, cx) reconcile(cx) end)
-
--- Setup is done once the host has a saved record: counted from an open Config of this host/session,
--- else from the last snapshot this client read (SPAWN closes the Config it opened after a launch).
-local function saved_records(cx: any): number?
-	local origin = capture(cx)
-	if origin == nil then return nil end
-	for _, pane in cx.session:panes() do
-		if pane.block ~= BLOCK or pane.parked or not pane_member(cx, origin, pane.pane) then continue end
-		local candidate = table.clone(origin)
-		candidate.pane = pane.pane
-		local ok, value = pcall(snapshot, cx, candidate, true)
-		if ok and value ~= nil then return #value.records end
-	end
-	local seen = records_cache()[origin.host_key]
-	return if integer(seen) then seen else nil
-end
-local function menu(cx: any)
-	for _, message in icon_errors do fail(cx, "Provider icon registration failed: " .. message) end
-	local items = {}
-	table.insert(items, { label = "Managed local setup", detail = "Native wizard: helpers, actual prerequisites and explicit attestation", action = "managed" })
-	local saved = saved_records(cx)
-	if saved == nil or saved == 0 then table.insert(items, { label = "Guided setup", detail = "Verified OMP setup on the captured execution host", action = "setup" }) end
-	table.insert(items, { label = "Config", detail = "Saved records and manual Paste JSON import", action = "config" })
-	table.insert(items, { label = "Spawn all", detail = "Enabled records explicitly included in this session", action = "all" })
-	table.insert(items, { label = "Spawn specific", detail = "One reviewed saved account", action = "specific" })
-	cx:pick({ items = items, placeholder = "SPAWN", icon = "sparkle" }):next(function(item, err, fresh)
-		if fresh == nil then return end
-		if err ~= nil then fail(fresh, err); return end
-		if item == nil then return end
-		if item.action == "setup" then start_setup(fresh)
-		elseif item.action == "managed" then open_managed_setup(fresh)
-		elseif item.action == "config" then open_config(fresh)
-		elseif item.action == "all" then spawn_all(fresh)
-		elseif item.action == "specific" then spawn_specific(fresh) end
+local setup_navigating=false
+local function start_setup(cx: any,target: number?)
+	if target==nil then open_config(cx,"setup");return end
+	if setup_navigating then fail(cx,"Execution-machine selection is already being applied; no second helper was requested.");return end
+	local origin,problem=capture(cx)
+	if not origin or not pane_member(cx,origin,target) then fail(cx,problem or "The original SPAWN setup pane is unavailable.");return end
+	local bytes=DispatchWindow.read_node(cx,target,BLOCK,"spawn-setup-topology","spawn.setup.topology",32000)
+	local ok,topology=pcall(tern.json.decode,bytes or "")
+	if not ok or type(topology)~="table" or topology.window~=cx:window_key() then fail(cx,"Choose the device setup in SPAWN before starting Guided setup.");return end
+	local SetupDiscovery = require("./setup_discovery")
+	local selected,why=SetupDiscovery.primary(topology.observation,topology.selected,topology.mode)
+	if not selected then fail(cx,why);return end
+	local listed,hosts,current=pcall(function()return cx.hosts:list(),cx.hosts:current()end)
+	local discovered,discovery_error
+	if listed then discovered,discovery_error=SetupDiscovery.devices(hosts,current) end
+	local actual,selection_error=SetupDiscovery.primary(discovered,selected.id,topology.mode)
+	if not actual or actual.name~=selected.name or actual.address~=selected.address or actual.kind~=selected.kind then fail(cx,selection_error or discovery_error or "The chosen device changed; find execution machines again.");return end
+	if selected.id==origin.host then launch_setup(cx,target);return end
+	setup_navigating=true
+	-- Let the original exact-recipient intent ACK finish before switching host.
+	tern.timer(1,function(fresh)
+		if fresh==nil then setup_navigating=false;return end
+		if context_error(fresh,origin,true)~=nil then setup_navigating=false;fail(fresh,"The setup session changed before device selection was applied. Nothing started.");return end
+		local switched,switch_error=pcall(function()fresh.hosts:switch(selected.id)end)
+		if not switched then setup_navigating=false;fail(fresh,"Could not show "..selected.name..": "..tostring(switch_error));return end
+		local polls=0
+		local function selected_ready(nextcx: any)
+			if nextcx==nil then setup_navigating=false;return end
+			local here=capture(nextcx)
+			if here and here.host==selected.id then
+				setup_navigating=false
+				if here.host_info.name~=selected.name or here.host_info.address~=selected.address or here.host_info.kind~=selected.kind then fail(nextcx,"Execution-machine identity changed. Nothing started.");return end
+				launch_setup(nextcx,nil);return
+			end
+			polls+=1
+			if polls>=40 then setup_navigating=false;fail(nextcx,"Tern did not show a session on "..selected.name..". Open its session in Tern, then choose Guided setup there. No helper or transport terminal was started.");return end
+			tern.timer(POLL_MS,selected_ready)
+		end
+		selected_ready(fresh)
 	end)
 end
+tern.on("agent_finished", function(_event, cx) reconcile(cx) end)
+tern.on("agent_state", function(_event, cx) reconcile(cx) end)
+
+local function menu(cx: any)
+	if observer == nil then
+		ensure_observer(cx, function(fresh, why) if why then fail(fresh, why) else menu(fresh) end end)
+		return
+	end
+	for _, message in icon_errors do fail(cx, "Provider icon registration failed: " .. message) end
+	open_config(cx, "start")
+end
 -- "This window has no setup run" for a Review setup result click in Config.
-local SETUP_ELSEWHERE = "This setup was started in another window; paste its result in Config › Setup › Paste setup JSON"
+local SETUP_ELSEWHERE = "This window has no original setup binding. Use Advanced manual recovery on the original host/session; pasted run IDs do not prove automatic provenance."
 -- A batch from this window, or a launch still resolving its Config, is in flight.
 local function launch_busy(): boolean
-	if starting > 0 then return true end
+	if starting > 0 or setup_navigating then return true end
 	for _, batch in batches do
 		if not batch.completed and not batch.stopped then return true end
 	end
 	return false
 end
-local route_hooks = { capture = capture, member = pane_member, startup = startup_delivered }
+route_hooks = {
+	capture = capture, member = pane_member, startup = startup_delivered, ensure = ensure_observer,
+	recipient = function()
+		if observer_store == nil then return nil end
+		local recipient = observer_store.recipient
+		return { namespace = observer_store.identity.namespace, window_key = recipient.window_key, conn = recipient.conn, since = recipient.since }
+	end,
+}
+tern.route.link(function(link, cx)
+	ManagedRoute = ManagedRoute or require("./managed_route_window")
+	return ManagedRoute.consent(cx, link, route_hooks) or DispatchWindow.consent_migration(cx, link, route_hooks)
+end)
+discard_setup_result=function(cx: any,pane: number,attempt_id: string)
+	with_authority(cx,function(ready,origin,value)
+		local selected=nil
+		for _,job in value.jobs or {} do if job.attempt_id==attempt_id then selected=job;break end end
+		if selected==nil or selected.setup==nil or selected.setup_consumed~=false or not integer(selected.pending_bytes) or selected.pending_bytes<1 or type(selected.pending_digest)~="string" then fail(ready,"No matching unconsumed setup submission remains; nothing was discarded");return end
+		local data={attempt_id=attempt_id,setup_run_id=selected.setup_run_id,pending_digest=selected.pending_digest,confirmed=true}
+		ready:pick({items={
+			{action="discard",label="Discard this setup result",detail="Run "..selected.setup_run_id.." · "..tostring(selected.pending_bytes).." bytes · SHA-256 "..selected.pending_digest.."\nSaved records, other submissions, helper conversations and history remain unchanged."},
+			{action="cancel",label="Keep this setup result"},
+		},placeholder="Discard only this exact pending submission?"}):next(function(item,problem,fresh)
+			if fresh==nil then return end
+			if problem then fail(fresh,problem);return end
+			if not item or item.action~="discard" then return end
+			request(fresh,origin,"discard_setup_result",data,function(done,reply,err)
+				if err then fail(done,"Setup result was not discarded: "..tostring(err));return end
+				if not reply.result or reply.result.discarded~=true then fail(done,"Discard acknowledgment is invalid; refresh before choosing another action");return end
+				if setup and setup.job_id==attempt_id and setup.origin.authority_id==origin.authority_id then setup=nil;save_observer(done) end
+				done:toast("success","SPAWN","Setup result discarded without importing. Saved records and history are unchanged; Guided setup can start a fresh run.")
+			end)
+		end)
+	end,true,pane)
+end
 local function run_intent(cx: any, intent: any, pane: number)
-	if intent.kind == "all" then spawn_all(cx, pane)
-	elseif intent.kind == "record" then spawn_specific(cx, pane, intent.record_id)
+	if intent.kind == "record" then start_saved_agent(cx, pane, intent.record_id)
 	elseif intent.kind == "setup" then start_setup(cx, pane)
-	elseif intent.kind == "route_probe" then ManagedRoute.start(cx,pane,intent.config_revision,route_hooks)
+	elseif intent.kind=="discard" then discard_setup_result(cx,pane,intent.record_id)
 	elseif intent.kind == "readiness" then
 		local opened,why=PageNavigation.readiness(cx,pane,navigation_hooks)
 		if not opened then fail(cx,tostring(why)..". Required SPAWN setup remains saved.") end
@@ -1393,29 +1660,50 @@ local function run_intent(cx: any, intent: any, pane: number)
 		ensure_observer(cx, function(ready, problem)
 			if problem then fail(ready, problem)
 			elseif setup == nil then ready:toast("info", "SPAWN", SETUP_ELSEWHERE)
-			else collect_setup(ready, true) end
+			elseif setup.origin.pane ~= pane then fail(ready, "Review must use the original setup Config; no result was retargeted")
+			else collect_setup(ready) end
 		end)
 	end
 end
--- Runs the launches clicked in a visible Config of this host/session in click order, each exactly
--- once, and acks each so the host drops it from the queue. The journal is shared by every window
--- of this client. While a launch from this window is in flight the rest wait for a later tick.
+-- HOST's durable pending recipient excludes other windows; this incarnation's
+-- journal excludes re-entry after an interrupted callback. Neither substitutes
+-- for the other, and a recipient is never reassigned after a possible effect.
 local function poll_intents(cx: any)
 	local origin = capture(cx)
 	if origin == nil then return end
+	if observer == nil then
+		ensure_observer(cx, function(fresh, why) if why then fail(fresh, why) end end)
+		return
+	end
 	local live={}
 	for _,pane in cx.session:panes() do live[pane.pane]=true end
 	for pane in pairs(page_context_attempts) do if not live[pane] then page_context_attempts[pane]=nil end end
+	for pane in pairs(native_account_attempts) do if not live[pane] then native_account_attempts[pane]=nil end end
 	for _, pane in cx.session:panes() do
 		-- Nobody can click a parked or hidden Config; its node is never acted on.
 		if pane.block ~= BLOCK or pane.parked or not pane_member(cx, origin, pane.pane) then continue end
 		poll_page_context(cx,pane.pane,origin)
+		poll_native_accounts(cx,pane.pane,origin)
+		poll_setup_devices(cx,pane.pane,origin)
+		DispatchWindow.observe_migration(cx,pane.pane,route_hooks)
+		local queue = intent_queue(cx, pane.pane)
+		if queue == nil then continue end
 		local journal = intent_journal()
+		reclaim_intents(journal, queue, origin, pane.pane)
 		local value: any = nil
-		for _, intent in ipairs(intent_queue(cx, pane.pane)) do
+		for _, intent in ipairs(queue.intents) do
 			if not valid_intent(intent) then continue end
-			if (intent.kind == "readiness" or intent.kind == "route_probe") and intent.native_window ~= cx:window_key() then continue end
-			if not contains(journal, intent.intent_id) then
+			if (intent.kind == "readiness" or intent.kind=="discard") and intent.native_window ~= cx:window_key() then continue end
+			local recipient = observer_store.recipient
+			local envelope = table.clone(recipient)
+			envelope.intent_id = intent.intent_id
+			envelope.queue_id = queue.queue_id
+			if intent.recipient == nil then
+				cx.session:event(pane.pane, { ev = "action", id = "main", act = "spawn.launch-intent-claim", value = tern.json.encode(envelope) })
+				break
+			end
+			if not WindowJournal.same_recipient(intent.recipient, recipient) then break end
+			if not intent_seen(journal, intent.intent_id, queue, origin, pane.pane) then
 				-- The user clicked in this Config; it is theirs and stays open, even while this
 				-- click waits for a running batch.
 				opened_for_batch[pane.pane] = nil
@@ -1428,29 +1716,51 @@ local function poll_intents(cx: any)
 				local stale = value.config_revision ~= intent.config_revision
 				-- Click order: a later launch never overtakes one that has to wait.
 				if not stale and launch_busy() then break end
-				table.insert(journal, intent.intent_id)
-				while #journal > 64 do table.remove(journal, 1) end
-				-- Journal before running: a lost ack or a second window never runs it again.
-				if not pcall(tern.kv.set, INTENT_JOURNAL, journal) then break end
+				table.insert(journal, if queue.queue_id == nil then intent.intent_id else {
+					intent_id = intent.intent_id, queue_id = queue.queue_id, host_key = origin.host_key,
+					session = origin.session, pane = pane.pane, recipient = table.clone(recipient),
+				})
+				-- Persist before effect; HOST already excluded every other incarnation.
+				WindowJournal.save_cache(observer_store, INTENT_JOURNAL, journal)
 				if stale then
 					cx:toast("info", "SPAWN", "Config changed; press again")
 				else
-					local ran, run_error = pcall(run_intent, cx, intent, pane.pane)
+					local ran, run_error = pcall(function()
+						run_intent(cx, intent, pane.pane)
+						return nil
+					end)
 					if not ran then fail(cx, "The Config launch could not start: " .. tostring(run_error)) end
 				end
 			end
-			pcall(function() cx.session:event(pane.pane, { ev = "action", id = "main", act = "spawn.launch-intent-ack", value = intent.intent_id }) end)
+			pcall(function() cx.session:event(pane.pane, { ev = "action", id = "main", act = "spawn.launch-intent-ack", value = tern.json.encode(envelope) }) end)
 		end
-		local pending=false
-		for _,intent in ipairs(intent_queue(cx,pane.pane)) do
-			if intent.kind=="route_probe" and not contains(journal,intent.intent_id) then pending=true end
+		local observed = intent_queue(cx, pane.pane)
+		if observed ~= nil then
+			reclaim_intents(journal, observed, origin, pane.pane)
 		end
-		ManagedRoute.reconcile(cx,pane.pane,pending,route_hooks)
+		ManagedRoute = ManagedRoute or require("./managed_route_window")
+		ManagedRoute.reconcile(cx,pane.pane,false,route_hooks)
+		local focused=cx.session:focused()
+		-- Only interrupt the live setup conversation or its initiating SPAWN pane.
+		-- A review click in another Config cannot awaken a background auto-review.
+		if setup and focused~=nil and not setup.imported and not setup.reviewing and setup.origin.pane==pane.pane and (focused==setup.origin.pane or focused==setup.pane) then
+			local latest=read_snapshot(cx,pane.pane)
+			local setup_transport=transport(setup.origin)
+			if latest and setup_transport.pending==nil and latest.request_sequences[observer.id]==setup_transport.sequence then
+				for _,job in ipairs(latest.jobs or {}) do
+					if job.id==setup.job_id and job.stage=="submitted" and job.setup_consumed==false and job.pending_digest~=setup.offered_digest then
+						setup.offered_digest=job.pending_digest
+						collect_setup(cx)
+						break
+					end
+				end
+			end
+		end
 	end
 end
 for _, command in ipairs({
 	{ id = "spawn_config", title = "SPAWN: Config", run = open_config },
-	{ id = "spawn_managed_setup", title = "SPAWN: Managed local setup", run = open_managed_setup },
+	{ id = "spawn_managed_setup", title = "SPAWN: Prepare agents for ORCH+", run = open_managed_setup },
 	{ id = "spawn_setup", title = "SPAWN: Guided setup", run = function(cx) start_setup(cx) end },
 	{ id = "spawn_menu", title = "SPAWN", run = menu },
 	{ id = "spawn_running", title = "SPAWN: Running agents", run = open_running },
@@ -1464,9 +1774,7 @@ tern.css("reset-danger", [[
 -- Config › Spawn agents rows: provider artwork (or a tinted dot) and a one-line mono command hint.
 -- The launch intent node is machine-only.
 local launch_rules = {
-	'[data-surface="plugin.spawn.spawner"] [data-role="spawn.launch.intent"] { display: none; }',
-	'[data-surface="plugin.spawn.spawner"] [data-role="spawn.managed.route"] { display: none; }',
-	'[data-surface="plugin.spawn.spawner"] [data-role="spawn.page.context"] { display: none; }',
+	-- Machine nodes use native hidden properties supplied by the host, not CSS hiding.
 	'[data-surface="plugin.spawn.spawner"] .pf-row[data-row^="spawn-launch:"] .pf-lbl .h { font-family: var(--mono, ui-monospace, monospace); font-size: 0.85em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }',
 }
 for program, color in pairs(COLORS) do
@@ -1499,7 +1807,10 @@ tern.timer(250, function(cx)
 			-- One-time cleanup of Config blocks older versions parked and forgot.
 			local origin = capture(fresh)
 			if origin ~= nil then
-				local cleaned, clean_error = pcall(close_parked, fresh, origin)
+				local cleaned, clean_error = pcall(function()
+					close_parked(fresh, origin)
+					return nil
+				end)
 				if not cleaned then fail(fresh, "Could not close leftover SPAWN Config blocks: " .. tostring(clean_error)) end
 			end
 		end)
@@ -1510,7 +1821,10 @@ local function tick(cx: any)
 	if cx ~= nil then
 		local ok, err = pcall(reconcile, cx)
 		if not ok then fail(cx, "Read-only host observation failed; no execution was repeated: " .. tostring(err)) end
-		local polled, poll_error = pcall(poll_intents, cx)
+		local polled, poll_error = pcall(function()
+			poll_intents(cx)
+			return nil
+		end)
 		if not polled then fail(cx, "Config launch check failed; nothing was launched: " .. tostring(poll_error)) end
 	end
 end

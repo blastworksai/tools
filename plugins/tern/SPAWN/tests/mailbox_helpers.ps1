@@ -125,8 +125,9 @@ function FinishHelper($Process,[switch]$RawOutput) {
   return @{code=$Process.ExitCode;out=$out.GetAwaiter().GetResult();err=$err.GetAwaiter().GetResult()}
  } finally { if ($null -ne $buffer) { $buffer.Dispose() } }
 }
-function Target([string]$Mode,[string]$Selected,[byte[]]$Bytes=([byte[]]@()),[long]$ReportFloor=0,[long]$ReplyFloor=0) {
+function Target([string]$Mode,[string]$Selected,[byte[]]$Bytes=([byte[]]@()),[long]$ReportFloor=0,[long]$ReplyFloor=0,[string]$Withdrawn='') {
  $args=@('-Root:',$Root,'-Handle:',$Handle,'-Mode:',$Mode,'-Selected:',$Selected,'-Operation:',('op_'+[Guid]::NewGuid().ToString('N')),'-Identity:',$identity,'-ReportFloor:',[string]$ReportFloor,'-ReplyFloor:',[string]$ReplyFloor)
+ if ($Withdrawn.Length -gt 0) { $args+=@('-WithdrawnStarts:',$Withdrawn) }
  return FinishHelper (StartHelper $targetPath $args ([Convert]::ToBase64String($Bytes)))
 }
 function Worker([string]$Mode,[string]$InputText='',[string]$Message='',[switch]$RawOutput,[string]$Cwd='',[hashtable]$Environment=$null) {
@@ -145,9 +146,55 @@ function AuthorizedFixture {
  # Do not Save: compaction would remove the retained resolved fact under test.
  [IO.File]::WriteAllBytes($journalPath,(Encode $journal))
 }
-function AuthorizedRetire([string]$Report='2',[string]$Reply='1',[string]$Chain=$journal.receipt_chain,[string]$SuppliedOwner=$Owner,[string]$Expected=[Convert]::ToBase64String((Encode $binding))) {
+function AuthorizedRetire([string]$Report='2',[string]$Reply='1',[string]$Chain=$journal.receipt_chain,[string]$SuppliedOwner=$Owner,[string]$Expected=[Convert]::ToBase64String((Encode $binding)),[string]$Withdrawn='') {
  $args=@('-Root:',$Root,'-Handle:',$Handle,'-Owner:',$SuppliedOwner,'-Mode:','retire-authorized','-ReportFloor:',$Report,'-ReplyFloor:',$Reply,'-ReceiptChain:',$Chain,'-ExpectedBinding:',$Expected)
+ if ($Withdrawn.Length -gt 0) { $args+=@('-WithdrawnStarts:',$Withdrawn) }
  return FinishHelper (StartHelper $workerPath $args)
+}
+function WithdrawnFixture {
+ AuthorizedFixture
+ $descriptor=@{handle=$Handle;binding=$binding;capabilities=@('report-files-v1','coordinator-control-v1','project-start-v1')}
+ [IO.File]::WriteAllBytes((Join-Path $box 'provision.json'),(Encode $descriptor))
+ InstallReply (ReplyBytes 1) 1
+ $entries=@()
+ foreach ($seq in @(2,3)) {
+  $reply=Decode (ReplyBytes $seq)
+  $reply.kind='project_start'
+  $reply.payload=@{owner_id='owner';owner_generation=1;activation_token=('a'*64);orch_project_id='project';project_revision=1;decision_context=('b'*64)}
+  $bytes=Encode $reply; InstallReply $bytes $seq
+  $entries+=@{reply_seq=$seq;message_id=$reply.message_id;message_sha256=(Hash $bytes)}
+ }
+ $script:withdrawal=[Convert]::ToBase64String((Encode $entries))
+}
+function PendingWithdrawalFixture {
+ WithdrawnFixture
+ $null=Allocate @{kind='WAITING';payload=@{reason='final pending report'}}
+ $script:finalAck=AckBytes
+ $script:finalChain=(Decode $finalAck).receipt_chain_sha256
+ [IO.File]::WriteAllBytes((Join-Path $box 'acks/3.json'),$finalAck)
+}
+function MailboxBytes {
+ $snapshot=@{}
+ foreach ($file in Get-ChildItem -LiteralPath $box -File -Force -Recurse) {
+  $snapshot[$file.FullName]=[Convert]::ToBase64String([IO.File]::ReadAllBytes($file.FullName))
+ }
+ return $snapshot
+}
+function UnchangedMailbox($Before) {
+ $after=MailboxBytes
+ Assert ($Before.Count -eq $after.Count) 'Refusal changed physical mailbox files'
+ foreach ($path in $Before.Keys) { Assert ($after.ContainsKey($path) -and $Before[$path] -ceq $after[$path]) ('Refusal changed mailbox bytes: '+$path) }
+}
+function EnrolFixture([bool]$Initialize=$true) {
+ Fixture 'enrol_'
+ $binding['enrolment_token']=$Owner
+ [IO.File]::WriteAllBytes((Join-Path $box 'provision.json'),(Encode @{handle=$Handle;binding=$binding}))
+ [IO.File]::Delete($journalPath); [IO.File]::Delete((Join-Path $box 'producer/lock'))
+ if ($Initialize) {
+  $initialized=Worker 'init'
+  Assert ($initialized.code -eq 0) ('Actual enrol journal init failed: '+$initialized.err)
+  Reload
+ }
 }
 function RefusedRetirement([scriptblock]$Operation) {
  $before=[IO.File]::ReadAllBytes($journalPath)
@@ -172,6 +219,23 @@ function UnsettledRetirement([scriptblock]$Operation) {
  Assert (Test-Path -LiteralPath (Join-Path $box 'producer/lock')) 'Refusal removed producer lock'
 }
 try {
+ Fixture
+ $prior=Usage
+ $old=Join-Path $box 'staging/old.json'
+ [IO.File]::WriteAllText($old,'{}')
+ [IO.File]::SetLastWriteTimeUtc($old,[DateTime]::UtcNow.AddHours(-1))
+ $fresh=Join-Path $box 'staging/fresh.json'
+ [IO.File]::WriteAllText($fresh,'{}')
+ $journalBefore=[IO.File]::ReadAllBytes($journalPath)
+ $inventory=Target 'inventory' '60000'
+ Assert ($inventory.code -eq 0) 'Inventory process failed'
+ $observed=ConvertFrom-Json $inventory.out
+ Assert ($observed.open_files -eq ($prior.files+2) -and $observed.stale_files -eq 1) 'Inventory did not count actual file ages'
+ Assert ([Math]::Abs($observed.observed_at_ms-[DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()) -lt 10000) 'Inventory observation time is not current'
+ EqualBytes $journalBefore ([IO.File]::ReadAllBytes($journalPath))
+ Assert (-not (Test-Path -LiteralPath (Join-Path $box 'capacity.lock'))) 'Inventory acquired a durable admission lock'
+ $invalid=Target 'inventory' '0'
+ Assert ($invalid.out -ceq "binding_mismatch`n") 'Inventory accepted invalid stale threshold'
  # DirectoryInfo.Parent is not a provider-emitted item: no PSIsContainer note
  # property is promised. Both production guards must walk real nested ancestry,
  # reject file leaves, and still reject a junction at the leaf or any ancestor.
@@ -180,6 +244,7 @@ try {
  $repository=Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $spawn))
  $corpus=ConvertFrom-Json ([IO.File]::ReadAllText((Join-Path $repository 'shared/report-files-v1/corpus.json')))
  $exercised=@{}
+ $rulingCases=@{}
  foreach ($case in $corpus.cases) {
   if ('powershell' -cnotin $case.helpers) { continue }
   $raw=[Convert]::FromBase64String($case.bytes_b64)
@@ -217,6 +282,18 @@ try {
     $result=Worker 'report' ($utf8.GetString([Convert]::FromBase64String($case.helper_report_input_b64))) -RawOutput
    } else { $result=Worker 'consume' -RawOutput }
    Assert (($result.code -eq 0) -eq $case.expect.ok) ('Shared helper case '+$case.id+': '+$result.err)
+   if ($case.id.StartsWith('c3-ruling-')) {
+    $rulingCases[$case.id]=$true
+    Reload
+    if ($case.expect.ok) {
+     Assert ($journal.consumed.Count -eq 1 -and $journal.consumed[0].execution -ceq 'unclaimed') 'Ruling receipt completed an execution'
+     EqualBytes $raw ([Convert]::FromBase64String($journal.consumed[0].bytes))
+     $ack=Decode ([Convert]::FromBase64String($journal.pending[0].bytes))
+     Assert ($ack.kind -ceq 'reply_ack' -and $ack.payload.status -ceq 'recorded' -and $ack.payload.reply_sha256 -ceq (Hash $raw) -and $ack.payload.message_id -ceq $envelope.message_id -and $ack.payload.reply_seq -eq $envelope.reply_seq) 'Ruling ACK is not exact durable receipt'
+    } else {
+     Assert (@(Get-ChildItem -LiteralPath (Join-Path $box 'reports') -Force).Count -eq 0) 'Refused ruling published an ACK'
+    }
+   }
    if ($case.expect.ok) {
     if ($case.op -ceq 'decode_reply') { EqualBytes $raw $result.out }
     elseif ($null -ne $case.helper_frame) { Assert ((Hash $result.out) -ceq $manifest.message_sha256) ('Shared frame bytes: '+$case.id) }
@@ -236,6 +313,7 @@ try {
   $exercised[$case.op+':'+$case.expect.ok]=$true
  }
  foreach ($op in @('strict_decode','decode_reply','decode_report','decode_object')) { foreach ($ok in @($true,$false)) { Assert $exercised[$op+':'+$ok] ('Missing shared coverage '+$op+':'+$ok) } }
+ foreach ($case in $corpus.cases) { if ($case.id.StartsWith('c3-ruling-')) { Assert $rulingCases[$case.id] ('Missing actual ruling receive coverage: '+$case.id) } }
 
  $null=[IO.Directory]::CreateDirectory($nested)
  DirectorySafe $nested; TargetDirectory $nested
@@ -295,6 +373,155 @@ try {
  Assert ($literal.code -eq 0 -and $literal.out -ceq "compacted`n") ('Literal target argument binding failed; helper='+ (ConvertTo-Json -InputObject $literal -Compress))
  $literal=Worker 'replay'
  Assert ($literal.code -eq 0 -and $literal.out -ceq '') ('Literal worker argument binding failed; helper='+ (ConvertTo-Json -InputObject $literal -Compress))
+
+ # Withdrawn START retirement is a physical tail exception, not consumption.
+ WithdrawnFixture
+ $prefix=ReadFile (Join-Path $box 'replies/1/manifest.json') 2048
+ $tail=ReadFile (Join-Path $box 'replies/2/manifest.json') 2048
+ $retired=AuthorizedRetire -Withdrawn $withdrawal
+ Assert ($retired.code -eq 0 -and $retired.out -ceq "producer_retired`n") 'Exact unread START tail did not authorize producer retirement'
+ EqualBytes $prefix (ReadFile (Join-Path $box 'replies/1/manifest.json') 2048)
+ EqualBytes $tail (ReadFile (Join-Path $box 'replies/2/manifest.json') 2048)
+ Assert (@([IO.Directory]::EnumerateFileSystemEntries((Join-Path $box 'acks'))).Count -eq 0) 'Withdrawal manufactured an ACK'
+ Assert (@([IO.Directory]::EnumerateFileSystemEntries((Join-Path $box 'watermarks'))).Count -eq 0) 'Withdrawal manufactured a cursor'
+ $result=Target 'retire' '-' ([byte[]]@()) 2 1 -Withdrawn $withdrawal
+ Assert ($result.out -ceq "retired`n" -and -not (Test-Path -LiteralPath $box)) 'Target failed exact withdrawn START retirement'
+ $result=Target 'reconcile_retire' '-' ([byte[]]@()) 2 1 -Withdrawn $withdrawal
+ Assert ($result.out -ceq "retired`n") 'Exact withdrawn retirement proof did not reconcile after deletion'
+
+ # A dead producer can ingest an actual final host ACK; no fabricated receipt
+ # or execution resolution is needed to reach the exact authorized report floor.
+ PendingWithdrawalFixture
+ $reportManifest=ReadFile (Join-Path $box 'reports/3/manifest.json') 2048
+ $result=AuthorizedRetire -Report '3' -Chain $finalChain -Withdrawn $withdrawal
+ Assert ($result.code -eq 0 -and $result.out -ceq "producer_retired`n") 'Genuine final ACK did not drain pending report'
+ EqualBytes $finalAck (ReadFile (Join-Path $box 'acks/3.json') 2048)
+ EqualBytes $reportManifest (ReadFile (Join-Path $box 'reports/3/manifest.json') 2048)
+ $watermark=Decode (ReadFile (Join-Path $box 'watermarks/3.json') 2048)
+ Assert ($watermark.through_seq -eq 3 -and $watermark.receipt_chain_sha256 -ceq $finalChain) 'Receipt ingestion did not publish real authorized floor and chain'
+ Assert (-not (Test-Path -LiteralPath $journalPath)) 'Retirement retained drained producer journal'
+ Assert (@([IO.Directory]::EnumerateFileSystemEntries((Join-Path $box 'consumer'))).Count -eq 0) 'Receipt draining manufactured consumer state'
+ $result=Target 'retire' '-' ([byte[]]@()) 3 1 -Withdrawn $withdrawal
+ Assert ($result.code -eq 0 -and $result.out -ceq "retired`n" -and -not (Test-Path -LiteralPath $box)) 'Target failed retirement after real final ACK draining'
+
+ foreach ($invalid in @('missing','event','hash','chain','binding','disposition','preflight')) {
+  PendingWithdrawalFixture
+  $ack=Decode $finalAck
+  switch ($invalid) {
+   'missing' { [IO.File]::Delete((Join-Path $box 'acks/3.json')) }
+   'event' { $ack.event_id='foreign' }
+   'hash' { $ack.event_sha256='c'*64 }
+   'chain' { $ack.receipt_chain_sha256='c'*64 }
+   'binding' { $ack.work_id='foreign' }
+   'disposition' { $ack.disposition='refused' }
+   'preflight' {
+    $entries=Decode ([Convert]::FromBase64String($withdrawal)); $entries[0].message_sha256='c'*64
+    $withdrawal=[Convert]::ToBase64String((Encode $entries))
+   }
+  }
+  if ($invalid -cnotin @('missing','preflight')) { [IO.File]::WriteAllBytes((Join-Path $box 'acks/3.json'),(Encode $ack)) }
+  $before=MailboxBytes
+  $result=AuthorizedRetire -Report '3' -Chain $finalChain -Withdrawn $withdrawal
+  if ($invalid -ceq 'missing') {
+   Assert ($result.code -eq 0 -and $result.out -ceq "producer_unsettled`n") 'Missing real ACK did not definitely refuse retirement'
+  } else {
+   Assert ($result.code -ne 0 -and $result.out -ceq '') ('Invalid ACK or preflight did not strictly refuse: '+$invalid)
+  }
+  UnchangedMailbox $before
+ }
+
+ foreach ($mutation in @('missing_cap','missing_control','wrong_hash','wrong_id','duplicate','reverse','empty','extra_field','string_seq','missing_slot','extra_slot','extra_file','hidden_slot','hidden_file','report_above_floor','ack_above_floor','consumer_fact','staging_fact','unknown_producer','missing_chunk','bad_chunk','duplicate_manifest','wrong_kind','foreign_binding','bad_payload')) {
+  WithdrawnFixture
+  switch ($mutation) {
+   'missing_cap' { $descriptor.capabilities=@('report-files-v1','coordinator-control-v1'); [IO.File]::WriteAllBytes((Join-Path $box 'provision.json'),(Encode $descriptor)) }
+   'missing_control' { $descriptor.capabilities=@('report-files-v1','project-start-v1'); [IO.File]::WriteAllBytes((Join-Path $box 'provision.json'),(Encode $descriptor)) }
+   'missing_slot' { [IO.Directory]::Delete((Join-Path $box 'replies/3'),$true) }
+   'extra_slot' { InstallReply (ReplyBytes 4) 4 }
+   'extra_file' { [IO.File]::WriteAllText((Join-Path $box 'replies/2/unknown'),'retain') }
+   'hidden_slot' { $null=[IO.Directory]::CreateDirectory((Join-Path $box 'replies/.hidden')) }
+   'hidden_file' { [IO.File]::WriteAllText((Join-Path $box 'replies/2/.hidden'),'retain') }
+   'report_above_floor' { $path=Join-Path $box 'reports/3'; $null=[IO.Directory]::CreateDirectory($path); [IO.File]::WriteAllText((Join-Path $path 'manifest.json'),'{}') }
+   'ack_above_floor' { [IO.File]::WriteAllText((Join-Path $box 'acks/3.json'),'{}') }
+   'consumer_fact' { [IO.File]::WriteAllText((Join-Path $box 'consumer/claim'),'retain') }
+   'staging_fact' { [IO.File]::WriteAllText((Join-Path $box 'staging/unknown'),'retain') }
+   'unknown_producer' { [IO.File]::WriteAllText((Join-Path $box 'producer/unknown'),'retain') }
+   'missing_chunk' { [IO.File]::Delete((Join-Path $box 'replies/2/chunk-1.json')) }
+   'bad_chunk' { [IO.File]::WriteAllText((Join-Path $box 'replies/2/chunk-1.json'),'{}') }
+   'duplicate_manifest' {
+    $path=Join-Path $box 'replies/2/manifest.json'; $wire=$utf8.GetString((ReadFile $path 2048))
+    [IO.File]::WriteAllText($path,('{"version":1,'+$wire.Substring(1)),$utf8)
+   }
+   { $_ -cin @('wrong_kind','foreign_binding','bad_payload') } {
+    $chunk=Decode (ReadFile (Join-Path $box 'replies/2/chunk-1.json') 4096)
+    $reply=Decode ([Convert]::FromBase64String($chunk.data_b64))
+    if ($mutation -ceq 'wrong_kind') { $reply=Decode (ReplyBytes 2) }
+    elseif ($mutation -ceq 'foreign_binding') { $reply.work_id='foreign' }
+    else { $reply.payload.owner_generation='1' }
+    $bytes=Encode $reply
+    [IO.Directory]::Delete((Join-Path $box 'replies/2'),$true); InstallReply $bytes 2
+    $entries=Decode ([Convert]::FromBase64String($withdrawal)); $entries[0].message_sha256=Hash $bytes
+    $withdrawal=[Convert]::ToBase64String((Encode $entries))
+   }
+   default {
+    $entries=Decode ([Convert]::FromBase64String($withdrawal))
+    switch ($mutation) {
+     'wrong_hash' { $entries[0].message_sha256='c'*64 }
+     'wrong_id' { $entries[0].message_id='other' }
+     'duplicate' { $entries=@($entries[0],$entries[0]) }
+     'reverse' { $entries=@($entries[1],$entries[0]) }
+     'empty' { $entries=@() }
+     'extra_field' { $entries[0].unknown=1 }
+     'string_seq' { $entries[0].reply_seq='2' }
+    }
+    $withdrawal=[Convert]::ToBase64String((Encode $entries))
+   }
+  }
+  $before=ReadFile $journalPath 1572864
+  $prefix=ReadFile (Join-Path $box 'replies/1/manifest.json') 2048
+  $physicalBefore=MailboxBytes
+  $result=AuthorizedRetire -Withdrawn $withdrawal
+  if ($mutation -cin @('report_above_floor','ack_above_floor','consumer_fact','staging_fact','unknown_producer')) {
+   Assert ($result.code -eq 0 -and $result.out -ceq "producer_unsettled`n") ('Physical residue was not a definite refusal: '+$mutation)
+  } else {
+   Assert ($result.code -ne 0 -and $result.out -ceq '') ('Producer did not strictly reject invalid withdrawn tail: '+$mutation)
+  }
+  UnchangedMailbox $physicalBefore
+  EqualBytes $before (ReadFile $journalPath 1572864)
+  EqualBytes $prefix (ReadFile (Join-Path $box 'replies/1/manifest.json') 2048)
+  # Independently test target rejection with a physically absent producer fixture.
+  # The target must reject the bad tail before touching the settled prefix.
+  [IO.File]::Delete($journalPath); [IO.File]::Delete((Join-Path $box 'producer/lock'))
+  $result=Target 'retire' '-' ([byte[]]@()) 2 1 -Withdrawn $withdrawal
+  Assert ($result.out -cne "retired`n") ('Target accepted invalid withdrawn tail: '+$mutation)
+  EqualBytes $prefix (ReadFile (Join-Path $box 'replies/1/manifest.json') 2048)
+ }
+
+ foreach ($block in @('pending','claimed','unclaimed','chain','floor')) {
+  WithdrawnFixture
+  if ($block -ceq 'pending') { $null=Allocate @{kind='WAITING';payload=@{reason='unacknowledged final report'}} }
+  elseif ($block -cin @('claimed','unclaimed')) { $journal.consumed[0].execution=$block }
+  elseif ($block -ceq 'chain') { $journal.receipt_chain='d'*64 }
+  else { $journal.reply_next=3 }
+  [IO.File]::WriteAllBytes($journalPath,(Encode $journal))
+  $before=ReadFile $journalPath 1572864
+  $chain=$journal.receipt_chain; if ($block -ceq 'chain') { $chain='e'*64 }
+  $result=AuthorizedRetire -Withdrawn $withdrawal -Chain $chain
+  Assert ($result.code -eq 0 -and $result.out -ceq "producer_unsettled`n") ('Withdrawal bypassed actual journal settlement: '+$block+'; helper='+(ConvertTo-Json -InputObject $result -Compress))
+  EqualBytes $before (ReadFile $journalPath 1572864)
+ }
+ WithdrawnFixture
+ $before=ReadFile (Join-Path $box 'replies/1/manifest.json') 2048
+ $result=Target 'compact' '-' ([byte[]]@()) 2 1 -Withdrawn $withdrawal
+ Assert ($result.out -ceq "binding_mismatch`n") 'Withdrawal widened compact'
+ EqualBytes $before (ReadFile (Join-Path $box 'replies/1/manifest.json') 2048)
+ WithdrawnFixture
+ $before=ReadFile (Join-Path $box 'replies/1/manifest.json') 2048
+ $result=Target 'retire' '-' ([byte[]]@()) 2 1 -Withdrawn $withdrawal
+ Assert ($result.out -ceq "incomplete`n") 'Target ignored retained producer journal'
+ EqualBytes $before (ReadFile (Join-Path $box 'replies/1/manifest.json') 2048)
+ $result=Target 'reconcile_retire' '-' ([byte[]]@()) 2 1 -Withdrawn $withdrawal
+ Assert ($result.out -ceq "incomplete`n") 'Present withdrawn retirement readback was not incomplete'
+ EqualBytes $before (ReadFile (Join-Path $box 'replies/1/manifest.json') 2048)
 
  # Actual -File entrypoints: authorization is exact, never an instruction to
  # collect pending receipts, clear claims, or repair a malformed journal.
@@ -392,6 +619,159 @@ try {
  $retired=AuthorizedRetire -Report '0' -Reply '0'
  Assert ($retired.code -eq 0 -and $retired.out -ceq "producer_retired`n") 'Zero-floor authorized retirement failed'
 
+ # Cancellation is mailbox retirement, never a request to stop the terminal.
+ $acceptedWire='{"kind":"ACCEPTED","payload":{"assignment_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}'
+ foreach ($initialized in @($false,$true)) {
+  EnrolFixture $initialized
+  $chain=Hash ($utf8.GetBytes("report-files-v1`n"+$Handle+"`n"))
+  $retired=AuthorizedRetire -Report '0' -Reply '0' -Chain $chain
+  $expected="producer_absent`n"; if ($initialized) { $expected="producer_retired`n" }
+  Assert ($retired.code -eq 0 -and $retired.out -ceq $expected) 'Unused enrol producer did not settle'
+  $retired=Target 'retire' '-'
+  Assert ($retired.code -eq 0 -and $retired.out -ceq "retired`n") 'Unused enrol mailbox did not retire'
+  Assert (-not (Test-Path -LiteralPath $box)) 'Cancelled enrol mailbox remains'
+  $delayed=Worker 'init'; Assert ($delayed.code -ne 0) 'Delayed paste recreated cancelled mailbox'
+  $delayed=Worker 'report' $acceptedWire; Assert ($delayed.code -ne 0) 'Delayed ACCEPTED used cancelled mailbox'
+  Assert (-not (Test-Path -LiteralPath $box)) 'Delayed report recreated cancelled mailbox'
+ }
+ foreach ($afterCleanup in @($false,$true)) {
+  EnrolFixture
+  $chain=$journal.receipt_chain
+  if ($afterCleanup) {
+   $retired=AuthorizedRetire -Report '0' -Reply '0' -Chain $chain
+   Assert ($retired.out -ceq "producer_retired`n") 'Race setup did not retire producer'
+   $initialized=Worker 'init'; Assert ($initialized.code -eq 0) 'Producer did not recreate journal in cleanup gap'
+   $retired=Target 'retire' '-'
+   Assert ($retired.code -eq 0 -and $retired.out -ceq "storage_error`n") 'Recreated producer was falsely retired'
+  }
+  $published=Worker 'report' $acceptedWire
+  Assert ($published.code -eq 0) ('Actual race ACCEPTED publication failed: '+$published.err)
+  $before=ReadFile $journalPath 1572864
+  $manifest=ReadFile (Join-Path $box 'reports/1/manifest.json') 2048
+  $chunk=ReadFile (Join-Path $box 'reports/1/chunk-1.json') 4096
+  $retired=AuthorizedRetire -Report '0' -Reply '0' -Chain $chain
+  Assert ($retired.code -eq 0 -and $retired.out -ceq "producer_unsettled`n") 'Published ACCEPTED was cleared at zero floors'
+  $retired=Target 'retire' '-'
+  Assert ($retired.code -eq 0 -and $retired.out -ceq "incomplete`n") 'Winning producer was falsely retired'
+  EqualBytes $before (ReadFile $journalPath 1572864)
+  EqualBytes $manifest (ReadFile (Join-Path $box 'reports/1/manifest.json') 2048)
+  EqualBytes $chunk (ReadFile (Join-Path $box 'reports/1/chunk-1.json') 4096)
+  Assert (Test-Path -LiteralPath (Join-Path $box 'provision.json')) 'Race refusal removed provisioning'
+ }
+ # An absent producer result is scoped evidence, not a tombstone: target rechecks.
+ EnrolFixture $false
+ $chain=Hash ($utf8.GetBytes("report-files-v1`n"+$Handle+"`n"))
+ $retired=AuthorizedRetire -Report '0' -Reply '0' -Chain $chain
+ Assert ($retired.code -eq 0 -and $retired.out -ceq "producer_absent`n") 'Uninitialized producer absence not proven'
+ $initialized=Worker 'init'; Assert ($initialized.code -eq 0) 'Producer could not enter the retirement gap'
+ $published=Worker 'report' $acceptedWire; Assert ($published.code -eq 0) 'Winning ACCEPTED publication failed'
+ $before=ReadFile $journalPath 1572864
+ $retired=Target 'retire' '-'; Assert ($retired.out -ceq "incomplete`n") 'Absent proof incorrectly authorized deleting a later producer'
+ EqualBytes $before (ReadFile $journalPath 1572864)
+ EnrolFixture $false
+ $chain=Hash ($utf8.GetBytes("report-files-v1`n"+$Handle+"`n"))
+ foreach ($arguments in @(@{Report='1';Reply='0';Chain=$chain},@{Report='0';Reply='1';Chain=$chain},@{Report='0';Reply='0';Chain=('0'*64)})) {
+  $retired=AuthorizedRetire @arguments
+  Assert ($retired.code -eq 0 -and $retired.out -ceq "producer_unsettled`n") 'Absent producer accepted nonzero floors or wrong chain'
+  Assert (-not (Test-Path -LiteralPath $journalPath)) 'Absence refusal created a journal'
+ }
+ $wrong=Decode (Encode $binding); $wrong.worker_id='wrong'
+ $retired=AuthorizedRetire -Report '0' -Reply '0' -Chain $chain -Expected ([Convert]::ToBase64String((Encode $wrong)))
+ Assert ($retired.code -ne 0) 'Absent producer accepted wrong binding'
+ $retired=AuthorizedRetire -Report '0' -Reply '0' -Chain $chain -SuppliedOwner 'different_owner_1234'
+ Assert ($retired.code -ne 0) 'Absent producer accepted wrong owner'
+ foreach ($lane in @('reports','replies','acks','watermarks')) {
+  $evidence=Join-Path $box ($lane+'/.retained')
+  [IO.File]::WriteAllBytes($evidence,$utf8.GetBytes('retained evidence'))
+  $retired=AuthorizedRetire -Report '0' -Reply '0' -Chain $chain
+  Assert ($retired.code -eq 0 -and $retired.out -ceq "producer_unsettled`n") 'Missing journal hid retained evidence'
+  EqualBytes ($utf8.GetBytes('retained evidence')) ([IO.File]::ReadAllBytes($evidence))
+  [IO.File]::Delete($evidence)
+ }
+ $retired=AuthorizedRetire -Report '0' -Reply '0' -Chain $chain
+ Assert ($retired.code -eq 0 -and $retired.out -ceq "producer_absent`n") 'Exact empty absence proof refused'
+
+ # Real Windows -File publication for new proposal variants (not schema-only calls).
+ $snow=[string][char]0x96EA
+ $newWork=@{owner_id='owner';owner_generation=1;activation_token=('a'*64);proposal_id='proposal';kind='new_work';new_project_name=($snow+' project');record_id='record';record_revision=0;prompt='Discuss work';scope=@{paths=@('src/'+$snow+' file');systems=@('editor')};checks=@(@{check_id='check';argv=@('check',($snow+' argument'))})}
+ $newSource=@{owner_id='owner';owner_generation=1;activation_token=('a'*64);proposal_id='proposal';kind='add_source';orch_project_id='existing';source=@{kind='plan_file';path=('C:\plans\'+$snow+' plan.md');revision='r1'}}
+ $proposals=@($newWork,$newSource)
+ $board=Decode (Encode $newSource); $board.source=@{kind='board';path=('\\server\share\'+$snow);revision='r2'}; $proposals+=,$board
+ $template=Decode (Encode $newSource); $template.source=@{kind='template';template_id='template';revision='r3';input='Describe work'}; $proposals+=,$template
+ $targeted=Decode (Encode $newWork); $targeted['repository_id']='repo'; $targeted['target_ref']='main'; $targeted['target_revision']=('b'*40); $proposals+=,$targeted
+ foreach ($proposal in $proposals) {
+  Fixture
+  $report=@{kind='COORDINATOR_PROPOSAL';payload=$proposal}
+  $published=Worker 'report' ($utf8.GetString((Encode $report)))
+  Assert ($published.code -eq 0) ('Proposal publication failed: '+$published.err)
+  Reload; $raw=[Convert]::FromBase64String($journal.pending[0].bytes); $stored=Decode $raw
+  foreach ($key in $proposal.Keys) {
+   if ($key -eq 'scope') {
+    EqualBytes (Encode $proposal.scope.paths) (Encode $stored.payload.scope.paths)
+    EqualBytes (Encode $proposal.scope.systems) (Encode $stored.payload.scope.systems)
+   } elseif ($key -eq 'checks') {
+    Assert ($stored.payload.checks.Count -eq $proposal.checks.Count) 'Proposal changed check count'
+    for ($i=0;$i -lt $proposal.checks.Count;$i++) {
+     Assert ($stored.payload.checks[$i].check_id -ceq $proposal.checks[$i].check_id) 'Proposal changed check ID'
+     EqualBytes (Encode $proposal.checks[$i].argv) (Encode $stored.payload.checks[$i].argv)
+    }
+   } elseif ($key -eq 'source') {
+    foreach ($field in $proposal.source.Keys) { Assert ($stored.payload.source[$field] -ceq $proposal.source[$field]) ('Proposal changed source '+$field) }
+   } else { Assert ($stored.payload[$key] -ceq $proposal[$key]) ('Proposal changed '+$key) }
+  }
+  Assert ($stored.work_id -ceq $binding.work_id -and $stored.kind -ceq 'COORDINATOR_PROPOSAL') 'Proposal changed envelope binding'
+  $manifest=ReadFile (Join-Path $box 'reports/1/manifest.json') 2048
+  $frame=Decode $manifest
+  Assert ($frame.message_sha256 -ceq (Hash $raw)) 'Proposal manifest digest differs'
+  $joined=New-Object IO.MemoryStream
+  try {
+   for ($index=1;$index -le $frame.count;$index++) {
+    $part=Decode (ReadFile (Join-Path $box ('reports/1/chunk-'+$index+'.json')) 4096)
+    $bytes=[Convert]::FromBase64String($part.data_b64); $joined.Write($bytes,0,$bytes.Length)
+   }
+   EqualBytes $raw ($joined.ToArray())
+  } finally { $joined.Dispose() }
+  $replayed=Worker 'replay'; Assert ($replayed.code -eq 0) 'Proposal replay failed'
+  EqualBytes $manifest (ReadFile (Join-Path $box 'reports/1/manifest.json') 2048)
+ }
+ Fixture
+ $before=ReadFile $journalPath 1572864
+ $invalidProposals=@()
+ foreach ($proposal in @($newWork,$newSource)) {
+  foreach ($key in @('work_id','project_id','checkpoint_id','argv','account_id','pane_id','execution_cwd','executable')) {
+   $bad=Decode (Encode $proposal); $bad[$key]='override'; $invalidProposals+=,$bad
+  }
+  $bad=Decode (Encode $proposal); $bad['orch_project_id']='existing'; $bad['new_project_name']='new'; $invalidProposals+=,$bad
+  $bad=Decode (Encode $proposal); $bad.Remove('orch_project_id'); $bad.Remove('new_project_name'); $invalidProposals+=,$bad
+ }
+ foreach ($mutation in @(
+  @{key='prompt';value=" `t`n"}, @{key='new_project_name';value=(([string][char]0x00E9)*81)},
+  @{key='checks';value=@($newWork.checks[0],$newWork.checks[0])},
+  @{key='checks';value=@(@{check_id='check';argv=@()})},
+  @{key='checks';value=@(@{check_id='check';argv=@('x'*513)})},
+  @{key='scope';value=@{paths=@('x')*65;systems=@()}},
+  @{key='scope';value=@{paths=@();systems=@('x')*17}},
+  @{key='scope';value=@{paths=@($snow*86);systems=@()}},
+  @{key='scope';value=@{paths=@();systems=@($snow*27)}},
+  @{key='target_ref';value='main'}, @{key='target_revision';value=('b'*40)}
+ )) {
+  $bad=Decode (Encode $newWork); $bad[$mutation.key]=$mutation.value; $invalidProposals+=,$bad
+ }
+ $bad=Decode (Encode $targeted); $bad.Remove('repository_id'); $invalidProposals+=,$bad
+ foreach ($source in @(
+  @{kind='plan_file';path='relative';revision='r'}, @{kind='board';path='/board';revision=" `t"},
+  @{kind='plan_file';path=('/bad'+[char]0);revision='r'},
+  @{kind='template';template_id='t';revision='r';input=' '},
+  @{kind='template';template_id='t';revision=('r'+[char]0);input='text'},
+  @{kind='board';path='/board';revision='r';input='override'}
+ )) { $bad=Decode (Encode $newSource); $bad.source=$source; $invalidProposals+=,$bad }
+ foreach ($proposal in $invalidProposals) {
+  $rejected=Worker 'report' ($utf8.GetString((Encode @{kind='COORDINATOR_PROPOSAL';payload=$proposal})))
+  Assert ($rejected.code -ne 0 -and $rejected.err.Contains('invalid_schema')) 'Invalid proposal accepted'
+  EqualBytes $before (ReadFile $journalPath 1572864)
+ }
+ Assert (@([IO.Directory]::EnumerateFileSystemEntries((Join-Path $box 'reports'))).Count -eq 0) 'Invalid proposal published files'
+
  # Parity with the POSIX helper: only ACCEPTED reads the provisioned handover. A malformed
  # one leaves authorized retirement and other reports unchanged and refuses ACCEPTED.
  $malformedHandover=@{handover_id='bad id';handover_sha256='x'}
@@ -426,7 +806,7 @@ try {
   @{kind='REVIEW_RESULT';action_id='action';action_revision=1;payload=@{review_id='review';round=1;artifact_revision='rev';outcome='changes_required';findings=@(@{finding_id='f1';path='a.luau';line=3;summary='Missing bound.'});summary='One'}},
   @{kind='LABEL';action_id='label';action_revision=1;payload=@{work_ref='work';class='feature';reason='new mode'}},
   @{kind='DONE';payload=@{checkpoint_id='cp';artifact_revision='rev';summary='done';output_ref='out/a.md'}},
-  @{kind='REGISTER';payload=@{capabilities=@('report-files-v1','native-ask-v1','worker-poll-v1','argv-v1','coordinator-control-v1','check-runner-v1','release-manager-v1')}},
+  @{kind='REGISTER';payload=@{capabilities=@('report-files-v1','native-ask-v1','worker-poll-v1','argv-v1','coordinator-control-v1','check-runner-v1','release-manager-v1','project-start-v1')}},
   @{kind='DONE';payload=@{checkpoint_id='cp';artifact_revision='rev';summary='done'}},
   @{kind='ROLLOVER_REQUEST';payload=@{checkpoint_id='cp';reason='handover'}},
   @{kind='LANDING_REQUEST';payload=@{checkpoint_id='cp';project_id='project';repo_ref='repo';target_ref='main';target_revision='base';source_ref='work';source_revision='rev'}},
@@ -659,6 +1039,102 @@ try {
    EqualBytes $before (ReadFile $journalPath 1572864)
   }
  }
+ # A project start is a closed, correlated grant, never executable instructions.
+ $startCapabilities=@('report-files-v1','native-ask-v1','worker-poll-v1','argv-v1','coordinator-control-v1','check-runner-v1','release-manager-v1','project-start-v1')
+ $startPayload=@{owner_id='owner';owner_generation=1;activation_token=('a'*64);orch_project_id='project';project_revision=1;decision_context=('b'*64)}
+ $startClaim=@{kind='PROJECT_START_CLAIM';action_id='action';action_revision=1;payload=$startPayload}
+ Fixture 'start_' $startCapabilities
+ $start=Decode (ReplyBytes); $start.kind='project_start'; $start.payload=$startPayload
+ $exact=Encode $start; InstallReply $exact
+ $result=Worker 'consume' -RawOutput
+ Assert ($result.code -eq 0) ('Project start rejected: '+$result.err); EqualBytes $exact $result.out
+ $result=Worker 'consume' -RawOutput
+ Assert ($result.code -eq 0) 'Unclaimed project start replay failed'; EqualBytes $exact $result.out
+ Reload
+ Assert ($journal.next_seq -eq 2 -and $journal.consumed[0].execution -ceq 'unclaimed') 'Project start replay allocated a second ACK'
+ $result=Worker 'claim' '' 'reply_1'; Assert ($result.code -eq 0) 'Project start local claim failed'
+ $result=Worker 'claim' '' 'reply_1'; Assert ($result.code -ne 0 -and $result.err -match 'uncertain') 'Project start local claim replayed'
+ $result=Worker 'report' ($utf8.GetString((Encode $startClaim)))
+ Assert ($result.code -eq 0) ('Project start claim producer rejected: '+$result.err)
+ Reload; $claimReport=Decode ([Convert]::FromBase64String($journal.pending[1].bytes))
+ Assert ($claimReport.kind -ceq 'PROJECT_START_CLAIM' -and $claimReport.action_id -ceq 'action' -and $claimReport.action_revision -eq 1) 'Project start claim lost action correlation'
+ foreach ($key in $startPayload.Keys) { Assert ($claimReport.payload[$key] -ceq $startPayload[$key]) ('Project start claim changed '+$key) }
+ $result=Worker 'consume'; Assert ($result.code -eq 0 -and $result.out -ceq '') 'Claimed project start redelivered'
+ $startMutations=@()
+ foreach ($key in $startPayload.Keys) { $startMutations+=@{key=$key;remove=$true} }
+ $startMutations+=@(
+  @{key='instructions';value='execute this'},@{key='owner_id';value='bad id'},
+  @{key='owner_generation';value=$true},@{key='owner_generation';value=0},
+  @{key='activation_token';value=('A'*64)},@{key='orch_project_id';value=''},
+  @{key='project_revision';value=0},@{key='project_revision';value=-1},
+  @{key='project_revision';value=1.5},@{key='project_revision';value=$true},
+  @{key='project_revision';value='1'},@{key='project_revision';value=9007199254740992},
+  @{key='decision_context';value=('B'*64)},@{key='decision_context';value=('b'*63)}
+ )
+ foreach ($mutation in $startMutations) {
+  Fixture 'start_bad_' $startCapabilities
+  $bad=Decode (Encode $start)
+  if ($mutation.ContainsKey('remove')) { $bad.payload.Remove($mutation.key) } else { $bad.payload[$mutation.key]=$mutation.value }
+  InstallReply (Encode $bad); $before=ReadFile $journalPath 1572864
+  $result=Worker 'consume'
+  Assert ($result.code -ne 0 -and $result.out -ceq '') ('Invalid project start consumed: '+$mutation.key)
+  EqualBytes $before (ReadFile $journalPath 1572864)
+  $badClaim=Decode (Encode $startClaim); $badClaim.payload=$bad.payload
+  $result=Worker 'report' ($utf8.GetString((Encode $badClaim)))
+  Assert ($result.code -ne 0) ('Invalid project start claim produced: '+$mutation.key)
+  EqualBytes $before (ReadFile $journalPath 1572864)
+ }
+ foreach ($kind in @('project_start','PROJECT_START_CLAIM')) {
+  foreach ($key in @('action_id','action_revision')) {
+   foreach ($value in @($null,$true,0,'')) {
+    Fixture 'start_action_' $startCapabilities
+    if ($kind -ceq 'project_start') { $bad=Decode (Encode $start) } else { $bad=Decode (Encode $startClaim) }
+    if ($null -eq $value) { $bad.Remove($key) } else { $bad[$key]=$value }
+    $before=ReadFile $journalPath 1572864
+    if ($kind -ceq 'project_start') { InstallReply (Encode $bad); $result=Worker 'consume' }
+    else { $result=Worker 'report' ($utf8.GetString((Encode $bad))) }
+    Assert ($result.code -ne 0) ('Uncorrelated project start accepted: '+$kind+' '+$key)
+    EqualBytes $before (ReadFile $journalPath 1572864)
+   }
+  }
+ }
+ foreach ($missing in @('coordinator-control-v1','project-start-v1','both')) {
+  $limited=@('report-files-v1')
+  if ($missing -ceq 'coordinator-control-v1') { $limited+=@('project-start-v1') }
+  if ($missing -ceq 'project-start-v1') { $limited+=@('coordinator-control-v1') }
+  Fixture 'start_cap_' $limited
+  $start=Decode (ReplyBytes); $start.kind='project_start'; $start.payload=$startPayload
+  InstallReply (Encode $start); $before=ReadFile $journalPath 1572864
+  $result=Worker 'consume'
+  Assert ($result.code -ne 0 -and $result.err -match 'unsupported_capability' -and $result.out -ceq '') ('Unprovisioned project start consumed: '+$missing)
+  EqualBytes $before (ReadFile $journalPath 1572864)
+  $result=Worker 'report' ($utf8.GetString((Encode $startClaim)))
+  Assert ($result.code -ne 0 -and $result.err -match 'unsupported_capability') ('Unprovisioned project start claim produced: '+$missing)
+  EqualBytes $before (ReadFile $journalPath 1572864)
+  Assert (@(Get-ChildItem -LiteralPath (Join-Path $box 'reports') -Force).Count -eq 0) 'Unprovisioned project start allocated a report'
+  # Replaying retained bytes must re-check both capabilities before ACK/publication.
+  Fixture 'start_replay_' $startCapabilities
+  $start=Decode (ReplyBytes); $start.kind='project_start'; $start.payload=$startPayload
+  InstallReply (Encode $start); $result=Worker 'consume'; Assert ($result.code -eq 0) 'Project start replay setup failed'
+  $descriptor.capabilities=$limited
+  [IO.File]::WriteAllBytes((Join-Path $box 'provision.json'),(Encode $descriptor))
+  $before=ReadFile $journalPath 1572864
+  $result=Worker 'consume'
+  Assert ($result.code -ne 0 -and $result.err -match 'unsupported_capability' -and $result.out -ceq '') ('Retained project start bypassed capability proof: '+$missing)
+  EqualBytes $before (ReadFile $journalPath 1572864)
+  $result=Worker 'wait'
+  Assert ($result.code -ne 0 -and $result.err -match 'unsupported_capability' -and $result.out -ceq '') ('Retained project start wait bypassed capability proof: '+$missing)
+  EqualBytes $before (ReadFile $journalPath 1572864)
+  Fixture 'start_report_replay_' $startCapabilities
+  $result=Worker 'report' ($utf8.GetString((Encode $startClaim)))
+  Assert ($result.code -eq 0) 'Project start pending claim replay setup failed'
+  $descriptor.capabilities=$limited
+  [IO.File]::WriteAllBytes((Join-Path $box 'provision.json'),(Encode $descriptor))
+  $before=ReadFile $journalPath 1572864
+  $result=Worker 'replay'
+  Assert ($result.code -ne 0 -and $result.err -match 'unsupported_capability' -and $result.out -ceq '') ('Pending project start claim replay bypassed capability proof: '+$missing)
+  EqualBytes $before (ReadFile $journalPath 1572864)
+ }
  # Landing grants are closed typed replies: exact landing/grant/project/checkpoint IDs plus
  # repository, target ref, expected head, source ref and source revision; nothing else.
  $release=@('report-files-v1','release-manager-v1')
@@ -705,6 +1181,88 @@ try {
   $result=Worker 'consume'
   Assert ($result.code -ne 0) ('Invalid landing refresh accepted: '+$mutation.key)
   EqualBytes $before (ReadFile $journalPath 1572864)
+ }
+
+ # record_ruling uses the same durable receipt/claim/resolve path; no helper writer.
+ $document=Join-Path $testRoot "owner's existing plan.md"
+ $original=$utf8.GetBytes("Plan`r`nProgress without final newline")
+ [IO.File]::WriteAllBytes($document,$original)
+ $rulingPayload=@{path=$document;marker='orchplus-ruling:authority:gate';entry="> Owner: approve &lt;literal&gt; &#96;work&#96;`n> Context: caf$([char]0x00E9)";expected_document_sha256=(Hash $original);expected_non_rulings_sha256=(Hash $original)}
+ foreach ($withoutProof in @('legacy','release')) {
+  if ($withoutProof -ceq 'legacy') { Fixture } else { Fixture 'ruling_' @('report-files-v1','release-manager-v1') }
+  $ruling=Decode (ReplyBytes); $ruling.kind='record_ruling'; $ruling.gate_id='gate'; $ruling.gate_revision=1; $ruling.payload=$rulingPayload
+  InstallReply (Encode $ruling)
+  $before=ReadFile $journalPath 1572864; $provision=ReadFile (Join-Path $box 'provision.json') 65536
+  $result=Worker 'consume'
+  # Worker returns raw native stderr, including PowerShell's error-record decoration.
+  # Decode the typed diagnostic exactly as the shared helper corpus does above.
+  $diagnostic=($result.err.Trim() -split '\r?\n',2)[0].Split(':')[0]
+  Assert ($result.code -ne 0 -and $diagnostic -ceq 'unsupported_capability' -and $result.out -ceq '') ('Unprovisioned ruling was not explicitly refused ('+$withoutProof+'); helper='+(ConvertTo-Json -InputObject $result -Compress))
+  EqualBytes $before (ReadFile $journalPath 1572864)
+  EqualBytes $provision (ReadFile (Join-Path $box 'provision.json') 65536)
+  Assert (@(Get-ChildItem -LiteralPath (Join-Path $box 'reports') -Force).Count -eq 0) 'Unprovisioned ruling allocated ACK'
+  EqualBytes $original ([IO.File]::ReadAllBytes($document))
+ }
+ Fixture 'ruling_' @('report-files-v1','coordinator-control-v1')
+ $ruling=Decode (ReplyBytes); $ruling.kind='record_ruling'; $ruling.gate_id='gate'; $ruling.gate_revision=1; $ruling.payload=$rulingPayload
+ $exact=$utf8.GetBytes(" `n"+$utf8.GetString((Encode $ruling))+" `t"); InstallReply $exact
+ # Lose publication/stdout after the existing atomic receipt+ACK commit.
+ Set-Item -Path Function:PublishPending -Value { param($Pending,[bool]$Drain=$false) throw 'simulated_ruling_receipt_crash' }
+ Reject { ReadReply } 'simulated_ruling_receipt_crash'
+ . ([scriptblock]::Create($definitions.PublishPending))
+ Reload
+ Assert ($journal.next_seq -eq 2 -and $journal.consumed[0].execution -ceq 'unclaimed' -and $journal.consumed[0].ack_seq -eq 1) 'Ruling receipt and ACK were not atomic'
+ $ack=Decode ([Convert]::FromBase64String($journal.pending[0].bytes))
+ Assert ($ack.payload.status -ceq 'recorded' -and $ack.payload.reply_sha256 -ceq (Hash $exact)) 'Ruling ACK claimed write completion'
+ $delivered=Worker 'consume' -RawOutput; Assert ($delivered.code -eq 0) 'Ruling receipt recovery failed'; EqualBytes $exact $delivered.out
+ EqualBytes $original ([IO.File]::ReadAllBytes($document))
+ $published=Target 'publish' 'acks/1.json' (AckBytes); Assert ($published.out -ceq "published`n") 'Ruling ACK publication failed'
+ $receipts=Worker 'receipts'; Assert ($receipts.code -eq 0) 'Ruling ACK receipt failed'
+ $compacted=Target 'compact' '-' ([byte[]]@()) 1 1; Assert ($compacted.out -ceq "compacted`n") 'Ruling transport compaction failed'
+ $delivered=Worker 'wait' -RawOutput; Assert ($delivered.code -eq 0) 'Ruling redelivery failed'; EqualBytes $exact $delivered.out
+ Reload; Assert ($journal.next_seq -eq 2 -and $journal.consumed[0].execution -ceq 'unclaimed') 'ACK resolved ruling or allocated another ACK'
+ $claim=Worker 'claim' '' 'reply_1'; Assert ($claim.code -eq 0) 'Ruling claim failed'
+ $claim=Worker 'claim' '' 'reply_1'; Assert ($claim.code -ne 0 -and $claim.err -match 'uncertain') 'Ruling claim replayed'
+ $delivered=Worker 'consume'; Assert ($delivered.code -eq 0 -and $delivered.out -ceq '') 'Claimed ruling redelivered'
+ # The existing authorized writer owns the effect, not the helper or receipt ACK.
+ EqualBytes $original ([IO.File]::ReadAllBytes($document))
+ $resolved=Worker 'resolve' '' 'reply_1'; Assert ($resolved.code -eq 0) 'Ruling resolution failed'
+ Reload; Assert ($journal.consumed.Count -eq 0) 'Settled ruling was retained'
+ EqualBytes $original ([IO.File]::ReadAllBytes($document))
+
+ # Supplement the shared ruling corpus with literal text and UTF-8 byte boundaries.
+ $literalMutations=@(
+  @{location='payload';key='entry';value='> ';ok=$true},
+  @{location='payload';key='entry';value=('> '+([string][char]0x00E9)*4095);ok=$true},
+  @{location='payload';key='path';value='\\server\share\existing.md';ok=$true},
+  @{location='payload';key='entry';value=('> '+([string][char]0x00E9)*4095+'x')},
+  @{location='payload';key='entry';value="> text`n"},
+  @{location='payload';key='entry';value="> text`r`n> text"},
+  @{location='payload';key='entry';value=('> text'+[char]0)},
+  @{location='payload';key='entry';value='> `command`'},
+  @{location='payload';key='entry';value='> nested > quote'},
+  @{location='payload';key='path';value=('/existing'+[char]0+'.md')},
+  @{location='payload';key='marker';value=('orchplus-ruling:'+('a'*237)+':gate')},
+  @{location='payload';key='marker';value="orchplus-ruling:authority:gate`n"},
+  @{location='envelope';key='gate_revision';value=$true},
+  @{location='envelope';key='gate_revision';value=0},
+  @{location='envelope';key='gate_id';value='Gate'}
+ )
+ foreach ($mutation in $literalMutations) {
+  Fixture 'ruling_literal_' @('report-files-v1','coordinator-control-v1')
+  $ruling=Decode (ReplyBytes); $ruling.kind='record_ruling'; $ruling.gate_id='gate'; $ruling.gate_revision=1
+  $ruling.payload=Decode (Encode $rulingPayload)
+  if ($mutation.location -ceq 'payload') { $ruling.payload[$mutation.key]=$mutation.value } else { $ruling[$mutation.key]=$mutation.value }
+  $raw=Encode $ruling; InstallReply $raw; $before=ReadFile $journalPath 1572864
+  $result=Worker 'consume' -RawOutput
+  if ($mutation.ok) {
+   Assert ($result.code -eq 0) ('Literal ruling rejected: '+$mutation.key+': '+$result.err)
+   EqualBytes $raw $result.out
+  } else {
+   Assert ($result.code -ne 0 -and $result.out.Length -eq 0) ('Invalid literal ruling accepted: '+$mutation.key)
+   EqualBytes $before (ReadFile $journalPath 1572864)
+   Assert (@(Get-ChildItem -LiteralPath (Join-Path $box 'reports') -Force).Count -eq 0) 'Invalid literal ruling allocated ACK'
+  }
  }
 
  # Crash boundary: atomic receipt+pending ACK committed, publication/stdout lost.

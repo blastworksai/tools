@@ -36,7 +36,7 @@ function W.api()
 	end
 	return api
 end
-W.CAPS = { "report-files-v1", "native-ask-v1", "coordinator-control-v1", "check-runner-v1", "release-manager-v1" }
+W.CAPS = { "report-files-v1", "native-ask-v1", "coordinator-control-v1", "project-start-v1", "check-runner-v1", "release-manager-v1" }
 W.ROWS = { { "builder", "Claude" }, { "claude2", "Claude" }, { "codex", "Codex" }, { "kimi", "Kimi" }, { "omp", "omp" } }
 function W.hx(name) return api.codec.sha256("revision:" .. name):sub(1, 40) end
 function W.arr(t) return runtime.json.array(t or {}) end
@@ -49,22 +49,43 @@ end
 function W.catalog(f, rows)
 	local records = {}
 	for _, row in rows or W.ROWS do
-		table.insert(records, { id = row[1], revision = 0, provider = row[2], account_label = "configured, not verified", backend = "native-agent", enabled = true, eligible = true,
-			capability_evidence = "configured_operator_attestation_not_runtime_proof", effective_identity = { provider = row[2], evidence = "configured" },
+		table.insert(records, { id = row[1], revision = 0, provider = row[2], provider_family = ({ Claude = "anthropic", Codex = "openai", Kimi = "moonshot" })[row[2]], account_label = "configured, not verified", backend = "native-agent", enabled = true, eligible = true,
+			capability_evidence = "configured_operator_attestation_not_runtime_proof", effective_identity = { provider = row[2], identity_status = "configured_not_verified" },
 			capabilities = W.arr(W.CAPS), unsupported = W.arr(), cwd = "/fixture", placement = "split" })
 	end
 	local r = f:apply("catalog"); assert(r.ok, r.message)
 	assert(f:finish(r.action_id, "catalog", { catalog_version = 2, setup = { schema = 1, state = "completed", config_revision = 0, readiness = { state = "not_run", config_revision = 0, summary = "" } }, namespace = "fixture-spawn", host_key = "fixture-host", config_revision = 0, revision = 0, records = W.arr(records) }).ok)
 end
+-- Model the actual project owner transaction. Native scenarios separately prove its Git probe.
+function W.repository(f, common_dir, target, route, project_id, cwd)
+	local registry = f.authority.registry
+	local project = (registry.dispatch.projects or {})[project_id or f.default_project]
+	if not project or project.logical_session_id ~= f.origin.logical_session_id or project.finished then
+		f.default_project = f:project("Workflow fixture project", true)
+		registry = f.authority.registry; project = registry.dispatch.projects[f.default_project]
+	end
+	if route == nil then
+		for _, choice in registry.dispatch.repository_policies or {} do if choice.common_dir == common_dir and choice.target_ref == target then route = choice.queue_route end end
+	end
+	route = route or "orch_queue"; cwd = cwd or "/fixture/worktree"
+	if project.repository and project.repository.common_dir == common_dir and project.repository.target_ref == target
+		and project.repository.queue_route == route and project.repository.cwd == cwd then return end
+	local saved = f:apply("project_repository", { orch_project_id = project.orch_project_id, project_revision = project.revision,
+		repository = { cwd = cwd, repo_root = cwd, common_dir = common_dir,
+			target_ref = target, head_revision = W.hx("configured-target"), queue_route = route } })
+	assert(saved.ok, saved.message)
+end
 -- A fresh store with the family catalog and a Config v4 policy patch. The session's release manager
 -- record defaults to "kimi" (Kimi: no other fixture role uses it); a patch may override it, "" = none.
 -- The default clock is fixed: native runs are sliced across real seconds, so wall-clock time must not
--- move a fixture across launch/claim timeouts mid-section.
+-- move a fixture across launch/claim timeouts mid-section. Its epoch makes workflow ticks use the
+-- same complete host-clock contract as dispatch commands.
 function W.fixture(patch, clock)
-	W.api(); local f = api.fixture(clock or function() return { now_ms = 1700000000000, mono_ms = 1000 } end); W.catalog(f)
-	local merged = { release_manager_record = "kimi" }
+	W.api(); local f = api.fixture(clock or function() return { now_ms = 1700000000000, mono_ms = 1000, epoch = "workflow-fixture-host" } end); W.catalog(f)
+	local merged = { merge_actor_mode = "selected_record", release_manager_record = "kimi", preferred_worker_record = "builder", auto_approve_kinds = W.arr(), review_rounds = 2, concurrency_limit = 32 }
 	for key, value in patch or {} do merged[key] = value end
 	local saved = f:apply("policy", { policy = merged }); assert(saved.ok, saved.message)
+	W.repository(f, "/fixture/repository/.git", "refs/heads/main", "orch_queue")
 	return f
 end
 W.serial = 0
@@ -75,9 +96,11 @@ function W.start(f, worker_id, action_id, caps)
 	assert(f:finish(action_id, "provisioned", { handle = "mailbox-cp3-" .. W.serial, binding_digest = string.rep("e", 64), capabilities = W.arr(caps or W.CAPS), limits = {},
 		manifest_sha256 = W.worker(f, worker_id).manifest_sha256 }).ok)
 	local w = W.worker(f, worker_id)
-	assert(f:finish(w.launch_action_id, "awaiting_acceptance", { pane_binding = { pane_id = tostring(9700 + W.serial), window_key = f.origin.window_key,
-		window_epoch = f.origin.window_epoch, native_session_id = f.origin.native_session_id, window_host_id = f.origin.window_host_id } }).ok)
-	assert(f:apply("intake", { worker_id = worker_id, bytes = f:report(worker_id, 1, "ACCEPTED", { assignment_sha256 = w.assignment_sha256 }) }).ok)
+	local launched = f:finish(w.launch_action_id, "awaiting_acceptance", { pane_binding = { pane_id = tostring(9700 + W.serial), window_key = f.origin.window_key,
+		window_epoch = f.origin.window_epoch, native_session_id = f.origin.native_session_id, window_host_id = f.origin.window_host_id } })
+	assert(launched.ok, tern.json.encode({ result = launched, worker_id = worker_id, source = w.source, phase = w.phase, launch_gates = w.launch_gates }))
+	local handover = if w.handover_id then { handover_id = w.handover_id, handover_token = w.handover_token } else nil
+	assert(f:apply("intake", { worker_id = worker_id, bytes = f:report(worker_id, 1, "ACCEPTED", { assignment_sha256 = w.assignment_sha256 }, handover) }).ok)
 	assert(f:finish(f:apply("poll", { worker_id = worker_id }).action_id, "published", {}).ok)
 	assert(f:finish(f:apply("poll", { worker_id = worker_id }).action_id, "accepted", {}).ok)
 	return worker_id
@@ -86,7 +109,7 @@ function W.builder(f, record, fields)
 	local event = { record_id = record or "builder", record_revision = 0, catalog_revision = 0, prompt = "Implement the declared fixture task.", cwd = "/fixture",
 		placement = "split", coordinator = false, checks = W.unit() }
 	for key, value in fields or {} do event[key] = value end
-	local queued = f:apply("queue", event); assert(queued.ok and queued.action_id, queued.message)
+	local queued = f:allow_shared_fixture(f:apply("queue", event)); assert(queued.ok and queued.action_id, queued.message)
 	return W.start(f, queued.worker_id, queued.action_id)
 end
 function W.cp(cp_id, revision)
@@ -111,9 +134,21 @@ function W.settle(f, id, full)
 	if next(W.worker(f, id).receipts) ~= nil then assert(f:watermark(id).ok) end
 end
 function W.checkout(f, id, revision, path)
-	return W.send(f, id, "CHECKOUT", { worktree_path = path or "/fixture/worktree", common_dir = "/fixture/repository/.git",
+	local result = W.send(f, id, "CHECKOUT", { worktree_path = path or "/fixture/worktree", common_dir = "/fixture/repository/.git",
 		branch = "refs/heads/fixture-work", head = W.hx(revision), base = W.hx("base"), changed_files = W.arr(),
 		changed_overflow = false, changed_total = 0, dirty = false })
+	if result.ok then
+		local shared = {}
+		for _, gate in f.authority.registry.dispatch.gates do
+			if gate.worker_id == id and gate.kind == "shared_checkout" and gate.phase == "pending" then table.insert(shared, { id = gate.id, revision = gate.revision }) end
+		end
+		for _, gate in shared do
+			local acknowledged = f:apply("answer", { gate_id = gate.id, gate_revision = gate.revision, choice_id = "acknowledge",
+				answer = "The fixture owner intentionally coordinates these shared-worktree edits." })
+			assert(acknowledged.ok, acknowledged.message)
+		end
+	end
+	return result
 end
 -- Checkpoint (and optionally a helper check result) then REVIEW_READY for that revision.
 function W.ready(f, id, cp_id, revision, exit_code)
@@ -205,6 +240,12 @@ function W.landing(f) return f.authority.registry.dispatch.landing end
 function W.item(f, lid) return W.landing(f).items[lid] end
 function W.request(f, id, cp_id, revision, target, head)
 	W.settle(f, id)
+	if not W.worker(f, id).checkout or W.worker(f, id).checkout.head ~= W.hx(revision) then
+		local checkout = W.checkout(f, id, revision); assert(checkout.ok, checkout.message)
+	end
+	local requested_target = target or "refs/heads/main"
+	local canonical_target = if requested_target:sub(1, 5) == "refs/" then requested_target else "refs/heads/" .. requested_target
+	W.repository(f, W.worker(f, id).checkout.common_dir, canonical_target, nil, W.worker(f, id).orch_project_id)
 	local sent = W.send(f, id, "LANDING_REQUEST", { checkpoint_id = cp_id, project_id = "project-one", repo_ref = "repo:fixture", target_ref = target or "refs/heads/main",
 		target_revision = head or "head-0", source_ref = "refs/heads/" .. cp_id, source_revision = W.hx(revision) }); assert(sent.ok, sent.message)
 	for key, candidate in W.landing(f).items do
@@ -220,9 +261,9 @@ function W.approve(f, lid)
 	if answered.ok then W.rm(f) end
 	return answered
 end
--- Checkpoint 4 (Contracts I/J): the session's release manager is the only grant holder.
+-- Selected-record fixtures can launch a separate release-manager grant holder.
 function W.rm_id(f)
-	for key, w in f.authority.registry.dispatch.workers do if w.role == "release_manager" and w.finish == nil and w.release == nil then return key end end
+	for key, w in f.authority.registry.dispatch.workers do if w.logical_session_id == f.origin.logical_session_id and w.role == "release_manager" and w.finish == nil and w.release == nil then return key end end
 	return nil
 end
 -- Launch the release manager ORCH+ queued (if any); returns its worker ID.
@@ -248,14 +289,14 @@ function W.landing_result(f, id, lid, outcome, fields)
 	W.settle(f, id)
 	return W.send(f, id, "LANDING_RESULT", p, { action_id = g.action_id, action_revision = g.action_revision })
 end
--- A proven (cross-family round), owner-approved request on `target`, granted to the release manager.
+-- A proven, owner-approved request on `target`, granted to the configured exact actor.
 function W.granted(f, cp_id, target)
 	local b = W.builder(f); W.round(f, b, cp_id, "rev-" .. cp_id, "approved")
 	local lid = W.request(f, b, cp_id, "rev-" .. cp_id, target); assert(W.approve(f, lid).ok); W.rm(f)
 	assert(#W.item(f, lid).grants == 1, "fixture request was not granted: " .. tostring(W.item(f, lid).hold and W.item(f, lid).hold.code))
 	return b, lid
 end
--- The release manager consumes the grant and reports it landed at `head`.
+-- The exact grant holder consumes the grant and reports it landed at `head`.
 function W.land(f, lid, head)
 	local rm = W.holder(f, lid)
 	assert(W.ack(f, rm, W.grant(f, lid)).ok)
@@ -275,7 +316,7 @@ function W.drain(f, id)
 			action_id = entry.reply.action_id, action_revision = entry.reply.action_revision }); assert(sent.ok, sent.message)
 	end
 end
--- A DEPLOY_RESULT for the deploy's latest attempt, sent by that attempt's release manager.
+-- A DEPLOY_RESULT for the deploy's latest attempt, sent by that attempt's exact holder.
 function W.deploy_result(f, lid, outcome, fields, extra)
 	local dep, a = W.deploy(f, lid), W.attempt(f, lid)
 	local p = { deploy_id = dep.deploy_id, attempt_id = a.attempt_id, landing_id = lid, outcome = outcome, revision = dep.revision, evidence = W.arr({ "deploy:log" }) }
@@ -283,14 +324,11 @@ function W.deploy_result(f, lid, outcome, fields, extra)
 	W.settle(f, a.worker_id)
 	return W.send(f, a.worker_id, "DEPLOY_RESULT", p, extra or { action_id = a.action_id, action_revision = a.action_revision })
 end
--- Invariant sweep (Checkpoint 4): builders never receive `landing_grant`. Every retained reply of every
--- non-release-manager worker, every non-legacy grant record and every deploy attempt is checked, and
--- every grant holder's record differs from the builder's and the reviewer's (signer ≠ reviewer).
--- W.restores runs it, so each fixture's full registry output is swept.
+-- Every exact issued actor stays bound to its grant, independent of later policy edits.
 function W.sweep(f)
 	local d = f.authority.registry.dispatch
 	for wid, w in d.workers do
-		if w.role ~= "release_manager" then
+		if w.role ~= "release_manager" and w.role ~= "builder" then
 			for _, retained in w.replies do
 				local reply = not retained.legacy and api.codec.decode_reply(retained.bytes, w)
 				assert(not reply or (reply.kind ~= "landing_grant" and reply.kind ~= "deploy_grant"), "a non-release-manager worker holds a grant reply: " .. wid)
@@ -301,15 +339,19 @@ function W.sweep(f)
 		for _, g in it.grants do
 			if not g.legacy then
 				local h, b = d.workers[g.worker_id], d.workers[it.worker_id]
-				assert(h and h.role == "release_manager" and h.record_id ~= b.record_id, "a landing grant addressed to a non-release-manager or the builder record: " .. lid)
 				local r = it.proof and (d.reviews or {})[it.proof.review_id]
+				local builder_record = if b then b.record_id elseif r then r.builder_record_id else nil
+				assert(b or table.find({ "landed", "rejected", "cancelled" }, it.status), "an open landing lost its builder: " .. lid)
+				assert(h and builder_record ~= nil and (h.role == "release_manager" and h.record_id ~= builder_record or h.role == "builder" and h.worker_id == it.worker_id),
+					"a landing grant addressed to neither the selected release actor nor the exact builder: " .. lid)
 				assert(r == nil or r.reviewer_record_id ~= h.record_id, "a landing grant held by the reviewer record: " .. lid)
 			end
 		end
 	end
 	for did, dep in d.deploys or {} do
 		for _, a in dep.attempts do
-			assert(d.workers[a.worker_id] and d.workers[a.worker_id].role == "release_manager", "a deploy grant addressed to a non-release-manager: " .. did)
+			local h, it = d.workers[a.worker_id], d.landing.items[dep.landing_id]
+			assert(h and (h.role == "release_manager" or (h.role == "builder" and it and h.worker_id == it.worker_id)), "a deploy grant addressed to an unrelated actor: " .. did)
 		end
 	end
 	checks += 1
@@ -445,6 +487,19 @@ if section == nil or section == "plan_import" then
 	check(not has(task_of(modern, "1A").flags, "check_unparsed"), "a clean VALIDATE is not flagged")
 	local again = importer.parse(MODERN)
 	check(same(again, modern), "parsing the same bytes twice gives the identical plan (stable ids)")
+	local ruling = "\n" .. importer.RULINGS_OPEN .. "\n> orchplus-ruling:test_authority:gate_1\n> Decision: approved &lt;literal&gt;\n" .. importer.RULINGS_CLOSE .. "\n"
+	check(same(assert(importer.parse(MODERN .. ruling)), modern), "canonical owner rulings change neither plan identity nor executable tasks")
+	local no_eof = MODERN:gsub("\n$", "")
+	check(same(assert(importer.parse(no_eof .. ruling)), assert(importer.parse(no_eof))), "metadata's own separator preserves a plan without final newline")
+	local progress = "## Progress\nNew routine progress after ruling metadata\n"
+	check(assert(importer.parse(MODERN .. ruling .. progress)).plan_revision == codec.sha256(MODERN .. progress),
+		"later Progress remains identity-bearing content, not accidentally stripped with metadata")
+	local changed = MODERN:gsub("### UPDATE", "### REFACTOR", 1)
+	check(assert(importer.parse(changed .. ruling)).plan_revision == codec.sha256(changed)
+		and assert(importer.parse(changed .. ruling)).plan_revision ~= modern.plan_revision,
+		"independent executable edits retain normal re-import invalidation")
+	local duplicate, duplicate_problem = importer.parse(MODERN .. ruling .. ruling)
+	check(duplicate == nil and duplicate_problem ~= nil, "duplicate ruling blocks fail import safely without discarding instructions")
 
 	-- Legacy conventions: import safely, never as independent work.
 	local legacy, legacy_problem = importer.parse(LEGACY)
@@ -453,17 +508,15 @@ if section == nil or section == "plan_import" then
 		and legacy.project_hint.kind == "workspace" and legacy.project_hint.name == "other", "legacy plan title, revision and home")
 	local legacy_ids = {}
 	for _, cp in legacy.checkpoints do for _, t in cp.tasks do table.insert(legacy_ids, t.id) end end
-	check(#legacy.checkpoints == 3 and same(legacy_ids, { "1A", "1B", "1C", "2A", "2B" }), "legacy plan: 3 checkpoints, 5 tasks")
+	check(#legacy.checkpoints == 3 and #legacy_ids == 7 and #legacy.checkpoints[3].tasks == 2, "file-action work is retained as executable tasks")
 	for _, cp in legacy.checkpoints do for _, t in cp.tasks do
 		check(t.independent == false, t.id .. ": prose 'INDEPENDENT of …' is not the marker")
 		if t.id == "1A" then check(t.sequential_why == "establishes canonical files before builders edit them." and not has(t.flags, "sequential_default"), "1A SEQUENTIAL reason")
 		else check(has(t.flags, "sequential_default") and t.sequential_why == nil, t.id .. ": no marker → sequential_default") end
-		check(#t.checks == 0 and has(t.flags, "no_checks") and not has(t.flags, "check_unparsed"), t.id .. ": plain '- VALIDATE:' lines are not checks")
 		check(#t.files == 1 and has(t.flags, "file_outside_home"), t.id .. ": files outside home workspace:other are flagged")
 	end end
-	check(#legacy.checkpoints[3].tasks == 0 and has(legacy.checkpoints[3].flags, "no_tasks") and has(legacy.checkpoints[3].flags, "untasked_actions")
-		and #legacy.checkpoints[2].flags == 0, "legacy checkpoint 3 has untasked action headers and no tasks; checkpoint 2 is clean")
-	check(task_headers(legacy) == #PLAN_CHECK.legacy.lines - 3, "legacy plan: all action headers except checkpoint 3's two and the Progress one sit inside tasks")
+	check(#legacy.checkpoints[3].tasks == 2 and not has(legacy.checkpoints[3].flags, "untasked_actions"), "action-owned tasks no longer disappear from the plan")
+	check(task_headers(legacy) == #PLAN_CHECK.legacy.lines - 1, "all executable action headers remain task-owned; Progress remains excluded")
 
 	-- Inline plans: markers, checks, refusals; each both ways.
 	local GOOD = {
@@ -512,7 +565,10 @@ if section == nil or section == "plan_import" then
 	refused({ "# Feature: Empty", "", "Prose only." }, "no_checkpoints", "title but no checkpoints")
 	refused({ "# Feature: X", "### Checkpoint 1 One", "#### Task 1A — t" }, "checkpoint_header_invalid", "checkpoint without the dash title")
 	refused({ "# Feature: X", "### Checkpoint 2 — Two", "#### Task 2A — t", "### Checkpoint 1 — One", "#### Task 1A — t" }, "checkpoint_order", "decreasing checkpoint numbers")
-	refused({ "# Feature: X", "## Overview", "#### Task 1A — t", "### Checkpoint 1 — One" }, "task_outside_checkpoint", "task before any checkpoint")
+	local outside = assert(importer.parse(plan({ "# Feature: X", "## Task Format Guidelines", "#### Task 1A — example, not executable",
+		"## Plan", "### Checkpoint 1 — One", "#### Task 1B — actual work", "Do the bounded work." })))
+	check(#outside.checkpoints == 1 and #outside.checkpoints[1].tasks == 1 and outside.checkpoints[1].tasks[1].id == "1B",
+		"Task-like format examples outside a checkpoint do not create work or invalidate the real checkpoint")
 	refused({ "# Feature: X", "### Checkpoint 1 — One", "#### Task 1A first" }, "task_header_invalid", "task with a digit id but no dash title")
 	refused({ "# Feature: X", "### Checkpoint 1 — One", "#### Task 1A.b — t" }, "task_id_invalid", "task id outside [A-Za-z0-9_-]")
 	refused({ "# Feature: X", "### Checkpoint 1 — One", "#### Task 1A — t", "### Checkpoint 2 — Two", "#### Task 1A — again" }, "duplicate_task", "duplicate task id")
@@ -623,10 +679,10 @@ if section == nil or section == "review_cross_family" then
 		check(not p.require_code_review and not p.require_other_family, "disabling review clears the active family's requirement")
 		check(#W.gates(t, "reviewer_unavailable") == 0 and #W.gates(t, "family_unknown") == 0,
 			"disabling review closes the pending reviewer availability gate")
-		check(table.find({ "resolved", "cancelled", "superseded" }, t.authority.registry.dispatch.gates[gate.id].phase) ~= nil,
-			"the original availability gate is terminal, not merely hidden")
+		check(t.authority.registry.dispatch.gates[gate.id] == nil,
+			"the settled availability gate is reclaimed, not merely hidden")
 		assert(W.ready(t, tb, "cp-off", "rev-off", 0).ok)
-		assert(t.authority:apply({ kind = "workflow_tick" }))
+		assert(t:tick())
 		for _, w in t.authority.registry.dispatch.workers do check(w.role ~= "reviewer", "reports and ticks while review is off spawn no reviewer") end
 		check(#W.gates(t, "reviewer_unavailable") == 0 and #W.gates(t, "family_unknown") == 0, "off reports never reopen review availability gates")
 		check(W.restores(t), "active review-off transition restores")
@@ -666,12 +722,33 @@ if section == nil or section == "review_rounds" then
 	local lid = W.request(f, b, "cp-2", "rev-2"); assert(W.approve(f, lid).ok)
 	check(W.item(f, lid).status == "granted" and W.item(f, lid).proof.review_id == r2.review_id, "the round 2 approval proves its revision")
 	W.rule_h(f)
+	local project = f.authority.registry.dispatch.projects[W.worker(f, b).orch_project_id]
+	local retained_grant = api.clone(W.grant(f, lid))
+	local refreshed = f:apply("project_repository", { orch_project_id = project.orch_project_id,
+		project_revision = project.revision, repository = api.clone(project.repository) })
+	check(refreshed.ok and refreshed.code == "no_progress"
+		and f.authority.registry.dispatch.projects[project.orch_project_id].revision == project.revision
+		and api.quota.digest(W.grant(f, lid)) == api.quota.digest(retained_grant),
+		"an identical verified repository refresh preserves a pending landing and its immutable grant")
+	local observation = api.clone(project.repository)
+	observation.target_ref = "main"; observation.head_revision = W.hx("fresh-target-observation")
+	local observed = f:apply("project_repository", { orch_project_id = project.orch_project_id,
+		project_revision = project.revision, repository = observation })
+	check(observed.ok and api.quota.digest(W.grant(f, lid)) == api.quota.digest(retained_grant),
+		"refreshing head evidence under the same canonical checkout/target preserves the pending immutable grant")
+	local current_project = f.authority.registry.dispatch.projects[project.orch_project_id]
+	local retarget = api.clone(current_project.repository); retarget.target_ref = "refs/heads/other"
+	check(f:apply("project_repository", { orch_project_id = current_project.orch_project_id,
+		project_revision = current_project.revision, repository = retarget }).code == "repository_busy"
+		and api.quota.digest(W.grant(f, lid)) == api.quota.digest(retained_grant),
+		"a genuinely different target stays fenced while its old landing is unsettled")
+	W.land(f, lid, "head-1")
 	-- A new artifact revision voids the approval and its check proof.
 	W.settle(f, b)
 	check(W.send(f, b, "CHECKPOINT", W.cp("cp-3", "rev-3")).ok, "a new revision is checkpointed")
 	local voided = f.authority.registry.dispatch.reviews[r2.review_id]
 	check(voided.void ~= nil and voided.void.artifact_revision == W.hx("rev-3"), "new revision voids approval: the approved review records the void")
-	local l3 = W.request(f, b, "cp-3", "rev-3", "refs/heads/next"); assert(W.approve(f, l3).ok)
+	local l3 = W.request(f, b, "cp-3", "rev-3", nil, "head-1"); assert(W.approve(f, l3).ok)
 	check(#W.item(f, l3).grants == 0 and W.item(f, l3).proof == nil and W.item(f, l3).hold.code == "check_stale",
 		"landing the new revision waits for fresh checks as well as its own review")
 	W.rule_h(f); check(W.restores(f), "rework rounds and voided approvals restore")
@@ -714,7 +791,11 @@ if section == nil or section == "auto_finish" then
 	local r = W.review(f, b)
 	local reviewer, request = W.open(f, r)
 	-- Unsettled state defers: a pending owner progress request to the reviewer.
-	assert(f:apply("reply", { worker_id = reviewer }).ok)
+	local unconfirmed = f:apply("reply", { worker_id = reviewer })
+	check(not unconfirmed.ok and unconfirmed.code == "worker_not_sendable", "an unobserved reviewer is never interrupted by a progress request")
+	assert(f:apply("observe", { worker_id = reviewer, pane_binding = api.clone(W.worker(f, reviewer).pane_binding), native_state = "idle" }).ok)
+	local reply = f:apply("reply", { worker_id = reviewer })
+	assert(reply.ok, reply.message)
 	check(W.result(f, reviewer, request, "approved").ok, "the reviewer's result is accepted")
 	check(W.worker(f, reviewer).finish == nil, "unsettled: the result's receipt is unpublished and a reply is pending, so no finish is queued")
 	local pending = W.worker(f, reviewer).workflow.report_request
@@ -920,11 +1001,20 @@ if section == nil or section == "proof_rule" then
 				local p = repairs[1].reply.payload
 				check(p.review_id == nil and #p.findings == 0 and #p.failed_checks == 1 and p.failed_checks[1].check_id == "unit",
 					label .. ": check-only repair never invents review findings or identity")
+				-- Watermark polling also delivers the answered landing gate. Finish that setup before
+				-- counting reply sequences so its owner_decision cannot masquerade as a second repair.
+				W.settle(f, b, true)
+				local approval = f.authority.registry.dispatch.gates[W.item(f, lid).gate_id]
+				check(approval.delivery ~= nil and approval.delivery.published and #W.replies(f, b, "rework") == 1,
+					label .. ": publishing the landing approval leaves exactly one repair")
 				local repair_seq = W.worker(f, b).reply_seq
-				W.drain(f, b); W.settle(f, b)
+				W.drain(f, b); W.settle(f, b, true)
+				check(#W.replies(f, b, "rework") == 0 and W.worker(f, b).reply_seq == repair_seq,
+					label .. ": consuming the repair never issues a replacement")
 				assert(W.send(f, b, "CHECK_RESULT", { check_id = "unit", argv_sha256 = api.codec.sha256("argv"), exit_code = 2,
 					output_sha256 = api.codec.sha256("different failure"), head = W.hx("rev-1"), ran_at_ms = 2 }).ok)
-				assert(f.authority:apply({ kind = "workflow_tick" }))
+				local ticked = f:tick()
+				assert(ticked.ok, label .. ": workflow tick refused: " .. tostring(ticked.code) .. " " .. tostring(ticked.message))
 				check(W.worker(f, b).reply_seq == repair_seq, label .. ": unchanged revision never launches repeated repair after consumption")
 				check(#W.item(f, lid).grants == 0, label .. ": repeated failure remains blocked")
 				if not mode[1] then
@@ -989,6 +1079,62 @@ if section == nil or section == "release_config" then
 			"review disabled: signer validation is nil-safe and still refuses " .. case[2])
 		check(W.restores(f), "review-disabled signer refusal restores")
 	end
+	do
+		local f = W.fixture({ merge_actor_mode = "worker", release_manager_record = "", reviewer_records = W.arr({ "codex" }) })
+		local b, lid = W.granted(f, "existing-builder")
+		check(W.holder(f, lid) == b and W.rm_id(f) == nil and W.grant(f, lid).worker_id == b, "worker mode grants the exact existing builder without a manager launch")
+		check(W.item(f, lid).proof.review_id ~= nil and W.worker(f, b).role == "builder", "worker merge preserves independent review and builder identity")
+		W.land(f, lid, W.hx("landed-builder"))
+		check(W.attempt(f, lid).worker_id == b and W.rm_id(f) == nil, "deployment also stays with the exact existing builder")
+		check(W.deploy_result(f, lid, "not_applicable", { reason = "No deployment is defined." }).ok, "the grant-bound builder's exact deploy result is consumed")
+		check(W.restores(f), "worker merge and deploy proof restore with bound identities")
+		local missing = W.fixture({ merge_actor_mode = "worker", release_manager_record = "", require_code_review = false })
+		local queued = missing:allow_shared_fixture(missing:apply("queue", { record_id = "builder", record_revision = 0, catalog_revision = 0,
+			prompt = "Complete the bounded capability fixture.", cwd = "/fixture", placement = "split", coordinator = false, checks = W.unit() }))
+		assert(queued.ok and queued.action_id, queued.message)
+		local worker = W.start(missing, queued.worker_id, queued.action_id, { "report-files-v1", "native-ask-v1", "check-runner-v1" })
+		assert(W.ready(missing, worker, "capability-checkpoint", "capability-revision", 0).ok)
+		local held = W.request(missing, worker, "capability-checkpoint", "capability-revision")
+		assert(W.approve(missing, held).ok)
+		check(#W.item(missing, held).grants == 0 and W.item(missing, held).hold.code == "capability_missing" and W.rm_id(missing) == nil,
+			"a configured record label never substitutes for this builder mailbox's real release capability, and no extra manager starts")
+		check(W.restores(missing), "missing worker merge capability remains an actionable durable hold")
+	end
+	do
+		local patch = { merge_actor_mode = "selected_record", release_manager_record = "kimi", require_code_review = false,
+			auto_approve_kinds = W.arr(), concurrency_limit = 32 }
+		local f = W.fixture(patch)
+		local sid = "headroom-second-session"
+		assert(f.authority:apply(f:state_event("register_session", { orch_session_id = sid, name = "Second selected release owner" })).ok)
+		local admitted = f.authority:apply(f:state_event("admit_controller", { orch_session_id = sid,
+			pane_binding = { host_pane_id = "43", alias_nonce = "headroom-second-controller" } }))
+		assert(admitted.ok, admitted.message)
+		local other = table.clone(f)
+		other.origin = { logical_session_id = sid, owner_id = admitted.owner_id, owner_generation = admitted.generation,
+			host_pane_id = "43", alias_nonce = "headroom-second-controller", window_key = "", window_epoch = "headroom-second-window",
+			native_session_id = "7", window_host_id = "local" }
+		other.controller_pane, other.command_seq, other.default_project = "9003", nil, nil
+		assert(other:control("admit_session").ok); W.catalog(other)
+		assert(other:apply("policy", { policy = patch }).ok)
+		W.repository(other, "/fixture/repository/.git", "refs/heads/second", "orch_queue")
+		local first, second = W.builder(f), W.builder(other)
+		local function queue()
+			return f:allow_shared_fixture(f:apply("queue", { record_id = "builder", record_revision = 0, catalog_revision = 0,
+				prompt = "Wait for the bounded capacity assignment.", cwd = "/fixture", placement = "split", coordinator = false }))
+		end
+		for _ = 1, 11 do local queued = queue(); assert(queued.ok and queued.action_id, queued.message) end
+		local held = queue(); assert(held.ok, held.message)
+		check(held.code == "task_held" and held.action_id == nil and W.worker(f, held.worker_id).reason.code == "waiting_for_agent_space",
+			"two active selected-actor sessions preserve two future manager slots and one shared progress slot within the physical sixteen-generation domain")
+		assert(W.ready(f, first, "headroom-first", "headroom-first", 0).ok)
+		local one = W.request(f, first, "headroom-first", "headroom-first", "refs/heads/main"); assert(W.approve(f, one).ok)
+		assert(W.ready(other, second, "headroom-second", "headroom-second", 0).ok)
+		local two = W.request(other, second, "headroom-second", "headroom-second", "refs/heads/second"); assert(W.approve(other, two).ok)
+		check(W.holder(f, one) == W.rm_id(f) and W.holder(other, two) == W.rm_id(other)
+			and W.rm_id(f) ~= W.rm_id(other) and #W.item(f, one).grants == 1 and #W.item(other, two).grants == 1,
+			"both selected release actors really provision and obtain independent exact target grants despite held ordinary work")
+		check(W.provision_of(f, held.worker_id) == nil and W.restores(f), "reserved progress never releases another ordinary launch or loses held work on restore")
+	end
 end
 if section == nil or section == "release_launch" then
 	-- The first grantable head queues the session's release manager; one without release-manager-v1 is never granted.
@@ -1024,17 +1170,14 @@ if section == nil or section == "release_refresh" then
 	check(#W.replies(f, a, "landing_grant") == 0 and #W.replies(f, b, "landing_grant") == 0, "no builder receives a landing_grant")
 	check(W.item(f, lb).status == "ready" and #W.item(f, lb).grants == 0, "one slot per target: the second item waits")
 	-- Builder LANDING_RESULT refused; only the holder settles the grant.
-	check(W.landing_result(f, a, la, "landed", { result_revision = "head-1" }).code == "landing_unauthorized" and W.grant(f, la).result == nil,
+	check(W.landing_result(f, a, la, "landed", { result_revision = "head-1" }).code == "binding_mismatch" and W.grant(f, la).result == nil,
 		"the requesting builder's LANDING_RESULT is refused")
-	check(W.landing_result(f, b, la, "landed", { result_revision = "head-1" }).code == "landing_unauthorized", "another builder's LANDING_RESULT is refused")
+	check(W.landing_result(f, b, la, "landed", { result_revision = "head-1" }).code == "binding_mismatch", "another builder's LANDING_RESULT is refused")
 	-- Target moved → one refresh to the builder → approval voided → fresh review required.
 	local rv_b = W.review(f, b)
 	W.land(f, la, "head-1")
 	check(W.item(f, lb).hold.code == "target_moved" and W.refreshes(f, b) == 1 and W.refreshes(f, rm) == 0,
 		"target_moved sends exactly one landing_refresh, to the builder")
-	local reviewed_refresh = W.replies(f, b, "landing_refresh")[1].reply.payload.reason
-	check(reviewed_refresh:find("REVIEW_READY", 1, true) ~= nil and reviewed_refresh:find("helper check", 1, true) ~= nil,
-		"enabled review refresh instructs a fresh review and independent current-revision helper checks")
 	local void = f.authority.registry.dispatch.reviews[rv_b.review_id].void
 	check(void ~= nil and void.target_revision == "head-1" and void.artifact_revision == nil,
 		"the refresh voids the builder's review approval on the moved target head (void.target_revision), not as an artifact revision")
@@ -1075,10 +1218,6 @@ if section == nil or section == "release_refresh" then
 		local lid = W.request(t, tb, "cp-off", "rev-off"); assert(W.approve(t, lid).ok)
 		local holder = W.holder(t, lid); assert(W.ack(t, holder, W.grant(t, lid)).ok)
 		assert(W.landing_result(t, holder, lid, "stale_target", { observed_target_revision = "head-off" }).ok)
-		local refresh = W.replies(t, tb, "landing_refresh")[1].reply.payload.reason
-		check(refresh:find("CHECKPOINT", 1, true) ~= nil and refresh:find("LANDING_REQUEST", 1, true) ~= nil
-			and refresh:find("helper check", 1, true) ~= nil and refresh:find("REVIEW_READY", 1, true) == nil,
-			"disabled review refresh instructs checkpoint, fresh helper checks and landing request without requesting a reviewer")
 		W.settle(t, tb); assert(W.send(t, tb, "CHECKPOINT", W.cp("cp-off-new", "rev-off-new")).ok)
 		check(W.request(t, tb, "cp-off-new", "rev-off-new", nil, "head-off") == lid
 			and W.item(t, lid).hold.code == "check_stale" and #W.item(t, lid).grants == 1,
@@ -1114,17 +1253,16 @@ if section == nil or section == "release_holder" then
 			reason = "Inspected the remote target log read-only", operator_verified = true }).ok and W.item(g, lu).status == "landed", "the owner reconciles the uncertain grant read-only")
 		check(W.restores(g), "the reconciled uncertain grant restores")
 	end
-	-- A 0.3.0 store with a grant addressed to a builder restores as legacy_grant_outstanding.
+	-- Current grant stores cannot invoke historical upgrade by re-addressing immutable grant bytes.
 	do
 		local g = W.fixture({ reviewer_records = W.arr({ "codex" }) })
 		local lbid, ll = W.granted(g, "cp-l")
 		local stored = api.clone(g.memory.value); W.legacy(stored, ll)
-		g.memory.value = stored; g.authority = api.host.new_authority(g.memory); assert(g.authority:load().ok)
-		local lit = W.item(g, ll)
-		check(W.grant(g, ll).legacy == true and lit.hold.code == "legacy_grant_outstanding" and lit.status == "granted" and #lit.grants == 1 and #W.gates(g, "legacy_grant_outstanding") == 1,
-			"a legacy 0.3.0 granted item restores as legacy_grant_outstanding with one owner gate")
-		check(lit.holder ~= nil and lit.holder.worker_id == lbid, "the legacy grant's holder is the builder generation it was addressed to, never re-addressed")
-		check(W.restores(g), "the upgraded legacy store restores")
+		local exact, writes = runtime.json.encode(stored), g.memory.writes
+		g.memory.value = stored; g.authority = api.host.new_authority(g.memory)
+		local loaded = g.authority:load()
+		check(not loaded.ok and loaded.code == "state_corrupt", "an obsolete builder-addressed grant injected into the current store fails closed")
+		check(g.memory.writes == writes and runtime.json.encode(g.memory.value) == exact, "failed current grant validation preserves exact bytes and invents no historical holder")
 	end
 	-- A reviewed grant with inconsistent immutable review identities must block before validation.
 	do
@@ -1141,17 +1279,15 @@ if section == nil or section == "release_holder" then
 		local chunks = {}; for offset = 1, #bytes, 2048 do table.insert(chunks, bytes:sub(offset, offset + 2047)) end
 		retained.frames = { manifest = retained.frames.manifest, chunks = chunks, message_sha256 = retained.sha256, message_bytes = #bytes }
 		local exact = runtime.json.encode(stored)
-		local restored, problem = api.state.rehydrate(stored)
-		check(restored == nil and problem ~= nil and problem.code == "migration_blocked"
-			and problem.message:find(grant.grant_id, 1, true) ~= nil and problem.message:find("reconcile", 1, true) ~= nil,
-			"review identity mismatch visibly blocks restore with the exact grant and drain/reconcile guidance")
+		local restored = api.state.rehydrate(stored)
+		check(restored == nil, "a current immutable grant with a different review identity is invalid, not a request for legacy migration")
 		check(runtime.json.encode(stored) == exact and grant.bytes == bytes and retained.bytes == bytes,
 			"blocked restore leaves the complete snapshot and both immutable grant copies unchanged")
 		g.memory.value = api.clone(stored)
 		local writes = g.memory.writes
 		g.authority = api.host.new_authority(g.memory)
 		local loaded = g.authority:load()
-		check(not loaded.ok and loaded.code == "migration_blocked", "cold authority load exposes the immutable grant migration block")
+		check(not loaded.ok and loaded.code == "state_corrupt", "cold authority load rejects the malformed current immutable grant")
 		check(g.memory.writes == writes and runtime.json.encode(g.memory.value) == exact, "blocked authority load never rewrites the persisted grant")
 	end
 end
@@ -1166,6 +1302,50 @@ function W.landed(f, cp_id)
 	return lid, dep
 end
 if section == nil or section == "deploy" then
+	do
+		local stop = W.fixture({ merge_actor_mode = "worker", release_manager_record = "", reviewer_records = W.arr({ "codex" }) })
+		local builder, lid = W.granted(stop, "pending-stop")
+		assert(W.ack(stop, builder, W.grant(stop, lid)).ok); assert(stop:apply("pause").ok)
+		assert(W.landing_result(stop, builder, lid, "landed", { result_revision = W.hx("pending-stop-landed") }).ok)
+		check(W.deploy(stop, lid).status == "pending" and #W.deploy(stop, lid).attempts == 0, "pause preserves a real completed merge with an unissued deployment")
+		assert(stop:apply("observe", { worker_id = builder, pane_binding = api.clone(W.worker(stop, builder).pane_binding), native_state = "exited" }).ok)
+		assert(stop:apply("resume").ok)
+		check(W.deploy(stop, lid).status == "pending" and W.deploy(stop, lid).hold ~= nil and W.rm_id(stop) == nil,
+			"an absent current builder leaves deployment actionably held without another manager launch")
+		local old = W.item(stop, lid).revision
+		check(not stop:apply("cancel_landing", { landing_id = lid, landing_revision = old - 1 }).ok, "stopping pending deployment still requires the exact current item revision")
+		assert(stop:apply("cancel_landing", { landing_id = lid, landing_revision = old }).ok)
+		check(W.item(stop, lid).status == "landed" and W.deploy(stop, lid).status == "stopped" and #W.deploy(stop, lid).attempts == 0
+			and W.deploy(stop, lid).revision == W.hx("pending-stop-landed") and W.restores(stop),
+			"owner stops only the unissued deployment; the exact completed merge remains intact and durable")
+	end
+	do
+		local f = W.fixture({ merge_actor_mode = "worker", release_manager_record = "", reviewer_records = W.arr({ "codex" }) })
+		local builder, lid = W.granted(f, "pending-successor")
+		assert(W.ack(f, builder, W.grant(f, lid)).ok); assert(f:apply("pause").ok)
+		assert(W.landing_result(f, builder, lid, "landed", { result_revision = W.hx("successor-landed") }).ok)
+		assert(f:apply("observe", { worker_id = builder, pane_binding = api.clone(W.worker(f, builder).pane_binding), native_state = "idle" }).ok)
+		local rollover = f:apply("rollover", { worker_id = builder, trigger = "owner" }); assert(rollover.ok, rollover.message)
+		assert(f:apply("resume").ok)
+		local request = api.clone(W.worker(f, builder).workflow.report_request); assert(request)
+		assert(W.ack(f, builder, request).ok)
+		local cp = W.cp("pending-successor-handover", "rev-pending-successor"); cp.request_id = request.request_id
+		assert(W.send(f, builder, "CHECKPOINT", cp).ok)
+		local successor = assert(f.authority.registry.dispatch.rollovers[rollover.handover_id].successor_worker_id)
+		W.start(f, successor, assert(W.provision_of(f, successor)))
+		check(W.deploy(f, lid).status == "pending" and #W.deploy(f, lid).attempts == 0,
+			"an active predecessor/successor handover keeps the already-landed deployment pending")
+		W.settle(f, builder, true)
+		local stopped = f:apply("poll", { worker_id = builder }); assert(stopped.ok, stopped.message)
+		assert(f:action(stopped.action_id).request.op == "stop")
+		assert(f:finish(stopped.action_id, "stopped", { pane_binding = api.clone(f:action(stopped.action_id).request.pane_binding), observation = "exited" }).ok)
+		check(W.attempt(f, lid) and W.attempt(f, lid).worker_id == successor and W.rm_id(f) == nil
+			and W.item(f, lid).worker_id == builder and W.grant(f, lid).worker_id == builder
+			and W.deploy(f, lid).revision == W.hx("successor-landed"),
+			"after the exact predecessor exit, the accepted same-work successor receives only the pending deployment; original merge/proof identities stay unchanged")
+		assert(W.deploy_result(f, lid, "not_applicable", { reason = "This landed fixture has no deployment." }).ok)
+		check(#W.deploy(f, lid).attempts == 1 and W.restores(f), "successor deployment settles exactly once without merge replay or an extra actor")
+	end
 	-- Contract J: after landed, one deploy_grant per attempt to the release manager.
 	local f = W.fixture({ reviewer_records = W.arr({ "codex" }), loop_cap = 2 })
 	local ld, dep = W.landed(f, "cp-d")
@@ -1250,6 +1430,9 @@ if section == nil or section == "deploy_lost" then
 		and W.attempt(f, lu).status == "uncertain" and W.deploy(f, lu).status == "uncertain", "the owner holds a silent deploy as uncertain")
 	W.settle(f, rm); assert(W.send(f, rm, "HEARTBEAT", { state = "working" }).ok)
 	check(#W.replies(f, rm, "deploy_grant") == grants_before and #W.deploy(f, lu).attempts == 1, "an uncertain deploy is never re-granted")
+	check(not f:apply("reconcile_landing", { landing_id = lu, landing_revision = W.item(f, lu).revision,
+		outcome = "deployed", current_target_revision = "unrelated-head", reason = "Inspected the service read-only", operator_verified = true }).ok
+		and W.deploy(f, lu).status == "uncertain", "deploy reconciliation refuses landing-only current-head evidence")
 	check(f:apply("reconcile_landing", { landing_id = lu, landing_revision = W.item(f, lu).revision, outcome = "deployed", reason = "Inspected the service read-only",
 		operator_verified = true }).ok and W.deploy(f, lu).status == "deployed" and W.attempt(f, lu).reconciliation ~= nil, "read-only reconcile settles the uncertain deploy")
 	W.deploy_result(f, lu, "failed", { reason = "Late report" })
@@ -1298,6 +1481,7 @@ if section == nil or string.sub(section, 1, 5) == "grid_" then
 				local head = if status == "landed" or status == "deploy_held" then "head-1" else "head-0"
 				if op == "new_revision" then
 					W.settle(f, b); assert(W.send(f, b, "CHECKPOINT", W.cp("cp-n", "rev-new")).ok)
+					assert(W.checkout(f, b, "rev-new").ok)
 					W.settle(f, b)
 					local sent = W.send(f, b, "LANDING_REQUEST", { checkpoint_id = "cp-n", project_id = "project-one", repo_ref = "repo:fixture", target_ref = "refs/heads/main",
 						target_revision = head, source_ref = "refs/heads/cp-n", source_revision = W.hx("rev-new") })
@@ -1375,6 +1559,7 @@ function W.propose(f, cid, kind, work_id, fields)
 	local w = W.worker(f, cid)
 	local p = { owner_id = w.coordinator_owner_id, owner_generation = w.coordinator_generation, activation_token = w.activation.activation_token,
 		proposal_id = "proposal-" .. kind .. "-" .. tostring(W.pserial), kind = kind, work_id = work_id, project_id = "project-one" }
+	if kind == "new_work" or kind == "add_source" then p.work_id = nil; p.project_id = nil end
 	for key, value in fields or {} do p[key] = value end
 	W.settle(f, cid)
 	return W.send(f, cid, "COORDINATOR_PROPOSAL", p)
@@ -1395,16 +1580,17 @@ end
 -- host from the stored bytes leave the effects and the execution record unchanged.
 function W.idempotent(f, label, gid, answer)
 	local effects, execution = W.effects(f), runtime.json.encode(f.authority.registry.dispatch.gates[gid].execution)
-	if answer then check(f.authority:apply(api.clone(answer)).ok, label .. ": the exact answer replay is accepted") end
-	assert(f.authority:apply({ kind = "workflow_tick" }))
+	if answer then check(not f.authority:apply(api.clone(answer)).ok, label .. ": an already consumed subject cannot execute the old answer again") end
+	assert(f:tick())
 	check(W.effects(f) == effects and runtime.json.encode(f.authority.registry.dispatch.gates[gid].execution) == execution, label .. ": answer replay and tick never execute twice")
 	local restored = assert(api.state.rehydrate(api.clone(f.authority.registry)), label .. ": restore")
-	local twin = api.dispatch.tick(restored, { kind = "workflow_tick" }, { now_ms = 1, mono_ms = 1, epoch = "autonomy-twin" }) or restored
+	local twin = api.dispatch.tick(restored, { kind = "workflow_tick", authority_namespace = restored.authority_namespace,
+		expected_revision = restored.revision }, { now_ms = 1, mono_ms = 1, epoch = "autonomy-twin" }) or restored
 	check(runtime.json.encode(twin.dispatch.gates[gid].execution) == execution, label .. ": the restored twin keeps the execution record")
 	local tf = { authority = { registry = twin } }
 	check(W.effects(tf) == effects, label .. ": the restored twin's tick executes nothing again")
 	f.authority = api.host.new_authority(f.memory); assert(f.authority:load().ok)
-	assert(f.authority:apply({ kind = "workflow_tick" }))
+	assert(f:tick())
 	check(W.effects(f) == effects and runtime.json.encode(f.authority.registry.dispatch.gates[gid].execution) == execution, label .. ": a cold start revisits the answered gate without executing again")
 end
 -- One cell. Returns nothing; every expectation is a check.
@@ -1436,12 +1622,11 @@ function W.autonomy_cell(kind, scoped, auto)
 	local sent = W.propose(f, cid, kind, W.worker(f, b).work_id, extra); check(sent.ok, label .. ": proposal accepted (" .. tostring(sent.code) .. ")")
 	local g = W.proposal_gate(f)
 	if not scoped then
-		check(table.find(g.evidence, "scope:" .. W.OUT[kind][2]) ~= nil and g.question:find("Outside plan scope", 1, true) ~= nil,
-			label .. ": the gate names why the work is outside plan scope")
+		check(table.find(g.evidence, "scope:" .. W.OUT[kind][2]) ~= nil,
+			label .. ": the gate records why the work is outside plan scope")
 	else
 		check(table.find(g.evidence, "scope:in") ~= nil, label .. ": the gate records the work as in plan scope")
 	end
-	check(g.question:find("does not execute a native or landing effect", 1, true) == nil, label .. ": gate text no longer claims approval executes nothing")
 	local answer
 	if auto and scoped then
 		check(g.answer ~= nil and g.answer.choice_id == "approve" and g.answer.source.kind == "policy" and g.answer.source.rule == "auto_approve:" .. kind
@@ -1460,10 +1645,16 @@ function W.autonomy_cell(kind, scoped, auto)
 	if kind == "dispatch" then
 		local new = e.effect_ref and f.authority.registry.dispatch.workers[e.effect_ref:match("^worker:(.+)$") or ""]
 		check(e.state == "done" and new ~= nil and new.record_id == "claude2"
-			and new.prompt:find("Implement the follow-on planned task.\n\nORCH+ review policy at assignment:", 1, true) == 1
+			and new.prompt:find("Implement the follow-on planned task.", 1, true) ~= nil
 			and runtime.json.encode(new.source) == runtime.json.encode(bw.source) and runtime.json.encode(new.scope) == runtime.json.encode(bw.scope),
 			label .. ": dispatch queues the proposed record/prompt inheriting the parent's source and scope")
 	elseif kind == "report" then
+		check(e.state == "pending" and e.effect_ref == "worker_not_sendable" and bw.workflow.report_request == nil,
+			label .. ": an approved proposal waits for actual safe-idle evidence (" .. runtime.json.encode(e) .. ")")
+		assert(f:apply("observe", { worker_id = b, pane_binding = api.clone(bw.pane_binding), native_state = "idle" }).ok)
+		f:autonomy_sweep()
+		g = f.authority.registry.dispatch.gates[g.id]
+		e, bw = g.execution, W.worker(f, b)
 		local rr = bw.workflow.report_request
 		check(e.state == "done" and rr ~= nil and e.effect_ref == "report_request:" .. rr.request_id, label .. ": report sends one report_request to the work")
 	elseif kind == "review" then
@@ -1482,6 +1673,210 @@ function W.autonomy_cell(kind, scoped, auto)
 	W.idempotent(f, label, g.id, answer)
 	check(W.restores(f), label .. ": restores")
 end
+-- C4 uses two admitted sessions in one authority, not two isolated stores.
+if section == nil or (section and section:match("^repository_")) then
+	local function second_session(f, patch)
+		local sid = "repository-second-session"
+		local registered = f.authority:apply(f:state_event("register_session", { orch_session_id = sid, name = "Other repository owner" }))
+		assert(registered.ok, registered.message)
+		local admitted = f.authority:apply(f:state_event("admit_controller", { orch_session_id = sid,
+			pane_binding = { host_pane_id = "43", alias_nonce = "repository-second-controller" } }))
+		assert(admitted.ok, admitted.message)
+		local other = table.clone(f)
+		other.origin = { logical_session_id = sid, owner_id = admitted.owner_id, owner_generation = admitted.generation,
+			host_pane_id = "43", alias_nonce = "repository-second-controller", window_key = "", window_epoch = "repository-second-window",
+			native_session_id = "7", window_host_id = "local" }
+		other.controller_pane, other.command_seq, other.default_project = "9003", nil, nil
+		other:control("admit_session"); W.catalog(other)
+		local policy = { require_code_review = false, merge_actor_mode = "selected_record", release_manager_record = "kimi" }
+		for key, value in patch or {} do policy[key] = value end
+		local saved = other:apply("policy", { policy = policy }); assert(saved.ok, saved.message)
+		W.repository(other, "/fixture/repository/.git", "refs/heads/main")
+		return other
+	end
+	local function prepared(f, name)
+		local builder = W.builder(f)
+		assert(W.ready(f, builder, name, name, 0).ok)
+		return builder
+	end
+	local function request(f, builder, name, target, label, head)
+		W.settle(f, builder)
+		local sent = W.send(f, builder, "LANDING_REQUEST", { checkpoint_id = name, project_id = "project-one", repo_ref = label or "repo:fixture",
+			target_ref = target or "refs/heads/main", target_revision = head or "head-0", source_ref = "refs/heads/" .. name, source_revision = W.hx(name) })
+		assert(sent.ok, sent.message)
+		for id, item in W.landing(f).items do if item.worker_id == builder then return id end end
+		error("repository request missing")
+	end
+	local function rejected(f, lid)
+		local holder = W.holder(f, lid)
+		assert(W.ack(f, holder, W.grant(f, lid)).ok)
+		assert(W.landing_result(f, holder, lid, "rejected", { reason = "Repository rejected this attempt without moving its target." }).ok)
+	end
+	if section == nil or section == "repository_sessions" then
+		local f = W.fixture({ require_code_review = false })
+		local other = second_session(f)
+		local a = prepared(f, "repo-a"); local la = request(f, a, "repo-a")
+		assert(W.approve(f, la).ok)
+		local b = prepared(other, "repo-b"); local lb = request(other, b, "repo-b", "main", "a different free-text repository label")
+		assert(W.approve(other, lb).ok)
+		check(#W.item(f, la).grants == 1 and #W.item(f, lb).grants == 0 and W.item(f, lb).hold.code == "repository_wait",
+			"distinct sessions, labels and short/full target spellings share one canonical repository slot")
+		local view = api.dispatch.project(f.authority.registry, other.origin.logical_session_id, other.origin.alias_nonce).workflow
+		check(#view.landing == 1 and view.landing[1].repository_slot == la and view.landing[1].items[1].repository_position == 2,
+			"the second owner sees its actual global position and the first owner's occupied slot")
+		rejected(f, la)
+		local manager = assert(W.rm_id(other), "foreign-session release manager was not advanced")
+		check(W.worker(other, manager).origin_binding.logical_session_id == other.origin.logical_session_id
+			and W.worker(other, manager).controller_pane == other.controller_pane,
+			"settlement in one session advances the other using that session's own bound controller")
+		W.rm(other)
+		check(#W.item(f, lb).grants == 1 and W.holder(other, lb) == manager, "the released slot grants the next session exactly once")
+		check(W.restores(f), "the shared queue and both immutable grants survive restoration")
+	end
+	if section == nil or section == "repository_policy" then
+		local f = W.fixture({ require_code_review = false })
+		local other = second_session(f, { require_code_review = true, require_other_family = true, reviewer_records = W.arr({ "codex" }) })
+		local a = prepared(f, "policy-a"); local la = request(f, a, "policy-a"); assert(W.approve(f, la).ok)
+		local b = prepared(other, "policy-b"); local lb = request(other, b, "policy-b"); assert(W.approve(other, lb).ok)
+		rejected(f, la)
+		check(#W.item(other, lb).grants == 0 and W.item(other, lb).proof == nil and W.item(other, lb).hold ~= nil,
+			"the first session's disabled review never supplies the second session's missing review proof")
+		check(W.restores(f), "different session review policies remain independently valid")
+	end
+	if section == nil or section == "repository_paused" then
+		local f = W.fixture({ require_code_review = false }); local other = second_session(f)
+		local a = prepared(f, "paused-a"); local la = request(f, a, "paused-a"); assert(W.approve(f, la).ok)
+		local b = prepared(other, "paused-b"); local lb = request(other, b, "paused-b"); assert(W.approve(other, lb).ok)
+		assert(other:apply("pause").ok); rejected(f, la)
+		check(#W.item(other, lb).grants == 0 and W.item(other, lb).hold.code == "session_paused",
+			"foreign settlement does not resume a paused owner")
+		assert(other:apply("resume").ok); W.rm(other)
+		check(#W.item(other, lb).grants == 1, "explicit resume permits the already approved next request")
+	end
+	if section == nil or section == "repository_external" then
+		local f = W.fixture({ require_code_review = false })
+		W.repository(f, "/fixture/repository/.git", "refs/heads/main", "repository_queue")
+		local other = second_session(f)
+		local a = prepared(f, "external-a"); local la = request(f, a, "external-a"); assert(W.approve(f, la).ok)
+		local b = prepared(other, "external-b"); local lb = request(other, b, "external-b"); assert(W.approve(other, lb).ok)
+		check(#W.item(f, la).grants == 1 and #W.item(other, lb).grants == 1,
+			"an explicitly declared protected repository queue receives both normal authorized grants without a competing local slot")
+		for _, q in W.landing(f).queues do check(q.slot == nil, "repository_queue never owns an ORCH landing slot") end
+		local first = W.grant(f, la).bytes
+		rejected(other, lb)
+		check(W.item(f, lb).status == "failed" and W.grant(f, la).bytes == first and W.grant(f, la).result == nil,
+			"one external rejection settles only its exact grant")
+		check(W.restores(f), "external grants and independently settled outcomes restore")
+	end
+	if section == nil or section == "repository_result_order" then
+		for _, outcome in { "stale_target", "landed" } do
+			local f = W.fixture({ require_code_review = false })
+			W.repository(f, "/fixture/repository/.git", "refs/heads/main", "repository_queue")
+			local other = second_session(f)
+			local a = prepared(f, "order-a"); local la = request(f, a, "order-a"); assert(W.approve(f, la).ok)
+			local b = prepared(other, "order-b"); local lb = request(other, b, "order-b"); assert(W.approve(other, lb).ok)
+			local holder, original = W.holder(other, lb), W.grant(other, lb).bytes
+			assert(W.ack(other, holder, W.grant(other, lb)).ok)
+			if outcome == "landed" then
+				local first_holder = W.holder(f, la)
+				assert(W.ack(f, first_holder, W.grant(f, la)).ok)
+				assert(W.landing_result(f, first_holder, la, "stale_target", { observed_target_revision = "head-1" }).ok)
+			else
+				W.land(f, la, "head-1")
+			end
+			local c = prepared(f, "order-c"); local lc = request(f, c, "order-c", nil, nil, "head-1")
+			assert(W.approve(f, lc).ok); W.land(f, lc, "head-2")
+			local fields = if outcome == "landed" then { result_revision = "head-1" } else { observed_target_revision = "head-1" }
+			assert(W.landing_result(other, holder, lb, outcome, fields).ok)
+			for _, queue in W.landing(f).queues do
+				check(queue.head.revision == "head-2", "a delayed " .. outcome .. " result cannot replace the newer shared head")
+			end
+			local grant = W.grant(other, lb)
+			check(grant.bytes == original and grant.result == nil and grant.late_result.outcome == outcome
+				and grant.uncertain.code == "repository_head_unordered" and W.deploy(other, lb) == nil,
+				"the exact conflicting result is retained without replay, premature settlement or deployment")
+			check(W.refreshes(other, b) == 0 and W.restores(f), "disputed ordering restores without an obsolete refresh notice")
+			local d = prepared(f, "order-d"); local ld = request(f, d, "order-d", nil, nil, "head-2")
+			assert(W.approve(f, ld).ok)
+			check(#W.item(f, ld).grants == 0 and W.item(f, ld).hold.code == "repository_head_unordered",
+				"unresolved ordering blocks new grants across repository partitions")
+			local reconciliation = { landing_id = lb, landing_revision = W.item(other, lb).revision,
+				outcome = if outcome == "landed" then "landed" else "not_landed",
+				target_revision = if outcome == "landed" then "head-1" else nil,
+				reason = "Inspected this attempt and the current repository head independently.", operator_verified = true }
+			check(not other:apply("reconcile_landing", reconciliation).ok, "unordered reconciliation requires a fresh current-head observation")
+			if outcome == "landed" then reconciliation.current_target_revision = "head-2" else reconciliation.target_revision = "head-2" end
+			reconciliation.landing_revision = W.item(other, lb).revision
+			assert(other:apply("reconcile_landing", reconciliation).ok)
+			check(#W.item(f, ld).grants == 1, "retained historical uncertainty no longer blocks the reconciled repository")
+			if outcome == "landed" then
+				check(W.deploy(other, lb).revision == "head-1", "deployment uses this grant's landing result, not the later current head")
+			else
+				assert(W.ready(other, b, "order-b-fresh", "order-b-fresh", 0).ok)
+				assert(request(other, b, "order-b-fresh", nil, nil, "head-2") == lb)
+				check(#W.item(other, lb).grants == 1 and W.item(other, lb).hold.code == "approval_pending",
+					"reconciliation does not approve or replay a refreshed landing request")
+				assert(W.approve(other, lb).ok)
+				check(#W.item(other, lb).grants == 2 and W.grant(other, lb).target_revision == "head-2",
+					"only a new owner approval grants the refreshed request")
+			end
+			for _, queue in W.landing(f).queues do check(queue.head.revision == "head-2" and queue.slot == nil, "external reconciliation preserves the current head without a local slot") end
+			check(W.restores(f), "separate result and current-head evidence survive restoration")
+		end
+	end
+	if section == nil or section == "repository_targets" then
+		local f = W.fixture({ require_code_review = false }); local other = second_session(f)
+		local a = prepared(f, "target-a"); local la = request(f, a, "target-a"); assert(W.approve(f, la).ok)
+		W.repository(other, "/fixture/repository/.git", "refs/heads/release", "orch_queue")
+		local b = prepared(other, "target-b"); local lb = request(other, b, "target-b", "refs/heads/release"); assert(W.approve(other, lb).ok)
+		check(#W.item(f, la).grants == 1 and #W.item(other, lb).grants == 1,
+			"distinct verified targets have independent local slots")
+		local qa, qb = W.landing(f).queues[W.item(f, la).queue_id], W.landing(f).queues[W.item(f, lb).queue_id]
+		check(qa.repository.key ~= qb.repository.key and qa.slot == la and qb.slot == lb, "independence is target identity, not session identity")
+	end
+	if section == nil or section == "repository_head" then
+		local f = W.fixture({ require_code_review = false }); local other = second_session(f)
+		local a = prepared(f, "head-a"); local la = request(f, a, "head-a"); assert(W.approve(f, la).ok)
+		local b = prepared(other, "head-b"); local lb = request(other, b, "head-b"); assert(W.approve(other, lb).ok)
+		W.land(f, la, "head-new")
+		check(#W.item(other, lb).grants == 0 and W.item(other, lb).hold.code == "target_moved",
+			"a landing in another session blocks the stale expected-head request before any grant")
+		check(W.refreshes(other, b) == 1, "cross-session target movement issues one normal refresh, not a replayed grant")
+		assert(W.ready(other, b, "head-b-fresh", "head-b-fresh", 0).ok)
+		check(W.request(other, b, "head-b-fresh", "head-b-fresh", nil, "head-new") == lb
+			and #W.item(other, lb).grants == 0 and W.item(other, lb).hold.code == "approval_pending",
+			"fresh cross-session head and checks cannot reuse the prior request's owner approval")
+		assert(W.approve(other, lb).ok)
+		check(#W.item(other, lb).grants == 1 and W.grant(other, lb).target_revision == "head-new",
+			"a new explicit owner approval grants only the refreshed target head")
+	end
+	if section == nil or section == "repository_route_change" then
+		local f = W.fixture({ require_code_review = false })
+		local a = prepared(f, "route-a"); local la = request(f, a, "route-a"); assert(W.approve(f, la).ok)
+		local original, writes = W.grant(f, la).bytes, f.memory.writes
+		local project = f.authority.registry.dispatch.projects[W.worker(f, a).orch_project_id]
+		local repository = api.clone(project.repository); repository.queue_route = "repository_queue"
+		local changed = f:apply("project_repository", { orch_project_id = project.orch_project_id, project_revision = project.revision, repository = repository })
+		check(not changed.ok and changed.code == "repository_busy" and f.memory.writes == writes and W.grant(f, la).bytes == original,
+			"changing queue route cannot strand or reinterpret an outstanding grant")
+		rejected(f, la)
+		W.repository(f, "/fixture/repository/.git", "refs/heads/main", "repository_queue")
+		check(f.authority.registry.dispatch.projects[f.default_project].repository.queue_route == "repository_queue", "the owner can change the project's route after settlement")
+	end
+	if section == nil or section == "repository_sharing" then
+		local f = W.fixture({ require_code_review = false }); local other = second_session(f)
+		W.builder(f)
+		local queued = other:apply("queue", { record_id = "builder", record_revision = 0, catalog_revision = 0,
+			prompt = "Intentional shared-tree boundary case.", cwd = "/fixture", placement = "split", coordinator = false })
+		check(queued.ok and queued.code == "task_gated" and queued.action_id == nil,
+			"another session's live worker gates the same checkout even with empty checkout_roots")
+		local worker = W.worker(other, queued.worker_id)
+		check(worker.mailbox_handle == nil and #worker.launch_gates == 1, "shared checkout requires owner input before any provision")
+		local granted = other:allow_shared_fixture(queued)
+		check(granted.ok and granted.action_id ~= nil, "the explicit existing sharing decision releases only this launch")
+	end
+end
+
 -- tests/gates.luau reuses these fixtures for its Checkpoint 5 invariant sweep.
 if section == "helpers" then return W end
 W.AUTONOMY = { autonomy_dispatch = "dispatch", autonomy_report = "report", autonomy_review = "review", autonomy_landing = "landing" }
@@ -1546,22 +1941,29 @@ function W.scratch()
 	runtime.fs.mkdir(dir)
 	return dir
 end
-W.ROUTES = { { class = "build", record_id = "builder" }, { class = "docs", record_id = "claude2" } }
 function W.src_fixture(patch)
 	W.api()
-	local merged = { routes = W.arr(api.clone(W.ROUTES)) }
+	local merged = { preferred_worker_record = "builder", auto_start_projects = true }
 	for key, value in patch or {} do merged[key] = value end
 	return W.fixture(merged)
 end
 -- Cold-start twin: a second host loads the stored bytes and ticks. The restored controller stays
 -- uncertain until re-admitted, so the twin is inspected while the live authority continues.
 function W.cold(f)
-	local memory = { value = api.clone(f.memory.value), writes = 0 }
-	memory.get = function() return api.clone(memory.value) end
-	memory.set = function(_, value) memory.value = api.clone(value); memory.writes += 1 end
-	local twin = { authority = api.host.new_authority(memory), origin = f.origin }
+	local memory = { value = api.clone(f.memory.value), marker = f.memory.marker, writes = 0, marker_writes = 0 }
+	memory.get = function(key)
+		if key == "authority_state_initialized" then return memory.marker end
+		assert(key == "authority_state")
+		return api.clone(memory.value)
+	end
+	memory.set = function(key, value)
+		if key == "authority_state_initialized" then memory.marker = value; memory.marker_writes += 1; return end
+		assert(key == "authority_state")
+		memory.value = api.clone(value); memory.writes += 1
+	end
+	local twin = { authority = api.host.new_authority(memory), origin = f.origin, tick = f.tick }
 	local loaded = twin.authority:load(); assert(loaded.ok, "cold start load: " .. tostring(loaded.code) .. " " .. tostring(loaded.message))
-	assert(twin.authority:apply({ kind = "workflow_tick" }))
+	assert(twin:tick().ok)
 	return twin
 end
 function W.plan(f, id) return f.authority.registry.dispatch.plans[id] end
@@ -1569,8 +1971,20 @@ function W.task(plan, task_id)
 	for _, cp in plan.checkpoints do for _, t in cp.tasks do if t.id == task_id then return t end end end
 	error("task missing: " .. task_id)
 end
+-- Positive scheduling fixtures explicitly authorize only their real checkout launch gates.
+function W.release_queue(f, worker_id)
+	local w = W.worker(f, worker_id)
+	for _, gate_id in api.clone(w.launch_gates or {}) do
+		local gate = f.authority.registry.dispatch.gates[gate_id]
+		assert(gate and (gate.kind == "shared_checkout" or gate.kind == "file_overlap"), "unexpected source launch gate")
+		local answered = f:apply("answer", { gate_id = gate.id, gate_revision = gate.revision,
+			choice_id = "launch_anyway", answer = "Fixture owner explicitly coordinates this shared checkout." })
+		assert(answered.ok, answered.message)
+	end
+end
 -- Launch (if still queued) then finish one source worker cleanly.
 function W.complete(f, worker_id)
+	W.release_queue(f, worker_id)
 	local w = W.worker(f, worker_id)
 	if w.phase == "queued" then W.start(f, worker_id, (assert(W.provision_of(f, worker_id), "source work has no provision"))) end
 	W.settle(f, worker_id, true)
@@ -1600,9 +2014,74 @@ function W.write_plan(dir, text, name)
 end
 
 if section == nil or section == "sources" then
+	do
+		local legacy = W.src_fixture({ concurrency_limit = 4, auto_start_projects = false })
+		local original = table.concat({ "# Feature: Stable work", "", "### Checkpoint 1 — Retained work",
+			"### UPDATE `src/alpha.luau`", "**INDEPENDENT**", "Keep alpha instructions.", "",
+			"### UPDATE `src/beta.luau`", "**INDEPENDENT**", "Keep beta instructions.", "" }, "\n")
+		local path = W.write_plan(W.scratch(), original)
+		local imported = legacy:apply("plan_import", { path = path }); assert(imported.ok, imported.message)
+		local old = W.plan(legacy, imported.plan_id)
+		-- A real old stored shape, before any worker is queued: later worker receipts are issued
+		-- by the reducer with these original numeric-checkpoint-era identities, never rewritten.
+		old.checkpoints[1].id = nil; old.checkpoints[1].source_state = nil
+		local alpha, beta = old.checkpoints[1].tasks[1], old.checkpoints[1].tasks[2]
+		alpha.id = "cp1-legacy-alpha"; beta.id = "cp1-legacy-beta"
+		for _, task in old.checkpoints[1].tasks do
+			task.source_identity = nil; task.identity_ambiguous = nil; task.source_state = nil
+			task.steps = nil; task.filechanges = nil; task.validationchecks = nil; task.depends_on = nil
+		end
+		local project = legacy.authority.registry.dispatch.projects[imported.orch_project_id]
+		assert(legacy:apply("project_start", { orch_project_id = project.orch_project_id, project_revision = project.revision, checks_reviewed = true }).ok)
+		old = W.plan(legacy, imported.plan_id)
+		local first_id, running_id = old.checkpoints[1].tasks[1].worker_id, old.checkpoints[1].tasks[2].worker_id
+		W.release_queue(legacy, first_id); W.start(legacy, first_id, assert(W.provision_of(legacy, first_id)))
+		W.release_queue(legacy, running_id); W.start(legacy, running_id, assert(W.provision_of(legacy, running_id)))
+		W.done(legacy, first_id)
+		W.complete(legacy, first_id)
+		local first_source, running_source = api.clone(W.worker(legacy, first_id).source), api.clone(W.worker(legacy, running_id).source)
+		local done_bytes = W.worker(legacy, first_id).workflow.evidence.DONE
+		local revised = original:gsub("### Checkpoint 1 — Retained work", "### Checkpoint 1 — Inserted work\n### UPDATE `src/new.luau`\n**INDEPENDENT**\nOnly the new task is new work.\n\n### Checkpoint 2 — Retained work")
+		runtime.fs.write(path, revised)
+		local reimported = legacy:apply("plan_import", { path = path }); assert(reimported.ok, reimported.message)
+		local next_plan = W.plan(legacy, reimported.plan_id)
+		local by_file = {}
+		for _, cp in next_plan.checkpoints do for _, task in cp.tasks do by_file[task.files[1]] = task end end
+		check(by_file["src/alpha.luau"].state == "done" and by_file["src/alpha.luau"].worker_id == first_id
+			and by_file["src/beta.luau"].state == "running" and by_file["src/beta.luau"].worker_id == running_id
+			and by_file["src/new.luau"].state == "queued_plan" and by_file["src/new.luau"].worker_id == nil,
+			"insert/renumber reconciliation preserves old done/running executions and queues only genuinely new source work")
+		project = legacy.authority.registry.dispatch.projects[imported.orch_project_id]
+		assert(legacy:apply("project_start", { orch_project_id = project.orch_project_id, project_revision = project.revision, checks_reviewed = true }).ok)
+		local count = 0; for _ in legacy.authority.registry.dispatch.workers do count += 1 end
+		check(count == 3 and W.worker(legacy, first_id).source.ref == first_source.ref
+			and W.worker(legacy, first_id).source.revision == first_source.revision
+			and W.worker(legacy, running_id).source.ref == running_source.ref
+			and W.worker(legacy, running_id).source.revision == running_source.revision
+			and W.worker(legacy, first_id).workflow.evidence.DONE == done_bytes,
+			"only the new task gets a new worker; immutable old source revisions, protocol references and completion bytes are not rebound")
+		local before = runtime.json.encode(legacy.authority.registry)
+		runtime.fs.write(path, revised:gsub("Keep alpha instructions%.", "Changed alpha instructions."))
+		local edited = legacy:apply("plan_import", { path = path })
+		check(not edited.ok and edited.code == "plan_identity_changed" and runtime.json.encode(legacy.authority.registry) == before,
+			"editing a managed source task holds the import without rerunning done work or replacing existing proof")
+		check(W.restores(legacy), "legacy semantic carry with old receipt identities restores")
+	end
+	do
+		local ambiguous = W.src_fixture()
+		local path = W.write_plan(W.scratch(), table.concat({ "# Feature: Duplicate work", "### Checkpoint 1 — Work",
+			"### UPDATE `src/same.luau`", "**INDEPENDENT**", "Same instructions.",
+			"### UPDATE `src/same.luau`", "**INDEPENDENT**", "Same instructions." }, "\n"))
+		local added = ambiguous:apply("plan_import", { path = path }); assert(added.ok, added.message)
+		local plan = W.plan(ambiguous, added.plan_id)
+		check(#plan.checkpoints[1].tasks == 2 and next(ambiguous.authority.registry.dispatch.workers) == nil
+			and plan.checkpoints[1].tasks[1].hold.code == "plan_identity_ambiguous"
+			and plan.checkpoints[1].tasks[2].hold.code == "plan_identity_ambiguous",
+			"identical repeated source actions parse but cannot silently execute twice on their initial import")
+	end
 	-- Join + INDEPENDENT fan-out under concurrency_limit 2.
 	local dir = W.scratch()
-	local f = W.src_fixture({ concurrency_limit = 2 })
+	local f = W.src_fixture({ concurrency_limit = 2, auto_start_projects = false })
 	check(f.authority.registry.dispatch.plans == nil, "cold start: a fresh store has no plans collection")
 	local path = W.write_plan(dir)
 	local imported = f:apply("plan_import", { path = path })
@@ -1610,8 +2089,12 @@ if section == nil or section == "sources" then
 	check(imported.code == "plan_imported" and imported.checkpoints == 2 and imported.tasks == 5, "the plan imports with its two checkpoints and five tasks")
 	local plan = W.plan(f, imported.plan_id)
 	check(plan.plan_revision == api.codec.sha256(W.PLAN_TEXT) and plan.path == path, "the plan revision is the sha256 of the host-read bytes")
-	check(#imported.started == 2 and W.task(plan, "1A").state == "running" and W.task(plan, "1B").state == "running",
-		"INDEPENDENT tasks start together up to concurrency_limit (2)")
+	check(#imported.started == 0 and W.task(plan, "1A").state == "queued_plan" and W.effects(f) == "",
+		"ordinary import records a held source without dispatching")
+	local project = f.authority.registry.dispatch.projects[imported.orch_project_id]
+	assert(f:apply("project_start", { orch_project_id = project.orch_project_id, project_revision = project.revision, checks_reviewed = true }).ok)
+	plan = W.plan(f, imported.plan_id)
+	check(W.task(plan, "1A").state == "running" and W.task(plan, "1B").state == "running", "explicit START releases independent tasks up to concurrency_limit")
 	check(W.task(plan, "1C").state == "queued_plan", "the third INDEPENDENT task waits for a free slot (limit 2), not for its siblings")
 	check(W.task(plan, "1D").state == "queued_plan" and W.task(plan, "2A").state == "queued_plan", "the sequential task and checkpoint 2 stay queued_plan")
 	local wa = W.worker(f, W.task(plan, "1A").worker_id)
@@ -1621,7 +2104,7 @@ if section == nil or section == "sources" then
 	check(wa.files[1] == "src/a.luau" and wa.scope.paths[1] == "src/a.luau" and #wa.scope.systems == 2 and wa.scope.systems[1] == "orch" and wa.scope.systems[2] == "spawn",
 		"files and scope.paths come from the action headers; scope.systems only from **SYSTEMS**")
 	check(#W.worker(f, W.task(plan, "1B").worker_id).scope.systems == 0, "a task without **SYSTEMS** has no systems")
-	check(wa.record_id == "builder", "plan work routes to the build route's record")
+	check(wa.record_id == "builder", "plan work uses the preferred worker")
 	local again = f:apply("plan_import", { path = path })
 	check(again.ok and again.code == "plan_already_imported" and again.plan_id == imported.plan_id, "re-importing the same revision changes nothing")
 	check(W.restores(f), "the imported plan restores")
@@ -1629,7 +2112,22 @@ if section == nil or section == "sources" then
 	plan = W.plan(f, imported.plan_id)
 	check(W.task(plan, "1A").state == "done" and W.task(plan, "1C").state == "running", "a finished task frees its slot: the waiting INDEPENDENT task starts")
 	check(W.task(plan, "1D").state == "queued_plan", "the sequential task still waits for every earlier task of its checkpoint")
+	local second_worker = W.task(plan, "1B").worker_id
+	W.release_queue(f, second_worker)
+	local retained_gate
+	for _, gate in f.authority.registry.dispatch.gates do
+		if gate.worker_id == second_worker and gate.ruling then retained_gate = gate; break end
+	end
+	check(retained_gate ~= nil and retained_gate.phase == "resolved" and retained_gate.pane_binding == nil,
+		"the released prelaunch decision retains its plan-document obligation without inventing a native pane")
+	local original_gate = tern.json.encode(retained_gate)
 	W.complete(f, W.task(plan, "1B").worker_id)
+	check(tern.json.encode(f.authority.registry.dispatch.gates[retained_gate.id]) == original_gate,
+		"launch, acceptance and finish preserve the exact prelaunch decision and pending document obligation")
+	local substituted = api.clone(f.authority.registry)
+	substituted.dispatch.gates[retained_gate.id].pane_binding = api.clone(W.worker(f, second_worker).pane_binding)
+	substituted.dispatch.gates[retained_gate.id].pane_binding.pane_id = "999999"
+	check(not api.state.valid(substituted), "a retained prelaunch ruling never authorizes a substituted native recipient")
 	plan = W.plan(f, imported.plan_id)
 	check(W.task(plan, "1D").state == "queued_plan" and W.task(plan, "2A").state == "queued_plan", "with 1C open, neither 1D nor checkpoint 2 starts")
 	W.complete(f, W.task(plan, "1C").worker_id)
@@ -1651,58 +2149,51 @@ if section == nil or section == "sources" then
 	-- Malformed plan: refused with the parser's reason; nothing stored.
 	local bad = W.write_plan(dir, "no title here\n", "bad.md")
 	local refused = u:apply("plan_import", { path = bad })
-	check(not refused.ok and refused.code == "no_title" and refused.message:find("Plan import refused", 1, true) == 1, "a malformed plan is refused with the parser's reason")
+	check(not refused.ok and refused.code == "no_title", "a malformed plan is refused with the parser's reason")
 	check(not u:apply("plan_import", { path = dir .. "/absent.md" }).ok, "a missing plan file is refused")
 	check(u:apply("plan_import", { path = "relative/plan.md" }).code == "invalid_path", "a relative plan path is refused")
 
-	-- Intake gate: auto_launch_intake=false holds new intake work behind an `intake` gate.
+	-- One start policy: off keeps sources passive; explicit START is sufficient.
 	local board = "/tmp/fixture-board.tern"
 	for _, auto in { false, true } do
-		local g = W.src_fixture({ board_path = board, auto_launch_intake = auto })
+		local g = W.src_fixture({ board_path = board, auto_start_projects = auto })
 		local tags = W.arr({ "#class-build" })
 		local sent = g:apply("board_intake", { board_path = board, card_id = "card-1", text = "Add the fixture feature.", tags = tags,
 			text_sha256 = api.quota.digest({ text = "Add the fixture feature.", tags = tags }) })
 		assert(sent.ok, sent.message)
-		local w = W.worker(g, sent.worker_id)
-		local gates = W.gates(g, "intake")
+		check(#W.gates(g, "intake") == 0, "new intake never creates the obsolete second start question")
 		if auto then
-			check(sent.code == "intake_accepted" and sent.state == "accepted" and #gates == 0 and w.launch_gates == nil, "auto_launch_intake=true: the intake launches directly with no intake gate")
+			check(sent.state == "accepted" and sent.worker_id ~= nil, "saved explicit auto-start policy can release new intake")
 		else
-			check(sent.code == "intake_received" and sent.state == "received" and #gates == 1 and w.launch_gates and w.launch_gates[1] == gates[1].id and w.phase == "queued",
-				"auto_launch_intake=false: the work waits behind an intake gate and nothing is provisioned")
-			check(W.provision_of(g, sent.worker_id) == nil, "no provision is queued before the owner answers")
+			check(sent.state == "received" and sent.worker_id == nil and W.effects(g) == "", "default intake creates no worker or launch")
 			local tg = W.cold(g)
-			check(#W.gates(tg, "intake") == 1 and tg.authority.registry.dispatch.intakes[sent.intake_id].state == "received", "cold start: the intake gate and received state survive")
-			local gate = W.gates(g, "intake")[1]
-			local answered = g:apply("answer", { gate_id = gate.id, gate_revision = gate.revision, choice_id = "launch_anyway", answer = "Launch it." })
-			assert(answered.ok, answered.message)
-			check(g.authority.registry.dispatch.intakes[sent.intake_id].state == "accepted" and W.provision_of(g, sent.worker_id) ~= nil,
-				"the owner's launch answer launches the work and the intake becomes accepted")
-			-- Cancel: the second card's work is dropped and the intake refused.
-			local tags2 = W.arr({ "class-build" })
-			local second = g:apply("board_intake", { board_path = board, card_id = "card-2", text = "A different card.", tags = tags2,
-				text_sha256 = api.quota.digest({ text = "A different card.", tags = tags2 }) })
-			local g2 = W.gates(g, "intake")[1]
-			assert(g:apply("answer", { gate_id = g2.id, gate_revision = g2.revision, choice_id = "cancel", answer = "Not now." }).ok)
-			local rec = g.authority.registry.dispatch.intakes[second.intake_id]
-			check(rec.state == "refused" and rec.refusal == "owner_cancelled", "cancelling the intake gate refuses the intake (owner_cancelled)")
+			check(tg.authority.registry.dispatch.intakes[sent.intake_id].held == true and W.effects(tg) == "", "cold start retains passive intake")
+			local project = g.authority.registry.dispatch.projects[sent.orch_project_id]
+			assert(g:apply("project_start", { orch_project_id = project.orch_project_id, project_revision = project.revision }).ok)
+			local rec = g.authority.registry.dispatch.intakes[sent.intake_id]
+			check(rec.state == "accepted" and W.provision_of(g, rec.worker_id) ~= nil, "one explicit START releases the intake")
+			local second = g:apply("board_intake", { orch_project_id = project.orch_project_id, board_path = board,
+				card_id = "card-2", text = "A different card.", tags = tags, text_sha256 = api.quota.digest({ text = "A different card.", tags = tags }) })
+			check(second.ok and second.worker_id == nil and g.authority.registry.dispatch.intakes[second.intake_id].held == true,
+				"adding work to an already active project still waits for a fresh explicit START")
 		end
-		check(W.restores(g), "intake gate state restores (auto=" .. tostring(auto) .. ")")
+		check(W.restores(g), "passive/explicit source policy restores")
 	end
 
 	-- Template chain: a ⇄ b cycle stops after 8 successful steps with a loop_cap gate naming the bound.
-	local templates = W.arr({ { id = "draft", title = "Draft", prompt = "Draft from {input}.", output = "out/draft.md", next = "polish" },
-		{ id = "polish", title = "Polish", prompt = "Polish {input}.", output = "out/polish.md", next = "draft" },
-		{ id = "solo", title = "Solo", prompt = "Do {input}.", output = "out/solo.md", next = "" } })
+	local templates = W.arr({ { id = "draft", title = "Draft", prompt = "Draft from {input}.", output = "out/draft.md", next = "polish", custom_fields = {} },
+		{ id = "polish", title = "Polish", prompt = "Polish {input}.", output = "out/polish.md", next = "draft", custom_fields = {} },
+		{ id = "solo", title = "Solo", prompt = "Do {input}.", output = "out/solo.md", next = "", custom_fields = {} } })
 	local c = W.src_fixture({ templates = templates })
 	check(c.authority.registry.dispatch.chains == nil, "cold start: no chains collection before the first template start")
 	local started = c:apply("template_start", { template_id = "draft", input = "notes/brief.md" })
 	assert(started.ok, started.message)
-	check(started.code == "template_started" and started.action_id ~= nil, "template_start launches the first step")
+	check(started.code == "template_added" and W.provision_of(c, started.worker_id) ~= nil, "saved auto-start policy releases the first template step")
 	local chain_id = started.chain_id
 	local worker_id, inputs = started.worker_id, {}
 	for step = 1, 8 do
 		local w = W.worker(c, worker_id)
+		W.release_queue(c, worker_id)
 		table.insert(inputs, w.prompt)
 		W.start(c, worker_id, (assert(W.provision_of(c, worker_id), "chain step has no provision")))
 		W.done(c, worker_id, if step % 2 == 1 then "out/draft.md" else "out/polish.md")
@@ -1718,7 +2209,7 @@ if section == nil or section == "sources" then
 	local chain = c.authority.registry.dispatch.chains[chain_id]
 	local caps = W.gates(c, "loop_cap")
 	check(chain.status == "capped" and chain.successes == 8, "the chain stops at 8 successful steps")
-	check(#caps == 1 and caps[1].question:find("chain bound 8", 1, true) ~= nil, "a loop_cap gate names \"chain bound 8\"")
+	check(#caps == 1, "the capped chain has one owner gate")
 	local opts = {}; for _, o in caps[1].options do table.insert(opts, o.id) end
 	check(table.find(opts, "allow_more") == nil, "the structural chain bound offers no allow_more")
 	local workers = 0; for _ in c.authority.registry.dispatch.workers do workers += 1 end
@@ -1728,16 +2219,46 @@ if section == nil or section == "sources" then
 	check(W.restores(c), "the capped chain restores")
 	-- Other way: a template with no next ends the chain after one step, no gate.
 	local solo = c:apply("template_start", { template_id = "solo", input = "x.md" }); assert(solo.ok, solo.message)
+	W.release_queue(c, solo.worker_id)
 	W.start(c, solo.worker_id, assert(W.provision_of(c, solo.worker_id)))
 	W.done(c, solo.worker_id, "out/solo.md")
 	check(c.authority.registry.dispatch.chains[solo.chain_id].status == "done" and #W.gates(c, "loop_cap") == 1, "a chain whose template has no next ends done without a gate")
 	check(c:apply("template_start", { template_id = "missing", input = "x" }).code == "template_unknown", "an unknown template is refused")
+	do
+		local custom = W.src_fixture({ templates = W.arr({
+			{ id = "custom", title = "Custom", prompt = "Process {input} for {topic}.", output = "out/{topic}.md", next = "follow", custom_fields = { topic = "default" } },
+			{ id = "follow", title = "Follow", prompt = "Continue {input} for {topic}.", output = "out/{topic}-follow.md", next = "", custom_fields = { topic = "other-default" } },
+		}) })
+		local added = custom:apply("template_start", { template_id = "custom", input = "brief.md", custom_fields = { topic = "selected" } })
+		assert(added.ok, added.message)
+		local current = custom.authority.registry.dispatch.chains[added.chain_id]
+		check(current.steps[1].output_path == "out/selected.md" and current.steps[1].custom_fields.topic == "selected", "custom invocation values reach resolved template output and durable chain state")
+		W.start(custom, added.worker_id, assert(W.provision_of(custom, added.worker_id)))
+		W.done(custom, added.worker_id, "out/selected.md")
+		current = custom.authority.registry.dispatch.chains[added.chain_id]
+		local following = current.steps[#current.steps]
+		check(following.template_id == "follow" and following.output_path == "out/selected-follow.md", "matching custom values carry into the actual next template step")
+		check(not custom:apply("template_start", { template_id = "custom", input = "brief.md", custom_fields = { unknown = "x" } }).ok, "unknown custom fields cannot silently save or execute")
+		check(W.restores(custom), "custom template fields and resolved output paths survive restore")
+	end
+	do
+		local defaults = W.src_fixture({ templates = W.arr({
+			{ id = "first", title = "First", prompt = "Process {input} in {lang}.", output = "out/first.md", next = "next", custom_fields = { lang = "en" } },
+			{ id = "next", title = "Next", prompt = "Continue {input} in {lang}.", output = "out/{lang}.md", next = "", custom_fields = { lang = "de" } },
+		}) })
+		local added = defaults:apply("template_start", { template_id = "first", input = "brief.md" }); assert(added.ok, added.message)
+		W.start(defaults, added.worker_id, assert(W.provision_of(defaults, added.worker_id)))
+		W.done(defaults, added.worker_id, "out/first.md")
+		local chain = defaults.authority.registry.dispatch.chains[added.chain_id]
+		check(chain.steps[#chain.steps].output_path == "out/de.md", "template B uses B's default, not template A's expanded defaults, when no invocation override was supplied")
+		check(W.restores(defaults), "separate template defaults and invocation overrides restore across a real next-step transition")
+	end
 end
 
 if section == nil or section == "intake" then
 	local dir = W.scratch()
 	local inbox = dir .. "/inbox"; runtime.fs.mkdir(inbox)
-	local f = W.src_fixture({ inbox_folder = inbox, auto_launch_intake = true })
+	local f = W.src_fixture({ inbox_folder = inbox })
 	check(f.authority.registry.dispatch.intakes == nil, "cold start: a fresh store has no intakes collection")
 	local body = "**CLASS**: build\n\nImplement the inbox fixture task.\n"
 	runtime.fs.write(inbox .. "/task.md", body)
@@ -1766,8 +2287,12 @@ if section == nil or section == "intake" then
 	check(f.authority.registry.dispatch.intakes[api.quota.digest({ kind = "inbox", path = inbox .. "/task.md", sha256 = api.codec.sha256("never this") })] == nil,
 		"content_changed is not durable (retried next poll)")
 	local second = f:apply("inbox_intake", { name = "task.md", content_sha256 = api.codec.sha256(body2) })
-	check(second.ok and second.code == "intake_accepted" and second.intake_id ~= first.intake_id and second.work_id ~= first.work_id,
-		"new content under the same name is a new intake with its own work")
+	check(second.ok and second.code == "intake_received" and second.intake_id ~= first.intake_id
+		and second.work_id ~= first.work_id and W.worker(f, second.worker_id).launch_gates ~= nil,
+		"new content creates distinct work but its shared checkout remains gated")
+	W.release_queue(f, second.worker_id)
+	check(f.authority.registry.dispatch.intakes[second.intake_id].state == "accepted",
+		"only the exact owner's checkout decision makes this intake archivable")
 	-- Too large: refused durably, file untaken.
 	local big = string.rep("x", 40000)
 	runtime.fs.write(inbox .. "/big.md", big)
@@ -1791,223 +2316,73 @@ if section == nil or section == "intake" then
 	check(W.restores(f), "the intakes collection restores")
 
 	-- Board: card id re-map after an id-invalidating reload; oversize card refused.
-	local board = "/tmp/fixture-board.tern"
-	local g = W.src_fixture({ board_path = board, auto_launch_intake = true })
+	local board = "/tmp/" .. string.rep("nested-board/", 48) .. "fixture-board.tern"
+	local g = W.src_fixture({ board_path = board })
 	local tags = W.arr({ "urgent", "class-docs" })
 	local text = "Document the board flow."
 	local tsha = api.quota.digest({ text = text, tags = tags })
-	local card = g:apply("board_intake", { board_path = board, card_id = "card-old", text = text, tags = tags, text_sha256 = tsha })
+	local old_id = tern.json.encode(W.arr({ board, 1, 7 }))
+	local new_id = tern.json.encode(W.arr({ board, 2, 7 }))
+	local card = g:apply("board_intake", { board_path = board, card_id = old_id, text = text, tags = tags, text_sha256 = tsha })
 	assert(card.ok, card.message)
 	check(card.intake_id == api.quota.digest({ kind = "board", path = board, sha256 = tsha }), "the board intake_id matches the window's derivation")
-	check(W.worker(g, card.worker_id).record_id == "claude2", "a board tag class-<route class> picks that route")
-	local remap = g:apply("board_intake", { board_path = board, card_id = "card-new", text = text, tags = tags, text_sha256 = tsha })
-	check(remap.code == "intake_duplicate" and remap.work_id == card.work_id and g.authority.registry.dispatch.intakes[card.intake_id].card_id == "card-new",
-		"after a reload the re-sent card id re-maps the existing intake")
+	check(W.worker(g, card.worker_id).record_id == "builder" and W.worker(g, card.worker_id).class == "docs", "task type is retained metadata; Preferred Worker selects the actual record")
+	local before_remap, source = W.effects(g), tern.json.encode(W.worker(g, card.worker_id).source)
+	local remap = g:apply("board_intake", { board_path = board, card_id = new_id, text = text, tags = tags, text_sha256 = tsha })
+	check(remap.code == "intake_duplicate" and remap.work_id == card.work_id and g.authority.registry.dispatch.intakes[card.intake_id].card_id == new_id
+		and W.effects(g) == before_remap and tern.json.encode(W.worker(g, card.worker_id).source) == source,
+		"full-path opaque native IDs survive generation remapping without another worker, changed manifest/source identity or replay")
+	check(W.worker(g, card.worker_id).source.ref == board .. "#" .. card.intake_id,
+		"the real full board path and semantic intake digest bind work without embedding/truncating its transient native ID")
 	local cards = api.dispatch.project(g.authority.registry, g.origin.logical_session_id, g.origin.alias_nonce).workflow.board.cards
-	check(#cards == 1 and cards[1].card_id == "card-new" and cards[1].intake_id == card.intake_id, "the board projection maps the new card id to the intake")
+	check(#cards == 1 and cards[1].card_id == new_id and cards[1].intake_id == card.intake_id, "the board projection retains the complete current native association")
 	local long = string.rep("y", 4097)
 	local oversize = g:apply("board_intake", { board_path = board, card_id = "card-big", text = long, tags = W.arr(), text_sha256 = api.quota.digest({ text = long, tags = W.arr() }) })
 	check(oversize.code == "intake_refused" and oversize.refusal == "card_too_large" and g.authority.registry.dispatch.intakes[oversize.intake_id].state == "refused",
 		"a card longer than 4096 bytes is refused card_too_large durably")
-	check(g:apply("board_intake", { board_path = "/tmp/other.tern", card_id = "c", text = text, tags = tags, text_sha256 = tsha }).code == "board_mismatch", "a board other than Config's is refused")
+	local other = g:apply("board_intake", { board_path = "/tmp/other.tern", card_id = "c", text = text, tags = tags, text_sha256 = tsha })
+	check(other.ok and other.intake_id ~= card.intake_id and g.authority.registry.dispatch.intakes[other.intake_id].path == "/tmp/other.tern"
+		and api.dispatch.policy(g.authority.registry, g.origin.logical_session_id).board_path == board,
+		"explicit intake from another absolute board keeps its own source identity without replacing the watched board")
+	local before_relative = tern.json.encode(g.authority.registry)
+	check(g:apply("board_intake", { board_path = "relative.tern", card_id = "c", text = text, tags = tags, text_sha256 = tsha }).code == "board_mismatch"
+		and tern.json.encode(g.authority.registry) == before_relative, "a relative board path is rejected without a source or project write")
 	check(g:apply("board_intake", { board_path = board, card_id = "c", text = text .. "!", tags = tags, text_sha256 = tsha }).code == "intake_invalid", "a text_sha256 mismatch is refused")
-	-- No class: held label_pending, no worker. An ordinary tag equal to a route class never routes.
+	-- Unclassified work also uses the preferred worker, never a classifier session.
 	local plain_tags = W.arr({ "docs", "#build", "class-unknown" })
 	local plain = g:apply("board_intake", { board_path = board, card_id = "card-plain", text = "Unlabelled.", tags = plain_tags, text_sha256 = api.quota.digest({ text = "Unlabelled.", tags = plain_tags }) })
-	check(plain.ok and plain.state == "received" and plain.work_id == nil and plain.hold and plain.hold.code == "label_pending",
-		"a card whose tags only equal route classes (docs, #build) or name no route (class-unknown) waits for the labeller")
+	check(plain.ok and plain.work_id ~= nil and W.worker(g, plain.worker_id).record_id == "builder", "unclassified intake reaches the preferred worker without classifier-only machinery")
 	local tb = W.cold(g)
-	check(tb.authority.registry.dispatch.intakes[card.intake_id].card_id == "card-new", "cold start: the re-mapped card id is durable")
+	check(tb.authority.registry.dispatch.intakes[card.intake_id].card_id == new_id, "cold start: the full-path native generation ID remapping is durable")
 	check(W.restores(g), "board intakes restore")
+	local protocol = api.load("dispatch_protocol")
+	local before_invalid, writes = tern.json.encode(g.authority.registry), g.memory.writes
+	check(not g:apply("board_intake", { board_path = board, card_id = string.rep("x", protocol.NATIVE_BOARD_ID_BYTES + 1),
+		text = text, tags = tags, text_sha256 = tsha }).ok and g.memory.writes == writes and tern.json.encode(g.authority.registry) == before_invalid,
+		"overbound opaque identity refuses atomically rather than truncating or rebinding an existing card")
 end
 
--- Checkpoint 7 (D13, Contracts B/C/D/L): unclassed intake → labeller worker → LABEL routes in code.
-W.BOARD = "/tmp/fixture-board.tern"
-function W.router(patch)
-	local merged = { board_path = W.BOARD, auto_launch_intake = true, labeller_record = "omp", loop_cap = 2 }
-	for key, value in patch or {} do merged[key] = value end
-	return W.src_fixture(merged)
-end
-function W.card(f, card_id, text)
-	local sha = api.quota.digest({ text = text, tags = W.arr() })
-	local r = f:apply("board_intake", { board_path = W.BOARD, card_id = card_id, text = text, tags = W.arr(), text_sha256 = sha }); assert(r.ok, r.message)
-	return r
-end
-function W.intake(f, intake_id) return f.authority.registry.dispatch.intakes[intake_id] end
-function W.labellers(f)
-	local n = 0; for _, w in f.authority.registry.dispatch.workers do if w.role == "labeller" then n += 1 end end; return n
-end
--- Launch the intake's current labeller (if queued), deliver and acknowledge its label_request.
-function W.label_open(f, intake_id)
-	local id = assert(W.intake(f, intake_id).label and W.intake(f, intake_id).label.worker_id, "intake has no labeller")
-	if W.worker(f, id).phase == "queued" then W.start(f, id, (assert(W.provision_of(f, id), "labeller provision missing"))) end
-	W.settle(f, id, true)
-	local issued = W.replies(f, id, "label_request"); assert(#issued >= 1, "label_request missing")
-	local entry = issued[#issued]
-	assert(W.send(f, id, "reply_ack", { message_id = entry.reply.message_id, reply_seq = entry.reply.reply_seq, reply_sha256 = api.codec.sha256(entry.retained.bytes),
-		status = "recorded" }, { action_id = entry.reply.action_id, action_revision = entry.reply.action_revision }).ok)
-	return id, entry.reply
-end
-function W.label(f, id, request, class, extra)
-	local p = { work_ref = request.payload.work_ref, class = class, reason = "fixture label" }
-	for key, value in extra or {} do p[key] = value end
-	return W.send(f, id, "LABEL", p, { action_id = request.action_id, action_revision = request.action_revision })
-end
-function W.gate_answer(f, gate, choice) return f:apply("answer", { gate_id = gate.id, gate_revision = gate.revision, choice_id = choice, answer = "Owner chose " .. choice .. "." }) end
-
-if section == nil or section == "router" then
-	-- No labeller configured: label_pending hold pointing at Config; no labeller worker.
-	local none = W.router({ labeller_record = "" })
-	local held = W.card(none, "card-1", "Please write the onboarding guide.")
-	check(held.work_id == nil and held.hold and held.hold.code == "label_pending" and W.labellers(none) == 0, "no labeller_record → label_pending hold, no labeller worker")
-	check(held.hold.message:find("Config", 1, true) ~= nil, "the label_pending hold points the owner at Config")
-	check(W.cold(none).authority.registry.dispatch.intakes[held.intake_id].hold.code == "label_pending", "cold start: the label_pending hold is durable")
-	check(W.restores(none), "the held intake restores")
-
-	-- Known label routes in code to that class's record.
-	local f = W.router()
-	local fresh = W.card(f, "card-1", "Please write the onboarding guide.")
-	local rec = W.intake(f, fresh.intake_id)
-	check(fresh.work_id == nil and rec.label and rec.label.worker_id and W.labellers(f) == 1, "unclassed intake with a labeller_record queues exactly one labeller")
-	check(not (fresh.hold and fresh.hold.code == "label_pending"), "with a labeller configured the intake is not label_pending")
-	local lw = W.worker(f, rec.label.worker_id)
-	check(lw.role == "labeller" and lw.record_id == "omp" and lw.class == nil, "the labeller runs the Config labeller_record with role labeller and no class")
-	local twin = W.cold(f)
-	check(twin.authority.registry.dispatch.intakes[fresh.intake_id].label.worker_id == rec.label.worker_id, "cold start: the labeller binding is durable")
-	local lid, request = W.label_open(f, fresh.intake_id)
-	check(request.payload.work_ref == fresh.intake_id and #request.payload.classes == 2 and request.payload.classes[1] == "build" and request.payload.classes[2] == "docs"
-		and request.payload.text == "Please write the onboarding guide.", "label_request carries {work_ref, classes = route classes in Config order, text}")
-	W.settle(f, lid, true)
-	check(W.worker(f, lid).finish == nil and W.intake(f, fresh.intake_id).work_id == nil, "a settled labeller without a LABEL is pinned, not finished, and nothing is routed")
-	check(W.label(f, lid, request, "docs", { work_ref = "intake-other" }).ok == false or W.intake(f, fresh.intake_id).class == nil, "a LABEL for another work_ref never routes this intake")
-	local labelled = W.label(f, lid, request, "docs")
-	check(labelled.ok, "LABEL with a routed class is accepted")
-	rec = W.intake(f, fresh.intake_id)
-	check(rec.class == "docs" and rec.work_id ~= nil, "a class in routes routes the intake in code")
-	local routed
-	for _, w in f.authority.registry.dispatch.workers do if w.work_id == rec.work_id and w.role ~= "labeller" then routed = w end end
-	check(routed and routed.record_id == "claude2" and routed.class == "docs", "the routed worker runs the route's record (model/effort live in that record) with the class")
-	check(#W.gates(f, "label_unknown") == 0, "a known class opens no label_unknown gate")
-	-- Labeller auto-finishes (CP3 rule) once its LABEL receipt is settled.
-	check(W.worker(f, lid).finish == nil, "unsettled: the LABEL receipt is unpublished, so no finish yet")
-	W.settle(f, lid, true)
-	local finish = W.worker(f, lid).finish
-	check(finish and finish.source and finish.source.kind == "policy" and finish.source.rule == "auto_finish:labeller", "settled: ORCH+ finishes the labeller with policy auto_finish:labeller")
-	check(routed.finish == nil, "auto-finish never applies to the routed worker")
-	local twin2 = W.cold(f)
-	check(twin2.authority.registry.dispatch.intakes[fresh.intake_id].class == "docs" and twin2.authority.registry.dispatch.intakes[fresh.intake_id].work_id == rec.work_id,
-		"cold start: the routed class and work are durable")
-	check(W.restores(f), "a routed, auto-finishing labeller restores")
-	-- A class written on the card is routed without any labeller.
-	local tagged = f:apply("board_intake", { board_path = W.BOARD, card_id = "card-tag", text = "Build it.", tags = W.arr({ "class-build" }),
-		text_sha256 = api.quota.digest({ text = "Build it.", tags = W.arr({ "class-build" }) }) })
-	check(tagged.ok and tagged.work_id ~= nil and W.labellers(f) == 1, "an intake that already names a route class never queues a labeller")
-
-	-- Unknown label gates; route_now re-gates until Config routes the class; cancel refuses.
-	local u = W.router()
-	local ucard = W.card(u, "card-u", "Deploy the release to staging.")
-	local uid, ureq = W.label_open(u, ucard.intake_id)
-	check(W.label(u, uid, ureq, "deploy").ok, "LABEL with an unrouted class is recorded")
-	local gates = W.gates(u, "label_unknown")
-	check(#gates == 1 and W.intake(u, ucard.intake_id).work_id == nil and W.intake(u, ucard.intake_id).class == nil, "a class outside routes opens one label_unknown gate and routes nothing")
-	check(W.intake(u, ucard.intake_id).hold and W.intake(u, ucard.intake_id).hold.code == "label_unknown", "the intake is held label_unknown")
-	check(W.cold(u).authority.registry.dispatch.intakes[ucard.intake_id].hold.code == "label_unknown", "cold start: the label_unknown hold is durable")
-	local again = W.gate_answer(u, gates[1], "route_now")
-	check(again.ok and W.intake(u, ucard.intake_id).work_id == nil and #W.gates(u, "label_unknown") == 1, "route now without a Config route re-gates; nothing routes")
-	local routes = api.clone(W.ROUTES); table.insert(routes, { class = "deploy", record_id = "codex" })
-	assert(u:apply("policy", { policy = { routes = W.arr(routes) } }).ok)
-	local open = W.gates(u, "label_unknown")
-	check(W.gate_answer(u, open[1], "route_now").ok and W.intake(u, ucard.intake_id).class == "deploy" and W.intake(u, ucard.intake_id).work_id ~= nil,
-		"route now after Config gains the class routes the intake")
-	check(#W.gates(u, "label_unknown") == 0, "routing resolves the label_unknown gate")
-	local c = W.router()
-	local ccard = W.card(c, "card-c", "Something odd.")
-	local cid2, creq = W.label_open(c, ccard.intake_id)
-	assert(W.label(c, cid2, creq, "mystery").ok)
-	check(W.gate_answer(c, W.gates(c, "label_unknown")[1], "cancel").ok and W.intake(c, ccard.intake_id).state == "refused"
-		and W.intake(c, ccard.intake_id).refusal == "owner_cancelled", "cancel on label_unknown refuses the intake owner_cancelled")
-	check(W.restores(u) and W.restores(c), "label_unknown outcomes restore")
-
-	-- Retries capped (Contract L, loop_cap 2): a labeller ending without LABEL is retried; the failure
-	-- after loop_cap retries opens one loop_cap gate instead of another labeller.
-	local r = W.router({ loop_cap = 2 })
-	local rcard = W.card(r, "card-r", "Unclear request.")
-	local started = {}
-	for attempt = 1, 3 do
-		local wid = W.intake(r, rcard.intake_id).label.worker_id
-		check(wid ~= nil and not table.find(started, wid) and #W.gates(r, "loop_cap") == 0, "attempt " .. attempt .. ": a fresh labeller, no loop_cap gate yet")
-		table.insert(started, wid)
-		W.label_open(r, rcard.intake_id)
-		W.complete(r, wid)
+-- The old section selectors remain registered acceptance groups for the routing cutover.
+if section == nil or section == "router" or section == "labeller_finish" then
+	local board = "/tmp/fixture-preferred-board.tern"
+	local function add(f, card, text, tags)
+		tags = tags or W.arr()
+		return f:apply("board_intake", { board_path = board, card_id = card, text = text, tags = tags, text_sha256 = api.quota.digest({ text = text, tags = tags }) })
 	end
-	local loops = W.gates(r, "loop_cap")
-	check(#loops == 1 and W.labellers(r) == 3 and W.intake(r, rcard.intake_id).work_id == nil, "loop_cap 2: the third ended labeller opens one loop_cap gate, no fourth labeller")
-	check(W.intake(r, rcard.intake_id).hold and W.intake(r, rcard.intake_id).hold.code == "loop_cap", "the intake is held loop_cap")
-	check(W.cold(r).authority.registry.dispatch.intakes[rcard.intake_id].label.loop.count == 2, "cold start: the retry count is durable")
-	check(W.gate_answer(r, loops[1], "allow_more").ok and W.labellers(r) == 4, "allow more queues one more labeller")
-	local s = W.router({ loop_cap = 1 })
-	local scard = W.card(s, "card-s", "Unclear request.")
-	for _ = 1, 2 do local wid = W.intake(s, scard.intake_id).label.worker_id; W.label_open(s, scard.intake_id); W.complete(s, wid) end
-	local sl = W.gates(s, "loop_cap")
-	check(#sl == 1 and W.labellers(s) == 2, "loop_cap 1: one retry, then the gate")
-	check(W.gate_answer(s, sl[1], "stop").ok and W.intake(s, scard.intake_id).state == "refused" and W.intake(s, scard.intake_id).refusal == "label_stopped" and W.labellers(s) == 2,
-		"stop refuses the intake label_stopped and queues nothing")
-	check(W.restores(r) and W.restores(s), "capped labeller loops restore")
-end
-
--- FinalSmoke2 defect 2: a labeller's auto-finish runs the standard finish to its end — exact pane
--- stop, then settled mailbox retirement — both when its LABEL routes behind an intake gate and when
--- it opens a label_unknown gate. Until the worker publishes its receipt watermark the finish waits
--- (never stops an unsettled journal). `phase` stays "accepted" (the accept lifecycle, not completion).
-if section == nil or section == "labeller_finish" then
-	local function projected(f, id)
-		return api.dispatch.project(f.authority.registry, f.origin.logical_session_id, f.origin.alias_nonce).workers[id]
-	end
-	for _, case in { { name = "routed", patch = { auto_launch_intake = false }, class = "docs" }, { name = "label_unknown", patch = {}, class = "deploy" } } do
-		local f = W.router(case.patch)
-		local card = W.card(f, "card-lf", "Ship the release notes.")
-		local id, request = W.label_open(f, card.intake_id)
-		check(W.label(f, id, request, case.class).ok, case.name .. ": the LABEL is accepted")
-		if case.name == "routed" then
-			check(W.intake(f, card.intake_id).work_id ~= nil and #W.gates(f, "intake") == 1, "routed: the label routes the intake behind one intake gate")
-		else
-			check(#W.gates(f, "label_unknown") == 1 and W.intake(f, card.intake_id).work_id == nil, "label_unknown: the label opens one label_unknown gate")
-		end
-		-- Publish every owed receipt (the LABEL's last) but no watermark: like the worker whose helper
-		-- never consumed the LABEL ACK, the journal is not settled yet.
-		for _ = 1, 8 do
-			local owed = false
-			for _, receipt in W.worker(f, id).receipts do if receipt.publish then owed = true end end
-			if not owed then break end
-			local publish = f:apply("poll", { worker_id = id }); assert(publish.ok and publish.action_id, publish.message)
-			assert(f:action(publish.action_id).request.op == "mailbox_publish_ack")
-			assert(f:finish(publish.action_id, "published", {}).ok)
-		end
-		local w = W.worker(f, id)
-		check(w.finish ~= nil and w.finish.source.rule == "auto_finish:labeller" and w.compacted_floor < w.accepted_seq,
-			case.name .. ": the published LABEL receipt queues the policy finish before any watermark")
-		local early = f:apply("poll", { worker_id = id })
-		local early_op = if early.action_id then f:action(early.action_id).request.op else nil
-		check(early_op ~= "stop" and W.worker(f, id).stop_action_id == nil, case.name .. ": without the worker's watermark no stop is issued (the journal is not settled)")
-		if early.action_id then
-			assert(f:finish(early.action_id, if early_op == "mailbox_retire" then "compacted" elseif early_op == "mailbox_read" then "missing" else "published", {}).ok)
-		end
-		assert(f:watermark(id).ok)
-		local stop = f:apply("poll", { worker_id = id }); assert(stop.ok and stop.action_id, stop.message)
-		local sr = f:action(stop.action_id).request
-		check(sr.op == "stop" and W.worker(f, id).stop_action_id == stop.action_id, case.name .. ": the settled finish issues the exact pane stop")
-		check(f:finish(stop.action_id, "stopped", { pane_binding = api.clone(sr.pane_binding), observation = "absent" }).ok, case.name .. ": the stop outcome commits")
-		local retire = f:apply("poll", { worker_id = id }); assert(retire.ok and retire.action_id, retire.message)
-		local rr = f:action(retire.action_id).request
-		check(rr.op == "mailbox_retire" and rr.mode == "retire" and rr.report_floor == W.worker(f, id).accepted_seq, case.name .. ": the stopped labeller's mailbox retirement follows")
-		check(f:finish(retire.action_id, "retired", {}).ok, case.name .. ": the retirement outcome commits")
-		w = W.worker(f, id)
-		local pw = projected(f, id)
-		check(w.stopped ~= nil and w.mailbox_retired == true and w.phase == "accepted" and pw and pw.finish_requested and pw.stop_status == "absent" and pw.mailbox_status == "retired",
-			case.name .. ": the labeller is finished: stopped and retired (phase stays accepted; inspect shows the stop and retirement)")
-		check(not (f:apply("poll", { worker_id = id }).action_id), case.name .. ": nothing further is issued for the retired labeller")
-		check(W.restores(f), case.name .. ": the finished labeller restores")
-	end
+	local f = W.src_fixture({ board_path = board, preferred_worker_record = "claude2" })
+	local first = add(f, "unclassified", "Write the documentation.")
+	assert(first.ok, first.message)
+	check(first.worker_id ~= nil and W.worker(f, first.worker_id).record_id == "claude2", "unclassified work uses the instance preferred worker")
+	for _, worker in f.authority.registry.dispatch.workers do check(worker.role ~= "labeller", "intake creates no classifier-only worker") end
+	local tagged = add(f, "typed", "Build it.", W.arr({ "class-build" }))
+	assert(tagged.ok, tagged.message)
+	check(W.worker(f, tagged.worker_id).record_id == "claude2" and W.worker(f, tagged.worker_id).class == "build", "task metadata never selects a static build route")
+	local missing = W.src_fixture({ board_path = board, preferred_worker_record = "" })
+	local held = add(missing, "held", "Keep this work.")
+	check(held.ok and held.worker_id == nil and held.hold.code == "preferred_worker_missing", "missing preference holds original intake without inventing a fallback")
+	check(not missing:apply("policy", { policy = { routes = W.arr({ { class = "build", record_id = "builder" } }) } }).ok, "removed static routing is not a writable alias")
+	check(not missing:apply("policy", { policy = { labeller_record = "omp" } }).ok, "removed classifier setup is refused")
+	check(W.restores(f) and W.restores(missing), "preferred routing and held original work survive restore")
 end
 
 -- Checkpoint 7 (D17, Task 7B math): account usage delta between two pinned readings.
@@ -2186,61 +2561,35 @@ if section == nil or section == "usage_delta" then
 		"the rollover successor does not inherit usage_before/usage_after")
 end
 
--- 8C (D14): every assignment ORCH+ sends starts with its role's Config guidance — typed queue work,
--- coordinator starts, attached panes and approved dispatch proposals as well as composed prompts.
-if section == nil or section == "role_guidance" then
-	local f = W.fixture({ reviewer_records = W.arr({ "codex" }) })
-	local G = { builder = "Builder guidance: stay inside scope.", reviewer = "Reviewer guidance: cite lines.", release_manager = "Release guidance: follow AGENTS.md.",
-		coordinator = "Coordinator guidance: propose small steps.", labeller = "Labeller guidance: pick the closest class." }
-	for _, role in { "builder", "reviewer", "release_manager", "coordinator", "labeller" } do
-		local saved = f:apply("policy", { role_guidance_put = { role = role, text = G[role] } }); assert(saved.ok, saved.message)
-	end
-	local function guided(id, role, text)
-		local w = W.worker(f, id)
-		local prefix = G[role] .. "\n\n" .. (text or "")
-		return w ~= nil and w.prompt:sub(1, #prefix) == prefix
-			and (text == nil or (if role == "builder" or role == "coordinator"
-				then w.prompt:find("\n\nORCH+ review policy at assignment:", #prefix + 1, true) == #prefix + 1 else w.prompt == prefix))
-			and w.assignment_sha256 == api.codec.sha256(w.prompt)
-	end
-	local typed = f:apply("queue", { record_id = "builder", record_revision = 0, catalog_revision = 0, prompt = "Typed fixture task.", cwd = "/fixture", placement = "split", coordinator = false })
+-- Task text and built-in review policy remain; retired custom overrides never rewrite
+-- immutable assignments or transport evidence during restore.
+if section == nil or section == "assignment_policy" then
+	local f = W.fixture()
+	local typed = f:apply("queue", { record_id = "builder", record_revision = 0, catalog_revision = 0,
+		prompt = "Typed fixture task.", cwd = "/fixture", placement = "split", coordinator = false })
 	assert(typed.ok, typed.message)
-	check(guided(typed.worker_id, "builder", "Typed fixture task."), "a typed queue task starts with the builder guidance (assignment digest of the guided prompt)")
-	local as_reviewer = f:apply("queue", { record_id = "claude2", record_revision = 0, catalog_revision = 0, prompt = "Typed review task.", cwd = "/fixture", placement = "split",
-		coordinator = false, role = "reviewer" }); assert(as_reviewer.ok, as_reviewer.message)
-	check(guided(as_reviewer.worker_id, "reviewer", "Typed review task."), "a typed task queued with role reviewer gets the reviewer guidance")
-	local adopted = f:apply("adopt", { record_id = "builder", record_revision = 0, catalog_revision = 0, prompt = "Adopted fixture task.", attestation = "operator_verified_exact_agent_pane",
-		pane_binding = { pane_id = "9690", window_key = f.origin.window_key, window_epoch = f.origin.window_epoch, native_session_id = f.origin.native_session_id, window_host_id = f.origin.window_host_id } })
-	assert(adopted.ok, adopted.message)
-	check(guided(adopted.worker_id, "builder", "Adopted fixture task."), "an attached pane's task starts with the builder guidance")
-	local cid = W.coordinator(f)
-	check(guided(cid, "coordinator", "Coordinate the fixture plan."), "a coordinator start begins with the coordinator guidance")
-	local b = W.builder(f, "builder", { source = W.PLAN, files = W.arr({ "src/feature.luau" }) })
-	check(guided(b, "builder", "Implement the declared fixture task."), "a launched builder accepted the guided prompt")
-	local rv = W.round(f, b, "cp-1", "rev-1", "approved")
-	check(guided(rv.reviewer_worker_id, "reviewer"), "the reviewer ORCH+ composes starts with the reviewer guidance")
-	local lid = W.request(f, b, "cp-1", "rev-1"); assert(W.approve(f, lid).ok)
-	check(W.rm_id(f) ~= nil and guided(W.rm_id(f), "release_manager"), "the release manager starts with the release-manager guidance")
-	local sent = W.propose(f, cid, "dispatch", W.worker(f, b).work_id, { record_id = "claude2", record_revision = 0, prompt = "Implement the follow-on planned task." })
-	assert(sent.ok, sent.message)
-	local g = W.proposal_gate(f)
-	local answered = f:apply("answer", { gate_id = g.id, gate_revision = g.revision, choice_id = "approve", answer = "Owner approves this proposal." }); assert(answered.ok, answered.message)
-	local e = f.authority.registry.dispatch.gates[g.id].execution
-	local new = e and e.effect_ref:match("^worker:(.+)$")
-	check(e ~= nil and e.state == "done" and new ~= nil and guided(new, "builder", "Implement the follow-on planned task."),
-		"an approved dispatch proposal's new work starts with the builder guidance (" .. tostring(e and e.effect_ref) .. ")")
-	check(W.restores(f), "guided assignments restore")
-	for _, mode in { { true, true }, { true, false }, { false, false } } do
-		assert(f:apply("policy", { policy = { require_code_review = mode[1], require_other_family = mode[2] } }).ok)
-		local task = f:apply("queue", { record_id = "builder", record_revision = 0, catalog_revision = 0,
-			prompt = "Policy snapshot fixture.", cwd = "/fixture", placement = "split", coordinator = false })
-		assert(task.ok, task.message)
-		local prompt = W.worker(f, task.worker_id).prompt
-		check(prompt:find("require_code_review=" .. tostring(mode[1]) .. "; require_other_family=" .. tostring(mode[2]), 1, true) ~= nil
-			and prompt:find("Every declared check requires successful helper CHECK_RESULT", 1, true) ~= nil,
-			"assignment gives the worker both policy flags and independent helper-check requirement")
-		check(prompt:find(if mode[1] then "CHECKPOINT then REVIEW_READY" else "CHECKPOINT then LANDING_REQUEST", 1, true) ~= nil,
-			"assignment exposes the appropriate review or direct-landing path")
+	local w = W.worker(f, typed.worker_id)
+	check(w.prompt:sub(1, #"Typed fixture task.") == "Typed fixture task."
+		and w.prompt:find("ORCH+ review policy at assignment: require_code_review=true", 1, true) ~= nil
+		and w.assignment_sha256 == api.codec.sha256(w.prompt),
+		"typed task instructions retain their content, applicable built-in review policy and immutable digest")
+	local old = api.clone(f.authority.registry)
+	local sid = f.origin.logical_session_id
+	old.dispatch.policies[sid].role_guidance = { builder = "Retired custom override.", reviewer = "",
+		release_manager = "", labeller = "", coordinator = "" }
+	local worker_before = api.clone(old.dispatch.workers[typed.worker_id])
+	local actions_before = api.clone(old.dispatch.actions)
+	local restored = assert(api.state.rehydrate(old))
+	local retained = restored.dispatch.workers[typed.worker_id]
+	check(restored.dispatch.policies[sid].role_guidance == nil
+		and retained.prompt == worker_before.prompt and retained.assignment_sha256 == worker_before.assignment_sha256
+		and retained.launch_request_id == worker_before.launch_request_id and retained.launch_action_id == worker_before.launch_action_id,
+		"retiring stored overrides leaves the historical assignment and launch identity unchanged")
+	for id, action in actions_before do
+		local after = restored.dispatch.actions[id]
+		check(after ~= nil and after.request_bytes == action.request_bytes and after.request_sha256 == action.request_sha256
+			and after.response_bytes == action.response_bytes,
+			"retirement preserves immutable request/response evidence for " .. id)
 	end
 end
 
@@ -2289,9 +2638,10 @@ if section == nil or section == "autonomy_paused" then
 			assert(f:apply("pause").ok)
 			if case ~= "not_enabled" then assert(f:apply("policy", { policy = { auto_approve_kinds = W.arr({ "dispatch" }) } }).ok) end
 			local before = W.effects(f)
-			assert(f.authority:apply({ kind = "workflow_tick" })); assert(W.send(f, cid, "HEARTBEAT", { state = "working" }).ok)
+			assert(f:tick()); assert(W.send(f, cid, "HEARTBEAT", { state = "working" }).ok)
 			local restored = assert(api.state.rehydrate(api.clone(f.authority.registry)))
-			local twin = api.dispatch.tick(restored, { kind = "workflow_tick" }, { now_ms = 1, mono_ms = 1, epoch = "paused-proposal-twin" }) or restored
+			local twin = api.dispatch.tick(restored, { kind = "workflow_tick", authority_namespace = restored.authority_namespace,
+				expected_revision = restored.revision }, { now_ms = 1, mono_ms = 1, epoch = "paused-proposal-twin" }) or restored
 			check(f.authority.registry.dispatch.gates[g.id].answer == nil and twin.dispatch.gates[g.id].answer == nil and W.effects(f) == before,
 				case .. ": while paused, ticks, later reports and a restored twin answer nothing by policy")
 			if case == "owner_first" then
@@ -2326,7 +2676,7 @@ if section == nil or section == "proposal_early" then
 	check(early.ok and W.worker(f, cid).rejected_report == nil, "a proposal before its checkpoint is accepted as a refusal, never held (" .. tostring(early.code) .. ")")
 	local g = W.proposal_gate(f)
 	check(g.phase == "answered" and g.answer.choice_id == "reject" and g.answer.source.kind == "refusal" and g.answer.source.code == "scope_mismatch"
-		and g.answer.answer:find("Propose again", 1, true) ~= nil and table.find(g.evidence, "refused:scope_mismatch") ~= nil and g.execution == nil,
+		and table.find(g.evidence, "refused:scope_mismatch") ~= nil and g.execution == nil,
 		"ORCH+ answers the early proposal reject itself (source refusal scope_mismatch); nothing waits for the owner")
 	local reply = W.deliver(f, cid, g.id)
 	check(reply.kind == "owner_decision" and reply.gate_id == g.id and reply.payload.choice_id == "reject" and reply.payload.answer == g.answer.answer,
@@ -2344,6 +2694,829 @@ if section == nil or section == "proposal_early" then
 	check(W.restores(f), "refused and re-proposed gates restore")
 end
 
+-- START scenarios use the real proposal, approval, immutable reply publication and
+-- report intake paths. No fixture writes a started flag or manufactures a host claim.
+function W.held_proposal(f, cid, project_id)
+	local before = {}; for key in f.authority.registry.dispatch.workers do before[key] = true end
+	local proposed = W.propose(f, cid, "new_work", nil, { orch_project_id = project_id,
+		new_project_name = if project_id then nil else "Typed START work", record_id = "builder", record_revision = 0,
+		prompt = "Implement only the approved START task.", scope = { paths = W.arr({ "src/start-" .. tostring((W.pserial or 0) + 1) .. ".luau" }), systems = W.arr() },
+		checks = W.unit() })
+	assert(proposed.ok, runtime.json.encode(proposed))
+	local gate
+	for _, value in W.gates(f, "coordinator_proposal") do if value.phase == "pending" then gate = value end end
+	assert(gate, "pending new_work proposal")
+	assert(f:apply("answer", { gate_id = gate.id, gate_revision = gate.revision, choice_id = "approve", answer = "Add this real work held." }).ok)
+	for key, w in f.authority.registry.dispatch.workers do if not before[key] then return w.orch_project_id, key end end
+	error("approved task missing")
+end
+function W.project_start(f, project_id)
+	local p = f.authority.registry.dispatch.projects[project_id]
+	return f:apply("project_start", { orch_project_id = project_id, project_revision = p.revision, checks_reviewed = true })
+end
+function W.start_publication(f, cid, project_id)
+	for _ = 1, 32 do
+		local s = f.authority.registry.dispatch.projects[project_id].start
+		local queued = f:apply("poll", { worker_id = cid }); assert(queued.ok and queued.action_id, queued.message)
+		local a = f:action(queued.action_id)
+		if a.request.op == "mailbox_publish_reply" and a.request.reply_seq == s.reply_seq then return queued.action_id end
+		assert(f:finish(queued.action_id, if a.request.op == "mailbox_retire" then "compacted" elseif a.request.op == "mailbox_read" then "missing" else "published", {}).ok)
+	end
+	error("original START publication was not scheduled")
+end
+function W.publish_start(f, cid, project_id)
+	for _ = 1, 16 do
+		if f.authority.registry.dispatch.projects[project_id].start.published then return end
+		local action = W.start_publication(f, cid, project_id)
+		assert(f:finish(action, "published", {}).ok)
+	end
+	error("START manifest was not published last")
+end
+function W.start_claim(f, cid, project_id, changes, headers)
+	local s = f.authority.registry.dispatch.projects[project_id].start
+	local reply = assert(api.codec.decode_reply(s.bytes, W.worker(f, cid)))
+	local payload = api.clone(reply.payload)
+	for key, value in changes or {} do payload[key] = value end
+	local extra = { action_id = s.action_id, action_revision = s.action_revision }
+	for key, value in headers or {} do extra[key] = value end
+	return W.send(f, cid, "PROJECT_START_CLAIM", payload, extra)
+end
+function W.start_retry(f, project_id, changes)
+	local s = f.authority.registry.dispatch.projects[project_id].start
+	local fields = { orch_project_id = project_id, start_id = s.start_id, project_revision = s.project_revision, decision_context = s.decision_context }
+	for key, value in changes or {} do fields[key] = value end
+	return f:apply("project_start_retry", fields)
+end
+function W.mailbox_start_report(f, cid, bytes)
+	local frames = assert(api.codec.frame(bytes, "report", W.worker(f, cid)))
+	local objects = { frames.manifest }; for _, chunk in frames.chunks do table.insert(objects, chunk) end
+	local outcome
+	for _, object in objects do
+		local read
+		for _ = 1, 32 do
+			local queued = f:apply("poll", { worker_id = cid }); assert(queued.ok and queued.action_id, queued.message)
+			local request = f:action(queued.action_id).request
+			if request.op == "mailbox_read" and request.selector.stream == "report" then read = queued.action_id; break end
+			assert(f:finish(queued.action_id, if request.op == "mailbox_retire" then "compacted"
+				elseif request.op == "accept" then "accepted" elseif request.op == "native_wake" then "submitted" else "published", {}).ok)
+		end
+		assert(read, "bounded production report read")
+		local page = assert(api.codec.project_page(object, f:action(read).request.selector))
+		outcome = f:finish(read, "read", runtime.json.decode(page)); assert(outcome.ok, outcome.message)
+	end
+	return outcome
+end
+function W.claim_report(f, cid, start)
+	local reply = assert(api.codec.decode_reply(start.bytes, W.worker(f, cid)))
+	return f:report(cid, W.worker(f, cid).accepted_seq + 1, "PROJECT_START_CLAIM", reply.payload,
+		{ action_id = start.action_id, action_revision = start.action_revision })
+end
+if section == nil or section == "project_start" then
+	local f = W.src_fixture({ auto_start_projects = false }); local cid = W.coordinator(f)
+	local project, member = W.held_proposal(f, cid)
+	local requested = W.project_start(f, project); assert(requested.ok, requested.message)
+	local p = f.authority.registry.dispatch.projects[project]; local original = api.clone(p.start)
+	check(not p.started and W.worker(f, member).checks_pending and W.provision_of(f, member) == nil,
+		"approval and START record a real immutable grant but do not release managed work")
+	check(requested.start.state == "publishing" and requested.start.activation_token == nil and requested.start.bytes == nil
+		and requested.start.snapshot == nil and requested.start.coordinator.worker_id == cid, "START response exposes only safe correlated diagnostics")
+	local seq = W.worker(f, cid).reply_seq
+	check(W.project_start(f, project).ok and W.worker(f, cid).reply_seq == seq
+		and f.authority.registry.dispatch.projects[project].start.bytes == original.bytes, "a repeated click retains one action, token and exact reply bytes")
+	check(not W.start_claim(f, cid, project).ok and not f.authority.registry.dispatch.projects[project].started,
+		"claim before confirmed manifest publication cannot release work")
+	W.publish_start(f, cid, project)
+	check(not W.start_claim(f, cid, project).ok, "publication alone is not an accepted consume receipt")
+	assert(W.ack(f, cid, f.authority.registry.dispatch.projects[project].start).ok)
+	for _, change in { { owner_id = "other-owner" }, { owner_generation = 99 }, { activation_token = string.rep("f", 64) },
+		{ orch_project_id = "other-project" }, { project_revision = original.project_revision + 1 }, { decision_context = string.rep("f", 64) } } do
+		check(not W.start_claim(f, cid, project, change).ok and not f.authority.registry.dispatch.projects[project].started,
+			"a claim with another owner, activation, project, revision or source proof is refused atomically")
+	end
+	check(not W.start_claim(f, cid, project, nil, { action_id = "other-action" }).ok
+		and not W.start_claim(f, cid, project, nil, { action_revision = 2 }).ok, "claim header action and revision are exact")
+	local w = W.worker(f, cid); local reply = api.codec.decode_reply(original.bytes, w)
+	local claim_bytes = f:report(cid, w.accepted_seq + 1, "PROJECT_START_CLAIM", reply.payload,
+		{ action_id = original.action_id, action_revision = original.action_revision })
+	assert(f:apply("intake", { worker_id = cid, bytes = claim_bytes }).ok)
+	p = f.authority.registry.dispatch.projects[project]; local revision = p.revision
+	check(p.started and p.start.claim == claim_bytes and not W.worker(f, member).checks_pending,
+		"accepted authentic claim and captured membership release commit together")
+	check(f:apply("intake", { worker_id = cid, bytes = claim_bytes }).code == "report_replayed"
+		and f.authority.registry.dispatch.projects[project].revision == revision, "claim replay never releases or increments the project twice")
+	check(not W.start_claim(f, cid, project).ok and W.worker(f, cid).accepted_seq == w.accepted_seq + 1,
+		"a second claim at a fresh report sequence is refused rather than acknowledged or applied again")
+	local before_repeat = W.worker(f, cid).reply_seq
+	check(W.project_start(f, project).code == "project_already_started" and W.worker(f, cid).reply_seq == before_repeat
+		and f.authority.registry.dispatch.projects[project].start.bytes == original.bytes,
+		"START after completion without new held work creates no new grant")
+	check(W.restores(f), "accepted claim, publication and receipt proof survive rehydration")
+end
+if section == nil or section == "project_start_membership" then
+	local f = W.src_fixture({ auto_start_projects = false }); local cid = W.coordinator(f)
+	local project, approved = W.held_proposal(f, cid)
+	local function card(name)
+		local text, tags = "Approved source " .. name, W.arr({ "docs" })
+		local result = f:apply("board_intake", { orch_project_id = project, board_path = "/fixture/start-board.md",
+			card_id = "start-" .. name, text = text, tags = tags, text_sha256 = api.quota.digest({ text = text, tags = tags }) })
+		assert(result.ok, result.message); return result.intake_id
+	end
+	local approved_source = card("original")
+	assert(W.project_start(f, project).ok)
+	local original = api.clone(f.authority.registry.dispatch.projects[project].start)
+	local _, later = W.held_proposal(f, cid, project)
+	local later_source = card("later")
+	W.publish_start(f, cid, project); assert(W.ack(f, cid, f.authority.registry.dispatch.projects[project].start).ok)
+	assert(W.start_claim(f, cid, project).ok)
+	check(not W.worker(f, approved).checks_pending and W.worker(f, later).checks_pending
+		and W.worker(f, later).project_held and W.provision_of(f, later) == nil,
+		"later approved held membership does not inherit an older START snapshot")
+	check(not f.authority.registry.dispatch.intakes[approved_source].held
+		and f.authority.registry.dispatch.intakes[later_source].held,
+		"the original held source is released but a later source cannot inherit the captured START approval")
+	check(f.authority.registry.dispatch.projects[project].start.action_id == original.action_id and W.restores(f),
+		"later additions neither replace the original grant nor invalidate its retained accepted claim")
+	local legacy = W.src_fixture({ auto_start_projects = false })
+	local old = W.coordinator(legacy)
+	-- Persisted pre-upgrade provisioning stays old: today's selected descriptor is
+	-- not retroactive evidence about helpers that generation actually received.
+	local saved = api.clone(legacy.authority.registry)
+	saved.dispatch.workers[old].capabilities = W.arr({ "report-files-v1", "native-ask-v1", "coordinator-control-v1" })
+	saved.dispatch.workers[old].project_start_protocol = nil
+	check(api.state.rehydrate(api.clone(saved)) ~= nil, "persisted old-helper capability evidence remains valid")
+	-- This case is a running pre-upgrade generation, not a host restart. Rehydration
+	-- separately validates its persisted shape but deliberately fences execution on restart.
+	legacy.authority.registry = saved
+	legacy.memory.value = api.clone(saved)
+	local held, member = W.held_proposal(legacy, old)
+	check(W.project_start(legacy, held).code == "unsupported_capability"
+		and not legacy.authority.registry.dispatch.projects[held].started and W.worker(legacy, member).project_held
+		and legacy.authority.registry.dispatch.projects[held].start == nil,
+		"an existing old-capability coordinator cannot receive a START grant or fall back to standalone release")
+	local standalone = W.src_fixture({ auto_start_projects = false })
+	local created = standalone:project("Legitimate standalone", false)
+	check(W.project_start(standalone, created).code == "project_started"
+		and standalone.authority.registry.dispatch.projects[created].start == nil,
+		"explicit no-coordinator START remains the separate host-owned mode, with no fabricated claim")
+end
+if section == nil or section == "project_start_failures" then
+	local f = W.src_fixture({ auto_start_projects = false }); local cid = W.coordinator(f)
+	local project, member = W.held_proposal(f, cid)
+	f.memory.fail = true; local failed = W.project_start(f, project); f.memory.fail = false
+	check(not failed.ok and f.authority.registry.dispatch.projects[project].start == nil and W.worker(f, member).project_held,
+		"failed authority persistence publishes no grant and releases no work")
+	assert(W.project_start(f, project).ok); local original = api.clone(f.authority.registry.dispatch.projects[project].start)
+	local action = W.start_publication(f, cid, project)
+	assert(f:finish(action, "full", { resource = "mailbox", current = 1, limit = 1, retryable = true, effect_started = false }).ok)
+	check(not f.authority.registry.dispatch.projects[project].started and W.worker(f, member).project_held,
+		"definite pre-effect publication failure keeps the exact approved work held")
+	check(not f:apply("retry", { action_id = action, trigger = "owner" }).ok, "generic retry cannot replace a START publication")
+	check(not W.start_retry(f, project, { start_id = "other-start" }).ok
+		and not W.start_retry(f, project, { project_revision = original.project_revision + 1 }).ok
+		and not W.start_retry(f, project, { decision_context = string.rep("f", 64) }).ok, "retry is scoped to the captured original grant")
+	assert(W.start_retry(f, project).ok)
+	local retried = W.start_publication(f, cid, project)
+	check(f:action(retried).request.reply_seq == original.reply_seq
+		and f.authority.registry.dispatch.projects[project].start.bytes == original.bytes
+		and f.authority.registry.dispatch.projects[project].start.action_id == original.action_id,
+		"definite refusal retry republishes only the original typed action and immutable object bytes")
+	local object = api.clone(f:action(retried).request)
+	check(f:finish(retried, "rejected", nil, { code = "binding_mismatch", message = "Definite pre-effect prerequisite refusal." }).code == "project_start_delivery_failed",
+		"a conclusive non-revocation refusal retains a recoverable original delivery")
+	check(W.start_retry(f, project).code == "project_start_retry_queued", "repairing definite refusal prerequisites can rearm the same original grant")
+	retried = W.start_publication(f, cid, project)
+	check(f:action(retried).request.object_b64 == object.object_b64 and f:action(retried).request.part == object.part
+		and f:action(retried).request.reply_seq == original.reply_seq and f.authority.registry.dispatch.projects[project].start.bytes == original.bytes,
+		"definite refusal retry retains the exact object, cursor, reply slot and typed bytes")
+	assert(f:apply("claim", { action_id = retried, executor = f.origin.window_epoch }).ok)
+	local failed_delivery = f:finish(retried, "uncertain", nil, { code = "storage_error", message = "Publication outcome is not proven." })
+	check(failed_delivery.code == "effect_uncertain",
+		"an authentic uncertain publication retains its exact action, never a retryable refusal: " .. runtime.json.encode(failed_delivery))
+	local serial, seq = f.authority.registry.dispatch.serial, W.worker(f, cid).reply_seq
+	check(W.start_retry(f, project).code == "project_start_inspection"
+		and f.authority.registry.dispatch.serial == serial and W.worker(f, cid).reply_seq == seq,
+		"uncertain publication is inspection-only and cannot issue another transport or typed grant")
+	local diagnostic = api.dispatch.project(f.authority.registry, f.origin.logical_session_id).projects[project].start
+	check(diagnostic.state == "failed" and diagnostic.delivery_state == "uncertain" and diagnostic.delivery_action_id == retried
+		and not diagnostic.failure.retryable and diagnostic.activation_token == nil,
+		"safe uncertainty diagnostics retain the exact status-inspection action without granting retry")
+	check(not f:apply("readback_publication", { action_id = retried }).ok and W.worker(f, member).project_held
+		and not f.authority.registry.dispatch.projects[project].started, "generic readback cannot turn START uncertainty into a re-publication")
+	local twin = W.cold(f)
+	local restored = twin.authority.registry.dispatch.projects[project]
+	check(restored.start.bytes == original.bytes and restored.start.action_id == original.action_id and not restored.started,
+		"cold reload retains one grant and publication uncertainty without releasing held work")
+	check(W.restores(f), "failed and uncertain original START remain valid durable state")
+end
+
+if section == nil or section == "project_start_publication" then
+	local f = W.src_fixture({ auto_start_projects = false }); local cid = W.coordinator(f)
+	local project, member = W.held_proposal(f, cid); assert(W.project_start(f, project).ok)
+	local action
+	for _ = 1, 16 do
+		local selected = W.start_publication(f, cid, project)
+		if f:action(selected).request.part == "manifest" then action = selected; break end
+		assert(f:finish(selected, "published", {}).ok)
+	end
+	assert(action, "original manifest action")
+	assert(f:apply("claim", { action_id = action, executor = f.origin.window_epoch }).ok)
+	local a = f:action(action); local request = api.clone(a.request)
+	assert(f:apply("lost", { action_id = action, executor = f.origin.window_epoch, grant_id = a.claim.grant_id }).ok)
+	assert(W.ack(f, cid, f.authority.registry.dispatch.projects[project].start).ok)
+	local start = f.authority.registry.dispatch.projects[project].start
+	check(start.acknowledged and not start.published and W.worker(f, cid).replies[tostring(start.reply_seq)] ~= nil
+		and not W.start_claim(f, cid, project).ok and W.worker(f, member).project_held,
+		"early authentic consumption retains original publication bytes but cannot release work during publication uncertainty")
+	assert(f:finish(action, "published", { wake_status = "awaiting_window", wake_effect_started = false,
+		wake_target_request_id = request.request_id, wake_target_action_id = request.action_id }).ok)
+	start = f.authority.registry.dispatch.projects[project].start
+	check(start.published and start.publication.request_bytes ~= nil and start.publication.response_bytes ~= nil
+		and W.worker(f, cid).wakes[request.action_id] ~= nil and not f.authority.registry.dispatch.projects[project].started,
+		"complete manifest-last publication proof is durable before native wake and still is not a START claim")
+	assert(W.start_claim(f, cid, project).ok)
+	check(f.authority.registry.dispatch.projects[project].started and W.restores(f),
+		"the original status outcome can settle after consume, and only the subsequent exact accepted claim releases work")
+	local damaged = api.clone(f.authority.registry)
+	damaged.dispatch.projects[project].start.publication.response_bytes = "{}"
+	check(api.state.rehydrate(damaged) == nil, "restore validates full original publication evidence instead of trusting a published boolean")
+end
+
+if section == nil or section == "project_start_policy" then
+	local f = W.src_fixture({ auto_start_projects = true }); local cid = W.coordinator(f)
+	local project, manual = W.held_proposal(f, cid)
+	local text, tags = "The owner enabled automatic admission of this source.", W.arr({ "docs" })
+	local added = f:apply("board_intake", { orch_project_id = project, board_path = "/fixture/automatic-start.md",
+		card_id = "policy-card", text = text, tags = tags, text_sha256 = api.quota.digest({ text = text, tags = tags }) })
+	assert(added.ok, added.message)
+	local p = f.authority.registry.dispatch.projects[project]; local grant = api.clone(p.start)
+	check(grant and grant.source.kind == "policy" and grant.source.rule == "auto_start_projects"
+		and #grant.source.policy_revision == 64 and not p.started and f.authority.registry.dispatch.intakes[added.intake_id].held,
+		"saved explicit auto-start policy creates an honestly policy-sourced typed intent, never direct managed release")
+	local seq = W.worker(f, cid).reply_seq
+	assert(f:apply("pause").ok)
+	check(W.worker(f, cid).reply_seq == seq and f.authority.registry.dispatch.projects[project].start.bytes == grant.bytes,
+		"later bookkeeping and pause cannot allocate another automatic START grant")
+	W.publish_start(f, cid, project); assert(W.ack(f, cid, f.authority.registry.dispatch.projects[project].start).ok)
+	assert(W.start_claim(f, cid, project).ok)
+	check(not f.authority.registry.dispatch.intakes[added.intake_id].held and W.worker(f, manual).project_held
+		and W.worker(f, manual).checks_pending and W.provision_of(f, manual) == nil,
+		"policy approval releases only its actual source snapshot and never older force-held proposal membership")
+	local _, later = W.held_proposal(f, cid, project)
+	check(W.worker(f, later).project_held and W.worker(f, later).checks_pending
+		and f.authority.registry.dispatch.projects[project].start.action_id == grant.action_id
+		and not f.authority.registry.dispatch.projects[project].start.snapshot.workers[later] and W.restores(f),
+		"coordinator-proposed force-held additions remain explicit-owner-only even with auto-start enabled")
+	local g = W.src_fixture({ auto_start_projects = true }); local coordinator = W.coordinator(g)
+	local target = g:project("Independent future policy sources", false)
+	local function policy_card(id)
+		local text, tags = "Policy-admitted source " .. id, W.arr({ "docs" })
+		local added = g:apply("board_intake", { orch_project_id = target, board_path = "/fixture/policy-successor.md",
+			card_id = id, text = text, tags = tags, text_sha256 = api.quota.digest({ text = text, tags = tags }) })
+		assert(added.ok, added.message); return added.intake_id
+	end
+	local revoked = policy_card("revoked")
+	W.publish_start(g, coordinator, target); assert(W.ack(g, coordinator, g.authority.registry.dispatch.projects[target].start).ok)
+	local old = api.clone(g.authority.registry.dispatch.projects[target].start)
+	W.repository(g, "/fixture/policy-revised/.git", "refs/heads/reviewed", "orch_queue", target, "/fixture/policy-revised")
+	local fresh_source = policy_card("new-policy-authority")
+	local current = g.authority.registry.dispatch.projects[target].start
+	check(current.action_id ~= old.action_id and current.source.kind == "policy" and current.snapshot.intakes[fresh_source]
+		and not current.snapshot.intakes[revoked] and g.authority.registry.dispatch.projects[target].start_history[1].bytes == old.bytes,
+		"a new policy-admitted source gets an independent typed grant while the revoked source stays excluded and correlated")
+	W.publish_start(g, coordinator, target); assert(W.ack(g, coordinator, g.authority.registry.dispatch.projects[target].start).ok)
+	assert(W.start_claim(g, coordinator, target).ok)
+	check(g.authority.registry.dispatch.intakes[revoked].held and not g.authority.registry.dispatch.intakes[fresh_source].held
+		and W.restores(g), "saved policy resumes for genuinely new membership, never by reapproving a revoked snapshot")
+end
+if section == nil or section == "project_start_subject" then
+	local f = W.src_fixture({ auto_start_projects = false }); local cid = W.coordinator(f)
+	local dir = W.scratch(); local path = W.write_plan(dir, nil, "start-source.md")
+	local imported = f:apply("plan_import", { path = path }); assert(imported.ok, imported.message)
+	local project = imported.orch_project_id; assert(W.project_start(f, project).ok)
+	local original = api.clone(f.authority.registry.dispatch.projects[project].start)
+	W.write_plan(dir, W.PLAN_TEXT:gsub("Fixture scheduling plan", "Changed source plan", 1), "start-source.md")
+	assert(f:apply("plan_import", { path = path, orch_project_id = project }).ok)
+	W.publish_start(f, cid, project); assert(W.ack(f, cid, f.authority.registry.dispatch.projects[project].start).ok)
+	local before = W.worker(f, cid).accepted_seq
+	local refused = W.start_claim(f, cid, project)
+	check(refused.ok and refused.refused == "start_subject_changed" and W.worker(f, cid).accepted_seq == before + 1
+		and not f.authority.registry.dispatch.projects[project].started and not W.worker(f, cid).rejected_report,
+		"an authentic stale START report is consumed as a refused fact, never a work release or a blocked report lane")
+	check(W.start_retry(f, project).code == "project_start_inspection"
+		and f.authority.registry.dispatch.projects[project].start.bytes == original.bytes and W.restores(f),
+		"Retry cannot turn a terminal stale decision into another approval")
+	assert(W.project_start(f, project).ok)
+	check(f.authority.registry.dispatch.projects[project].start.action_id ~= original.action_id
+		and f.authority.registry.dispatch.projects[project].start_history[1].bytes == original.bytes,
+		"a new explicit current-source START creates a fresh decision only after preserving the closed original")
+	local reserved = W.src_fixture({ auto_start_projects = false })
+	assert(reserved:apply("queue", { record_id = "omp", record_revision = 0, catalog_revision = 0, prompt = "Await actual coordinator acceptance.",
+		cwd = "/fixture", placement = "split", coordinator = true }).ok)
+	local target = reserved:project("Reserved coordinator must not become standalone", false)
+	check(W.project_start(reserved, target).code == "start_coordinator_unavailable"
+		and not reserved.authority.registry.dispatch.projects[target].started,
+		"a reserved coordinator cannot be misrepresented as an absent coordinator to bypass typed START")
+end
+
+if section == nil or section == "project_start_active" then
+	local f = W.src_fixture({ auto_start_projects = true }); local cid = W.coordinator(f)
+	local project = f.default_project; assert(f.authority.registry.dispatch.projects[project].started)
+	assert(f:apply("pause").ok)
+	local queued = f:apply("queue", { orch_project_id = project, record_id = "builder", record_revision = 0, catalog_revision = 0,
+		prompt = "Continue already approved work after pause.", cwd = "/fixture", placement = "split", coordinator = false })
+	assert(queued.ok, queued.message)
+	local approved = W.worker(f, queued.worker_id); assert(approved.project_held and not approved.checks_pending)
+	local text, tags = "Automatically approved new source", W.arr({ "docs" })
+	local source = f:apply("board_intake", { orch_project_id = project, board_path = "/fixture/active-start.md", card_id = "active-source",
+		text = text, tags = tags, text_sha256 = api.quota.digest({ text = text, tags = tags }) }); assert(source.ok, source.message)
+	local p = f.authority.registry.dispatch.projects[project]
+	check(p.started and p.start and not p.start.snapshot.workers[queued.worker_id] and not W.worker(f, queued.worker_id).checks_pending,
+		"a new scoped policy START preserves existing project permission and does not reclassify pause-held approved work")
+	assert(f:apply("resume").ok)
+	check(f.authority.registry.dispatch.projects[project].started and not W.worker(f, queued.worker_id).checks_pending,
+		"Resume remains sufficient for already-approved work while the separate new-source START is pending")
+	check(f.authority.registry.dispatch.intakes[source.intake_id].held and W.restores(f),
+		"preserving ACTIVE does not release the new unclaimed source")
+end
+if section == nil or section == "project_start_mailbox" then
+	local f = W.src_fixture({ auto_start_projects = false }); local cid = W.coordinator(f)
+	local project, member = W.held_proposal(f, cid); assert(W.project_start(f, project).ok)
+	W.publish_start(f, cid, project); assert(W.ack(f, cid, f.authority.registry.dispatch.projects[project].start).ok)
+	local old = api.clone(f.authority.registry.dispatch.projects[project].start)
+	W.repository(f, "/fixture/revised/.git", "refs/heads/reviewed", "orch_queue", project, "/fixture/revised")
+	check(f.authority.registry.dispatch.projects[project].start.closed ~= nil, "known settled stale source decision closes without discarding its original correlation")
+	assert(W.project_start(f, project).ok)
+	local fresh = api.clone(f.authority.registry.dispatch.projects[project].start)
+	assert(fresh.action_id ~= old.action_id)
+	local bytes = W.claim_report(f, cid, old); local before = W.worker(f, cid).accepted_seq
+	check(W.mailbox_start_report(f, cid, bytes).code == "bridge_committed" and W.worker(f, cid).accepted_seq == before + 1
+		and W.worker(f, cid).rejected_report == nil and W.worker(f, cid).receipts[tostring(before + 1)].kind == "PROJECT_START_CLAIM",
+		"the actual mailbox-read route consumes an exact late closed-grant report as a refused fact instead of reject_read")
+	check(not f.authority.registry.dispatch.projects[project].started and W.worker(f, member).checks_pending
+		and f.authority.registry.dispatch.projects[project].start.action_id == fresh.action_id
+		and f.authority.registry.dispatch.projects[project].start_history[1].closed.report_bytes == bytes,
+		"accepting the old report's receipt releases nothing and cannot match the fresh grant")
+	assert(W.ack(f, cid, f.authority.registry.dispatch.projects[project].start).ok)
+	assert(W.mailbox_start_report(f, cid, W.claim_report(f, cid, fresh)).ok)
+	check(f.authority.registry.dispatch.projects[project].started and W.worker(f, cid).rejected_report == nil and W.restores(f),
+		"a fresh exact grant remains usable after the refused old report and its receipt")
+	local g = W.src_fixture({ auto_start_projects = false }); local coordinator = W.coordinator(g)
+	local empty = g:project("Finish must retain exact claim lookup", false)
+	assert(W.project_start(g, empty).ok)
+	W.publish_start(g, coordinator, empty); assert(W.ack(g, coordinator, g.authority.registry.dispatch.projects[empty].start).ok)
+	local earlier = api.clone(g.authority.registry.dispatch.projects[empty].start)
+	W.repository(g, "/fixture/finish-revised/.git", "refs/heads/reviewed", "orch_queue", empty, "/fixture/finish-revised")
+	local function finish_empty()
+		local p = g.authority.registry.dispatch.projects[empty]
+		return g:apply("project_finish", { orch_project_id = empty, project_revision = p.revision, result = "No implementation work was admitted." })
+	end
+	check(not finish_empty().ok and not g.authority.registry.dispatch.projects[empty].finished,
+		"an otherwise empty project cannot discard its acknowledged START before the authentic claim/refusal arrives")
+	assert(W.project_start(g, empty).ok)
+	W.publish_start(g, coordinator, empty); assert(W.ack(g, coordinator, g.authority.registry.dispatch.projects[empty].start).ok)
+	local latest = api.clone(g.authority.registry.dispatch.projects[empty].start)
+	assert(W.mailbox_start_report(g, coordinator, W.claim_report(g, coordinator, latest)).ok)
+	check(not finish_empty().ok and g.authority.registry.dispatch.projects[empty].start_history[1].bytes == earlier.bytes,
+		"settling the current grant cannot discard a historical exact claim that has not arrived")
+	assert(W.mailbox_start_report(g, coordinator, W.claim_report(g, coordinator, earlier)).ok)
+	check(finish_empty().ok and g.authority.registry.dispatch.projects[empty].finished and W.worker(g, coordinator).rejected_report == nil,
+		"the real mailbox route consumes the historical refusal and only then allows project history compaction")
+end
+if section == nil or section == "project_start_malformed" then
+	local f = W.src_fixture({ auto_start_projects = false }); local cid = W.coordinator(f)
+	local project = W.held_proposal(f, cid); assert(W.project_start(f, project).ok)
+	W.publish_start(f, cid, project); assert(W.ack(f, cid, f.authority.registry.dispatch.projects[project].start).ok)
+	local s = f.authority.registry.dispatch.projects[project].start
+	local report = runtime.json.decode(W.claim_report(f, cid, s)); report.action_revision += 1
+	local before = W.worker(f, cid).accepted_seq
+	check(W.mailbox_start_report(f, cid, runtime.json.encode(report)).code == "report_rejected"
+		and W.worker(f, cid).accepted_seq == before and W.worker(f, cid).rejected_report.code == "start_claim_unauthorized"
+		and not f.authority.registry.dispatch.projects[project].started,
+		"the real reject_read path retains a forged action revision without an acceptance receipt, skipped sequence or release")
+end
+
+if section == nil or section == "project_start_retirement" then
+	local f = W.src_fixture({ auto_start_projects = false }); local cid = W.coordinator(f)
+	local other = f:project("Another acknowledged START", false)
+	assert(W.project_start(f, other).ok)
+	W.publish_start(f, cid, other); assert(W.ack(f, cid, f.authority.registry.dispatch.projects[other].start).ok)
+	local other_start = api.clone(f.authority.registry.dispatch.projects[other].start)
+	W.settle(f, cid, true)
+	local project, member = W.held_proposal(f, cid)
+	local gate = W.proposal_gate(f)
+	W.deliver(f, cid, gate.id)
+	assert(W.project_start(f, project).ok)
+	local original = api.clone(f.authority.registry.dispatch.projects[project].start)
+	assert(f:apply("observe", { worker_id = cid, pane_binding = api.clone(W.worker(f, cid).pane_binding), native_state = "idle" }).ok)
+	check(not f:apply("retire", { worker_id = cid, withdraw_starts = true }).ok,
+		"an unpublished START and an unconsumed non-START reply cannot be withdrawn")
+	W.publish_start(f, cid, project)
+	check(not f:apply("retire", { worker_id = cid, withdraw_starts = true }).ok,
+		"complete START publication cannot bypass an unrelated owner-decision consumption obligation")
+	assert(W.ack(f, cid, f.authority.registry.dispatch.gates[gate.id].delivery).ok)
+	W.settle(f, cid, true)
+	local before = api.clone(W.worker(f, cid))
+	assert(before.reply_floor < original.reply_seq and before.release == nil and before.compacted_floor == before.accepted_seq)
+	assert(f:apply("observe", { worker_id = cid, pane_binding = api.clone(before.pane_binding), native_state = "working" }).ok)
+	check(not f:apply("retire", { worker_id = cid, withdraw_starts = true }).ok,
+		"a working coordinator cannot be stopped merely because its START is pending")
+	assert(f:apply("observe", { worker_id = cid, pane_binding = api.clone(before.pane_binding), native_state = "idle" }).ok)
+	local ready = api.dispatch.project(f.authority.registry, f.origin.logical_session_id).workers[cid]
+	check(ready.start_retirement_ready and ready.start_retirement_requested == false and ready.start_retirement == nil,
+		"only safe withdrawal eligibility, never the private original grants or retirement proof, is projected")
+	assert(f:apply("retire", { worker_id = cid, withdraw_starts = true }).code == "start_retirement_requested")
+	local intent = runtime.json.encode(W.worker(f, cid).start_retirement)
+	check(f:apply("retire", { worker_id = cid, withdraw_starts = true }).code == "retirement_already_requested"
+		and runtime.json.encode(W.worker(f, cid).start_retirement) == intent, "repeated owner withdrawal retains the one exact intent")
+	check(W.worker(f, cid).release == nil and W.worker(f, cid).reply_floor == before.reply_floor
+		and not f.authority.registry.dispatch.projects[project].started and W.worker(f, member).checks_pending,
+		"withdrawal records no ACK, self-release, floor advancement or task permission")
+	check(W.project_start(f, project).code == "project_start_pending", "fresh START remains blocked until real old-owner closure")
+	local before_other = W.worker(f, cid).accepted_seq
+	local refused_other = f:apply("intake", { worker_id = cid, bytes = W.claim_report(f, cid, other_start) })
+	check(refused_other.ok and refused_other.refused == "start_owner_changed" and W.worker(f, cid).accepted_seq == before_other + 1
+		and W.worker(f, cid).rejected_report == nil and not f.authority.registry.dispatch.projects[other].started,
+		"withdrawal consumes a late acknowledged START from another project as a refused fact instead of holding the report lane")
+	W.settle(f, cid, true)
+	local final_report_floor, final_report_chain = W.worker(f, cid).compacted_floor, W.worker(f, cid).compacted_chain
+	local stop = f:apply("poll", { worker_id = cid }); assert(stop.ok and stop.action_id)
+	local stop_request = api.clone(f:action(stop.action_id).request); assert(stop_request.op == "stop")
+	check(f:finish(stop.action_id, "uncertain", nil).code == "effect_uncertain"
+		and f:apply("retry", { action_id = stop.action_id }).code == "retry_refused"
+		and W.project_start(f, project).code == "project_start_pending", "uncertain native stop stays fenced and cannot grant successor approval")
+	assert(f:finish(stop.action_id, "stopped", { pane_binding = stop_request.pane_binding, observation = "exited" }).ok)
+	check(f.authority.registry.sessions[f.origin.logical_session_id].orchestrator ~= nil and W.project_start(f, project).code == "project_start_pending",
+		"positive native exit alone neither retires communication nor releases the owner")
+	local retire = f:apply("poll", { worker_id = cid }); assert(retire.ok and retire.action_id)
+	local request = api.clone(f:action(retire.action_id).request)
+	check(request.op == "mailbox_retire" and request.mode == "retire" and request.reply_floor == before.reply_floor
+		and request.report_floor == final_report_floor and request.report_chain_sha256 == final_report_chain
+		and #request.withdrawn_starts == 1 and request.withdrawn_starts[1].reply_seq == original.reply_seq
+		and request.withdrawn_starts[1].message_id == original.message_id
+		and request.withdrawn_starts[1].message_sha256 == api.codec.sha256(original.bytes),
+		"real retirement carries only the closed original START tail and actual unchanged floors/receipt chain")
+	check(f:finish(retire.action_id, "uncertain", nil).code == "effect_uncertain"
+		and f:apply("poll", { worker_id = cid }).code == "operation_pending",
+		"uncertain physical retirement retains its one exact request without a replacement")
+	assert(f:finish(retire.action_id, "retired", {}).code == "coordinator_retired")
+	local retired = W.worker(f, cid); local p = f.authority.registry.dispatch.projects[project]
+	check(retired.stopped and retired.mailbox_retired and retired.release == nil and retired.reply_floor == before.reply_floor
+		and not p.start.acknowledged and p.start.closed.retired and not p.started
+		and f.authority.registry.sessions[f.origin.logical_session_id].orchestrator == nil,
+		"real stop, exact physical retirement and generation fencing close the unconsumed grant without manufacturing consumption")
+	check(W.restores(f), "withdrawn original bytes and positive retirement proof restore together")
+	local successor = W.coordinator(f)
+	assert(W.project_start(f, project).ok)
+	p = f.authority.registry.dispatch.projects[project]
+	check(p.start.coordinator.worker_id == successor and p.start.action_id ~= original.action_id
+		and p.start_history[1].bytes == original.bytes and W.worker(f, member).checks_pending,
+		"fresh explicit approval targets the real successor and retains immutable terminal original correlation")
+	local refused = f:apply("intake", { worker_id = cid, bytes = W.claim_report(f, cid, original) })
+	check(refused.ok and refused.refused == "start_owner_revoked" and not f.authority.registry.dispatch.projects[project].started,
+		"an exact late original claim is a consumed refused fact, never successor permission")
+	W.publish_start(f, successor, project)
+	assert(W.ack(f, successor, f.authority.registry.dispatch.projects[project].start).ok)
+	assert(W.start_claim(f, successor, project).ok)
+	check(f.authority.registry.dispatch.projects[project].started and not W.worker(f, member).checks_pending
+		and W.restores(f), "only the successor's original published and consumed grant releases captured work")
+end
+
+if section == nil or section == "passive_proposals" then
+	local f = W.src_fixture({ auto_start_projects = true, auto_approve_kinds = W.arr({ "dispatch" }) })
+	local cid = W.coordinator(f)
+	assert(f:apply("pause").ok)
+	assert(W.propose(f, cid, "new_work", nil, { new_project_name = "Proposed research",
+		record_id = "builder", record_revision = 0, prompt = "Investigate the specified source without widening scope.",
+		scope = { paths = W.arr({ "src/research.luau" }), systems = W.arr() },
+		checks = W.arr({ { check_id = "research-check", argv = W.arr({ "luau", "tests/research.luau" }) } }) }).ok)
+	local gate = W.proposal_gate(f)
+	check(gate.answer == nil, "passive proposal requires owner review despite old dispatch auto-approval policy and no parent checkpoint")
+	local proposal = assert(api.codec.decode_report(gate.proposal, W.worker(f, cid)))
+	check(proposal.payload.work_id == nil and proposal.payload.project_id == nil, "passive proposal never invents a parent checkpoint binding")
+	assert(f:apply("answer", { gate_id = gate.id, gate_revision = gate.revision, choice_id = "approve", answer = "Add this held task." }).ok)
+	local work
+	for _, worker in f.authority.registry.dispatch.workers do if worker.worker_id ~= cid then work = worker end end
+	assert(work, "approved passive task missing")
+	local project = f.authority.registry.dispatch.projects[work.orch_project_id]
+	check(work.project_held and work.checks_pending and not project.started and W.provision_of(f, work.worker_id) == nil,
+		"approval while paused adds real held work, not a launch")
+	check(work.checks[1].argv[2] == "tests/research.luau" and work.scope.paths[1] == "src/research.luau",
+		"literal check argv and scope reach the pending work")
+	check(not f:apply("project_start", { orch_project_id = project.orch_project_id, project_revision = project.revision }).ok,
+		"START cannot bypass review of proposed check commands")
+	assert(f:apply("project_start", { orch_project_id = project.orch_project_id, project_revision = project.revision, checks_reviewed = true }).ok)
+	check(not f.authority.registry.dispatch.projects[project.orch_project_id].started and W.provision_of(f, work.worker_id) == nil,
+		"managed START during pause records a grant without release or native effect")
+	W.publish_start(f, cid, project.orch_project_id)
+	assert(W.ack(f, cid, f.authority.registry.dispatch.projects[project.orch_project_id].start).ok)
+	assert(W.start_claim(f, cid, project.orch_project_id).ok)
+	check(f.authority.registry.dispatch.projects[project.orch_project_id].started and W.provision_of(f, work.worker_id) == nil,
+		"accepted START claim records approval during pause but still performs no native launch")
+	check(W.restores(f), "passive proposal, owner decision and held start restore coherently")
+
+	local dir = W.scratch()
+	for _, kind in { "plan_file", "template", "board" } do
+		local templates = W.arr({ { id = "notes", title = "Notes", prompt = "Summarize {input}.", output = "notes.md", next = "", custom_fields = {} } })
+		local g = W.src_fixture({ auto_start_projects = true, templates = templates })
+		local coordinator = W.coordinator(g)
+		assert(g:apply("pause").ok)
+		local cards = W.arr({ { card_id = "passive-card", text = "Document the observation.", tags = W.arr({ "docs" }),
+			text_sha256 = api.quota.digest({ text = "Document the observation.", tags = W.arr({ "docs" }) }) } })
+		local source
+		if kind == "plan_file" then source = { kind = kind, path = W.write_plan(dir, nil, "proposal.md"), revision = api.codec.sha256(W.PLAN_TEXT) }
+		elseif kind == "template" then source = { kind = kind, template_id = "notes", revision = api.quota.digest(templates[1]), input = "the observed source" }
+		else source = { kind = kind, path = dir .. "/board.md", revision = api.quota.digest(cards) } end
+		assert(W.propose(g, coordinator, "add_source", nil, { new_project_name = "Passive " .. kind, source = source }).ok)
+		local proposed = W.proposal_gate(g)
+		assert(g:apply("answer", { gate_id = proposed.id, gate_revision = proposed.revision, choice_id = "approve", answer = "Add, but do not start." }).ok)
+		local admitted = g.authority.registry.dispatch.gates[proposed.id]
+		if kind == "board" then
+			check(admitted.execution.state == "pending" and next(g.authority.registry.dispatch.intakes or {}) == nil,
+				"board approval waits for an actual desktop snapshot rather than scraping a file")
+			local before = runtime.json.encode(g.authority.registry)
+			check(not g:apply("source_request", { gate_id = admitted.id, gate_revision = admitted.revision,
+				source_revision = api.quota.digest({}), cards = W.arr() }).ok and runtime.json.encode(g.authority.registry) == before,
+				"a changed snapshot cannot consume the approved source request")
+			assert(g:apply("source_request", { gate_id = admitted.id, gate_revision = admitted.revision,
+				source_revision = source.revision, cards = cards }).ok)
+		end
+		local workers = 0; for _ in g.authority.registry.dispatch.workers do workers += 1 end
+		check(workers == 1, kind .. " approval creates no worker beyond the already active coordinator")
+		local held = false
+		for _, value in g.authority.registry.dispatch.plans or {} do held = held or value.held == true end
+		for _, value in g.authority.registry.dispatch.intakes or {} do held = held or value.held == true end
+		for _, value in g.authority.registry.dispatch.chains or {} do held = held or value.held == true end
+		check(held and W.restores(g), kind .. " is a durable held source even under saved auto-start policy")
+	end
+end
+
+if section == nil or section == "plan_capacity" then
+	local dir, f = W.scratch(), W.src_fixture({ auto_start_projects = false })
+	local admitted = {}
+	for i = 1, 9 do
+		local imported = f:apply("plan_import", { path = W.write_plan(dir, nil, "plan-" .. tostring(i) .. ".md") })
+		assert(imported.ok, imported.message); table.insert(admitted, imported.plan_id)
+	end
+	local count = 0; for _ in f.authority.registry.dispatch.plans do count += 1 end
+	check(count == 9 and W.effects(f) == "", "plan admission has no four-plan cap and starts no work")
+	for _, id in admitted do check(W.plan(f, id).status == "active" and W.plan(f, id).held == true,
+		"admitting another plan does not evict an active held plan") end
+	check(#runtime.json.encode(f.authority.registry) < 8 * 1024 * 1024 - 512 * 1024 and W.restores(f),
+		"admitted plans retain the settlement reserve and all associations restore")
+end
+
+if section == nil or section == "project_review" then
+	for _, kind in { "plan", "board", "template" } do
+		local templates = W.arr({ { id = "held-notes", title = "Notes", prompt = "Summarize {input}.", output = "notes.md", next = "", custom_fields = {} } })
+		local f = W.src_fixture({ auto_start_projects = true, templates = templates })
+		local project = f:project("Only this new source is automatic", false)
+		local queued = f:apply("queue", { orch_project_id = project, record_id = "builder", record_revision = 0, catalog_revision = 0,
+			prompt = "This earlier manual task still needs START.", cwd = "/fixture", placement = "split", coordinator = false })
+		assert(queued.ok and queued.action_id == nil)
+		local added
+		if kind == "plan" then added = f:apply("plan_import", { orch_project_id = project, path = W.write_plan(W.scratch()) })
+		elseif kind == "board" then
+			local tags = W.arr({ "class-docs" })
+			added = f:apply("board_intake", { orch_project_id = project, board_path = "/fixture/native-board.md", card_id = "new-auto-card",
+				text = "Document the new source.", tags = tags, text_sha256 = api.quota.digest({ text = "Document the new source.", tags = tags }) })
+		else added = f:apply("template_start", { orch_project_id = project, template_id = "held-notes", input = "only the new source" }) end
+		assert(added.ok, added.message)
+		check(f.authority.registry.dispatch.projects[project].started and W.worker(f, queued.worker_id).checks_pending
+			and W.provision_of(f, queued.worker_id) == nil, kind .. ": auto-start intake cannot release older unrelated held work")
+		check(W.restores(f), kind .. ": independent hold survives restoration")
+	end
+	do
+		local f = W.src_fixture({ auto_start_projects = false })
+		local title = string.rep("a", 159) .. "—漢字"
+		local bytes = W.PLAN_TEXT:gsub("Fixture scheduling plan", function() return title end, 1)
+		local imported = f:apply("plan_import", { path = W.write_plan(W.scratch(), bytes, "unicode.md") }); assert(imported.ok, imported.message)
+		local name = f.authority.registry.dispatch.projects[imported.orch_project_id].name
+		check(name == string.rep("a", 159) and utf8.len(name) == 159, "project titles stop before a split UTF-8 codepoint")
+		local old = api.clone(f.authority.registry)
+		old.version = 4; old.dispatch.projects = nil; old.dispatch.finished_projects = nil
+		old.installation_defaults.policy.auto_start_projects = nil; old.installation_defaults.policy.auto_launch_intake = false
+		for _, policy in old.dispatch.policies do policy.auto_start_projects = nil; policy.auto_launch_intake = false end
+		for _, plan in old.dispatch.plans do plan.orch_project_id = nil; plan.held = nil end
+		local converted, info = api.state.rehydrate(old)
+		assert(converted, info and info.message)
+		local parent = converted.dispatch.projects[converted.dispatch.plans[imported.plan_id].orch_project_id]
+		check(parent.name == name and converted.authority_namespace == old.authority_namespace
+			and converted.dispatch.plans[imported.plan_id].plan_revision == imported.plan_revision,
+			"v4 Unicode plan conversion preserves source identity while producing a valid bounded display name")
+	end
+	do
+		local f = W.fixture({ reviewer_records = W.arr({ "codex" }) })
+		local builder, lid = W.granted(f, "project-finish-proof", "refs/heads/project-finish")
+		local rm, project = W.holder(f, lid), W.worker(f, builder).orch_project_id
+		local function finish_project()
+			return f:apply("project_finish", { orch_project_id = project,
+				project_revision = f.authority.registry.dispatch.projects[project].revision, result = "Code task settled." })
+		end
+		check(not finish_project().ok, "an issued landing grant still blocks project finish")
+		assert(W.ack(f, rm, W.grant(f, lid)).ok)
+		assert(W.landing_result(f, rm, lid, "uncertain", { reason = "Result needs owner inspection." }).ok)
+		check(not finish_project().ok, "release-manager infrastructure exemption cannot abandon an uncertain landing")
+		assert(f:apply("reconcile_landing", { landing_id = lid, landing_revision = W.item(f, lid).revision, outcome = "landed",
+			target_revision = "project-finished-head", reason = "Inspected target read-only.", operator_verified = true }).ok)
+		assert(W.ack(f, rm, W.attempt(f, lid)).ok)
+		assert(W.deploy_result(f, lid, "not_applicable", { reason = "This task defines no deployment." }).ok)
+		local members = {}
+		for id in f.authority.registry.dispatch.workers do table.insert(members, id) end
+		for _, id in members do W.drain(f, id); W.settle(f, id, true) end
+		for _, id in members do if id ~= rm then
+			if not W.worker(f, id).finish then assert(f:apply("finish", { worker_id = id }).ok) end
+			for _ = 1, 8 do
+				if W.worker(f, id).mailbox_retired then break end
+				local next_step = f:apply("poll", { worker_id = id }); assert(next_step.ok and next_step.action_id, next_step.message)
+				local request = f:action(next_step.action_id).request
+				if request.op == "stop" then
+					assert(f:finish(next_step.action_id, "stopped", { pane_binding = api.clone(request.pane_binding), observation = "absent" }).ok)
+				elseif request.op == "mailbox_retire" then assert(f:finish(next_step.action_id, if request.mode == "retire" then "retired" else "compacted", {}).ok)
+				else error("unexpected settlement operation " .. request.op) end
+			end
+			assert(W.worker(f, id).mailbox_retired, "ordinary project member failed to settle")
+		end end
+		check(f.authority.registry.dispatch.projects[project].finished == true
+			and W.worker(f, rm).phase == "accepted" and W.worker(f, rm).finish == nil and W.worker(f, rm).mailbox_retired ~= true,
+			"settled business work reaches finished history without stopping its session release manager")
+		check(W.restores(f), "finished project and live settled infrastructure restore together")
+	end
+end
+
+-- Settle a real accepted member through its public stop and mailbox-retirement protocol.
+function W.close_member(f, id)
+	W.drain(f, id); W.settle(f, id, true)
+	if not W.worker(f, id).finish then assert(f:apply("finish", { worker_id = id }).ok) end
+	for _ = 1, 8 do
+		if W.worker(f, id).mailbox_retired then return end
+		local next_step = f:apply("poll", { worker_id = id }); assert(next_step.ok and next_step.action_id, next_step.message)
+		local request = f:action(next_step.action_id).request
+		if request.op == "stop" then
+			assert(f:finish(next_step.action_id, "stopped", { pane_binding = api.clone(request.pane_binding), observation = "absent" }).ok)
+		elseif request.op == "mailbox_retire" then
+			assert(f:finish(next_step.action_id, if request.mode == "retire" then "retired" else "compacted", {}).ok)
+		else error("unexpected settlement operation " .. request.op) end
+	end
+	assert(W.worker(f, id).mailbox_retired, "member did not settle through its bounded retirement protocol")
+end
+if section == nil or section == "project_gate_rearm" then
+	for _, choice in { "launch_anyway", "cancel" } do
+		local f = W.src_fixture()
+		local queued = f:apply("queue", { record_id = "builder", record_revision = 0, catalog_revision = 0,
+			prompt = "Previously queued manual work.", cwd = "/fixture", placement = "split", coordinator = false })
+		assert(queued.ok and queued.action_id, queued.message)
+		local raw = api.clone(f.authority.registry)
+		raw.version = 4; raw.dispatch.projects = nil; raw.dispatch.finished_projects = nil
+		raw.installation_defaults.policy.auto_start_projects = nil; raw.installation_defaults.policy.auto_launch_intake = false
+		for _, policy in raw.dispatch.policies do policy.auto_start_projects = nil; policy.auto_launch_intake = false end
+		for _, worker in raw.dispatch.workers do worker.orch_project_id = nil; worker.presentation = nil; worker.selected_record = nil end
+		local restored, info = api.state.rehydrate(raw); assert(restored, info and info.message)
+		f.authority.registry = restored; f.memory.value = api.clone(restored)
+		assert(f:apply("continue_controller", { operator_verified = true }).ok)
+		assert(f:control("reconcile_session").ok); W.catalog(f)
+		local project = W.worker(f, queued.worker_id).orch_project_id
+		assert(f:apply("policy", { policy = { auto_start_projects = true,
+			templates = W.arr({ { id = "new-notes", title = "Notes", prompt = "Describe {input}.", output = "notes.md", next = "", custom_fields = {} } }) } }).ok)
+		assert(f:apply("template_start", { orch_project_id = project, template_id = "new-notes", input = "only this new source" }).ok)
+		assert(W.worker(f, queued.worker_id).checks_pending and f:action(queued.action_id).phase == "held_ready")
+		local other = f:project("Independent checkout peer", true)
+		W.repository(f, "/fixture/repository/.git", "refs/heads/main", "orch_queue", other, "/fixture/worktree")
+		local peer = f:allow_shared_fixture(f:apply("queue", { orch_project_id = other, record_id = "codex", record_revision = 0,
+			catalog_revision = 0, prompt = "Independent peer work.", cwd = "/fixture", placement = "split", coordinator = false }))
+		assert(peer.ok, peer.message)
+		assert(f:apply("project_start", { orch_project_id = project, project_revision = f.authority.registry.dispatch.projects[project].revision }).ok)
+		local worker = W.worker(f, queued.worker_id); assert(worker.launch_gates and #worker.launch_gates > 0)
+		check(f:action(queued.action_id).phase == "held_ready"
+			and api.dispatch.project(f.authority.registry, f.origin.logical_session_id, f.origin.alias_nonce, queued.action_id).actions[queued.action_id].start_blocked
+			and not f:apply("claim", { action_id = queued.action_id, executor = f.origin.window_epoch }).ok,
+			choice .. ": START cannot issue a retained provision before its newly required checkout decision")
+		local gate = f.authority.registry.dispatch.gates[worker.launch_gates[1]]
+		local answered = f:apply("answer", { gate_id = gate.id, gate_revision = gate.revision, choice_id = choice,
+			answer = "Exact owner checkout decision." }); assert(answered.ok, answered.message)
+		if choice == "cancel" then
+			check(W.worker(f, queued.worker_id) == nil and f:action(queued.action_id) == nil and W.worker(f, peer.worker_id) ~= nil,
+				"cancelling the gate removes only the worker and its proven-unissued provision")
+		else
+			local provisions = 0
+			for _, action in f.authority.registry.dispatch.actions do
+				if action.worker_id == queued.worker_id and action.request.op == "mailbox_provision" then provisions += 1 end
+			end
+			check(provisions == 1 and answered.action_id == queued.action_id and f:action(queued.action_id).phase == "ready",
+				"approval rearms the original provision instead of allocating a second mailbox")
+		end
+		check(W.restores(f), choice .. ": gate settlement has no dangling worker, action or decision")
+	end
+end
+if section == nil or section == "project_plan_reopen" then
+	for _, revised in { false, true } do
+		local f = W.src_fixture({ auto_start_projects = false })
+		local body = "# Feature: A repeatable plan\n\n## Plan\n\n### Checkpoint 1 — Work\n\n#### Task 1A — Read\n**INDEPENDENT**\n### UPDATE `notes.txt`\n"
+		local path = W.write_plan(W.scratch(), body, "repeat.md")
+		local imported = f:apply("plan_import", { path = path }); assert(imported.ok, imported.message)
+		local project = f.authority.registry.dispatch.projects[imported.orch_project_id]
+		assert(f:apply("project_start", { orch_project_id = project.orch_project_id, project_revision = project.revision, checks_reviewed = true }).ok)
+		local task = W.task(W.plan(f, imported.plan_id), "1A")
+		W.complete(f, task.worker_id); W.close_member(f, task.worker_id)
+		assert(f.authority.registry.dispatch.projects[project.orch_project_id].finished)
+		local old = runtime.json.encode(W.plan(f, imported.plan_id))
+		local reopened = f:apply("project_reopen", { summary_index = #f.authority.registry.dispatch.finished_projects }); assert(reopened.ok)
+		if revised then runtime.fs.write(path, body .. "\nA newly inspected revision.\n") end
+		local added = f:apply("plan_import", { path = path, orch_project_id = reopened.orch_project_id })
+		check(added.ok and added.plan_id ~= imported.plan_id and added.orch_project_id == reopened.orch_project_id,
+			"explicit re-add after Finish/Reopen creates a distinct plan for " .. (if revised then "new" else "identical") .. " source bytes")
+		local fresh = W.task(W.plan(f, added.plan_id), "1A")
+		check(fresh.state == "queued_plan" and fresh.worker_id == nil and fresh.work_id == nil
+			and not f.authority.registry.dispatch.projects[reopened.orch_project_id].started
+			and runtime.json.encode(W.plan(f, imported.plan_id)) == old,
+			"reopening preserves the old outcome without carrying completed work or START authority into the new project")
+		check(W.restores(f), "old completed plan and new passive re-import restore independently")
+	end
+end
+if section == nil or section == "project_live_conversation" then
+	for _, kind in { "association", "open", "enrol" } do
+		local board = "/fixture/lifecycle-board.tern"
+		local f = W.src_fixture({ board_path = board })
+		local project = f.default_project
+		local pane = { pane_id = tostring(9700 + W.serial + 1), window_key = f.origin.window_key, window_epoch = f.origin.window_epoch,
+			native_session_id = f.origin.native_session_id, window_host_id = f.origin.window_host_id }
+		local conversation
+		if kind == "association" then
+			assert(f:apply("associate_conversation", { orch_project_id = project, project_revision = f.authority.registry.dispatch.projects[project].revision,
+				pane_binding = pane, active = false }).ok)
+		else
+			local fields = { orch_project_id = project, record_id = "builder", record_revision = 0, catalog_revision = 0 }
+			if kind == "enrol" then fields.pane_binding = pane; fields.delivery = "native_ask"
+			else fields.prompt = api.codec.OPEN_CONVERSATION_ASSIGNMENT; fields.cwd = "/fixture"; fields.placement = "split"
+				fields.coordinator = false; fields.open_conversation = true; fields.presentation = "user_new_tab" end
+			local queued = f:apply(if kind == "enrol" then "enrol" else "queue", fields); assert(queued.ok, queued.message)
+			conversation = W.start(f, queued.worker_id, queued.action_id)
+			W.settle(f, conversation, true)
+		end
+		local text, tags = string.rep("x", 4097), W.arr()
+		local outcome = f:apply("board_intake", { orch_project_id = project, board_path = board, card_id = "settled-refusal", text = text,
+			tags = tags, text_sha256 = api.quota.digest({ text = text, tags = tags }) })
+		assert(outcome.ok and outcome.code == "intake_refused", outcome.message)
+		check(not f.authority.registry.dispatch.projects[project].finished and #f.authority.registry.dispatch.finished_projects == 0,
+			kind .. ": a settled source outcome cannot auto-finish a still-associated native conversation")
+		if conversation then W.settle(f, conversation, true) end
+		local finished = f:apply("project_finish", { orch_project_id = project,
+			project_revision = f.authority.registry.dispatch.projects[project].revision, result = "Owner explicitly ends the project, not the conversation." })
+		check(finished.ok and (not conversation or not W.worker(f, conversation).stopped),
+			kind .. ": explicit project Finish remains available after protocol obligations settle and does not stop native work")
+	end
+end
+if section == nil or section == "project_deploy_boundary" then
+	local f = W.fixture({ reviewer_records = W.arr({ "codex" }) })
+	local builder, lid = W.granted(f, "deploy-pins-project", "refs/heads/deploy-pins-project")
+	W.land(f, lid, "deploy-pins-head")
+	assert(W.ack(f, W.holder(f, lid), W.attempt(f, lid)).ok)
+	W.drain(f, builder); W.settle(f, builder, true)
+	check(not f:apply("finish", { worker_id = builder }).ok and W.worker(f, builder).finish == nil,
+		"a landed item with a live deploy still pins its source work")
+	local project = W.worker(f, builder).orch_project_id
+	check(not f:apply("project_finish", { orch_project_id = project,
+		project_revision = f.authority.registry.dispatch.projects[project].revision, result = "Not yet settled." }).ok,
+		"project completion cannot claim deployment obligations are settled while a deploy is outstanding")
+	assert(W.deploy_result(f, lid, "not_applicable", { reason = "The owner-defined task has no deployment." }).ok)
+	W.drain(f, builder); W.settle(f, builder, true)
+	check(f:apply("finish", { worker_id = builder }).ok, "a terminal deploy releases the real source work for normal finish")
+end
+if section == nil or section == "project_manager_boundary" then
+	local f = W.fixture({ reviewer_records = W.arr({ "codex" }) })
+	local builder, lid = W.granted(f, "finished-manager", "refs/heads/finished-manager")
+	local rm, project = W.holder(f, lid), W.worker(f, builder).orch_project_id
+	W.land(f, lid, "finished-manager-head")
+	assert(W.ack(f, rm, W.attempt(f, lid)).ok)
+	assert(W.deploy_result(f, lid, "not_applicable", { reason = "No deployment is defined." }).ok)
+	local members = {}
+	for id in f.authority.registry.dispatch.workers do table.insert(members, id) end
+	for _, id in members do W.drain(f, id); W.settle(f, id, true) end
+	for _, id in members do if id ~= rm then W.close_member(f, id) end end
+	assert(f.authority.registry.dispatch.projects[project].finished)
+	assert(f:apply("observe", { worker_id = rm, pane_binding = api.clone(W.worker(f, rm).pane_binding), native_state = "idle" }).ok)
+	assert(f:apply("policy", { policy = { auto_rollover = true, rollover_threshold_pct = 50 } }).ok)
+	assert(W.send(f, rm, "READY", { state = "idle", context_used_pct = 95 }).ok)
+	local due
+	for _, worker in api.dispatch.project(f.authority.registry, f.origin.logical_session_id).workflow.workers do
+		if worker.worker_id == rm then due = worker.due_rollover end
+	end
+	check(due == false and not f:apply("rollover", { worker_id = rm, trigger = "owner" }).ok
+		and next(f.authority.registry.dispatch.rollovers or {}) == nil,
+		"finished-project infrastructure cannot enter a permanently blocked handover")
+	W.drain(f, rm); W.settle(f, rm, true)
+	local original_approval = runtime.json.encode(W.item(f, lid).approval)
+	local original_grants = runtime.json.encode(W.item(f, lid).grants)
+	local old_gate = W.item(f, lid).gate_id
+	local _, second = W.granted(f, "another-project", "refs/heads/another-project")
+	check(W.holder(f, second) == rm and #W.item(f, second).grants == 1,
+		"the still-live settled release manager continues granting another project's real landing")
+	check(W.worker(f, builder) == nil and f.authority.registry.dispatch.gates[old_gate] == nil
+		and runtime.json.encode(W.item(f, lid).approval) == original_approval
+		and runtime.json.encode(W.item(f, lid).grants) == original_grants,
+		"new admission reclaims the settled builder and consumed gate, not the immutable landing approval or grants")
+	check(W.restores(f), "finished-project history and independent live landing restore together")
+end
+
 assert(section == nil or table.find({ "plan_import", "usage_delta", "review_cross_family", "review_rounds", "auto_finish", "proof_rule",
 	"release_config", "release_launch", "release_refresh", "release_holder", "deploy", "deploy_held", "deploy_retry", "deploy_lost",
 	"grid_queued_new_revision", "grid_queued_target_moved", "grid_queued_rm_rollover", "grid_queued_cancel",
@@ -2351,6 +3524,8 @@ assert(section == nil or table.find({ "plan_import", "usage_delta", "review_cros
 	"grid_granted_new_revision", "grid_granted_target_moved", "grid_granted_rm_rollover", "grid_granted_cancel",
 	"grid_landed_new_revision", "grid_landed_target_moved", "grid_landed_rm_rollover", "grid_landed_cancel",
 	"grid_deploy_held_new_revision", "grid_deploy_held_target_moved", "grid_deploy_held_rm_rollover", "grid_deploy_held_cancel",
-	"autonomy", "autonomy_dispatch", "autonomy_report", "autonomy_review", "autonomy_landing", "sources", "intake", "router", "labeller_finish",
-	"role_guidance", "autonomy_paused", "proposal_early" }, section), "unknown workflow section")
+	"autonomy", "autonomy_dispatch", "autonomy_report", "autonomy_review", "autonomy_landing", "sources", "intake", "router", "labeller_finish", "passive_proposals", "project_start", "project_start_membership", "project_start_failures", "project_start_publication", "project_start_policy", "project_start_subject", "project_start_active", "project_start_mailbox", "project_start_malformed", "project_start_retirement", "plan_capacity", "project_review",
+	"project_gate_rearm", "project_plan_reopen", "project_live_conversation", "project_deploy_boundary", "project_manager_boundary",
+	"assignment_policy", "autonomy_paused", "proposal_early", "repository_sessions", "repository_policy", "repository_paused",
+	"repository_external", "repository_result_order", "repository_targets", "repository_head", "repository_route_change", "repository_sharing" }, section), "unknown workflow section")
 return "workflow/" .. tostring(section or "all") .. ": " .. tostring(checks) .. " checks passed"

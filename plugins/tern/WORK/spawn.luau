@@ -1,11 +1,35 @@
 --!strict
--- Read-only view of SPAWN's saved agents on this host, and the command line WORK
--- runs for a chosen one. SPAWN owns the roster: WORK never writes it and takes no
--- part in SPAWN's launch bookkeeping (reservations, duplicate policy, Running agents).
+-- Read-only view of SPAWN's saved agents on this host and their launch-line rendering.
+-- WORK holds SPAWN launches on every OS pending a fresh host-owned current-record
+-- read and native single-winner claim; configured WORK ACP/CLI remains available.
 local M = {}
 
+type SavedAgent = {
+	id: string,
+	label: string,
+	icon: string,
+	disabled: string?,
+	record: { [string]: unknown },
+}
+type RosterSuccess = {
+	agents: { SavedAgent },
+	host_key: string,
+	-- Retained from storage, not validated or used to authorize a launch.
+	config_revision: unknown,
+	host_os: string,
+	problem: nil,
+}
+type RosterError = {
+	agents: { SavedAgent },
+	problem: string,
+	host_key: nil,
+	config_revision: nil,
+	host_os: nil,
+}
+type Roster = RosterSuccess | RosterError
+
 local ROSTER_MAX_BYTES = 4 * 1024 * 1024
--- Menu rows send their id as the action name; `=` would split it, so ids stay plain.
+-- Direct-link route ids stay plain and cannot collide with WORK's reserved :host route.
 local RECORD_ID = "^[%w][%w_%-]*$"
 
 M.ICONS = {
@@ -21,7 +45,7 @@ local FALLBACK_ICON = "sparkle"
 
 -- Provider CLIs that take an interactive session's first prompt on their command
 -- line, and the words before it. Anything else (a seat wrapper, Kimi, a custom
--- CLI) gets the prompt typed into its pane once it is up.
+-- CLI) uses WORK's clicking-window clipboard fallback; WORK never types it.
 local PROMPT_WORDS: { [string]: { string } } = {
 	claude = {}, codex = {}, grok = {}, muse = {}, omp = {}, agy = { "-i" },
 }
@@ -87,7 +111,7 @@ local function program(word: string): string
 end
 
 -- The POSIX command line for `record` with `prompt`, and how the prompt arrives:
--- "argument" (already on the line) or "type" (WORK types it once the agent is up).
+-- "argument" (already on the line) or "clipboard" (manual paste, never typing).
 function M.render(record: any, prompt: string): (string?, string?, string?)
 	local command = nonempty(record.command)
 	if command == nil then return nil, nil, "No launch command saved in SPAWN" end
@@ -100,7 +124,7 @@ function M.render(record: any, prompt: string): (string?, string?, string?)
 		table.insert(words, argument)
 	end
 	local prompt_words = PROMPT_WORDS[executable]
-	local delivery = "type"
+	local delivery = "clipboard"
 	if prompt_words ~= nil then
 		for _, word in ipairs(prompt_words) do table.insert(words, word) end
 		table.insert(words, prompt)
@@ -139,6 +163,8 @@ function M.render(record: any, prompt: string): (string?, string?, string?)
 	return line, delivery, nil
 end
 
+-- This predicate describes roster display only. It does not permit a launch:
+-- every SPAWN route stays held pending the native single-winner claim above.
 local function disabled_reason(record: any, host_os: string): string?
 	if host_os == "windows" then return "WORK starts SPAWN agents on Linux and macOS hosts only" end
 	if record.enabled ~= true then return "Disabled in SPAWN Config" end
@@ -148,7 +174,7 @@ local function disabled_reason(record: any, host_os: string): string?
 	return nil
 end
 
-local function agent(record: any, host_os: string): any?
+local function agent(record: any, host_os: string): SavedAgent?
 	if type(record) ~= "table" or type(record.id) ~= "string" or string.match(record.id, RECORD_ID) == nil then
 		return nil
 	end
@@ -164,7 +190,7 @@ local function agent(record: any, host_os: string): any?
 end
 
 -- SPAWN's host store: kv.json `authority` holds `config = {schema = 2, hosts = {[host_key] = {agents}}}`.
-function M.decode(store: any, host_os: string)
+function M.decode(store: any, host_os: string): Roster
 	local authority = if type(store) == "table" then store.authority else nil
 	local config = if type(authority) == "table" then authority.config else nil
 	local hosts = if type(config) == "table" and config.schema == 2 then config.hosts else nil
@@ -172,12 +198,12 @@ function M.decode(store: any, host_os: string)
 	if type(bucket) ~= "table" or type(bucket.agents) ~= "table" then
 		return { agents = {}, problem = "SPAWN's saved agents are in a format WORK can't read; using the default agent." }
 	end
-	local agents = {}
+	local agents: { SavedAgent } = {}
 	for _, record in ipairs(bucket.agents) do
 		local item = agent(record, host_os)
 		if item ~= nil then table.insert(agents, item) end
 	end
-	return { agents = agents }
+	return { agents = agents, host_key = authority.host_key, config_revision = authority.config_revision, host_os = host_os }
 end
 
 -- SPAWN keeps its roster in its own plugin data, beside WORK's on the same host.
@@ -189,7 +215,7 @@ function M.roster_path(): string?
 end
 
 -- nil when SPAWN has never stored anything on this host (not installed).
-function M.load(): any?
+function M.load(): Roster?
 	local path = M.roster_path()
 	if path == nil then return nil end
 	local exists_ok, exists = pcall(tern.fs.exists, path)

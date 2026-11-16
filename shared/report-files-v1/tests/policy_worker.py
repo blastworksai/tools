@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Deterministic C2 worker: real Git, packaged helpers, enrolled native launch.
+"""Deterministic native qualification worker: real Git, helpers and enrolled launch.
 
 This is not an AI reviewer or provider qualification. Its fixed review checks the
 explicit fixture contract only. No test code writes an ORCH/SPAWN authority,
@@ -40,10 +40,21 @@ class Worker:
         self.handle = self.transport['mailbox_handle']
         self.box = self.root/self.handle
         self.out = control/self.handle
+        # Test evidence lives outside product stores and is never a replay fence.
+        # Record before mkdir so a duplicate native invocation is observed even
+        # when the original worker's evidence directory correctly already exists.
+        with (control/'native-launches.jsonl').open('a', encoding='utf-8') as stream:
+            stream.write(json.dumps({'pid': os.getpid(), 'record_id': record,
+                                     'mailbox_handle': self.handle,
+                                     'worker_id': self.transport['binding']['worker_id'],
+                                     'started_ns': time.time_ns()})+'\n')
         self.out.mkdir()
         self.argv = ['sh', self.transport['producer_helper'], str(self.root), self.handle,
                      self.transport['binding']['enrolment_token']]
         self.events, self.calls, self.last_command = [], [], None
+        self.activation, self.proposals = None, set()
+        self.released = False
+        self.control_paused = False
         self.case = next(iter(re.findall(r'C2_CASE=(passed|failed|missing|stale|empty)', prompt)), None)
         self.target = 'refs/heads/main'
         self.branch = 'c2-'+self.handle
@@ -165,6 +176,37 @@ class Worker:
         self.request_landing()
         self.save('repaired', head=head)
 
+    def propose(self, payload, kind):
+        """Propose fixture work using this process's actual activation only.
+
+        The driver supplies closed new_work or plan_file add_source intent, not an owner identity or an
+        authority mutation. Native helper intake, owner approval and project
+        START remain independent product operations.
+        """
+        assert self.activation is not None, 'coordinator activation has not been consumed'
+        assert 'coordinator-control-v1' in self.transport['capabilities']
+        assert isinstance(payload, dict) and payload.get('kind') == kind
+        if kind == 'new_work':
+            required = {'proposal_id', 'kind', 'record_id', 'record_revision', 'prompt', 'scope', 'checks'}
+            optional = {'orch_project_id', 'new_project_name', 'base_ref', 'repository_id',
+                        'target_ref', 'target_revision'}
+        else:
+            assert kind == 'add_source', 'fixture command only proposes work or a literal owned plan source'
+            required, optional = {'proposal_id', 'kind', 'source'}, {'orch_project_id', 'new_project_name'}
+            source = payload['source']
+            assert isinstance(source, dict) and set(source) == {'kind', 'path', 'revision'}
+            assert source['kind'] == 'plan_file'
+            path = Path(source['path'])
+            assert path.is_absolute() and path.resolve().is_relative_to(self.control.parent.resolve())
+            assert hashlib.sha256(path.read_bytes()).hexdigest() == source['revision'], 'source changed before physical proposal'
+        assert required <= payload.keys() <= required | optional
+        assert ('orch_project_id' in payload) != ('new_project_name' in payload)
+        proposal_id = payload['proposal_id']
+        assert proposal_id not in self.proposals, 'never allocate another report for an uncertain proposal'
+        self.proposals.add(proposal_id)
+        self.report('COORDINATOR_PROPOSAL', dict(payload, **self.activation))
+        self.save('task_proposed' if kind == 'new_work' else 'source_proposed', proposal_id=proposal_id, payload=payload)
+
     def consume(self):
         output = self.helper('consume')
         if not output:
@@ -173,7 +215,29 @@ class Worker:
         self.helper('claim', message=reply['message_id'])
         self.save('reply', reply=reply, sha256=hashlib.sha256(output).hexdigest())
         kind, payload = reply['kind'], reply['payload']
-        if kind == 'review_request':
+        if kind == 'coordinator_activation':
+            assert 'coordinator-control-v1' in self.transport['capabilities']
+            assert self.activation is None, 'coordinator was activated twice'
+            self.activation = {key: payload[key] for key in ('owner_id', 'owner_generation', 'activation_token')}
+            self.save('activated', activation=self.activation)
+        elif kind == 'project_start':
+            assert self.activation is not None, 'project start requires consumed activation'
+            assert {'coordinator-control-v1', 'project-start-v1'} <= set(self.transport['capabilities'])
+            assert set(payload) == {'owner_id', 'owner_generation', 'activation_token',
+                                    'orch_project_id', 'project_revision', 'decision_context'}
+            assert {key: payload[key] for key in self.activation} == self.activation
+            # The real helper has already consumed/claimed this immutable message.
+            # report waits for actual host acceptance before the control is resolved.
+            self.report('PROJECT_START_CLAIM', dict(payload), reply)
+            self.save('project_started', orch_project_id=payload['orch_project_id'],
+                      project_revision=payload['project_revision'], message_id=reply['message_id'])
+        elif kind == 'coordinator_retirement':
+            assert self.activation is not None
+            assert {key: payload[key] for key in self.activation} == self.activation
+            self.report('COORDINATOR_RELEASE', dict(self.activation, quiescent=True), reply)
+            self.released = True
+            self.activation = None
+        elif kind == 'review_request':
             # Fixed fixture contract: the deliberately bad check is permitted;
             # review checks that the artifact is committed and fixture-shaped.
             artifact = payload['artifact_revision']
@@ -203,6 +267,9 @@ class Worker:
         else:
             self.save('reply_without_effect', reply_kind=kind)
         self.helper('resolve', message=reply['message_id'])
+        if kind in ('coordinator_activation', 'coordinator_retirement', 'project_start'):
+            self.helper('receipts')
+            self.save('resolved', message_id=reply['message_id'], reply_kind=kind)
         return True
 
     def run(self):
@@ -227,12 +294,20 @@ class Worker:
                     # The unchanged, already-approved landing advances when its
                     # missing/stale checks arrive. A second request races that
                     # grant and is correctly refused as landing_in_progress.
+                elif operation in ('propose-task', 'propose-source'):
+                    self.propose(command['payload'], 'new_work' if operation == 'propose-task' else 'add_source')
+                elif operation == 'pause-control':
+                    self.control_paused = True
+                    self.save('control_paused')
+                elif operation == 'resume-control':
+                    self.control_paused = False
+                    self.save('control_resumed')
                 elif operation == 'finish':
                     finished = True
                 else:
                     raise AssertionError('unknown deterministic worker operation '+operation)
                 atomic(self.out/'command-result.json', {'id': command['id'], 'ok': True})
-            if not finished:
+            if not finished and not self.released and not self.control_paused:
                 self.consume()
             time.sleep(.5)
 

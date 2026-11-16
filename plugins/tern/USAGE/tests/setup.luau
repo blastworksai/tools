@@ -136,6 +136,14 @@ local function menu()
 	reply("setup_state", state.source)
 	reply("diagnostics", state.diagnostics)
 end
+start(); menu(); choose("display"); answer(nil)
+check(#state.rpc == 0, "opening display disclosure or canceling never enables export")
+start(); menu(); choose("display"); choose("confirm")
+check(state.rpc[1].op == "configure" and state.rpc[1].payload.changes.display_enabled == true
+	and state.rpc[1].payload.consent.display == true and state.rpc[1].payload.changes.capacity_enabled == nil,
+	"actual local UI grants only display permission")
+reply("configure", { ok = true })
+check(state.changed == 1, "display save updates the ordinary cached view")
 start(); menu(); choose("share"); answer("127.0.0.1"); answer("49443"); answer(id)
 local disclosed = {}
 for _, item in state.ui[1].options.items do if item.action == "inspect" then table.insert(disclosed, item.label) end end

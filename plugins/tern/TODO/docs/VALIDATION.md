@@ -1,113 +1,160 @@
-# TODO 0.5.0 — validation
+# TODO 0.6.0+ — validation
 
-CodexBWAI · 4 November 2026. The owner chose explicit publication for existing interactive CLI sessions. This replaces the earlier agent-query/operator-path candidates. No agent input, managed skill edit, new dependency, Tern restart or FORGE operation is involved.
+CodexBWAI · 9 November 2026. This receipt supersedes the older 0.5.x validation headings for the current TODO reliability lane. Earlier 0.5.0, 0.5.1 and 0.5.2 receipts are historical and are not carried forward as evidence for this source.
 
-## Prior c8d4c8b source evidence
+## Source and helper receipt
 
-Ten executable helper tests pass: canonical parsing/immutability and LF/CRLF, usage errors returning1, bounded SSH error envelopes, strict host trust/forwarding/multiplexing, locale-independent payload and a legacy SSH option boundary. Synthetic option-resolution checks are distinguished from real connections.
+The immutable handoff is commit `ca8bebb4553e1338c7bf49844494f9d665af33fc`, based on `9f761f031154bd57e20391755a5c9fb675be9963`; its author receipt records version `0.6.0`. Integration preserves the owned updater work and adds the scoped review corrections below. No git command or runtime check was used during integration.
 
-Tern0.9.8 and0.9.10 each pass six native contracts and fourteen connected checks. The production show → window-scoped process → host discovery → published reader → native renderer path covers source edits, pinned identity/save/restore, stale-success removal, independent local and real key-authenticated loopback SSH sources/backoff, clear while alive and no-plan TODO exit leaving the selected program alive. The unlisted-launcher fixture ends its publishing child without clear, starts a replacement and proves the old publication is not inherited. Cleared/ended bindings stop polling. Receipts kept privately.
+The following SHA256 values are the current source-byte identities needed for a later coordinated companion/plugin rollout:
 
-The packaged tests/publication_probe.py passes nine Linux, four Windows and eight macOS native process/filesystem boundary checks. Windows Python3.14.7 and macOS Python3.9.6 execute as real new native Tern programs. It verifies canonical bytes, changed/failed publication refusal, clear while alive and a concurrent reader paused inside successful republish validation. POSIX also tests a readable unsafe matching store, an unrelated untraversable namespace, plain-file/cyclic-link entries and a forged owner using the exact session key. Linux exercises a real process-name change. Evidence: Linux, Windows and macOS probe receipts (kept privately).
+| Helper | SHA256 |
+| --- | --- |
+| `bin/todo.py` | `03f04874c7ba446bfeb9319530e6454e502b1c590a69f504f37614a71511907c` |
+| `bin/publication.py` | `9aae7120bc622891115ebd3bab0fd15aeea79e25b280c96e6e736063b88470d0` |
+| `bin/process_identity.py` | `d81cfd5c9dc2362fab5e9408992fe96dfd1caeaa5681fde229908e92f7dce72b` |
 
-The eight Linux runtime fingerprints match c8d4c8b, before the native split bridge repair. All three helper fingerprints match all portable receipts. The flat portable probe is byte-identical to the packaged script; only its filename differs. The primary comparison receipt is kept privately. Fixtures contain no AI or deployed metadata; subprocesses and owned native sessions are reaped. The macOS client kept its existing desktop, daemons and sessions, and its owned stage was removed. Native catalogue readbacks separately confirm TODO0.3.0 ready on the Linux execution host and the Windows and macOS clients.
+These are source hashes, not installed-companion or installed-plugin readbacks. A later authorized rollout must compare all three companion and plugin helpers at the same reviewed head and refuse schema/version skew. Task 2C performed no companion copy, plugin install/link/reload, deployment, publication or other rollout.
 
-Initial local pending/done accessibility rows were observed. Later source/restore/lifecycle checks use actual host callbacks after the isolated client's closed-beta overlay hides the UI. They are not authenticated appearance passes. A real private Windows desktop client reported gate:true and hid Files; no gate screenshot is represented as TODO. No auth state was copied or bypassed.
+### Integration review corrections
 
-## Review-driven repairs
+All three handoff helper hashes were checked against immutable incoming inputs. The handoff's `publication.py` hash was `e6baf830ab59504a942b75692fb05f4beccadc71a0915412bdbeefa5aeeceef1`; the integrated hash above differs because writer locks now reject extra hard links before any mode/ownership change, and Windows record reads validate ownership/DACL through `GetSecurityInfo` on the open handle before reading bytes. This reuses the existing account allowlist and ACE policy without weakening it. The path-only Windows security gap predates this handoff.
 
-The prior independent reviews at d7230de, edb246b and12baa7c returned REWORK NEEDED. Latest: https://github.com/blastworksai/tools/pull/2#issuecomment-6620750496. Those are historical verdicts; no new pass is claimed.
+The handoff's `todo.py` hash was `3b4cc607b390b50adae74df9857378a455048a715ef947b348195bfe15e03489`. Its semantic-maximal fixture did not bound the wire envelope: validation preserves leading/trailing whitespace while checking stripped lengths. The corrected ceiling is `6 * 1048576 + 20 = 6291476` bytes. The canonical file is still limited to 1 MiB; ASCII JSON encoding expands each input byte by at most six, and schema validation permits only existing plan fields and bounded numeric/enum values. The success wrapper (`ok`, `plan`, punctuation and newline) adds exactly 20 bytes; no caller-controlled wrapper field exists. All received envelope bytes, including error text and any extra fields, face the same cap before decoding. Accepted strings are neither trimmed nor truncated. The padded non-ASCII roundtrip and actual ceiling-plus-one rejection passed in the selected CP1T batch below.
 
-- Publisher identity is explicit --agent-pid, verified against owned native ancestry. The agent identifies its durable CLI from runtime facts or bounded ancestry output, never guesses a shell/launcher/helper. Ambiguity is unavailable. Identity checks use pid/birth/owner, not mutable process names; Windows ancestry also checks parent birth order.
-- Namespace entries are untrusted candidates. Discovery lstats before key lookup and accepts only real non-link/non-reparse directories owned by their named UID (own native SID on Windows). Non-candidates and key-lookup OSError are ignored; readable matching legitimate unsafe stores still produce error. This fixes the global regular-file/loop/unsearchable cases and forged-owner interference.
-- Successful republish retains the old record during validation and installs the new one atomically. Validation/write failure retracts this publisher's old record. Identity recheck during cleanup is best effort; it is not an atomic compare-and-delete claim.
-- Ended/cleared/changed bindings report terminal failure and stop polling. Own valid-but-dead records are pruned with a bounded pass; another live publisher in the same native session is refused.
-- Every instruction form includes verified --agent-pid. Examples explicitly use12345 as a placeholder supplied each time, without assuming a variable persists between tool shells. Both /glitch-plan and Codex $glitch-plan forms are named. Rollout requires all three installed companion/plugin helper hashes equal.
+New regressions cover unchanged canonical bytes/mode for a hardlinked lock, rejected open-handle security before reading, handle closure, and the existing owner/DACL policy. Interpreter fixtures drop incidental exact probe counts while retaining one-shot helper results and no replay of publication/clear. These corrections were not exercised during integration; the selected Python corrections are now covered by the CP1T result below, while native interpreter and Windows gates remain open.
 
-Actual red receipts (kept privately) reproduce the old failures: the namespace and atomic receipts use edb246b; the namespace and forged-owner receipts use12baa7c. Each intentionally records probe.passed:false with expected_failure:true. Current source passes the same boundaries; old receipts are never relabelled with new hashes.
+### CP1T closeout — selected Python and private CLI/filesystem proof
 
-The focused c8d4c8b repair review (https://github.com/blastworksai/tools/pull/2#issuecomment-6621268003) verified N1/N5 and the current fingerprints; code repairs are clear. The product observations and owner decisions recorded below supersede that review’s then-open gate list; no overall release pass is claimed. Known Low availability limit: a local account can place a broken record in its own correctly owned namespace at a guessed session key, causing a detection error for that session. The key is not secret. This fails closed and produces no wrong plan, prompt or action; no additional descendant-owner filtering is implemented. This documents the limit, not an owner waiver or a release pass.
+The initial 9 November closeout retained the integrated helper implementations; its `todo.py` hash was `9298427e80a45ac75375b09c79928240beb42ccddabe7b85608b15bacdda0349`. Review covered open-handle Windows ACL validation before `ReadFile`, single-link lock refusal before metadata mutation, the raw SSH ceiling with padded strings, handle closure, replacement-failure preservation, process/source identity and one-shot interpreter selection. The later bytecode correction below supersedes that helper hash, not the historical test receipt.
 
-## Isolation and remaining gates
+Deleted `Windows shims share the probe order and do not use PATH presence` from `tests/host_interpreter.luau`: source substring/order/count checks do not prove shim execution. The interpreter behavior and no-replay negative controls remain; actual CMD/PowerShell forwarding and fallback require the real Windows gate below.
 
-The connected smoke uses private config/plugin id, daemon, Xvfb window, disposable real loopback SSH and TODO_PUBLICATION_ROOT. The native publisher receives its fixture path explicitly because Tern drops arbitrary daemon environment variables from program launches. An earlier isolation mismatch wrote one dead own record to the normal root; it was removed by a deliberate real-session publish. Earlier production_touched:false receipts did not mean no pointer metadata was written to that root. Current fixtures stay private; the normal root contains only the real current CodexBWAI publication.
-
-Windows UI probes used a kill-on-close Job Object assigned before worker execution. Initial invalid daemon filesystem endpoint was corrected to a native named pipe; launching through the existing desktop daemon reached the real beta gate. Owned descendants were reaped, the installed profile was untouched, and completed test stages were removed after saved results. No unchanged sign-in retry follows.
-
-The current real canonical plan was deliberately published with its verified agent PID. The owner answered “1 / 1” to adding the shared planning instruction/accepting the disclosed same-process reset limit and using an existing signed-in Windows client. The supported companion is installed at the shared Glitch root with all seven files matching reviewed source. The exact approved instruction was added and passes lint. An in-process reset still requires explicit clear; this disclosed limit is accepted.
-
-A fresh ClaudeBWAI interactive session independently discovered the instruction, read the companion, and attempted startup clear and deliberate resume publication without being prompted to run those commands. That proves instruction adoption. Both operations correctly refused because that qualification used the separate SSH review helper: agent → sshd → init has no native Tern ancestor. It was incorrectly generalized as the production launcher. The production SPAWN route instead uses a local Terminal record for the ClaudeBWAI account; its deployed host executor wraps the approved launcher in sudo. Four live ClaudeBWAI agents independently showed native Tern ancestry. No production routing migration is needed. Observations and command receipts kept privately.
-
-An existing signed-in Windows client passed the actual Files header hover → TODO button → session picker → selected live program → discovered canonical plan → five native checklist rows path. Native buttons are intentionally hidden until header hover; their initial absence was not a load failure. A manifest-only `todo-test` candidate used the reviewed runtime without replacing production TODO. A screenshot was copied and inspected: green done checks/strike, pending hollow circle, current step and yellow blocked reason. Clearing the own fixture binding removed all old rows while its program remained alive. Selecting the own worker with no publication visibly reported “No active plan is published for this session.” and exited TODO while preserving that program (receipts kept privately). No authentication was copied and no existing app was restarted.
-
-The c8d4c8b native remote-host path failed: the window-side pane handle cannot be used as a native process CLI target, and the client-side CLI inspects its local daemon rather than the selected remote host. The real root session’s host-side child PID was independently verified against its publication. Numeric namespace decoding, title matching and a local fixture are not substitutes for this missing bridge. Related remote pane-ID limitations are documented by the existing SPAWN integration (tern-sdk#221).
-
-The native split bridge and R1 removal below close the code defects. The remaining release work is final evidence verification and 0.5.0 rollout. Raw SSH without native Tern ancestry remains unsupported; the separate SSH review helper is not the actual production SPAWN route. Existing0.3.0 installation is separate. No check was spoofed, protection bypassed, live catalogue mirror written or whole-platform release run.
+After all three CP1 writers stopped, the owner ran this selected batch from the TODO package: **35 tests passed in 1.153 seconds; OK**. No full discovery or native publication probe was run.
 
 ```sh
-python3 -m unittest discover -s tests -p todo_test.py
-python3 tests/todo_smoke.py --published --evidence /absolute/private/evidence.json
-# Requires an available authenticated UI:
-python3 tests/todo_smoke.py --published --files-button --evidence /absolute/private/ui-evidence.json
-# Launch only as a new owned native Tern program, with a new private work folder:
-python3 -I tests/publication_probe.py --work-dir /absolute/private/probe-work
+env PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=tests python3 -m unittest todo_test.SourceContract todo_test.ProcessIdentityContract todo_test.WindowsReadContract todo_test.PublicationContract
 ```
 
-Use the documented supervisor and record source hashes and cleanup. Evidence lives with the canonical interactive PLAN; no private plan prose or credentials are bundled in this package.
+The actual `bin/todo.py template --title Qualification --step First` → `source --plan <owned-private-file>` roundtrip returned the identical generated plan ID, title and checkpoint. A real hardlinked lock was refused before entering the writer body; canonical bytes, mode, owner and group remained unchanged, and no publication was created. Evidence: `_local/orchplus-adversarial-review-20261106/platform-completion/cp1-todo-smoke-20261109.json` in the private Brain evidence home. The owned throwaway fixture was removed after success. These checks made no network connection or publication into a real agent. The publication probe and `todo_smoke.py --contracts-only` remain separate supervised native operations; no install/link/reload or companion rollout occurred.
 
-## Native split bridge repair candidate
+### Native Mac discovery and installed-helper immutability
 
-The unshipped follow-up removes client-side process lookup. The window creates a native split beside the selected pane and confirms that exact pair using its own SDK handles. The owning host independently resolves the new block’s sibling from its native inventory, fences the membership around a host-side process query, and uses the existing publication checks unchanged. Pane IDs remain transient attach evidence. Bounded lookup and cancellation prevent an unfinished selection from polling indefinitely. The current source passes twelve native module/controller contracts and fourteen connected checks on Tern 0.9.10, including the asynchronous failure/deadline fence, with eleven runtime fingerprints recorded. The same twelve contracts and fourteen connected checks pass on Tern 0.9.8, with all eleven runtime fingerprints matching (receipts kept privately). A signed-in Windows client attached to the remote Linux execution host: Files → picker → a root session on that host → fourteen canonical checkpoints passed at 9214214. The native host graph proves the selected original pane remains focused and the new TODO view is its immediate right sibling; native process child PID matches the canonical publication. A screenshot was copied and inspected (receipts kept privately). ClaudeBWAI found the bridge sound at b0a1114 and independently closed the R1 deletion at68dbb54; final release evidence follows the actual production-route qualification below. No new native host, trust or launcher change has been applied.
+Mac a12 exercised the actual Files-header hover, TODO button and picker, then failed discovery because the native publisher used the normal user cache while the host helper used the private test cache. Its exact verified pointer and newly-created empty lock were removed after the run; broader cache preservation was not established. No end-to-end Mac qualification is claimed.
 
-The focused b0a1114 bridge review found the bridge sound, with one Low relic: accepting an unshipped client-supplied discover_pid argument. That entry and the unused production openSource helper are removed; discovery PID assignment now comes only from the host’s fenced native lookup. Explicit source fixtures construct their own test blocks directly; they are not production attach entry points.
+That run also created two helper bytecode files inside the installed plugin. The shared CLI entrypoint now sets `sys.dont_write_bytecode` before importing its helpers. Actual Mac CLI-only discovery with Python `-I`, without `-B`, preserved exact writable-install membership and bytes. The full isolated Python suite passed **38 tests** after supplying a private OS identity fixture required by offline OpenSSH configuration expansion; the earlier runner failure remains retained, and the fixture was removed. Neither result qualifies native pane environment forwarding or the GUI.
 
-Known non-blocking bridge limits from that review: two windows viewing the same tab may make native membership ambiguous and refuse attachment; this multi-window case is unqualified. Between window confirmation and the first host lookup, the binding is the focused immediate left sibling of the new TODO panel. Moving another pane into that position and focusing it during that interval can make it the selected source. Keep the arrangement still until the checklist loads. Subsequent membership changes are fenced around the process query. These limits are documented, not represented as additional owner waivers.
+Evidence in the private Brain evidence home: `cp2m-adapter-a12-receipts-20261109.json`, `cp2m-a12-external-pointer-cleanup-20261109.json`, `cp2m-a12-installed-package-delta-20261109.json`, `cp1t-bytecode-actual-mac-cli-smoke-20261109.json`, and `cp1t-bytecode-isolated-regression-suite-with-identity-20261109.json`.
 
-After the R1 removal, the connected run passes twelve native contracts and fourteen connected checks on Tern0.9.10 with all eleven current runtime fingerprints (receipt kept privately). The 0.9.8 and remote Windows-client receipts above precede only this deletion and its fixture adjustment; they are not relabelled as current-head runs. The supported native split/process bridge and all three publication helpers are unchanged.
+Mac a15 subsequently **passed the selected cold publication/discovery and native checkpoint-refresh case** against the corrected helpers. The actual durable publisher and host reader used the reviewed private roots, the real Files-header button/picker selected the plan, and the rendered rows changed to a completed first checkpoint and current second checkpoint. The retained 1280×800 native screenshot was viewed and matches the machine readback. Installed/source/input preservation, the specified production-preservation projection, original deadline, observed-owned-zero and endpoint cleanup passed. This is a selected real-GUI case, not a full Mac, connected, provider or estate qualification.
 
-## Actual production-route qualification
+The owner explicitly allowed normal account login-shell/profile startup before private worker binding; that startup is outside the isolation/preservation claim. Mac process observations remain sampled, not Windows-style cumulative kernel containment. A12 remains failed. A14 reached the selected behavior but failed the driver's missing named-check result contract; the corrected driver supplies actual named witnesses rather than weakening the common acceptance gate.
 
-A fresh ClaudeBWAI tab was launched with the exact already-approved live SPAWN invocation: `sudo -u <agent-account> -H -- <seat launcher> <agent-account>`. Without a publish instruction in its resume brief, it followed the installed reflex, cleared its own inherited binding and published the canonical plan with its verified durable agent PID. Root independently checked all four process owner/birth anchors against live /proc, the native pane child PID, group-readable pointer metadata, and the Tern host account’s read-group membership.
+Additional private evidence: `cp2m-adapter-a15-receipts-20261109.json`, `cp2m-a15-todo-visual-acceptance-20261109.json`, `cp2m-a15-todo-refreshed.png`, and `cp2m-normal-account-startup-consent-20261109.json`.
 
-On an existing signed-in Windows client, the actual command palette was opened with that ClaudeBWAI pane selected, and its unique “TODO: attach to this panel” action was clicked. Fourteen real canonical checkpoints rendered; no Local/SSH chooser or operator path prompt appeared. The focused agent stayed selected. The candidate differed only in manifest id todo-test; all runtime bytes equal reviewed68dbb54. A screenshot was captured and inspected (screenshot, receipts and independent planning observations kept privately).
+### Native Windows cold case and retained-exit correction — 11 November
 
-An unneeded per-account host pilot was fully rolled back without a client login: its own units/hold/profile and pilot-only plugin installation removed, historical state/host identity/SSH access unchanged, live agents preserved, SPAWN roster unchanged. The no-question palette behavior is now qualified through the real production launch path; a new service or trust migration is not a release prerequisite.
+Windows B243 passed the selected cold publication/discovery case: real Files selection, publisher/host private-root agreement and canonical checkpoint refresh without republishing. Its dark1920x1200 screenshot was hash-verified and visually inspected. Named-file preservation and all owned cleanup passed. The batch itself failed at the second case because the harness retained the first case's TODO panel; three later cases did not run. This is a scoped cold-case pass, not full Windows acceptance.
 
-## 0.5.1 workflow-entry regression and actual execution qualification
+A separate headless native check reproduced a retained-exit defect in the previous process helper: an exited child with an open native handle was classified unknown when Toolhelp omitted its parent. The current helper checks handle-bound exit time first. The same actual-child smoke now raises terminal `ProcessEnded`; live handles with missing parent evidence still remain unknown. Native `ProcessIdentityContract` ran10 tests in0.043seconds:9 passed,1 Linux-only case skipped. Source hashes were verified on the Windows machine and the throwaway fixture was removed. The later B256 GUI process-replacement case passed at the scope recorded below.
 
-Owner screenshots showed an ordinary
-`/glitch-execute <plan>` followed by
-no-active-plan. Direct readback found no TERN-SESSION block and no session
-publication. The 0.5.0 renderer qualification was valid but did not prove ordinary
-execution adoption; the release claim was too broad. Capability descriptors and
-a general reflex do not invoke the companion at workflow entry.
+Private evidence: `cp2w-b243-scoped-cold-pass-20261111.json`, `cp2w-todo-retained-exit-native-20261111.json`, `cp2w-todo-retained-exit-fixed-native-20261111.json`, `cp2w-todo-exit-fix-contract-tests-20261111.json` and `cp2w-todo-exit-fix-cleanup-20261111.json`. B243 used the preceding helper hash; its cold live-process path is unchanged by the added definitive-exit classification, but it does not qualify that new exit path.
 
-The additive companion entry hook delivers its instruction on UserPromptSubmit
-slash invocation, PreToolUse/Skill invocation, and startup/clear/resume. It does
-not publish, infer state or edit plans. The existing owning agent must create
-its explicit checkpoint summary and publish through ordinary tools. Two focused
-subprocess checks cover real payload-to-context delivery and silence for unrelated
-work. These are not an adoption or UI pass. No existing acting session or its canonical plan is modified by the installer.
+### Native view rendering correction — 11 November
 
-Actual execution qualification at f622626 (same entry-hook/runtime bytes as this
-head): root started a fresh native ClaudeBWAI process after additive local wiring,
-then entered only `/glitch-execute <glitch-root>/_local/<qualification>/PLAN.md`.
-Before entry, the neutral two-checkpoint plan had no TERN-SESSION block and no
-TODO/plugin/publication/hook instructions (before hash receipt saved). The agent
-read the companion, created the agreed block and published as a fresh process
-with its own verified PID; it completed CP1 and held CP2 blocked for coordinator verification.
-An existing Windows client's Files TODO button selected that native session
-and displayed both exact checkpoints, with no source/path question (receipts kept
-privately).
-The rendering plugin was 0.5.0; its viewer/publisher bytes are unchanged in0.5.1.
-This run qualifies ordinary Claude execution adoption in that configured Glitch root;
-it does not claim universal agent compliance or entry delivery in other harnesses.
-An already-running reported session was left untouched.
+Windows B251 exposed a blank error region despite a successful component-state check. Tern renders only a block-region root's children; the previous error checklist and loading text were childless roots. Both now use the same container convention as the normal plan. The native refusal driver additionally requires the expected diagnostic in the unique TODO panel's rendered tree; B256 subsequently exercised the corrected Windows process-replacement and owned-panel cleanup paths.
 
-## 0.5.2 icon change
+The actual current view module was exercised in a private Linux daemon and Xvfb-backed Tern window. Three native-host contract tests passed. Hash-verified, visually inspected screenshots show the error and its reason without stale checkpoints, the loading message, and the unchanged current blocked checkpoint with its reason. Actual native state and all three screenshots verified Dark/Obsidian/Solid. Owned processes reached zero, private and tracked X11 endpoints were removed, and the passive production projection was unchanged.
 
-The block, palette command and Files button shared WORK's `list` icon. They now
-use Tern's native `list-checks` icon so TODO is distinguishable from WORK. Only
-`plugin.toml` and `window.luau` changed; reader, publisher and host bytes are
-identical to 0.5.1. The 12 helper tests pass. No native suite was rerun for this
-metadata-only change.
+Private acceptance: `todo-view-native-window-visual-acceptance-20261111.json`, backed by `todo-view-native-window-smoke-v3-20261111.json`. This qualifies the view renderer only, not Windows/macOS lifecycle behavior, deployment or full ORCH+. Earlier smoke attempts remain failed/unaccepted: shot-only mode did not load the host plugin; the first native-window attempt hit an exit-during-cleanup race; another captured a late welcome dialog rather than unobscured product pixels. The final run waited for and dismissed the actual welcome dialog before selecting native Dark and capturing the view.
+
+### Native Windows process-replacement pass and sharing failure — 11 November
+
+B256 passed `todo/process-identity`: the old publisher binding became terminal, replacement did not inherit the stale publication, the native error was readable, and owned-panel cleanup completed before the next case began. The dark1920x1200 screenshot was hash-verified and visually inspected. Private receipt: `cp2w-b256-scoped-process-pass-20261111.json`.
+
+The batch failed in `todo/windows-sharing` when a real second publish returned WinError5 Access denied from `os.replace` while the actual product reader was held open after native ACL validation. This is unresolved native replacement behavior, not a sharing pass. Clear-while-alive and restored-source-ID cases were not-run. All three native Owners reached zero remaining processes, counts matched, endpoints and the exact temporary task were removed, and the ordinary outer task's final named-file preservation check passed. The aggregate batch remains failed; the selected process case is not full Windows or TODO qualification.
+
+
+## Current 2A/2B source review
+
+The repaired source establishes these contracts:
+
+- Linux publication metadata uses `0751` directories and `0640` records/locks with the existing `agents` group where available. macOS publication metadata is owner-only `0700`/`0600`, including an explicit inventory/migration of legacy metadata. Windows uses protected per-user ACLs. Canonical-plan modes are never changed by these paths.
+- Linux multi-account viewing still requires native process inspection plus host access to the canonical plan and every ancestor. Readable pointer metadata alone cannot make a plan viewable. macOS/Windows discovery is restricted to the current owner's store; solo-Mac/solo-Windows and the existing Linux estate are the current targets unless later evidence expands them.
+- Metadata reads and mode changes use no-follow opens plus checks on the actual open descriptor/handle. Ownership, object type, link count and object identity are revalidated where needed. A pre-created namespace symlink cannot redirect permission changes to its target or alter canonical-plan modes.
+- Pruning a different record takes that candidate's own writer lock and then reads and validates the record again. A cooperating writer that updates the different record before revalidation is not deleted using the earlier observation.
+- TODO's Windows metadata reader requests read/write/delete sharing so its own open read does not prevent replacement, inspects the open handle and closes it on success and failure. This currently has mocked unit coverage; real Windows qualification remains open.
+- If the final replacement operation fails, including a simulated sharing violation, the previous valid publication remains in place and temporary files/handles are cleaned up. A failed replacement is not treated as a successful new publication that should be retracted.
+- Initial discovery treats process-access/unknown failures as nonterminal: the error remains visible, polling continues and a later successful discovery recovers the selected plan. A real initial `ProcessEnded` instead emits `terminal=true` and exits rather than retrying. The Luau fixture covers both paths and uses captured real helper output for the terminal case, but remains unrun until ORCH+ coordination.
+- Process identity is tri-state: live, definitively ended/changed, or inaccessible/unknown. Only ended/changed is terminal. Permission, enumeration and other access errors remain visible and nonterminal; real PID, parent, owner or birth mismatches are not retried as transient.
+- The direct-SSH response ceiling is derived from the existing raw canonical byte limit, worst-case JSON expansion and fixed envelope overhead, not stripped semantic field lengths or a 64 KiB assumption. It preserves accepted padded/non-ASCII strings without increasing the canonical file limit.
+- The host and Windows shims probe `py -3`, then `python`, then `python3`. A successful Python 3 probe selects one interpreter; helper errors and mutating commands are not retried through another interpreter. Store alias output is not a valid version probe.
+- In-process conversation reset remains invisible to the process binding and requires explicit clear. Multiple native windows claiming the same TODO panel produce an ambiguity error and fail closed. Harnesses without the Claude-specific entry wiring require explicit companion publication.
+
+## Author handoff evidence — before integration corrections
+
+### Python unit suite
+
+From `plugins/tern/TODO`, with bytecode writing disabled:
+
+```sh
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p todo_test.py
+```
+
+Author-recorded handoff result: **34 tests passed; OK** on Linux. That historical full-suite result precedes the integration corrections; the current selected 35-test result is recorded separately above.
+
+The suite covers canonical parsing and byte immutability, CLI errors, synthetic SSH argv/trust/forwarding boundaries, a bounded non-ASCII SSH envelope and overflow refusal, tri-state process identity, Windows snapshot error handling and shared-read/handle mocks, POSIX metadata modes/macOS migration fixtures, symlink mode preservation, replace-failure preservation and handle closure, different-record writer lock/revalidation, same-record observed-revision cleanup, nonterminal access failure, terminal identity changes and workflow-entry payload boundaries. The OpenSSH-specific check uses `ssh -G` with a synthetic configuration; it makes no remote connection. Windows API behavior exercised through mocks is not real Windows evidence. The corrected padded-string roundtrip and raw-ceiling-plus-one cases passed in the current selected CP1T batch, not the author's historical 34-test result.
+
+### Linux native publication probe
+
+The author recorded a fresh run as an owned native Tern program with private fixture metadata completing **13 checks, all passed** on Linux, before the integration corrections:
+
+1. Native publication, discovery and read preserve canonical bytes.
+2. Linux `agents` metadata modes are applied.
+3. A readable but unsafe matching store is an error.
+4. An untraversable unrelated namespace cannot disable valid discovery.
+5. Plain-file and cyclic-link entries are not accepted as namespaces.
+6. A pre-created namespace symlink cannot change its target directory or canonical-plan modes.
+7. A forged-owner namespace cannot interfere with the exact session key.
+8. Republish and clear survive a native process-name change.
+9. Competing writers on the same record serialize, and a failed old writer cannot retract the later success.
+10. Same-plan republish has no missing-record window during validation.
+11. A reader-open replace failure preserves the previous valid publication, and a `finally` assertion on the exception path proves `reader.closed`.
+12. Changed and failed publications cannot retain stale success.
+13. Clear removes the binding while the selected program stays alive.
+
+The separate 34-test unit suite, not this 13-check probe, contains the deterministic different-record competing-writer lock/revalidation case. The probe supplies native Linux process/filesystem evidence only. It is not a Luau contract run, native connected daemon/window run, real remote-client result, real macOS result or real Windows result.
+
+## Integrated-source component checks
+
+On 9 November 2026, luau-lsp 1.70.1 analysis of `host.luau` and `window.luau`, including their imported modules, passed against the generated target Tern definitions. `host_selection.RunOptions` now reflects native optional process fields; discovery outcomes require a source only for `active`, and an error only for `retry`/`terminal`. This is static contract evidence, not native interpreter, process, GUI or platform acceptance.
+
+The selected `host_interpreter` and `host_selection_test` fixtures passed all 11 named cases in a private native Tern host, with unchanged source snapshots, owned processes/endpoints removed and production unchanged. They exercise interpreter choice, one-shot helper results, discovery recovery and stale callback/process binding using the fixtures' existing mocked external effects. The first fixture attempt was rejected before loading because its generated plugin ID exceeded Tern's 32-character bound; that failed receipt is retained. This selected pass does not close the full native suite, real Python discovery, local/SSH UI or Windows gates below.
+
+## Open gates at this head
+
+The selected Mac cold-publication, Files/picker and checkpoint-refresh case passed as recorded above. The broader gates below remain open for the integrated source. The author-recorded Linux publication probe must also be repeated against the corrected helper under separately authorized native-slot coordination; no earlier failed result is relabelled.
+
+| Gate | Required evidence still outstanding |
+| --- | --- |
+| Native Luau contracts | Run `python3 tests/todo_smoke.py --contracts-only --evidence <new-private-evidence.json>` after ORCH+ native-slot coordination. This includes `tests/native_suite.luau` and `host_interpreter.luau`: interpreter fallback, Store stubs, one-shot helper results, initial nonterminal discovery remaining visible and recovering, and initial `ProcessEnded` producing `terminal=true` and exiting. The fixture's terminal case uses captured real `todo.py discover --parent-pid 999999999` output with an isolated absent publication root; captured output does not make the unrun Luau fixture a pass. Shim source inspection has been removed; actual shim behavior belongs to the real Windows gate. |
+| Native local/SSH connected suite | Run `python3 tests/todo_smoke.py --published --evidence <new-private-evidence.json>` in the coordinated private runtime. Mac a15 covers one real local cold-publication/refresh route; the full suite, SSH views, source-id change refusal, restored identity, clear while alive, no-plan behavior and process replacement remain outstanding. |
+| Native Files/picker UI | Mac a15 passed the actual Files-header hover, TODO button, picker, publication, rendered checkpoint refresh and specified preservation checks. Other required platform/client routes remain outstanding; a12's earlier discovery failure remains retained. |
+| Multi-window behavior | Exercise two real native windows and prove ambiguous panel membership refuses attachment without choosing a source. The source fails closed, but current-head native acceptance is outstanding. |
+| Linux estate multi-account viewing | On the existing estate, prove process inspection, `agents` metadata readability, canonical-plan readability and every ancestor's traversal together. Include inaccessible-process nonterminal behavior. The private 13-check Linux probe is not estate acceptance. |
+| Real macOS | Mac a15 passed the selected private cold-publication/refresh route with viewed native visuals. Owner-only metadata migration, descriptor-based no-follow protections, native process identity/access failures, restored viewing and clear/source-id refusal still need their selected native cases. Normal account startup is explicitly outside isolation/preservation; downstream worker roots remain private. Cross-account stores remain out of scope unless new evidence and a later decision expand the target. |
+| Real Windows | Run the native publication probe and qualify sharing reads, replace failures and handle closure on real Windows, plus `py`/`python`/`python3` fallback, Store aliases, CMD/PowerShell shims, protected ACLs, process identity/access failures, solo-account local and attached remote-Linux viewing, clear/source-id refusal, restored views and actual client visuals. Cross-account stores remain out of scope unless new evidence and a later decision expand the target. No real Windows ran. |
+| Conversation and harness acceptance | Prove explicit clear around a real in-process conversation reset and fresh startup. Prove explicit companion publication on each non-Claude harness; no automatic adoption is claimed for unwired harnesses. |
+| Coordinated companion/plugin rollout | Compare installed companion and plugin helper hashes, qualify companion adoption and repeat the required native/real-client checks after an authorized rollout. This task recorded source hashes only and did not roll out anything. |
+
+## Preserved limitations and disqualifying workarounds
+
+### Non-atomic same-record cleanup race
+
+`publication._retract_observed` reads and compares the current record identity/revision and then calls `unlink`. The native writer lock excludes cooperating writers, and different-record pruning now locks and revalidates each candidate. Neither repair makes the final same-record check-to-unlink sequence an **atomic compare-delete** against outside or non-cooperating writers. Such a writer can replace the target after the check and before the unlink, causing that newer replacement to be removed. This narrowed race is intentionally preserved and disclosed; no atomicity or total outside-writer safety is claimed.
+
+### Account, path and transport boundaries
+
+Linux group-readable metadata does not grant process inspection or canonical-plan access. Both are independently required. Never make viewing work by copying plans, automatically changing plan/ancestor permissions or forwarding Tern/agent sockets. Raw SSH without native Tern ancestry remains unsupported, and no secondary SSH login, copied credential or socket-forwarding workaround is allowed.
+
+macOS and Windows publication stores are owner-only and cross-account viewing is not claimed. Inaccessible process inspection is a visible nonterminal unknown, not proof of process exit; initial discovery can recover after that unknown clears. An in-process conversation reset without explicit clear can leave the old publication visible until clear or process exit. Multi-window ambiguity fails closed. These limitations require honest UI/rollout evidence and must not be converted into silent fallback behavior.

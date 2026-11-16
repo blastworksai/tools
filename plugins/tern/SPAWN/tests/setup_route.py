@@ -17,23 +17,36 @@ PACKAGE = Path(__file__).resolve().parents[1]
 
 class SetupRouteLifetime(unittest.TestCase):
     def setUp(self):
-        self.directory = tempfile.TemporaryDirectory(prefix="spawn-route-")
+        self.directory = tempfile.TemporaryDirectory(prefix="spawn route Ω 雪 ")
         self.addCleanup(self.directory.cleanup)
-        self.output = Path(self.directory.name).resolve() / "result"
+        base = Path(self.directory.name).resolve()
+        self.output = base / "result Ω"
         self.nonce = "fixture-offline-route"
-        self.value = "literal offline diagnostic value"
-        self.identity = subprocess.check_output(["whoami"], text=True).strip()
+        self.value = 'literal "quoted" \\ Ω 雪 diagnostic'
+        installed = base / "installed tools Ω"
+        installed.mkdir()
+        self.helper = installed / ("setup_route.ps1" if os.name == "nt" else "setup_route.sh")
+        shutil.copyfile(PACKAGE / self.helper.name, self.helper)
+        self.environment = dict(os.environ, HOME=str(base), USERPROFILE=str(base), TMPDIR=str(base))
+        if os.name != "nt":
+            self.environment["LOCALAPPDATA"] = "must-not-be-used-on-posix"
         if os.name == "nt":
             executable = shutil.which("powershell.exe")
             if not executable:
                 self.skipTest("Windows PowerShell is unavailable")
+            self.identity = subprocess.check_output(
+                [executable, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
+                 "[Console]::OutputEncoding=New-Object Text.UTF8Encoding($false);"
+                 "[Console]::Write([Security.Principal.WindowsIdentity]::GetCurrent().Name)"],
+                encoding="utf-8").strip()
             self.command = [executable, "-NoLogo", "-NoProfile", "-NonInteractive", "-File",
-                            str(PACKAGE / "setup_route.ps1"), "-Output:", str(self.output),
+                            str(self.helper), "-Output:", str(self.output),
                             "-Nonce:", self.nonce, "-Value:", self.value]
         else:
-            self.command = ["sh", str(PACKAGE / "setup_route.sh"), str(self.output),
+            self.identity = subprocess.check_output(["whoami"], text=True).strip()
+            self.command = ["sh", str(self.helper), str(self.output),
                             self.nonce, self.value]
-        self.process = subprocess.Popen(self.command, cwd=self.directory.name,
+        self.process = subprocess.Popen(self.command, cwd=self.directory.name, env=self.environment,
                                         stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
                                         start_new_session=os.name != "nt")
         self.addCleanup(self.stop)
@@ -82,9 +95,9 @@ class SetupRouteLifetime(unittest.TestCase):
         self.assertIsNone(self.process.poll())
         if os.name != "nt":
             argv = subprocess.check_output(["ps", "-p", str(self.process.pid), "-o", "args="], text=True)
-            self.assertIn(str(PACKAGE / "setup_route.sh"), argv,
+            self.assertIn(str(self.helper), argv,
                           "the original helper shell must not exec-replace itself with sleep")
-        collision = subprocess.run(self.command, cwd=self.directory.name,
+        collision = subprocess.run(self.command, cwd=self.directory.name, env=self.environment,
                                    stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=5)
         self.assertNotEqual(collision.returncode, 0, "a repeated invocation must not overwrite or extend the observation")
         self.assertEqual(self.output.read_bytes(), expected)
@@ -100,6 +113,17 @@ class SetupRouteLifetime(unittest.TestCase):
         self.assertGreaterEqual(elapsed, 43, "the diagnostic lifetime ended before its inspection interval")
         self.assertLess(elapsed, 48, "the diagnostic lifetime was extended")
         self.assertEqual(self.output.read_bytes(), expected)
+
+    def test_relative_and_traversal_paths_refuse_without_publication(self):
+        self.published()
+        for invalid in ("relative-result", self.directory.name + "/../unexpected-result"):
+            command = list(self.command)
+            output_index = command.index("-Output:") + 1 if os.name == "nt" else 2
+            command[output_index] = invalid
+            refused = subprocess.run(command, cwd=self.directory.name, env=self.environment,
+                                     stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=5)
+            self.assertNotEqual(refused.returncode, 0)
+        self.assertFalse((Path(self.directory.name) / "relative-result").exists())
 
 
 if __name__ == "__main__":

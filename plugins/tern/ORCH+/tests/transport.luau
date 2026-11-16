@@ -383,6 +383,32 @@ for _, fixture in {
 	check(transport.decode_reply(encode(bad), granted) == nil, "closed reply payload " .. candidate.kind)
 end
 do
+	local ruling = reply("record_ruling", { path = "/existing/plan.md", marker = "orchplus-ruling:authority_1:gate_1",
+		entry = "> orchplus-ruling:authority_1:gate_1\n> Decision: use &lt;literal&gt; &#96;text&#96;",
+		expected_document_sha256 = hash("fresh B0"), expected_non_rulings_sha256 = hash("fresh executable B0") })
+	ruling.gate_id, ruling.gate_revision = "gate_1", 3
+	check(transport.decode_reply(encode(ruling), granted) ~= nil, "canonical ruling reply binds exact gate, existing absolute path, escaped entry and both B0 hashes")
+	for _, unprovisioned in { binding, check_runner, release_manager } do
+		check(transport.decode_reply(encode(ruling), unprovisioned) == nil, "ruling delivery never infers coordinator-control capability")
+	end
+	for _, mutate in {
+		function(v) v.gate_id = "other_gate" end,
+		function(v) v.gate_revision = nil end,
+		function(v) v.payload.path = "relative/plan.md" end,
+		function(v) v.payload.marker = "gate_1" end,
+		function(v) v.payload.entry = "> raw <tag>" end,
+		function(v) v.payload.entry = "> raw `code`" end,
+		function(v) v.payload.entry = "> first\nunquoted second" end,
+		function(v) v.payload.entry ..= "\n" end,
+		function(v) v.payload.expected_document_sha256 = string.rep("A", 64) end,
+		function(v) v.payload.expected_non_rulings_sha256 = nil end,
+		function(v) v.payload.create = true end,
+	} do
+		local bad = clone(ruling); mutate(bad)
+		check(transport.decode_reply(encode(bad), granted) == nil, "ruling payload cannot weaken gate/capability/path/escaped-byte contract")
+	end
+end
+do
 	local grant = reply("landing_grant", { landing_id = "landing_1", grant_id = "grant_1", project_id = "project_1", checkpoint_id = "cp_1", repo_ref = "repo/ref",
 		target_ref = "main", target_revision = "base", source_ref = "work/branch", source_revision = "abc", builder_work_id = "work_1",
 		proof = { mode = "review_disabled", artifact_revision = "abc", check_refs = list({ "unit:" .. zero_hash }) } })

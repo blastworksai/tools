@@ -35,7 +35,7 @@ local function same(left, right, message) check(equal(left, right), message) end
 local function record(id, fields)
 	local result = {
 		id = id, provider = "custom", account_label = id, backend = "local-terminal",
-		command = "ordinary-cli", arguments = {}, enabled = true, include_all = true,
+		command = "ordinary-cli", arguments = {}, enabled = true,
 		placement = "tab",
 	}
 	for key, value in pairs(fields or {}) do result[key] = value end
@@ -57,10 +57,23 @@ end
 local fresh = assert(config.migrate(nil, "host-A"))
 check(fresh.changed and #fresh.records == 0, "cold start has no seeded accounts")
 check(not assert(config.migrate(fresh.store, "host-A")).changed, "empty store is idempotent")
+do
+	local legacy = record("retired-bulk", { include_all = true, provider = "Codex" })
+	local converted = migrate({ legacy })
+	check(converted.records[1].include_all == nil and converted.records[1].provider_family == nil and config.provider_family(converted.records[1].provider,nil)=="openai", "migration retires bulk policy without inventing a saved provider declaration; catalog defaults stay derivable")
+	check(legacy.include_all == true and legacy.provider_family == nil, "migration preserves its original input for backup")
+	check(not assert(config.migrate(converted.store, "host-A")).changed, "provider metadata migration is idempotent")
+	local wrapper = assert(config.validate_record(record("wrapper", { provider = "OMP", backend = "native-agent", command = "omp", provider_family = " Anthropic " })))
+	check(wrapper.provider_family == "anthropic", "wrapper underlying provider declaration is normalized")
+	check(assert(config.validate_record(record("explicit-provider", { provider = "Claude", provider_family = "meta" }))).provider_family=="meta", "an explicit underlying-provider declaration overrides the client label for configured wrappers")
+	check(config.validate_record(record("invalid-family", { provider_family = "bad\nfamily" })) == nil, "control-bearing family declaration refuses")
+	local custom = assert(config.validate_record(record("new-provider", { provider_family = "my-provider" })))
+	check(custom.provider_family == "my-provider" and custom.command == "ordinary-cli", "open family vocabulary does not change executable identity")
+end
 local original_record = record("preserved", {
 	command = "/opt/My Tools/custom-cli", arguments = { "", "two words", "--", "acp", "$(not executed)" },
 	cwd = "/work/a directory/'quoted'", prompt = "  Keep this prompt.\nSecond line: $HOME `literal`  ",
-	enabled = false, include_all = false, placement = "split",
+	enabled = false, placement = "split",
 	host = "remote.example", user = "account", key_path = "/keys/my key",
 })
 local sentinel = { schema = 1, agents = { record("foreign") }, extension = { exact = "untouched" } }
@@ -160,8 +173,8 @@ same(ordinary_render, render_before, "host rendering does not mutate the approve
 local approved_prompt = "  Exact approved prompt.\nQuotes: ' \" $HOME `literal`  "
 local native_record = record("native-render", { provider = "omp", backend = "native-agent", command = "omp", arguments = { "--profile", "work account" }, prompt = "saved greeting", user = "account" })
 rendered = assert(executor.render(native_record, "/bin/zsh", "macos", approved_prompt))
-same(argv_of(rendered, "omp"), { "sudo", "-u", "account", "-H", "--", "omp", "--profile", "work account", approved_prompt }, "native setup prompt is one exact startup argv after approved arguments")
-check(native_record.prompt == "saved greeting" and #native_record.arguments == 2, "setup prompt does not overwrite the record or append persisted argv")
+same(argv_of(rendered, "omp"), { "sudo", "-u", "account", "-H", "--", "omp", "--profile", "work account", approved_prompt }, "ordinary OMP explicit prompt override remains one exact argv after approved arguments")
+check(native_record.prompt == "saved greeting" and #native_record.arguments == 2, "ordinary prompt override does not mutate persisted argv")
 native_record.user = ""
 same(argv_of(assert(executor.render(native_record, "/bin/bash", "linux")), "omp"), { "omp", "--profile", "work account", "saved greeting" }, "ordinary native launch uses its approved stored prompt")
 local wrapped = record("wrapped", { command = "sudo -u explicit -- ordinary-cli", user = "explicit", arguments = { "one" } })
@@ -530,7 +543,7 @@ observe(recovered, unknown, 1, { phase = "Unknown" })
 check(lifecycle.clear_history(recovered) == 0 and unknown.unresolved, "clear cannot release unresolved unknown reservations")
 check(lifecycle.reserve(recovered, record("disabled", { enabled = false }), first.scope, "window-1") == nil, "disabled account cannot reserve")
 check(lifecycle.reserve(recovered, blocked, first.scope, "window-1") == nil, "review-required migration cannot reserve")
-check(reserve(recovered, record("explicit-only", { include_all = false })).phase == "Starting", "batch exclusion does not prohibit explicit launch")
+check(reserve(recovered, record("explicit-only")).phase == "Starting", "explicit reviewed records can launch independently")
 local full_state = lifecycle.new()
 for index = 1, 128 do reserve(full_state, record("capacity-" .. tostring(index))) end
 local snapshot = copy(full_state)
@@ -669,7 +682,94 @@ do
 		local canonical = config.validate_record(imported)
 		check(canonical ~= nil and canonical.duplicate_policy == nil, "import strips duplicate_policy=" .. tostring(value))
 	end
-	local prompt = assert(config.setup_prompt({}, "run-1", "host-A", "host-A/session-1"))
-	check(not prompt:find("duplicate", 1, true), "setup prompt no longer asks for or emits duplicate_policy")
+	local context={result_path="/data/quote' Ω/result.json",binding="immutable-binding",native_session=4,host_config_pane=10,window="window' quoted",config_dir="/private config/quote'"}
+	local backend=load("backend")
+	local skill=runtime.fs.read(root.."/skills/setup/SKILL.md",32000)
+	local prompt = assert(backend.setup_prompt({}, "run-1", "host-A", "host-A/session-1",context,skill,"posix"))
+	local helper=assert(prompt:match("submission command once:\n([^\n]+)"))
+	local words=assert(config.parse_arguments(helper))
+	local offset=#words-7
+	same({words[offset+1],words[offset+2],words[offset+3],words[offset+5],words[offset+6],words[offset+7]},{"send","4/10","paste","--window",context.window,"--json"},"submission helper preserves exact native target/window through POSIX quoting")
+	check(words[1]=="TERN_DAEMON_SOCKET=${TERN_PANE_SOCKET:?Native Tern daemon socket is missing}"
+		and words[2]=="TERN_CONFIG_DIR="..context.config_dir and words[3]=="${TERN_EXE:?Native Tern executable is missing}","helper refuses missing native endpoint and never falls back to PATH/default daemon")
+	local envelope=assert(config.decode_setup_json(words[offset+4]))
+	check(envelope.path==context.result_path and envelope.binding==context.binding and envelope.setup_run_id=="run-1","shell-safe helper contains exact per-run path and binding")
+	local powershell=assert(backend.setup_prompt({},"run-1","host-A","host-A/session-1",context,skill,"powershell"))
+	check(powershell:find("$start.FileName=$env:TERN_EXE",1,true)~=nil and powershell:find("$start.EnvironmentVariables['TERN_DAEMON_SOCKET']=$env:TERN_PANE_SOCKET",1,true)~=nil
+		and powershell:find("window'' quoted",1,true)~=nil and powershell:find("$start.Arguments=",1,true)~=nil,"PowerShell helper uses native executable/socket, literal shell quoting and the existing Windows argv serializer")
+	check(backend.setup_prompt({},"run-1","host-A","host-A/session-1",context,skill,"cmd")==nil,"unqualified helper shell is refused rather than misquoted")
+	local oversized=copy(context);oversized.result_path="/"..string.rep("x",4200)
+	check(backend.setup_prompt({},"run-1","host-A","host-A/session-1",oversized,skill,"posix")==nil,"an undeliverable small envelope is refused before native admission")
+	for _,raw in ipairs({
+		'{"schema":2,"unknown":null}', '{"schema":2,"agents":[null]}',
+		'{"schema":2} trailing', '{"schema":2} {"schema":2}',
+		string.rep(" ",120001), '{"schema":2,"value":"\0"}',
+	}) do check(config.decode_setup_json(raw)==nil,"raw setup JSON refuses dropped null, partial/trailing or over-bound data") end
+	local quoted=assert(config.decode_setup_json('{"value":"literal null \\"quoted\\" \\\\ null"}'))
+	check(quoted.value=='literal null "quoted" \\ null',"raw null guard preserves literal quoted text and escapes")
+	local resolution=load("launch_resolution")
+	for _,command in ipairs({"non-OMP --opaque '$VALUE'","sudo -u explicit -- custom","ssh existing-host custom","runas /user:existing custom"}) do
+		local route=assert(resolution.setup_default(command,"/work","linux"))
+		check(route.command==command and route.cwd=="/work","user-trusted native default stays opaque without blacklist or argv reinterpretation")
+	end
+	local missing,why=resolution.setup_default(" \t","/work","linux")
+	check(missing==nil and why=="Set a default agent in Tern settings, then try setup again.","missing effective default produces exact settings guidance")
+	check(resolution.setup_default("default","~","linux")==nil,"setup requires resolved host cwd rather than guessed home expansion")
+	local windows_default=assert(resolution.setup_default("opaque default","C:/work","windows"))
+	check(windows_default.shell=="powershell" and windows_default.command=="opaque default","Windows helper names PowerShell explicitly without inferring shell/provider from ComSpec")
+	local setup_state=lifecycle.new()
+	local bootstrap={id="setup-default",backend="setup-default",provider="Tern default"}
+	local setup_attempt=assert(lifecycle.reserve(setup_state,bootstrap,"host-A/session-1","host-A/executor","setup"))
+	check(setup_attempt.mode=="Setup default" and lifecycle.validate(setup_state)~=nil,"setup bootstrap has explicit lifecycle meaning without relabeling ordinary Native OMP")
+	check(lifecycle.reserve(lifecycle.new(),bootstrap,"host-A/session-1","host-A/executor","launch")==nil,"setup bootstrap cannot be an ordinary launch record")
+	check(config.validate_record(record("fake",{backend="setup-default"}))==nil,"setup-only backend cannot enter saved configuration")
+end
+-- Platform setup paths come from the native execution-host plugin, never a
+-- conventional home or the connected desktop's LOCALAPPDATA. These are boundary
+-- fixtures only; real helper Unicode/lifetime checks are in setup_route.py.
+do
+	local setupSource=runtime.fs.read(root.."/managed_setup.luau")
+	local prerequisiteSource=runtime.fs.read(root.."/prereq.luau")
+	for _,platform in ipairs({
+		{os="linux",data="/srv/nondefault home Ω/plugin data",dir="/srv/tools 雪/SPAWN"},
+		{os="macos",data="/Volumes/Work Ω/home/Library/Application Support/Tern/data",dir="/Volumes/Work Ω/tools/SPAWN"},
+		{os="windows",data="D:\\Users\\Work Ω\\plugin data",dir="E:\\Tools 雪\\SPAWN"},
+	}) do
+		local calls={}
+		local fake=setmetatable({
+			runtime={os=platform.os},plugin={data=platform.data,dir=platform.dir},
+			getenv=function()error("Setup path must not be guessed from environment")end,
+			process={run=function(argv,_options,callback)
+				table.insert(calls,copy(argv));callback({status=0,stdout="worker Ω 雪\r\n",stderr="",timed_out=false})
+			end},
+		},{__index=runtime})
+		local chunk=assert(loadstring(setupSource,"managed_setup_platform"))
+		setfenv(chunk,setmetatable({tern=fake,require=load},{__index=environment}))
+		local managed=chunk()
+		local currentFolder=platform.data.."/current folder Ω"
+		local draft=managed.defaults(currentFolder)
+		check(draft.root==platform.data.."/managed","setup uses exact native data root on "..platform.os)
+		check(draft.cwd==currentFolder and draft.user=="","setup uses native current folder and same user on "..platform.os)
+		check(managed.defaults("relative").cwd=="","unavailable native folder remains an explicit choice, never a guessed home")
+		local existing=record("local-default")
+		check(managed.from_record(existing,currentFolder).cwd==currentFolder,"ordinary records without a folder inherit the observed folder only in the setup draft")
+		existing.cwd=currentFolder.."/chosen"
+		check(managed.from_record(existing,platform.data).cwd==existing.cwd,"explicit saved working folder is never replaced by the default")
+		draft.cwd="relative folder";draft.executable="worker"
+		local refused
+		managed.prepare(draft,{host_os=platform.os,host_shell=if platform.os=="windows" then "powershell" else "posix"},function(candidate,probe,why)
+			check(candidate==nil and probe==nil,"relative working folder cannot reach a setup probe")
+			refused=why
+		end)
+		check(refused and #calls==0,"relative working folder refuses before resource effects on "..platform.os)
+		local prerequisites=assert(loadstring(prerequisiteSource,"prereq_platform"))
+		setfenv(prerequisites,setmetatable({tern=fake,require=load},{__index=environment}))
+		local observed
+		prerequisites().identity("",function(value,why)check(why==nil,"identity fixture succeeds");observed=value end)
+		check(observed=="worker Ω 雪" and #calls==1,"same-user identity retains Unicode without sudo on "..platform.os)
+		if platform.os=="windows" then
+			check(calls[1][#calls[1]]:find("OutputEncoding",1,true)~=nil,"Windows identity explicitly emits UTF-8")
+		else same(calls[1],{"id","-un"},"POSIX identity uses exact argv without home expansion") end
+	end
 end
 return "PASS " .. tostring(checks) .. " SPAWN behavior checks"

@@ -1,0 +1,9 @@
+/* Layout only: native controls, fonts and theme colors remain Tern's. */
+[data-role="orchplus-project-list"] .orch-project {
+  margin-top: 16px;
+}
+[data-role="orchplus-project-list"] .orch-project-conversations {
+  margin-left: 16px;
+  padding-left: 16px;
+  border-left: 1px solid var(--l2);
+}

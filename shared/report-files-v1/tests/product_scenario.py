@@ -6,6 +6,7 @@ import pwd
 import shutil
 import subprocess
 import sys
+import time
 import uuid
 from owned_runtime import owned_runtime
 
@@ -25,7 +26,13 @@ class UI:
         self.data = runtime.config/'plugin-data/report-product-driver'
         lib.wait_for(lambda: read_json(self.data/'ready.json'), 'real product UI controller', 30)
 
+    def remaining(self, seconds):
+        deadline = getattr(self, 'operation_deadline', None)
+        return seconds if deadline is None else min(seconds, max(0, deadline-time.monotonic()))
+
     def __call__(self, op, **fields):
+        if self.remaining(20) <= 0:
+            raise TimeoutError('original native owner-input deadline expired; no new input sent')
         if op == 'action':
             # Ordinary native action dispatch, outside a plugin callback. Cross-plugin
             # product navigation is exercised through its actual clicked controls.
@@ -41,13 +48,14 @@ class UI:
         def ready():
             result = read_json(self.data/'response.json')
             return result if result and result.get('id') == self.serial else None
-        result = self.lib.wait_for(ready, 'native UI '+op, 20, .05)
+        result = self.lib.wait_for(ready, 'native UI '+op, self.remaining(20), .05)
         if not result['ok']:
             raise AssertionError(result['error'])
         return result.get('result')
 
     def click(self, pane, label):
-        self.lib.wait_for(lambda: label in json.dumps(self('surface', pane=pane), ensure_ascii=False), 'native button '+label, 40)
+        self.lib.wait_for(lambda: label in json.dumps(self('surface', pane=pane), ensure_ascii=False),
+                          'native button '+label, self.remaining(40))
         return self('click', pane=pane, label=label)
 
     def prompt(self, label, text):
@@ -92,6 +100,21 @@ def measurements(runtime):
     return {'totals': {key: sum(value.get('metrics', {}).get(key, 0) for value in observations.values()) for key in keys},
             'contexts': {context: {'metrics': value.get('metrics', {}), 'codec_modules': value.get('codec_modules', {})}
                          for context, value in observations.items()}}
+
+
+def dismiss_signin(runtime):
+    """Close Tern's first-run sign-in dialog (new tn-signin-card or legacy tn-signin-x) if shown."""
+    tree = json.dumps(runtime.ctl('tree'))
+    if 'tn-signin-card' in tree:
+        selector = '.tn-signin-layer .mdl-x'
+    elif 'tn-signin-x' in tree:
+        selector = '.tn-signin-x'
+    else:
+        return None
+    response = runtime.ctl('click', selector)
+    after = json.dumps(runtime.ctl('tree'))
+    assert 'tn-signin-card' not in after and 'tn-signin-x' not in after, 'Tern sign-in dialog still present after clicking '+selector
+    return response
 
 
 def select_native_dark(runtime):
@@ -215,8 +238,9 @@ def product_reports(base, root, evidence, processes, lib, name='reports-product-
         runtime.command('plugin', 'link', orch)
         runtime.command('plugin', 'link', driver)
         ui = UI(runtime, lib)
-        if 'tn-signin-x' in json.dumps(runtime.ctl('tree')):
-            result['optional_signin_dismissal'] = runtime.ctl('click', '.tn-signin-x')
+        dismissed = dismiss_signin(runtime)
+        if dismissed is not None:
+            result['optional_signin_dismissal'] = dismissed
         result['appearance_commands'] = []
         for command in (('theme', 'dark', 'obsidian'), ('appearance', 'dark'), ('style', 'solid')):
             result['appearance_commands'].append({'command': list(command), 'response': runtime.ctl(*command)})
@@ -369,4 +393,454 @@ def product_reports(base, root, evidence, processes, lib, name='reports-product-
         result['spawn_window_trace'] = trace(runtime, 'spawn', 'window')
         (control/'stop').write_text('supervisor cleanup\n')
         runtime.stop()
+    return result
+
+
+def _usage_cache_process(product, operation, **fields):
+    """Only fixture observations are writable; authority/consent/bindings are not.
+
+    Import the candidate's real Python consumer in a separate private process.
+    Native source_collect, not this driver, normalizes and publishes the saved
+    provider observations. Status reads use SQLite read-only mode.
+    """
+    program = r'''
+import json, sqlite3, sys
+from pathlib import Path
+sys.dont_write_bytecode = True
+package, root, operation = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3]
+sys.path.insert(0, str(package))
+fields = json.loads(sys.stdin.read())
+if operation == "writer":
+    from usage_service.spawn_roster import read_roster
+    source = Path(fields["fixture"])
+    authority = json.loads(source.read_text())
+    assert authority["version"] == 4, "requires current native SPAWN writer output"
+    detached = Path(fields["detached"])
+    detached.mkdir()
+    path = detached / "kv.json"
+    path.write_text(json.dumps({"authority": authority}))
+    roster, definitions = read_roster(path, "native-display-writer-consumer")
+    scope, = roster["scopes"]
+    assert {row["id"] for row in scope["accounts"]} == {"claude-demo", "codex-demo"}
+    assert [row["id"] for row in scope["consumers"]] == ["omp-demo"]
+    assert {row["id"] for row in definitions} == {"claude-demo", "codex-demo"}
+    assert "foreign-demo" not in json.dumps(roster)
+    assert scope["spawn_join"] == {key: authority[key] for key in ("namespace", "host_key", "config_revision")}
+    print(json.dumps({"roster": roster, "source_version": authority["version"]}))
+elif operation == "status":
+    path = root / "state.sqlite3"
+    assert path.is_file(), "USAGE native Setup has not created its private store"
+    with sqlite3.connect(path.as_uri() + "?mode=ro", uri=True) as db:
+        settings = {key: json.loads(value) for key, value in db.execute(
+            "SELECT key,value FROM settings WHERE key IN ('display_enabled','metadata_enabled','capacity_enabled','role')")}
+        state = {key: json.loads(value) for key, value in db.execute(
+            "SELECT key,value FROM local_state WHERE key IN ('usage_results','usage_publication','account_bindings','usage_preferences')")}
+        identity = db.execute("SELECT device_id FROM installations WHERE id=1").fetchone()[0]
+    print(json.dumps({"settings": settings, "source_id": identity, **state}))
+elif operation == "cache":
+    from usage_service.store import Store
+    from usage_service.refresh import Refresh, RESULTS
+    assert (root / "state.sqlite3").is_file(), "never bootstrap authority from a fixture"
+    store = Store(root)
+    try:
+        refresh = Refresh(store, root)
+        _, _, roster, definitions = refresh.configuration()
+        definition, = [row for row in definitions if row["id"] == fields["record_id"]]
+        assert definition["provider"] == "claude"
+        assert store.settings()["metadata_enabled"], "headless consent must be visible"
+        observed = fields["observed_at_ms"]
+        item = {key: definition[key] for key in ("scope_id", "id", "provider", "label", "revision")}
+        item["response"] = {"version": 1,
+            "metadata": {"principal": "synthetic-display@example.invalid", "principal_kind": "email",
+                         "label": "Synthetic cached display observation"},
+            "usage": {"provider": "claude", "observed_at_ms": observed,
+                      "windows": [{"key": "seven_day", "pool": "default", "used": 37, "remaining": 63,
+                                   "observed_at_ms": observed, "resets_at_ms": fields["resets_at_ms"]}]}}
+        store.set_local_state(RESULTS, {"items": [item]})
+        print(json.dumps({"item": item, "roster": roster,
+                          "evidence_limit": "synthetic cached provider observation; no provider request or quota proof"}))
+    finally:
+        store.close()
+else:
+    raise AssertionError("unknown fixture operation")
+'''
+    process = subprocess.run(
+        [sys.executable, '-B', '-c', program, str(product.root/'plugins/tern/USAGE'),
+         str(product.runtime.config/'plugin-data/usage/companion'), operation],
+        input=json.dumps(fields), text=True, capture_output=True, check=True,
+        env=product.runtime.env, timeout=40)
+    return json.loads(process.stdout)
+
+
+def product_usage_display(base, root, evidence, processes, lib, args):
+    """Owned-native SPAWN -> USAGE -> channel -> ordinary ORCH picker.
+
+    Register as ``usage-display-product`` in native_smoke, forwarding the same
+    argparse namespace as product_c2 (capture/provider/control options). Required
+    args.usage_spawn_fixture is the *raw* authority JSON emitted by the current
+    native SPAWN authority/usage_roster_fixture test, supplied explicitly via
+    --usage-spawn-fixture. Missing output fails; there is no checked-in fallback.
+    It is read in a detached consumer fixture, not installed into the native
+    profile.
+
+    Requires Product.create_orchestration and NativeUI.agent_picker from the
+    conversation-first driver, Linux native prerequisites, Python 3.11+, and
+    access to the shipped hash-locked USAGE dependencies for the visible private
+    runtime installation. No provider account, credentials or worker is used.
+    """
+    import base64
+    import hashlib
+    import threading
+    from product_c2 import Product, prerequisites, spawn_authority
+
+    unavailable = prerequisites()
+    if unavailable:
+        return unavailable
+    product = Product(base, root, evidence, processes, lib, 'usage-display-product',
+                      args, instrumented=False)
+    runtime, result = product.runtime, product.result
+    usage = root/'plugins/tern/USAGE'
+    companion_root = runtime.config/'plugin-data/usage/companion'
+    writer_fixture = getattr(args, 'usage_spawn_fixture', None)
+    fixture = Path(writer_fixture) if writer_fixture is not None else None
+    result.update(route='actual SPAWN writer and USAGE source collector/display export; shipped pane-free channel; ordinary ORCH agent picker',
+                  worker_kind='no launched worker; synthetic cached provider observations only',
+                  usage_display={'phases': {}, 'transport_frames': [], 'topology': []})
+    result['limits'].extend([
+        '37% is a deterministic cached fixture, not real provider quota or a provider acquisition test.',
+        'Only usage_results is fixture-written. Native Setup owns all consent and account bindings.',
+        'Native pane topology is sampled during every display wait; carrier frames are passively observed from owned files.',
+        'This scenario qualifies local Linux, not attached remote hosts or native Windows/macOS.'])
+    output = result['usage_display']
+    stopped, seen = threading.Event(), set()
+    observer_errors = []
+    observer = None
+
+    def observe_carrier():
+        paths = []
+        for sender, receiver in (('orchplus', 'usage'), ('usage', 'orchplus')):
+            for slot in range(1, 25):
+                paths.extend((runtime.config/f'plugin-data/{sender}/plugin-channel-v1/m-{slot:03}.json',
+                              runtime.config/f'plugin-data/{receiver}/plugin-channel-v1/a-{sender}-{slot:03}.json'))
+        while not stopped.is_set():
+            try:
+                for path in paths:
+                    frame = read_json(path)
+                    if not isinstance(frame, dict):
+                        continue
+                    if frame.get('kind') == 'ack':
+                        frame = frame.get('message', {})
+                    if not str(frame.get('route', '')).startswith('usage.'):
+                        continue
+                    key = (frame.get('from'), frame.get('incarnation'), frame.get('id'),
+                           frame.get('binding'), frame.get('body'))
+                    if key in seen:
+                        continue
+                    # Read the immutable actual producer bytes, never supply a response.
+                    raw = base64.b64decode(frame['body'], validate=True)
+                    assert len(raw) == frame['body_bytes']
+                    body = json.loads(raw)
+                    seen.add(key)
+                    output['transport_frames'].append({
+                        'observed_at_ns': time.time_ns(), 'path': str(path),
+                        'frame': frame, 'body': body, 'body_sha256': hashlib.sha256(raw).hexdigest()})
+            except Exception as error:
+                observer_errors.append(f'{type(error).__name__}: {error}')
+                return
+            stopped.wait(.025)
+
+    def state():
+        return _usage_cache_process(product, 'status')
+
+    def setting(key, expected):
+        def saved():
+            current = state()
+            return current if current['settings'].get(key) == expected else None
+        return lib.wait_for(saved, 'native USAGE saves '+key, 40, .5)
+
+    def setup_choice(label, confirm=None):
+        product.ui('action', pane=product.controller if hasattr(product, 'controller') else product.spawn_pane,
+                   action='plugin.usage.setup')
+        product.ui.choose('USAGE Setup', label)
+        if confirm:
+            product.ui.choose(confirm, 'Confirm')
+
+    def topology(picker):
+        panes = product.ui('panes')
+        assert not any(row.get('block') in ('usage.display', 'usage.capacity', 'spawn.dispatch',
+                                            'usage.config', 'usage.accounts', 'usage.account')
+                       for row in panes), 'display journey created a transport/USAGE pane'
+        ids = {row['pane'] for row in panes}
+        assert ids == baseline_panes | {picker}, 'display read changed native pane topology'
+        snapshot = {'panes': panes, 'observed_at_ns': time.time_ns()}
+        if not output['topology'] or output['topology'][-1]['panes'] != panes:
+            output['topology'].append(snapshot)
+        return panes
+
+    def wait_display(label, picker, predicate, timeout=65):
+        # Native picker reads pause while its tab is hidden by SPAWN preferences.
+        product.ui('focus', pane=picker)
+        def rendered():
+            topology(picker)
+            surface = product.ui('surface', pane=picker)
+            text = json.dumps(surface, ensure_ascii=False)
+            return surface if predicate(text) else None
+        surface = lib.wait_for(rendered, 'ordinary picker '+label, timeout, .1)
+        output['phases'][label] = {'surface': surface, 'state': state(),
+                                   'observed_at_ns': time.time_ns()}
+        product.capture('usage-display-'+label)
+        return surface
+
+    def response_since(mark, predicate):
+        return lib.wait_for(lambda: next((entry for entry in list(output['transport_frames'])
+                                         if entry['observed_at_ns'] >= mark
+                                         and entry['frame']['route'] == 'usage.display.response'
+                                         and predicate(entry['body'])), None),
+                            'actual USAGE display response bytes', 65, .05)
+
+    def assert_current_join(entry):
+        authority = spawn_authority(runtime)
+        response = entry['body']
+        assert set(response) <= {'version', 'display_only', 'request_id', 'op', 'ok', 'status',
+                                 'revision', 'as_of_ms', 'source_id', 'records', 'complete', 'next_cursor'}
+        assert response['version'] == 1 and response['display_only'] is True
+        assert response['ok'] is True and response['status'] == 'current'
+        assert response['source_id'] == state()['source_id']
+        expected = {key: authority[key] for key in ('namespace', 'host_key', 'config_revision')}
+        assert response['records'], 'snapshot omitted current configured accounts'
+        allowed_record = {'record_id', 'record_revision', 'definition_revision', 'scope_id', 'roster_revision',
+                          'namespace', 'host_key', 'config_revision', 'provider', 'provider_label',
+                          'account_label', 'icon', 'used', 'observed_at_ms', 'resets_at_ms',
+                          'age_ms', 'state', 'reason', 'text', 'underlying_record_id'}
+        for row in response['records']:
+            assert set(row) <= allowed_record, 'display record leaked an undeclared field'
+            assert {key: row[key] for key in expected} == expected
+            assert type(row['record_revision']) is int and row['record_revision'] == authority['config_revision']
+            assert row['scope_id'] and len(row['definition_revision']) == 64
+        assert {row['record_id'] for row in response['records']} == {'usage-measured', 'usage-unavailable'}
+        return expected
+
+    try:
+        # Never replace this input with a hand-written authority approximation.
+        assert fixture is not None, 'supply the current SPAWN usage_roster_fixture output explicitly'
+        assert fixture.is_file(), 'missing actual SPAWN usage_roster_fixture output: '+str(fixture)
+        output['writer_fixture'] = _usage_cache_process(
+            product, 'writer', fixture=str(fixture.resolve()), detached=str(runtime.root/'writer-consumer'))
+        output['writer_fixture'].update(path=str(fixture), sha256=hashlib.sha256(fixture.read_bytes()).hexdigest())
+        product.start()
+        product.open_spawn()
+        measured = product.create_record('usage-measured', 'Claude')
+        product.create_record('usage-unavailable', 'Codex')
+        observer = threading.Thread(target=observe_carrier, name='owned-usage-frame-observer', daemon=True)
+        observer.start()
+        runtime.command('plugin', 'install', usage)
+        installed = Path(json.loads(runtime.command('plugin', 'dir', '--json'))['dir'])/'usage'
+        expected_files = {str(path.relative_to(usage)): hashlib.sha256(path.read_bytes()).hexdigest()
+                          for path in usage.rglob('*') if path.is_file()}
+        actual_files = {str(path.relative_to(installed)): hashlib.sha256(path.read_bytes()).hexdigest()
+                        for path in installed.rglob('*') if path.is_file()}
+        assert actual_files == expected_files, 'native USAGE differs from candidate package'
+        output['usage_package_sha256'] = hashlib.sha256(json.dumps(expected_files, sort_keys=True).encode()).hexdigest()
+        product.ui('action', pane=product.spawn_pane, action='plugin.usage.setup')
+        def setup_ready():
+            tree = json.dumps(runtime.ctl('tree'), ensure_ascii=False)
+            return 'ready' if 'USAGE Setup' in tree else ('install' if 'Install private dependencies' in tree else None)
+        if lib.wait_for(setup_ready, 'native USAGE runtime or setup menu', 60) == 'install':
+            product.ui.choose('USAGE runtime', 'Install private dependencies')
+            product.ui.choose("Install USAGE's private runtime?", 'Confirm')
+            lib.wait_for(lambda: 'USAGE Setup' in json.dumps(runtime.ctl('tree')),
+                         'native private dependency installation', 240)
+        product.ui.choose('USAGE Setup', 'Allow headless usage reads')
+        product.ui.choose('Allow headless usage reads on this installation?', 'Confirm')
+        initial = setting('metadata_enabled', True)
+        assert initial['settings']['display_enabled'] is False
+        assert initial['settings']['capacity_enabled'] is False and initial['settings']['role'] == 'standalone'
+        assert initial.get('usage_preferences', {}).get('refresh_interval_seconds', 0) == 0
+
+        # This is the sole synthetic seam: stored provider observation, not a
+        # snapshot, display API answer, binding, catalog or domain authority.
+        fresh_at = int(time.time()*1000)-60000
+        reset_at = int(time.time()*1000)+3600000
+        output['cache_fresh'] = _usage_cache_process(product, 'cache', record_id=measured['id'],
+                                                     observed_at_ms=fresh_at, resets_at_ms=reset_at)
+        def published(expected_time, bound=False):
+            current = state()
+            publication = current.get('usage_publication', {})
+            for scope in publication.get('roster', {}).get('scopes', []):
+                for account in scope['accounts']:
+                    if account['id'] != measured['id'] or (bound and not account.get('profile_binding')):
+                        continue
+                    for reading_id in account['reading_ids']:
+                        reading = publication.get('readings', {}).get(reading_id, {})
+                        if any(window.get('used') == 37 and window.get('observed_at_ms') == expected_time
+                               for window in reading.get('windows', [])):
+                            return current
+            return None
+        publication = lib.wait_for(lambda: published(fresh_at), 'actual source collector publishes fixture cache', 65, .5)
+        scope = publication['usage_publication']['roster']['scopes'][0]
+        account = next(row for row in scope['accounts'] if row['id'] == measured['id'])
+        reading = publication['usage_publication']['readings'][account['reading_ids'][0]]
+        setup_choice('Bind SPAWN accounts…')
+        product.ui.choose('Bind SPAWN accounts',
+                          account['provider_label']+' · '+account['account_label']+' → '+reading['account_label'])
+        product.ui.choose('Bind this SPAWN account to its signed-in login?', 'Confirm')
+        output['native_bound_publication'] = lib.wait_for(lambda: published(fresh_at, True),
+                                                         'native owner binding and source republish', 65, .5)
+
+        product.create_orchestration('Usage display fixture')
+        picker = product.ui.agent_picker('Choose your orchestrator')
+        # Provider-labelled terminal fixtures are workers, not eligible coordinators.
+        product.ui.mouse_click(picker, 'Cancel')
+        lib.wait_for(lambda: all(row['pane'] != picker for row in product.ui('panes')),
+                     'Cancel closes the ineligible coordinator picker', 10)
+        product.ui.command(product.controller, 'new_conversation')
+        product.ui.choose('Existing orchestrated project or New', 'Usage display fixture')
+        picker = product.ui.agent_picker('Choose an agent')
+        baseline_panes = {row['pane'] for row in product.ui('panes')} - {picker}
+        disabled = wait_display('default-disabled', picker,
+                                lambda text: 'Show usage in ORCH+' in text and '37% used' not in text)
+        assert 'Claude' in json.dumps(disabled) and 'Codex' in json.dumps(disabled)
+        off = response_since(0, lambda body: body.get('status') == 'display_disabled')
+        assert off['body']['records'] == [] and off['body']['ok'] is False
+        mark = time.time_ns()
+        setup_choice('Show usage in ORCH+', 'Show usage in ORCH+?')
+        setting('display_enabled', True)
+        wait_display('fresh-cache', picker, lambda text: '37% used · current' in text and 'Usage unavailable' in text)
+        fresh = response_since(mark, lambda body: any(row.get('state') == 'fresh' and row.get('used') == 37
+                                                     for row in body.get('records', [])))
+        output['initial_join'] = assert_current_join(fresh)
+        catalog = product.ui.machine(product.controller, 'orchplus.catalog', key='catalog-index')
+        assert catalog and catalog['loaded'] is True
+        assert {key: catalog[key] for key in output['initial_join']} == output['initial_join']
+        for reading in fresh['body']['records']:
+            configured, = [row for row in catalog['records'] if row['id'] == reading['record_id']]
+            assert configured['revision'] == reading['record_revision']
+            if configured.get('definition_revision') is not None:
+                assert configured['definition_revision'] == reading['definition_revision']
+        output['native_catalog'] = catalog
+        assert next(row for row in fresh['body']['records'] if row['record_id'] == 'usage-unavailable')['state'] == 'unavailable'
+        assert next(row for row in fresh['body']['records'] if row['record_id'] == measured['id'])['observed_at_ms'] == fresh_at
+
+        stale_at = int(time.time()*1000)-20*60000
+        mark = time.time_ns()
+        output['cache_stale'] = _usage_cache_process(product, 'cache', record_id=measured['id'],
+                                                     observed_at_ms=stale_at, resets_at_ms=reset_at)
+        lib.wait_for(lambda: published(stale_at, True), 'native stale observation publication', 65, .5)
+        wait_display('stale-cache', picker,
+                     lambda text: '37% used · stale' in text and '37% used · current' not in text)
+        stale = response_since(mark, lambda body: any(row.get('used') == 37 and row.get('state') == 'stale'
+                                                     for row in body.get('records', [])))
+        assert_current_join(stale)
+        stale_row = next(row for row in stale['body']['records'] if row['record_id'] == measured['id'])
+        assert stale_row['observed_at_ms'] == stale_at and stale_row['age_ms'] >= 20*60000
+
+        mark = time.time_ns()
+        setup_choice('Stop showing usage in ORCH+', 'Stop showing usage in ORCH+?')
+        setting('display_enabled', False)
+        wait_display('revoked', picker, lambda text: 'Show usage in ORCH+' in text and '37% used' not in text)
+        revoked = response_since(mark, lambda body: body.get('status') == 'display_disabled')
+        assert revoked['body']['records'] == [] and revoked['body']['ok'] is False
+        setup_choice('Show usage in ORCH+', 'Show usage in ORCH+?')
+        setting('display_enabled', True)
+        wait_display('reenabled-stays-stale', picker, lambda text: '37% used · stale' in text
+                     and '37% used · current' not in text)
+
+        # A visible current-record edit changes both the catalog revision and
+        # semantic fingerprint. Old cached quota must not rejoin by its label.
+        before_edit = spawn_authority(runtime)
+        product.ui.preference(product.spawn_pane, page='agents')
+        prefs = product.ui('preferences', pane=product.spawn_pane)['properties']
+        label_rows = [row['id'] for section in prefs['sections'] for row in section['rows']
+                      if row['id'].startswith('agent:'+measured['id']+':account_label:')]
+        assert len(label_rows) == 1
+        mark = time.time_ns()
+        product.ui.preference(product.spawn_pane, row=label_rows[0], value='Edited synthetic account')
+        lib.wait_for(lambda: spawn_authority(runtime)['config_revision'] > before_edit['config_revision'],
+                     'visible SPAWN config edit', 30)
+        wait_display('changed-definition-unavailable', picker,
+                     lambda text: '37% used' not in text and 'Usage unavailable' in text)
+        changed = response_since(mark, lambda body: body.get('op') == 'snapshot'
+                                 and any(row.get('config_revision', -1) > before_edit['config_revision']
+                                         for row in body.get('records', [])))
+        output['changed_join'] = assert_current_join(changed)
+        changed_row = next(row for row in changed['body']['records'] if row['record_id'] == measured['id'])
+        assert changed_row['state'] == 'unavailable' and changed_row.get('used') is None
+        assert changed_row['definition_revision'] != stale_row['definition_revision']
+        setup_choice('Stop showing usage in ORCH+', 'Stop showing usage in ORCH+?')
+        final = setting('display_enabled', False)
+        wait_display('final-disabled', picker, lambda text: 'Show usage in ORCH+' in text and '37% used' not in text)
+        assert final['settings']['capacity_enabled'] is False and final['settings']['role'] == 'standalone'
+        assert final.get('usage_preferences', {}).get('refresh_interval_seconds', 0) == 0
+        product.ui.click(picker, 'Cancel')
+        lib.wait_for(lambda: {row['pane'] for row in product.ui('panes')} == baseline_panes,
+                     'ordinary picker closes without a transport pane', 30)
+
+        # Each displayed revision must have an actual, separately correlated
+        # native validate exchange. Matching labels or retained old frames fail.
+        frames = list(output['transport_frames'])
+        assert not observer_errors, observer_errors
+        assert frames and all(entry['frame']['route'] in ('usage.display.request', 'usage.display.response')
+                              for entry in frames), 'display journey issued a non-display USAGE request'
+        requests = {(entry['frame']['binding'], entry['body']['request_id']): entry for entry in frames
+                    if entry['frame']['route'] == 'usage.display.request'}
+        assert len({entry['body']['request_id'] for entry in requests.values()}) == len(requests), 'read identity reused'
+        for entry in requests.values():
+            body, frame = entry['body'], entry['frame']
+            assert frame['from'] == 'orchplus' and frame['to'] == 'usage'
+            assert body['version'] == 1
+            fields = {'version', 'request_id', 'op'}
+            if body['op'] in ('page', 'validate'):
+                fields.add('revision')
+            if body['op'] == 'page':
+                fields.add('cursor')
+            assert body['op'] in ('snapshot', 'page', 'validate') and set(body) == fields
+        validated = []
+        for entry in frames:
+            body, frame = entry['body'], entry['frame']
+            if frame['route'] != 'usage.display.response' or body.get('op') != 'validate' or body.get('ok') is not True:
+                continue
+            request = requests.get((frame['binding'], body['request_id']))
+            assert request is not None, 'missed actual request bytes; cannot claim correlated validation'
+            assert request['body']['op'] == 'validate' and request['body']['revision'] == body['revision']
+            assert frame['from'] == 'usage' and frame['to'] == 'orchplus'
+            assert body['records'] == [] and body['complete'] is True
+            validated.append(body['revision'])
+        assert fresh['body']['revision'] in validated and stale['body']['revision'] in validated
+        output['validated_revisions'] = validated
+        assert not (registry(runtime) or {}).get('dispatch', {}).get('workers'), 'display exercise launched a worker'
+        result['checks'].extend([
+            'Actual current SPAWN writer fixture read by shipped USAGE consumer; foreign host records excluded.',
+            'Visible native SPAWN setup and USAGE consent/binding, no seeded domain authority.',
+            'Default-disabled, fresh synthetic cache, unavailable account, stale cache, revocation, re-enable and definition-change honesty.',
+            'Exact current host/config/numeric record revision and semantic fingerprint from native display frames.',
+            'Distinct correlated snapshot/validate over shipped channel; no capacity request or sampled transport pane.',
+            'Revocation removes received percentages on the existing picker; closing picker leaves only original panes.'])
+        result['status'] = 'passed'
+        result['status_scope'] = 'local owned-native display integration with explicitly synthetic cached provider observations'
+    except Exception as error:
+        result['error'] = f'{type(error).__name__}: {error}'
+        if hasattr(product, 'ui'):
+            result['failure_diagnostics'] = window_diagnostics(runtime)
+    finally:
+        stopped.set()
+        if observer is not None:
+            observer.join(timeout=5)
+        output['observer_errors'] = observer_errors
+        try:
+            product.close()
+        finally:
+            # Stop only this owned companion, after native hosts can no longer
+            # renew/restart it. No live profile or system daemon is touched.
+            if companion_root.exists():
+                try:
+                    cleanup = subprocess.run(
+                        [sys.executable, '-B', str(usage/'usage_service.py'), 'stop', '--data-root', str(companion_root)],
+                        input='{}', text=True, capture_output=True, env=runtime.env, timeout=60)
+                    output['companion_stop'] = json.loads(cleanup.stdout)
+                    if cleanup.returncode or output['companion_stop'].get('ok') is not True:
+                        result['status'] = 'failed'
+                        result['cleanup_error'] = 'owned USAGE companion stop failed'
+                except Exception as error:
+                    result['status'] = 'failed'
+                    result['cleanup_error'] = f'{type(error).__name__}: {error}'
     return result

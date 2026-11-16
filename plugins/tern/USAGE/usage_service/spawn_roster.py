@@ -19,11 +19,11 @@ PROVIDERS = {"claude": "claude", "codex": "openai", "openai": "openai",
              "agy": "antigravity", "antigravity": "antigravity", "kimi": "kimi",
              "muse": "muse", "grok": "grok", "omp": "omp"}
 LOCAL_SCOPES = {"host:local", "host:localhost"}
-# SPAWN launch/UI choices do not change account membership or profile selection.
+# SPAWN launch/UI and provider-family declarations do not change account identity.
 # Keep all other fields, including future selectors, in the semantic definition.
 LAUNCH_OPTIONS = {"enabled", "include_all", "duplicate_policy", "placement", "prompt",
-                  "review_required", "review_reason"}
-AUTHORITY_VERSION = 3
+                  "review_required", "review_reason", "provider_family"}
+AUTHORITY_VERSIONS = frozenset({3, 4})
 MAX_RECORDS = 128
 
 
@@ -146,9 +146,10 @@ def read_roster(path, installation_id, bindings=None):
         # SPAWN has not opened on this machine yet: no configured accounts.
         return {"version": 1, "scopes": []}, []
     authority = saved["authority"]
-    if (not isinstance(authority, dict) or type(authority.get("version")) is not int
-            or authority["version"] != AUTHORITY_VERSION):
+    if not isinstance(authority, dict) or type(authority.get("version")) is not int:
         raise _invalid()
+    if authority["version"] not in AUTHORITY_VERSIONS:
+        raise ServiceError("source_roster_version", 409)
     host_key = _text(authority.get("host_key"))
     config = authority.get("config")
     if (not isinstance(config, dict) or type(config.get("schema")) is not int or config["schema"] != 2

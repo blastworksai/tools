@@ -1,6 +1,7 @@
 # Offline native-terminal route observation; normal execution policy applies.
 param([Parameter(Mandatory=$true)][string]$Output,[Parameter(Mandatory=$true)][string]$Nonce,[Parameter(Mandatory=$true)][string]$Value)
 $ErrorActionPreference = 'Stop'
+if (-not [IO.Path]::IsPathRooted($Output) -or $Output -match '[\r\n]' -or $Output -match '(^|[\\/])\.\.?([\\/]|$)') { throw 'Absolute diagnostic path without traversal required' }
 if ($Nonce -notmatch '^[a-z0-9_-]+$') { throw 'Invalid diagnostic identity' }
 $parent = [IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($Output))
 while ($parent) {

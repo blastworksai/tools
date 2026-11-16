@@ -64,6 +64,8 @@ try {
         # Persist only modified access/owner sections, without requesting audit
         # access through Set-Acl's provider (SeSecurityPrivilege).
         $item.SetAccessControl($acl)
+        $item = Get-Item -LiteralPath $path -Force
+        if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'unsafe' }
     }
     $acl = Get-Acl -LiteralPath $path
     if ($acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $sid.Value) { throw 'unsafe' }
@@ -104,8 +106,7 @@ def _windows_acl(path: Path, *, protect: bool = False) -> None:
         raise ServiceError("setup_required", 503) from None
 
 
-def check_private(path: Path) -> None:
-    """Reject links, foreign ownership and any non-owner access; never repair."""
+def _check_private(path: Path, acl: bool) -> None:
     try:
         path = Path(path)
         info = path.lstat()
@@ -114,7 +115,8 @@ def check_private(path: Path) -> None:
         if stat.S_ISREG(info.st_mode) and info.st_nlink != 1:
             raise OSError()
         if os.name == "nt":
-            _windows_acl(path)
+            if acl:
+                _windows_acl(path)
         elif os.name == "posix":
             expected = 0o700 if stat.S_ISDIR(info.st_mode) else 0o600
             if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != expected:
@@ -123,6 +125,11 @@ def check_private(path: Path) -> None:
             raise OSError()
     except (OSError, ValueError, TypeError):
         raise ServiceError("setup_required", 503) from None
+
+
+def check_private(path: Path) -> None:
+    """Reject links, foreign ownership and any non-owner access; never repair."""
+    _check_private(path, True)
 
 
 def private_directory(root: Path) -> None:
@@ -138,7 +145,7 @@ def private_directory(root: Path) -> None:
             return
         if os.name == "nt":
             _windows_acl(root, protect=True)
-        check_private(root)
+        _check_private(root, os.name != "nt")
     except (OSError, ValueError, TypeError):
         raise ServiceError("setup_required", 503) from None
 
@@ -151,7 +158,7 @@ def private_staging_directory(parent: Path, prefix: str) -> Path:
         if os.name == "nt":
             # Python's mode-0700 directory ACL includes system/admin principals.
             _windows_acl(path, protect=True)
-        check_private(path)
+        _check_private(path, os.name != "nt")
         return path
     except BaseException:
         path.rmdir()
@@ -177,7 +184,7 @@ def write_private(path: Path, data: bytes) -> None:
         temporary = Path(name)
         if os.name == "nt":
             _windows_acl(temporary, protect=True)
-        check_private(temporary)
+        _check_private(temporary, os.name != "nt")
         with os.fdopen(descriptor, "wb") as stream:
             descriptor = None
             stream.write(data)

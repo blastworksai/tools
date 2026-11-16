@@ -30,14 +30,14 @@ end
 local function record(id, fields)
 	local value = {
 		id = id, provider = "custom", account_label = id, backend = "local-terminal",
-		command = "ordinary-cli", arguments = {}, enabled = true, include_all = true, placement = "tab",
+		command = "ordinary-cli", arguments = {}, enabled = true, placement = "tab",
 	}
 	for key, item in pairs(fields or {}) do value[key] = item end
 	return value
 end
 local function boundary(seed)
 	local saved = copy(seed or {})
-	local db = { writes = 0, authority_writes = 0, now = 1700000000 }
+	local db = { writes = 0, authority_writes = 0, now = 1700000000, files = {}, file_reads = {} }
 	db.kv = {
 		get = function(key)
 			if db.fail_get == key then error("injected read failure") end
@@ -59,7 +59,22 @@ local function boundary(seed)
 	return db
 end
 local function modules(db)
-	local injected = setmetatable({ kv = db.kv }, { __index = runtime })
+	local injected = setmetatable({
+		kv=db.kv,plugin={dir=root,data=if runtime.runtime.os=="windows" then "C:/fixture-data" else "/fixture-data"},
+		getenv=function(name)
+			if name=="SHELL" then return if runtime.runtime.os=="windows" then "pwsh.exe" else "/bin/bash" end
+			return runtime.getenv(name)
+		end,
+		fs=setmetatable({read=function(path,limit)
+			if db.files[path]~=nil then
+				db.file_reads[path]=(db.file_reads[path] or 0)+1
+				local bytes=db.files[path]
+				if limit and #bytes>limit then error("injected bounded read refusal") end
+				return bytes
+			end
+			return runtime.fs.read(path,limit)
+		end},{__index=runtime.fs}),
+	}, { __index = runtime })
 	local clock = setmetatable({ time = function() return db.now end }, { __index = os })
 	local loaded = {}
 	local function load(name)
@@ -101,8 +116,14 @@ end
 local function reserve_request(binding, observer, sequence, revision, id)
 	return request(binding, observer, sequence, revision, "launch_record", { record_id = id })
 end
-local function submit(authority, binding, value)
-	local ok, err = authority.request(binding, value)
+local function setup_context(binding)
+	return {config_pane=10,window="fixture-window",epoch="fixture-host:1",inventory={
+		clients={{kind="window",window="fixture-window",conn=1,since=10}},
+		sessions={{id=binding.native_session,tabs={{blocks={{id=10,cwd=if runtime.runtime.os=="windows" then "C:/work" else "/work"}}}}}},
+	}}
+end
+local function submit(authority, binding, value, context)
+	local ok, err = authority.request(binding, value, context or (if value.data.manual then setup_context(binding) else nil))
 	check(ok, "request admitted and committed: " .. tostring(err))
 	local reply = snapshot(authority, binding).replies[value.request_id]
 	check(reply ~= nil, "committed request retains its reply")
@@ -156,6 +177,55 @@ local function by_id(view)
 end
 local OBSOLETE_NOTICE = "An old Mark-no-longer-running request was cleared; SPAWN now does this automatically"
 local sections = {}
+-- The bytes below come from the real authority single writer, not a handwritten
+-- authority fixture. Only its existing KV boundary is isolated; all accounts are dummy.
+sections.usage_roster_fixture=function()
+	local db=boundary({config={schema=2,hosts={
+		["host-A"]={schema=2,agents={
+			record("claude-demo",{provider="claude",account_label="Demo Claude Ω",command="claude",profile="demo-profile"}),
+			record("codex-demo",{provider="codex",account_label="Demo Codex",command="codex",model="demo-model"}),
+			record("omp-demo",{provider="omp",account_label="Demo OMP",backend="native-agent",command="omp",prompt="Open a conversation"}),
+		}},
+		["host-B"]={schema=2,agents={record("foreign-demo",{provider="claude",account_label="Other execution host",command="claude"})}},
+	}}})
+	local authority=modules(db)
+	local binding,why=authority.open("host-A",4)
+	check(binding~=nil,"real authority writer opens dummy current-host roster: "..tostring(why))
+	local view=snapshot(authority,binding)
+	check(#view.records==3,"ordinary authority projection contains only the current host's dummy accounts")
+	check(not view.ready and view.migration ~= nil, "legacy roster requires deliberate source review")
+	local expected_records = copy(view.records)
+	for _, item in ipairs(expected_records) do
+		local selected
+		for index, source in ipairs(view.migration.sources) do
+			for _, candidate in ipairs(source.records) do
+				if equal(candidate, item) then selected = index; break end
+			end
+			if selected then break end
+		end
+		check(selected ~= nil, "current-host account is offered by a real review source")
+		edit(authority, binding, "review-choice", { id = item.id, source = selected })
+	end
+	edit(authority, binding, "review-confirm", {})
+	view = snapshot(authority, binding)
+	check(view.ready and view.migration == nil, "source confirmation releases the settings writer")
+	local reviewed = {}
+	for _, item in ipairs(view.records) do reviewed[item.id] = item end
+	for _, item in ipairs(expected_records) do same(reviewed[item.id], item, "source review preserves the selected account") end
+	local reviewed_revision = view.config_revision
+	edit(authority,binding,"replace-records",{records=view.records})
+	local value=db.peek("authority")
+	check(value.version==4 and value.host_key=="host-A" and value.config.schema==2,"writer emits its actual current authority and config schemas")
+	check(#value.config.hosts["host-A"].agents==3 and #value.config.hosts["host-B"].agents==1,"writer preserves the other host without joining its accounts")
+	check(next(value.sessions)~=nil and value.config_revision==reviewed_revision+1,
+		"replacement advances the current host's real reviewed writer revision")
+	return runtime.json.encode(value)
+end
+local function forget(authority,binding,live)
+	local preview,why,captured=authority.forget_sessions(binding,live,false)
+	if not preview then return nil,why end
+	return authority.forget_sessions(binding,live,true,captured)
+end
 -- Probe fixtures exercise only the authority boundary, never claim runtime proof.
 local function setup_record(id)
 	local windows=runtime.runtime.os=="windows"
@@ -169,12 +239,16 @@ local function setup_record(id)
 			producer={read=true,write=true,hash=true,journal=true,poll=true},capabilities={"report-files-v1","worker-poll-v1","argv-v1"}}})
 end
 local function setup_evidence(load,value)
-	return {record=copy(value),attested=true,probe={schema=1,passed=true,
+	return {record=copy(value),verified=true,probe={schema=1,passed=true,
 		record_sha256=load("wire/codec").sha256(runtime.json.encode(value)),bundle_digest=string.rep("a",64),
 		worker_identity="fixture-worker",provision_handle="fixture-provision",
 		observations={
-			{id="fixture-prerequisite",state="passed",summary="Deterministic authority fixture, not an actual runtime probe"},
+			{id="launch-construction",state="passed",summary="Deterministic authority fixture, not an actual runtime probe"},
 			{id="native-route",state="passed",summary="Deterministic authority fixture, not actual native route execution proof"},
+			{id="account-cli-folder-dependencies",state="passed",summary="Deterministic authority fixture"},
+			{id="serializer-argv",state="passed",summary="Deterministic authority fixture"},
+			{id="helper-provision",state="passed",summary="Deterministic authority fixture"},
+			{id="provision-readback",state="passed",summary="Deterministic authority fixture"},
 		}}}
 end
 local function setup_view(authority)
@@ -255,7 +329,8 @@ sections.setup_commit=function()
 	local data=setup_evidence(load,setup_record("managed"))
 	local before=copy(data)
 	for _,mutate in ipairs({
-		function(d)d.attested=false end,
+		function(d)d.verified=false end,
+		function(d)d.attested=true end,
 		function(d)d.probe.passed=false end,
 		function(d)d.probe.observations={} end,
 		function(d)d.probe.observations[1].state="unavailable" end,
@@ -271,7 +346,11 @@ sections.setup_commit=function()
 		function(d)d.record.command="changed-after-probe" end,
 	}) do
 		local changed=copy(data);mutate(changed)
-		refused_unchanged(db,function()return authority.setup_edit("host-A",1,"commit",changed)end,"unattested, failed or mismatched managed setup")
+		refused_unchanged(db,function()return authority.setup_edit("host-A",1,"commit",changed)end,"missing, failed or mismatched machine-observed managed setup")
+	end
+	for index=1,#data.probe.observations do
+		local incomplete=copy(data);table.remove(incomplete.probe.observations,index)
+		refused_unchanged(db,function()return authority.setup_edit("host-A",1,"commit",incomplete)end,"every required machine observation is necessary before setup completion")
 	end
 	db.fail_after(1)
 	refused_unchanged(db,function()return authority.setup_edit("host-A",1,"commit",data)end,"failed commit preserves both roster and lifecycle")
@@ -280,7 +359,7 @@ sections.setup_commit=function()
 	setup_write(authority,"commit",data)
 	local view=setup_view(authority)
 	check(db.authority_writes==writes+1 and view.setup.state=="completed" and #view.records==1,"record verification and completion persist in one atomic authority write")
-	check(view.records[1].mailbox.verified==true and view.records[1].mailbox.evidence_ref=="setup:"..data.probe.bundle_digest..":fixture-provision","only committed probe and attestation set mailbox verification")
+	check(view.records[1].mailbox.verified==true and view.records[1].mailbox.evidence_ref=="setup:"..data.probe.bundle_digest..":fixture-provision","only complete machine-observed evidence sets mailbox verification")
 	check(view.setup.readiness.state=="not_run","required setup completes without optional provider-backed readiness")
 	same(data,before,"writer never rewrites caller probe or record")
 	check(next(db.peek("authority").sessions)==nil,"commit does not allocate an ordinary session or launch")
@@ -301,11 +380,19 @@ sections.setup_commit=function()
 	local wrong=setup_evidence(adopt_load,setup_record("missing"))
 	refused_unchanged(adopt_db,function()return adopt.setup_edit("host-A",1,"adopt",wrong)end,"adoption must identify an existing record")
 	local unexecuted=copy(adoption);unexecuted.probe.observations[2]=nil
-	refused_unchanged(adopt_db,function()return adopt.setup_edit("host-A",1,"adopt",unexecuted)end,"adoption requires native route execution proof independently of attestation")
+	refused_unchanged(adopt_db,function()return adopt.setup_edit("host-A",1,"adopt",unexecuted)end,"adoption requires actual native route execution evidence")
 	setup_write(adopt,"adopt",adoption)
 	view=setup_view(adopt)
-	check(view.setup.state=="adopted_existing" and view.adoption_required==nil and #view.records==2,"probed and attested adoption preserves unrelated accounts")
+	check(view.setup.state=="adopted_existing" and view.adoption_required==nil and #view.records==2,"machine-observed adoption preserves unrelated accounts")
 	same(view.records[1],record("unrelated"),"adoption never replaces unrelated ordinary records")
+	local added_db=boundary(seed);local added,_,_,added_load=modules(added_db)
+	assert(added.open("host-A",4,nil,binding.session_key))
+	local retained=copy(added_db.peek("authority").config)
+	setup_write(added,"commit",setup_evidence(added_load,setup_record("new-managed")))
+	local added_view=setup_view(added)
+	check(added_view.setup.state=="completed" and added_view.adoption_required==nil and #added_view.records==3,"a verified new route completes setup without pretending old records were adopted")
+	local preserved=copy(added_db.peek("authority").config);table.remove(preserved.hosts["host-A"].agents,3)
+	same(preserved,retained,"creating a separate managed route leaves every existing record and host exactly unchanged")
 	local empty_db,_,empty_binding=fresh()
 	local empty_seed=empty_db.image();empty_seed.authority.version=3;empty_seed.authority.setup=nil;empty_seed.authority.setup_adoption_required=nil
 	local empty_store=boundary(empty_seed);local empty_adopt,_,_,empty_load=modules(empty_store)
@@ -379,8 +466,9 @@ sections.setup_invalid=function()
 end
 -- The native cleanup owner is injected evidence, not an executed process here.
 local function setup_route(backend,revision,nonce,binding)
-	local route={schema=1,nonce=nonce,config_revision=revision,window="",native_session=4,source_pane=9,native_conn=7,native_since=1700000000,
+	local route={schema=1,nonce=nonce,window_consent="window-consent-"..nonce,config_revision=revision,window="",native_namespace="desktop-odin",native_session=4,source_pane=9,native_conn=7,native_since=1700000000,
 		backend=backend,command="fixture-only "..nonce,cwd="/fixture/work",record_sha256=string.rep("b",64),
+		record_id="managed",
 		worker_identity="fixture-worker",host_os="linux",status="running",authority_id=binding.authority_id,
 		origin_epoch=if backend=="native-agent" then "fixture-boot:42:12345" else nil}
 	if backend=="native-agent" then
@@ -442,8 +530,17 @@ sections.setup_probe=function()
 		writes=db.writes
 		check(reload.setup_probe_bind("host-A",route.nonce,41) and db.writes==writes,"identical pane binding is read-only reconciliation")
 		refused_unchanged(db,function()return reload.setup_probe_bind("host-A",route.nonce,42)end,"probe pane identity cannot be replaced")
+		refused_unchanged(db,function()return reload.setup_probe_bind("host-A",route.nonce,41,0)end,"desktop pane binding must be positive")
+		check(reload.setup_probe_bind("host-A",route.nonce,41,941),"desktop SDK pane attaches to independently discovered native pane")
+		expected.authority.setup_probe.window_pane=941
+		same(db.image(),expected,"desktop association preserves the distinct native pane identity")
+		writes=db.writes
+		check(reload.setup_probe_bind("host-A",route.nonce,41,941) and db.writes==writes,"identical host and desktop association is read-only")
+		check(reload.setup_probe_bind("host-A",route.nonce,41) and db.writes==writes,"native-only reconciliation preserves an existing desktop association")
+		refused_unchanged(db,function()return reload.setup_probe_bind("host-A",route.nonce,41,942)end,"desktop pane cannot be rebound")
+		refused_unchanged(db,function()return reload.setup_probe_bind("host-A",route.nonce,42,941)end,"desktop echo cannot replace the native pane")
 		local cold=modules(db)
-		check(cold.setup_probe_read("host-A").pane==41,"pane binding survives another VM reload")
+		check(cold.setup_probe_read("host-A").pane==41 and cold.setup_probe_read("host-A").window_pane==941,"both identity domains survive another VM reload")
 		local original_authority=binding.authority_id
 		edit(cold,binding,"reset-transport",{})
 		check(binding.authority_id~=original_authority and cold.setup_probe_read("host-A").authority_id==original_authority,"transport rotation preserves original incarnation solely for cleanup")
@@ -466,6 +563,70 @@ sections.setup_probe=function()
 		local retired=copy(successor);retired.authority_id=original_authority
 		refused_unchanged(db,function()return cold.setup_probe_claim("host-A",current,retired)end,"retired authority incarnation cannot claim another diagnostic")
 	end
+	for _,kind in ipairs({"ordinary","managed","uncertain"}) do
+		local db,authority,binding,_,_,load=fresh({record("managed"),record("other")})
+		setup_write(authority,"begin")
+		local revision=setup_view(authority).config_revision
+		local second=assert(authority.open("host-A",5))
+		if kind=="ordinary" then
+			check(submit(authority,second,reserve_request(second,"second-window",1,revision,"managed")).ok,"another native session reserves ordinary work")
+		else
+			local attempt=assert(authority.managed_reserve(second,revision,"managed","second-session-worker"))
+			if kind=="uncertain" then check(authority.managed_observe(second,attempt.id,attempt.observer_id,{phase="Unknown"}),"other-session managed outcome is uncertain") end
+		end
+		local before=db.image()
+		check(not authority.record_preparation_available("host-A","managed"),"host-wide preparation detects "..kind.." work outside the visible Config scope")
+		same(db.image(),before,"host-wide preparation inspection performs no writes")
+		local route=setup_route("local-terminal",revision,"busy-"..kind,binding)
+		refused_unchanged(db,function()return authority.setup_probe_claim("host-A",revision,route)end,"busy other-session record cannot acquire paid/offline diagnostic authority")
+		local evidence=setup_evidence(load,setup_record("managed"))
+		refused_unchanged(db,function()return authority.setup_edit("host-A",revision,"adopt",evidence)end,"normal save/adoption rechecks host-wide busy state")
+	end
+	do
+		local db,authority,binding=fresh({record("managed"),record("other")})
+		setup_write(authority,"begin")
+		local revision=setup_view(authority).config_revision
+		local second=assert(authority.open("host-A",5))
+		local route=setup_route("local-terminal",revision,"exclusive-preparation",binding)
+		check(authority.setup_probe_claim("host-A",revision,route),"diagnostic claims exact record ownership")
+		check(not submit(authority,second,reserve_request(second,"blocked-window",1,revision,"managed")).ok,"probe ownership blocks a new ordinary launch in another session")
+		check(not authority.managed_reserve(second,revision,"managed","blocked-managed"),"probe ownership blocks another session's managed reservation")
+		check(submit(authority,second,reserve_request(second,"unrelated-window",1,revision,"other")).ok,"record-scoped preparation does not block unrelated launches")
+	end
+	for _,field in ipairs({"enabled","review_required"}) do
+		local configured=record("managed")
+		configured[field]=field~="enabled"
+		if field=="review_required" then configured.review_reason="Review this saved command" end
+		local db,authority,binding=fresh({configured})
+		setup_write(authority,"begin")
+		local revision=setup_view(authority).config_revision
+		check(not authority.record_preparation_available("host-A","managed"),"disabled or review-gated account is refused before preparation: "..field)
+		refused_unchanged(db,function()return authority.setup_probe_claim("host-A",revision,setup_route("native-agent",revision,"prerequisite-"..field,binding))end,"account prerequisite cannot be bypassed at diagnostic claim")
+	end
+	do
+		local db,authority,_,_,_,load=fresh()
+		setup_write(authority,"begin")
+		local value=setup_record("managed");local proof=setup_evidence(load,value).probe
+		local revision=setup_view(authority).config_revision;local before=db.image()
+		check(authority.setup_capacity_available("host-A",revision,value,proof),"normal prepared record fits unchanged final-save bounds before diagnostic cost")
+		same(db.image(),before,"capacity preflight publishes no readiness, receipt acknowledgment or store write")
+		check(value.mailbox.verified==false,"size-only projection does not mutate the real unverified record")
+		local large=copy(value);large.prompt=string.rep("x",120000);local largeProof=setup_evidence(load,large).probe
+		check(not authority.setup_capacity_available("host-A",revision,large,largeProof),"final roster budget refusal occurs before native/model diagnostic")
+		same(db.image(),before,"capacity refusal preserves all retained replies, records and evidence")
+	end
+	for _,missing in ipairs({"native_namespace","window_consent"}) do
+		local legacy_db,_,legacy_binding=fresh()
+		local legacy=setup_route("local-terminal",0,"legacy-route",legacy_binding);legacy[missing]=nil
+		local legacy_image=legacy_db.image();legacy_image.authority.setup_probe=legacy
+		local retained_db=boundary(legacy_image);local retained_authority=modules(retained_db)
+		local retained_probe=retained_authority.setup_probe_read("host-A")
+		check(retained_probe~=nil and retained_probe.nonce==legacy.nonce and retained_probe[missing]==nil,"legacy obligation remains visible without inventing "..missing)
+		same(retained_db.image(),legacy_image,"legacy obligation is retained verbatim rather than reset")
+		refused_unchanged(retained_db,function()return retained_authority.setup_probe_claim("host-A",0,setup_route("local-terminal",0,"replacement",legacy_binding))end,"legacy cleanup obligation blocks a fresh launch")
+		local missing_claim=setup_route("local-terminal",0,"missing-claim",legacy_binding);missing_claim[missing]=nil
+		refused_unchanged(legacy_db,function()return modules(legacy_db).setup_probe_claim("host-A",0,missing_claim)end,"new claim requires "..missing)
+	end
 	local db,authority,binding=fresh()
 	local route=setup_route("native-agent",0,"fixture-invalid",binding)
 	for _,mutate in ipairs({
@@ -476,6 +637,10 @@ sections.setup_probe=function()
 		function(value)value.authority_id="foreign:1" end,
 		function(value)value.origin_epoch=string.rep("x",257) end,
 		function(value)value.origin_epoch="invalid\nepoch" end,
+		function(value)value.native_namespace=false end,
+		function(value)value.native_namespace="" end,
+		function(value)value.window_consent=false end,
+		function(value)value.window_consent="" end,
 		function(value)value.native_conn=nil end,
 		function(value)value.native_since=nil end,
 		function(value)value.native_conn="7" end,
@@ -591,42 +756,64 @@ sections.managed_import=function()
 	refused_unchanged(db,function()return authority.managed_import(binding,2,"bridge-failed",{record("second")})end,"failed atomic import retains neither mutation nor receipt")
 	db.fail_authority_at=nil
 	check(authority.managed_import(binding,2,"bridge-failed",{record("second")}).imported==1,"uncommitted import may be reconciled once")
+	local view=snapshot(authority,binding)
+	local original=copy(view.records)
+	local family=assert(authority.managed_declare_provider_families(binding,view.config_revision,{{record_id="imported",provider_family="claude"}}))
+	check(family.applied==1 and family.config_revision==view.config_revision+1 and #family.families==1 and family.families[1].record_id=="imported" and family.families[1].provider_family=="anthropic","the writer durably fills an absent declaration and returns its canonical family for the exact requested record")
+	local saved=snapshot(authority,binding)
+	check(saved.records[1].provider_family=="anthropic" and saved.records[1].command==original[1].command,"declaration preserves owner-edited executable configuration")
+	local unchanged=db.image()
+	local repeated=assert(authority.managed_declare_provider_families(binding,saved.config_revision,{{record_id="imported",provider_family="anthropic"}}))
+	check(repeated.applied==0 and #repeated.families==1 and repeated.families[1].provider_family=="anthropic","identical declarations return the actual saved canonical family without a write")
+	same(db.image(),unchanged,"identical declarations preserve authority and history")
+	refused_unchanged(db,function()return authority.managed_declare_provider_families(binding,saved.config_revision,{{record_id="second",provider_family="google"},{record_id="imported",provider_family="openai"}})end,"a conflicting declaration refuses the entire batch without partial metadata writes")
+	refused_unchanged(db,function()return authority.managed_declare_provider_families(binding,view.config_revision,{{record_id="second",provider_family="google"}})end,"stale family writes cannot overwrite a newer roster")
+	local _,known,kb=fresh({record("known",{provider="Codex"})})
+	local migrated=assert(known.managed_declare_provider_families(kb,snapshot(known,kb).config_revision,{{record_id="known",provider_family="muse"}}))
+	check(migrated.families[1].provider_family=="meta" and snapshot(known,kb).records[1].provider_family=="meta","an old explicit wrapper override does not conflict with an invented saved default")
 end
 
 local function managed_fixture()
 	local db,authority,binding,_,_,load=fresh({record("managed")})
 	local P,Codec=load("bridge_protocol"),load("wire/codec")
 	local origin={logical_session_id="logical",owner_id="owner",owner_generation=1,host_pane_id="12",alias_nonce="alias",window_key="",window_epoch="epoch",native_session_id="4",window_host_id="7"}
-	local r={schema=1,origin="orchplus",op="launch",request_id="launch",action_id="action-launch",controller_pane="44",controller_generation=1,origin_binding=origin,
+	local r={schema=2,origin="orchplus",op="launch",request_id="launch",action_id="action-launch",controller_pane="44",controller_generation=1,origin_binding=origin,
+		authority_namespace="orch-fixture",logical_session_id="logical",admission_seq=1,request_serial=1,next_request_serial=11,settled_before=1,consumed={9},
 		record_id="managed",record_revision=1,work_id="work",prompt="assignment",cwd="/work",placement="tab",fresh=true,mailbox_handle="mailbox",
 		enrolment={worker_id="worker",worker_generation=1,enrolment_token="aaaaaaaaaaaaaaaa",assignment_sha256=Codec.sha256("assignment")}}
-	check(P.decode(runtime.json.encode(r))~=nil,"migration fixture is a real bridge launch request")
+	check(P.decode(runtime.json.encode(r))~=nil,"fixture uses canonical issued identity")
 	local observer="managed-"..Codec.sha256("logical/launch")
 	local a=assert(authority.managed_reserve(binding,1,"managed",observer))
 	check(authority.managed_observe(binding,a.id,observer,{phase="Starting",pane=55}),"fixture records exact native observation")
-	local launch={command="'ordinary-cli'",cwd="/work",placement="tab",backend="local-terminal",capabilities={}}
-	local registry={version=1,revision=0,namespace="dispatch-fixture",next_id=1,owners={logical={binding=copy(origin),authority=binding.managed_authority_id,host_session=4}},
-		tombstones={},request_fences={},mailboxes=load("mailbox").empty(),gates={},requests={}}
-	registry.requests["logical/launch"]={request=r,body=P.body(r,"awaiting_acceptance"),binding=copy(binding),observer_id=observer,attempt_id=a.id,
-		launch=launch,launch_sha256=P.fingerprint(launch),pane_binding={pane_id="55",window_epoch="epoch",window_key="",native_session_id="4",window_host_id="7"}}
-	check(load("dispatch").validate_registry(registry)~=nil,"fixture bridge evidence validates without side effects")
+	local registry={version=2,revision=0,namespace="dispatch-fixture",next_id=1,authority_namespace=r.authority_namespace,admission_cursor=1,
+		sessions={logical={admission_seq=1,authority=binding.managed_authority_id,host_session=4,controller_pane="44",
+			control={phase="open",binding=copy(origin),generation_floor=0,request_floor=1,next_request_serial=11,last_authority_revision=0}}},
+		workers={},mailboxes=load("mailbox").empty(),gates={},requests={},controls={}}
+	registry.workers["logical/launch"]={kind="launch",logical_session_id="logical",worker_id="worker",worker_generation=1,launch_request_id="launch",launch_action_id="action-launch",
+		work_id="work",enrolment_token=r.enrolment.enrolment_token,assignment_sha256=r.enrolment.assignment_sha256,mailbox_handle="mailbox",record_id="managed",record_revision=1,
+		origin_binding=copy(origin),controller_pane="44",controller_generation=1,phase="awaiting_acceptance",backend="local-terminal",binding=copy(binding),
+		observer_id=observer,attempt_id=a.id,mailbox_live=false,pane_binding={pane_id="55",window_epoch="epoch",window_key="",native_session_id="4",window_host_id="7"}}
+	P.observe(registry)
+	check(load("dispatch_state").validate_registry(registry)~=nil,"fixture bridge evidence validates without side effects")
 	db.kv.set("dispatch-v1",registry);db.kv.set("dispatch-v1-initialized",registry.namespace)
-	return db,authority,binding,a,registry
+	return db,authority,binding,a,registry,r
 end
 
 sections.managed_unbound_mailbox_retention=function()
 	for _,status in ipairs({"provisioned","uncertain"}) do
 		for _,launch_status in ipairs({"absent","rejected"}) do
-			local db,authority,binding,a,registry=managed_fixture()
+			local db,authority,binding,a,registry,issued=managed_fixture()
 			local _,_,_,load=modules(db)
 			local P,Mailbox=load("bridge_protocol"),load("mailbox")
-			local launch=copy(registry.requests["logical/launch"].request)
+			P.observe(registry)
+			local launch=copy(issued);launch.request_serial=2
 			launch.request_id="unbound";launch.action_id="action-unbound"
 			launch.mailbox_handle="unbound-mailbox"
 			if launch_status=="rejected" then
-				registry.requests["logical/unbound"]={request=launch,body=P.reject(launch,"stale_revision","Record changed before launch")}
+				registry.requests["logical/unbound"]={request=launch,request_json=runtime.json.encode(launch),body=P.reject(launch,"stale_revision","Record changed before launch")}
 			end
-			local provision={schema=1,origin="orchplus",op="mailbox_provision",request_id="provision",action_id="action-provision",
+			local provision={schema=2,origin="orchplus",op="mailbox_provision",request_id="provision",action_id="action-provision",
+				authority_namespace=issued.authority_namespace,admission_seq=1,request_serial=3,next_request_serial=11,settled_before=1,consumed={9},
 				origin_binding=copy(launch.origin_binding),controller_pane=launch.controller_pane,controller_generation=launch.controller_generation,
 				logical_session_id="logical",worker_id="worker",worker_generation=1,launch_request_id="unbound",work_id="work",
 				enrolment_token=launch.enrolment.enrolment_token,record_id="managed",record_revision=1,capability="report-files-v1"}
@@ -637,9 +824,11 @@ sections.managed_unbound_mailbox_retention=function()
 			local operation,intent=Mailbox.prepare(registry.mailboxes,provision,configured,
 				{operation_id="provision-op",handle="unbound-mailbox",host_os="linux",host_shell="sh"})
 			check(operation~=nil and intent~=nil,"unbound mailbox fixture prepares a real generation")
-			registry.mailboxes=assert(Mailbox.settle(intent,operation,{status=status}))
-			registry.requests["logical/provision"]={request=provision,body=P.body(provision,status)}
-			check(load("dispatch").validate_registry(registry)~=nil,"unbound mailbox registry remains valid")
+			local outcome
+			registry.mailboxes,outcome=Mailbox.settle(intent,operation,{status=status})
+			registry.requests["logical/provision"]={request=provision,request_json=runtime.json.encode(provision),body=P.body(provision,outcome.status,outcome.payload)}
+			registry.workers={}
+			check(load("dispatch_state").validate_registry(registry)~=nil,"unbound mailbox registry remains valid")
 			db.kv.set("dispatch-v1",registry)
 			check(authority.managed_retire(binding,a.id,a.observer_id,"managed",55),"original fixture worker settles")
 			edit(authority,binding,"replace-records",{records={record("managed"),record("ordinary")}})
@@ -662,16 +851,16 @@ sections.managed_unbound_mailbox_retention=function()
 end
 
 sections.managed_settlement_replay=function()
-	local db,authority,binding,a,registry=managed_fixture()
+	local db,authority,binding,a,registry,r=managed_fixture()
 	local _,_,_,load=modules(db);local P,Codec=load("bridge_protocol"),load("wire/codec")
-	local launched=registry.requests["logical/launch"]
-	local r=launched.request
-	local retirement={schema=1,origin="orchplus",op="mailbox_retire",request_id="retire",action_id="action-retire",origin_binding=copy(r.origin_binding),
+	P.observe(registry)
+	local retirement={schema=2,origin="orchplus",op="mailbox_retire",request_id="retire",action_id="action-retire",origin_binding=copy(r.origin_binding),
+		authority_namespace=r.authority_namespace,admission_seq=1,request_serial=2,next_request_serial=11,settled_before=1,consumed={9},
 		controller_pane=r.controller_pane,controller_generation=r.controller_generation,logical_session_id="logical",worker_id="worker",worker_generation=1,
 		launch_request_id="launch",work_id="work",enrolment_token=r.enrolment.enrolment_token,handle="mailbox",expected_generation=1,mode="retire",
 		settlement_revision=1,report_floor=1,report_chain_sha256=Codec.sha256("settled"),reply_floor=0,grant_id="retirement-grant"}
 	check(P.decode(runtime.json.encode(retirement))~=nil,"interrupted settlement uses a valid exact retirement request")
-	local pending={request=retirement,body=P.body(retirement,"pending"),retirement_result=P.body(retirement,"retired")}
+	local pending={request=retirement,request_json=runtime.json.encode(retirement),body=P.body(retirement,"pending"),retirement_result=P.body(retirement,"retired")}
 	registry.requests["logical/retire"]=pending
 	db.kv.set("dispatch-v1",registry)
 	check(authority.managed_retire(binding,a.id,a.observer_id,"managed",55),"authority settles while bridge retirement-result commit remains interrupted")
@@ -688,15 +877,13 @@ sections.managed_settlement_replay=function()
 	local before=db.image()
 	check(authority.managed_retire(binding,a.id,a.observer_id,"managed",55),"exact interrupted retirement still replays after history maintenance")
 	same(db.image(),before,"interrupted settlement replay is idempotent")
-	pending.retirement_result=nil;pending.body=P.body(retirement,"retired")
-	registry.owners={}
-	registry.tombstones={{binding=copy(r.origin_binding),revision=1,authority=binding.managed_authority_id,host_session=4,evidence="operator_attested_controller_and_launch_executors_stopped_or_retired"}}
+	registry.requests={};registry.workers={};registry.sessions={}
 	db.kv.set("dispatch-v1",registry)
 	local other=assert(authority.open("host-A",8))
 	local fences=db.peek("dispatch-v1")
-	local result=assert(authority.forget_sessions(other,{[8]=true},true))
-	check(result.sessions==1 and db.peek("authority").sessions[binding.session_key]==nil,"settled absent scope is reclaimable despite retained launch receipts and tombstone")
-	same(db.peek("dispatch-v1"),fences,"forgetting settled ledger never erases bridge replay fences")
+	local result=assert(forget(authority,other,{[8]=true}))
+	check(result.sessions==1 and db.peek("authority").sessions[binding.session_key]==nil,"delivery ACK and current worker/session removal release settled authority scope")
+	same(db.peek("dispatch-v1"),fences,"forgetting settled ledger never rewrites peer authority")
 end
 
 sections.managed_maintenance=function()
@@ -704,21 +891,28 @@ sections.managed_maintenance=function()
 	check(authority.managed_retire(binding,a.id,a.observer_id,"managed",55),"settled managed ledger alone does not clear controller")
 	refused_unchanged(db,function()return authority.edit(binding,1,"reset-transport",{})end,"controller reference prevents reset after settlement")
 	local other=assert(authority.open("host-A",8))
-	check(authority.forget_sessions(other,{[8]=true},true).kept==1,"owner and launch references protect absent session")
-	registry.owners={}
-	local entry=registry.requests["logical/launch"]
-	entry.authorization={nonce="nonce",boot="boot",bridge=77,binding=copy(binding),session=4,deadline=1,new=false,phase="consumed"}
+	check(forget(authority,other,{[8]=true}).kept==1,"owner and launch references protect absent session")
+	registry.sessions.logical.control.binding=nil;registry.sessions.logical.control.generation_floor=1
 	db.kv.set("dispatch-v1",registry)
-	refused_unchanged(db,function()return authority.edit(binding,1,"reset-transport",{})end,"consumed native authorization prevents reset independently of owner")
+	refused_unchanged(db,function()return authority.edit(binding,1,"reset-transport",{})end,"fenced current session and worker preserve native authority without completed launch request")
+	local admit=admitter(authority,binding,"ordinary-history")
+	local failed,exited=admit("managed"),admit("managed")
+	update(authority,binding,failed,"admitted",{stage="failed"},{phase="Failed"})
+	run_job(authority,binding,exited,88)
+	update(authority,binding,exited,"running",{stage="completed"},{phase="Exited"})
+	local attempts=by_id(snapshot(authority,binding))
+	check(attempts[a.id]~=nil and attempts[failed].phase=="Failed" and attempts[exited].phase=="Exited","current worker reference preserves reservation without deleting ordinary Failed/Exited history")
+	check(next(db.peek("dispatch-v1").requests)==nil,"worker authority retention requires no completed launch request")
 	db.kv.set("dispatch-v1",nil)
 	refused_unchanged(db,function()return authority.edit(binding,1,"reset-transport",{})end,"missing initialized bridge never permits reset")
-	refused_unchanged(db,function()return authority.forget_sessions(other,{[8]=true},true)end,"missing bridge never permits forgetting")
+	refused_unchanged(db,function()return forget(authority,other,{[8]=true})end,"missing bridge never permits forgetting")
 end
 
 sections.managed_migration=function()
 	local db,_,binding,a=managed_fixture()
 	local image=db.image();local old=image.authority
 	old.version=1;old.setup=nil;old.setup_adoption_required=nil
+	old.config.hosts["host-A"].agents[1].include_all=true
 	local scope=old.sessions[binding.session_key]
 	scope.native_session=nil;scope.jobs=nil;scope.managed_authority_id=nil;scope.managed_imports=nil
 	scope.inbox={};scope.imports={};scope.launch.attempts[1].purpose=nil
@@ -730,12 +924,13 @@ sections.managed_migration=function()
 	local expected=copy(scope.launch.attempts[1]);expected.purpose="managed"
 	same(result,expected,"migration changes only explicit purpose, never observer/attempt/pane evidence")
 	same(restored_db.peek("managed-v1-original"),old,"old managed authority is preserved before conversion")
+	check(migrated.config.hosts["host-A"].agents[1].include_all==nil,"v1 roster normalization removes retired bulk policy without refusing the authority")
 	same(restored_db.peek("dispatch-v1"),image["dispatch-v1"],"migration never rewrites immutable bridge grants")
 	check(#snapshot(restored,current).jobs==0,"migrated managed attempt cannot become an ordinary ticket")
 	for _,mutate in ipairs({
-		function(seed)seed["dispatch-v1"].requests["logical/launch"].observer_id="managed-not-the-exact-request"end,
+		function(seed)seed["dispatch-v1"].workers["logical/launch"].observer_id="managed-not-the-exact-request"end,
 		function(seed)seed.authority.sessions[binding.session_key].launch.attempts[1].record_id="ordinary"end,
-		function(seed)seed["dispatch-v1"].requests["logical/launch"].pane_binding.pane_id="56"end,
+		function(seed)seed["dispatch-v1"].workers["logical/launch"].pane_binding.pane_id="56"end,
 		function(seed)seed.authority.sessions[binding.session_key].inbox={{version=1}}end,
 	}) do
 		local broken=copy(image);mutate(broken)
@@ -781,8 +976,13 @@ sections.managed_migration=function()
 
 	local imported_db,importer,import_binding,import_config,_,load=fresh()
 	local Dispatch,Codec=load("dispatch"),load("wire/codec")
-	local imported_records=assert(import_config.validate_records({record("imported")}))
-	local bytes=runtime.json.encode(imported_records)
+	check(Dispatch.admin_bootstrap({request_id="migration-fixture-create",orch_session_id="migration-fixture-session",
+		owner_id="migration-fixture-owner",generation=1,authority_namespace=snapshot(importer,import_binding).namespace,
+		source_nonce="migration-fixture-source"})~=nil,"managed import fixture explicitly creates its native transport before opening an import gate")
+	local verified_record=setup_record("imported");verified_record.mailbox.verified=true;verified_record.mailbox.evidence_ref="actual-prior-managed-setup"
+	local imported_records=assert(import_config.validate_records({verified_record}))
+	local raw_imported_records=copy(imported_records);raw_imported_records[1].include_all=true
+	local bytes=runtime.json.encode(raw_imported_records)
 	local preview={schema=1,origin="spawn-migration",op="import_config",request_id="receipt",source_client="legacy-source",target_host=import_binding.host_key,
 		source_revision=1,source_sha256=Codec.sha256(bytes),records_json=bytes}
 	local gate_id=assert(Dispatch.open_import(import_binding,runtime.json.encode(preview)))
@@ -794,10 +994,13 @@ sections.managed_migration=function()
 	local imported_receipts=copy(imported_db.peek("authority").sessions[import_binding.session_key].managed_imports)
 	imported_receipts["ordinary-observer:setup:1"]=receipts["ordinary-observer:setup:1"]
 	local reset_seed=legacy_image(imported_db,import_binding,imported_receipts)
+	reset_seed.authority.sessions[import_binding.session_key].imports["bridge-receipt"][1].include_all=true
+	reset_seed["dispatch-v1"].gates[gate_id].records[1].include_all=true
 	local reset_db=boundary(reset_seed);local reset_authority=modules(reset_db)
 	local migrated_binding=assert(reset_authority.open("host-A",4,nil,import_binding.session_key))
 	same(snapshot(reset_authority,migrated_binding).records,imported_records,"receipt migration does not replay imports or restore obsolete ordinary records")
 	check(reset_authority.managed_import(migrated_binding,-1,"bridge-receipt",imported_records).replayed,"consumed bridge receipt matches stable host/session after transport rotation")
+	same(reset_db.peek("authority").sessions[import_binding.session_key].managed_imports["bridge-receipt"],imported_records,"v1 detached verified receipts canonicalize with consumed gate records without replaying or resetting managed identity")
 	same(reset_db.peek("dispatch-v1"),reset_seed["dispatch-v1"],"receipt migration preserves exact consumed gate binding and outcome")
 	same(reset_db.peek("managed-v1-original"),reset_seed.authority,"rotated old authority is backed up exactly")
 	for _,field in ipairs({"host_key","native_session","session_key"}) do
@@ -889,21 +1092,21 @@ sections.stale_config = function()
 	refused_unchanged(db, function()
 		return authority.edit(binding, old_revision, "replace-records", { records = { record("stale") } })
 	end, "stale form edit")
-	local stale = request(binding, "importer", 1, old_revision, "import_records", { setup_run_id = "old-setup", records = { record("stale") } })
+	local stale = request(binding, "importer", 1, old_revision, "import_records", { setup_run_id = "old-setup", records = { record("stale") },manual=true,confirmed=true })
 	local reply = submit(authority, binding, stale)
 	check(not reply.ok and reply.error == "stale-config", "stale import returns a retained rejection")
 	local after = snapshot(authority, binding)
 	same(after.records, before.records, "stale import leaves roster exact")
 	check(after.config_revision == before.config_revision, "stale import does not advance configuration revision")
 	local imported = { record("third", { prompt = "Keep exact prompt.\nNo automatic launch." }) }
-	local add = request(binding, "importer", 2, after.config_revision, "import_records", { setup_run_id = "approved-setup", records = imported })
+	local add = request(binding, "importer", 2, after.config_revision, "import_records", { setup_run_id = "approved-setup", records = imported,manual=true,confirmed=true })
 	check(submit(authority, binding, add).result.imported == 1, "review-confirmed import adds the intended record")
 	after = snapshot(authority, binding)
 	check(#after.attempts == 0, "import does not reserve or execute a launch")
 	local replay = request(binding, "importer", 3, after.config_revision, "import_records", add.data)
 	local replay_reply = submit(authority, binding, replay)
 	check(replay_reply.ok and replay_reply.result.imported == 0, "identical import is idempotent under a new request")
-	local conflict = request(binding, "importer", 4, after.config_revision, "import_records", { setup_run_id = "approved-setup", records = { record("third", { command = "different" }) } })
+	local conflict = request(binding, "importer", 4, after.config_revision, "import_records", { setup_run_id = "approved-setup", records = { record("third", { command = "different" }) },manual=true,confirmed=true })
 	check(not submit(authority, binding, conflict).ok, "conflicting import of an existing record is rejected")
 	same(snapshot(authority, binding).records, after.records, "setup replay and conflict preserve exact roster")
 end
@@ -987,8 +1190,8 @@ sections.byte_capacity = function()
 	local large = {}
 	for index = 1, 3 do large[index] = record("large-" .. tostring(index), { prompt = string.rep("x", 30000) }) end
 	check(config.validate_records(large) ~= nil, "large import is individually schema-valid")
-	local value = request(binding, "large", 1, 1, "import_records", { setup_run_id = "large-setup", records = large })
-	refused_unchanged(db, function() return authority.request(binding, value) end, "encoded durable state capacity")
+	local value = request(binding, "large", 1, 1, "import_records", { setup_run_id = "large-setup", records = large,manual=true,confirmed=true })
+	refused_unchanged(db, function() return authority.request(binding, value,setup_context(binding)) end, "encoded durable state capacity")
 	check(#snapshot(authority, binding).attempts == 0, "oversized request has no side effects")
 end
 
@@ -1319,13 +1522,13 @@ end
 sections.clear_history = function()
 	local helper = record("helper", { provider = "omp", backend = "native-agent", enabled = false, prompt = "Approved normal prompt" })
 	local db, authority, binding = fresh({ helper, record("active") })
-	local setup = request(binding, "window", 1, 1, "start_setup", { record_id = "helper", setup_run_id = "setup-once" })
-	local reply = submit(authority, binding, setup)
-	check(reply.ok and reply.result.job.initial_prompt ~= helper.prompt, "disabled reviewed helper has dedicated setup prompt")
+	local context=setup_context(binding)
+	local setup = request(binding, "window", 1, 1, "start_setup", {setup_run_id="setup-once",command="truthful-default --opaque",cwd=context.inventory.sessions[1].tabs[1].blocks[1].cwd,window=context.window,config_pane=700})
+	local reply = submit(authority, binding, setup,context)
+	check(reply.ok and reply.result.job.initial_prompt ~= helper.prompt and reply.result.job.backend=="setup-default", "disabled roster does not select or block the native default bootstrap")
 	local helper_id = reply.result.attempt.id
-	claim(authority, binding, helper_id)
-	update(authority, binding, helper_id, "claimed", { stage = "submission_intent", command = "omp setup" })
-	update(authority, binding, helper_id, "submission_intent", { stage = "completed" }, { phase = "Exited", exit_status = 0 })
+	db.now+=31
+	check(snapshot(authority,binding).attempts[1].phase=="Failed","unused native setup admission expires before any effect")
 	local active_id = submit(authority, binding, reserve_request(binding, "window", 2, 1, "active")).result.attempt.id
 	local before = db.peek("authority").sessions[binding.session_key]
 	local view = snapshot(authority, binding)
@@ -1408,11 +1611,13 @@ sections.forget_sessions = function()
 		refused_unchanged(db, function() return authority.forget_sessions(binding, inventory or nil, true) end, "forget without a verified inventory")
 	end
 	local before = db.image()
-	local preview = assert(authority.forget_sessions(binding, { [6] = true }, false))
+	local preview,why,captured = authority.forget_sessions(binding, { [6] = true }, false)
+	assert(preview,why)
 	check(preview.sessions == 1 and preview.attempts == 2 and preview.bytes > 0 and preview.kept == 1, "preview counts ended sessions, attempts, bytes and active absent sessions kept")
 	same(db.image(), before, "preview changes nothing")
 	local writes = db.authority_writes
-	local result = assert(authority.forget_sessions(binding, { [6] = true }, true))
+	refused_unchanged(db, function() return authority.forget_sessions(binding, { [6] = true }, true) end, "applying without pre-inspection evidence cannot remove history")
+	local result = assert(authority.forget_sessions(binding, { [6] = true }, true, captured))
 	same(result, preview, "forget reports what it removed")
 	check(db.authority_writes == writes + 1, "forget is one atomic persist")
 	local sessions = db.peek("authority").sessions
@@ -1420,8 +1625,18 @@ sections.forget_sessions = function()
 	check(sessions[binding.session_key] ~= nil and sessions[live.session_key] ~= nil, "bound and live sessions are kept")
 	check(sessions[running.session_key] ~= nil, "an absent session with a Running attempt is kept")
 	check(#runtime.json.encode(before.authority) > #runtime.json.encode(db.peek("authority")), "forgetting frees stored bytes")
-	local kept = assert(authority.forget_sessions(live, { [4] = true }, true))
+	local kept = assert(forget(authority, live, { [4] = true }))
 	check(kept.sessions == 0 and db.peek("authority").sessions[live.session_key] ~= nil, "the caller's bound session is never forgotten")
+	local changed = assert(authority.open("host-A", 20))
+	local _,capture_error,prior = authority.forget_sessions(binding, { [4] = true, [6] = true }, false)
+	assert(prior,capture_error)
+	local newer = assert(authority.open("host-A", 21))
+	check(submit(authority, changed, request(changed, "late", 1, 1)).ok, "captured scope receives a genuine later request")
+	local current = db.image()
+	local fenced = assert(authority.forget_sessions(binding, { [4] = true, [6] = true }, true, prior))
+	check(fenced.sessions == 0, "changed and newly created scopes are not authorized by old inspection candidates")
+	same(db.image(), current, "late scope creation and request history survive the stale cleanup capture")
+	check(db.peek("authority").sessions[newer.session_key] ~= nil, "new authority was not included retroactively")
 end
 
 -- Each write keeps only the 26 newest finished attempts; blocking ones stay.
@@ -1469,29 +1684,68 @@ end
 local function host_block(db, authority, config)
 	local _,_,_,load=modules(db)
 	local pane, definition = 9, nil
-	local harness = { fail = false }
-	local native_cli = { inspect = function(_window, _options, callback)
-		if harness.fail then callback({ status = 1, timed_out = false, stdout = "", stderr = "injected inspection failure" }, nil); return end
-		callback({ status = 0, timed_out = false, stdout = runtime.json.encode({ sessions = { { id = 4, tabs = { { blocks = { { id = pane } } } } } } }) }, nil)
+	local harness = { fail = false,
+		clients = { { kind = "window", window = "w", conn = 1, since = 1 } },
+		views = { w = { { id = 4, tabs = { { blocks = { { id = pane } } } } } } } }
+	local native_cli = { inspect = function(window, _options, callback)
+		if harness.fail or harness.fail_window == window then callback({ status = 1, timed_out = false, stdout = "", stderr = "injected inspection failure" }, nil); return end
+		local inventory = { sessions = copy(harness.views[window] or {}), clients = copy(harness.clients) }
+		if harness.on_inspect then harness.on_inspect(window,inventory) end
+		callback({ status = 0, timed_out = false, truncated = harness.truncated, stdout = runtime.json.encode(inventory) }, nil)
 	end }
 	local fake = setmetatable({
 		kv = db.kv, on = function() end, timer = function() end, now = function() return 0 end,
 		ui = { text = function(value) return { t = value } end, col = function(children) return children end, node = function() return {} end },
 		block = { define = function(name, value) if name=="spawner" then definition = value end end },
 	}, { __index = runtime })
+	-- Load registration modules against this fixture runtime, including relative
+	-- updater dependencies. Transport opening is explicitly unavailable here:
+	-- these authority-block tests never create a live channel endpoint.
+	local registered = {}
+	local function registration(name)
+		if registered[name] then return registered[name] end
+		if name == "channel/channel" then
+			return { open = function(options)
+				check(options.plugin_id == "spawn", "real relay requests the SPAWN transport boundary")
+				harness.channel_opened = true
+				return nil, { code = "fixture_transport_unavailable", operation = "open" }
+			end }
+		end
+		if name == "dispatch" then return { recovery_view = function() return {} end } end
+		if name == "authority" then return authority end
+		if name == "config" then return config end
+		if name == "wire/codec" then return load(name) end
+		local source = assert(loadstring(runtime.fs.read(root .. "/" .. name .. ".luau"), name))
+		local directory = name:match("^(.*)/") or ""
+		setfenv(source, setmetatable({ tern = fake, require = function(path)
+			assert(path:sub(1, 2) == "./", "registration dependency must be relative")
+			return registration((if directory == "" then "" else directory .. "/") .. path:sub(3))
+		end }, { __index = environment }))
+		local result = source()
+		registered[name] = result
+		return result
+	end
 	local chunk = assert(loadstring(runtime.fs.read(root .. "/host.luau"), "host"))
 	setfenv(chunk, setmetatable({ tern = fake, require = function(name)
 		if name == "./config" then return config end
 		if name == "./authority" then return authority end
+		if name == "./setup_review" then return load("setup_review") end
+		if name == "./setup_discovery" then return load("setup_discovery") end
 		if name == "./native_cli" then return native_cli end
 		if name == "./host_executor" then return { install = function() end, attach = function() end, epoch = function() return nil end } end
-		if name == "./dispatch" then return {recovery_view=function()return {}end,import_decode=function()return nil end} end
+		if name == "./dispatch" then return {recovery_view=function()return {}end} end
+		if name == "./dispatch_state" then return load("dispatch_state") end
 		if name == "./wire/codec" then return load("wire/codec") end
 		if name == "./managed_setup" then return load("managed_setup") end
+		if name == "./prereq" then return registration("prereq") end
 		if name == "./page_navigation" then return load("page_navigation") end
+		if name == "./window_journal" then return {host_initialize=function()return "fixture" end,client_inventory=load("window_journal").client_inventory} end
+		if name == "./dispatch_relay" then return registration("dispatch_relay") end
+		if name == "./updater/host" then return registration("updater/host") end
 		error("Unexpected host dependency: " .. name)
 	end }, { __index = environment }))
 	chunk()
+	check(harness.channel_opened == true, "host installs the real pane-free relay through the isolated transport boundary")
 	harness.definition, harness.cx = definition, { pane = pane, save = function() end, render = function() end }
 	harness.state = definition.init(harness.cx, { runtime.json.encode({ host = { name = "A" }, native_window = "w" }) }, nil)
 	return harness
@@ -1520,6 +1774,48 @@ sections.auto_forget = function()
 	harness.fail = false
 	harness.definition.event(state, { ev = "action", act = "refresh" }, harness.cx)
 	check(db.peek("authority").sessions[later.session_key] == nil, "the next verified inventory forgets it")
+	local other = assert(authority.open("host:a", 9))
+	local id = submit(authority, other, reserve_request(other, "ordinary", 1, 1, "x")).result.attempt.id
+	claim(authority, other, id, 91)
+	update(authority, other, id, "claimed", { stage = "submission_intent", command = "ordinary-cli" })
+	update(authority, other, id, "submission_intent", { stage = "completed" }, { phase = "Exited", exit_status = 0 })
+	harness.clients[2] = { kind = "window", window = "other", conn = 2, since = 2 }
+	harness.views.other = { { id = 9, tabs = {} } }
+	local history = db.peek("authority").sessions[other.session_key]
+	harness.definition.event(state, { ev = "action", act = "refresh" }, harness.cx)
+	same(db.peek("authority").sessions[other.session_key], history, "another live window keeps its exact ordinary Exited history")
+	local absent = assert(authority.open("host:a", 10))
+	harness.on_inspect = function(window,inventory)
+		if window == "other" then inventory.clients[2].since += 1 end
+	end
+	harness.definition.event(state, { ev = "action", act = "refresh" }, harness.cx)
+	check(db.peek("authority").sessions[absent.session_key] ~= nil and state.forget_hold ~= nil, "incarnation drift preserves a cleanup candidate")
+	local late
+	harness.on_inspect = function(window)
+		if window == "other" and not late then late = assert(authority.open("host:a", 11)) end
+	end
+	harness.definition.event(state, { ev = "action", act = "refresh" }, harness.cx)
+	check(db.peek("authority").sessions[absent.session_key] == nil, "unchanged settled absent scope is reclaimed after two complete stable scans")
+	check(late and db.peek("authority").sessions[late.session_key] ~= nil, "a scope created during inspection survives the captured deletion set")
+	harness.on_inspect = nil
+	harness.fail_window = "other"
+	harness.definition.event(state, { ev = "action", act = "refresh" }, harness.cx)
+	check(db.peek("authority").sessions[late.session_key] ~= nil and state.forget_hold ~= nil, "an unreadable other window cannot prove absence")
+	harness.fail_window = nil
+	harness.truncated = true
+	harness.definition.event(state, { ev = "action", act = "refresh" }, harness.cx)
+	check(db.peek("authority").sessions[late.session_key] ~= nil, "a truncated native result cannot authorize cleanup")
+	harness.truncated = nil
+	local visits = 0
+	harness.on_inspect = function(window,inventory)
+		if window == "other" then
+			visits += 1
+			if visits == 2 then inventory.sessions = {} end
+		end
+	end
+	harness.definition.event(state, { ev = "action", act = "refresh" }, harness.cx)
+	check(db.peek("authority").sessions[late.session_key] ~= nil and state.forget_hold ~= nil, "session drift between complete rounds preserves history")
+	same(db.peek("authority").sessions[other.session_key], history, "all incomplete or changing scans retain the other window's settled ordinary history")
 end
 
 -- Refusals that admitted nothing reach their requester through the rendered
@@ -1625,8 +1921,8 @@ sections.sweep_restart = function()
 	same(by_id(view_at(nil))[managed.id], managed_before, "managed attempt is unchanged after every sweep")
 end
 
--- R3 without a restart: a closed pane ends its attempt, an unclaimed ticket fails,
--- and an unverifiable host epoch (nil) falls back to the pane rule alone.
+-- Without a restart, inventory absence ends submitted work, not a claim whose
+-- native pre-submission checks are pending. Native failure and recovery still end it.
 sections.sweep_pane = function()
 	local db, authority, binding = fresh({ record("agent") })
 	local admit = admitter(authority, binding)
@@ -1657,10 +1953,138 @@ sections.sweep_pane = function()
 	check(authority.sweep(binding, { [63] = { title = "bash" } }, "daemon:1", db.now + authority.ADMISSION_SECONDS) == 1, "the deadline settles only the unclaimed ticket")
 	attempts, jobs = by_id(snapshot(authority, binding))
 	check(attempts[ticket].phase == "Failed" and not attempts[ticket].unresolved and attempts[ticket].diagnostic == "Never started (ticket not claimed)" and jobs[ticket].stage == "failed", "an unclaimed ticket moves to history as Failed")
-	check(authority.sweep(binding, {}, "daemon:1", db.now) == 1, "a claimed pane that closes before submission settles")
+	local waiting = db.image()
+	check(authority.sweep(binding, {}, "daemon:1", db.now + authority.ADMISSION_SECONDS) == 0, "inventory absence alone cannot end a pending claim, even after its old admission deadline")
+	same(db.image(), waiting, "a pending claim keeps its native binding, sequence and command absence")
+	refused_unchanged(db, function() return authority.claim_execution(binding, starting, native(64)) end, "an absent inventory row does not authorize a second claim")
+	update(authority, binding, starting, "claimed", { stage = "unknown" }, { phase = "Unknown", diagnostic = "Execution will not be repeated after reload" })
+	check(authority.sweep(binding, {}, nil, db.now) == 1, "a recovered claim with no in-flight submission still settles when its pane is gone")
 	attempts, jobs = by_id(snapshot(authority, binding))
-	check(attempts[starting].phase == "Exited" and attempts[starting].diagnostic == "Pane closed" and jobs[starting].stage == "resolved", "a Starting attempt whose pane is gone is never shown live")
+	check(attempts[starting].phase == "Exited" and attempts[starting].diagnostic == "Pane closed" and jobs[starting].stage == "resolved", "recovery is not protected as a fresh pending claim")
 	for _, a in pairs(attempts) do check(not a.unresolved, a.id .. " is history") end
+	local submitted = admit("agent"); claim(authority, binding, submitted, 64)
+	update(authority, binding, submitted, "claimed", { stage = "submission_intent", command = "ordinary-cli" })
+	check(authority.sweep(binding, {}, nil, db.now) == 1, "a submission intent still in Starting settles from a missing pane")
+	attempts, jobs = by_id(snapshot(authority, binding))
+	check(attempts[submitted].phase == "Exited" and jobs[submitted].stage == "resolved" and authority.execution_job(binding, submitted).command == "ordinary-cli", "the exception is only for claimed jobs, not every Starting phase")
+	refused_unchanged(db, function() return authority.update_execution(binding, submitted, "resolved", { stage = "submission_intent", command = "ordinary-cli" }) end, "a settled submission is never replayable")
+
+	local restarted = admit("agent"); claim(authority, binding, restarted, 65)
+	update(authority, binding, restarted, "claimed", { epoch = "daemon:1" })
+	check(authority.sweep(binding, {}, "daemon:2", db.now) == 1, "a pending claim still begins normal restart grace")
+	local restored = { [65] = { title = "ordinary-cli" } }
+	check(authority.sweep(binding, restored, "daemon:2", db.now + authority.RESTART_GRACE_SECONDS) == 1, "restart grace ends a pending claim even when its shell reappears")
+	attempts, jobs = by_id(snapshot(authority, binding))
+	check(attempts[restarted].phase == "Exited" and attempts[restarted].diagnostic == "Host restarted" and authority.execution_job(binding, restarted).command == nil, "no unsubmitted claim is readopted as a provider")
+
+	-- Real authority + real executor; only native observations, timers and pane
+	-- input are injected. This is deterministic boundary coverage, not GUI proof.
+	for _, outcome in ipairs({ "submit", "pane_exited", "window_closed", "native_ended", "readiness_failed", "process_failed", "reload" }) do
+		local db, authority, binding, _, _, load = fresh({ record("pending") })
+		local id = admitter(authority, binding)("pending")
+		local ticket = authority.execution_job(binding, id).ticket
+		local hooks, timers, writes, sweeps = {}, {}, {}, 0
+		local inspection, inspected = nil, false
+		local function response(value, callback)
+			callback({ status = 0, stdout = runtime.json.encode(value), stderr = "", timed_out = false }, nil)
+		end
+		local function inventory()
+			if outcome == "window_closed" then return { sessions = {} } end
+			return { sessions = { { id = 4, tabs = { { id = 6, blocks = {
+				{ id = 71, command = ticket, program = "/bin/bash", args = {}, live = true,
+					exited = if outcome == "native_ended" then 0 else nil },
+			} } } } } }
+		end
+		local adapter = {
+			from_spawn = load("native_cli").from_spawn,
+			epoch = function() return nil end,
+			inspect = function(window, options, callback)
+				check(window == "" and options.route.pane == 71 and options.route.socket == "/tmp/tern.sock", outcome .. ": retains the captured native route")
+				if not inspected then inspected, inspection = true, callback else response(inventory(), callback) end
+			end,
+			wait_prompt = function(_route, _session, _pane, _options, callback)
+				if outcome == "readiness_failed" then callback({ status = 0, stdout = "", stderr = "", timed_out = true }, nil)
+				else response({ block = 71 }, callback) end
+			end,
+			process = function(_route, _session, _pane, _options, callback)
+				if outcome == "process_failed" then callback({ status = 1, stdout = "", stderr = "native observation failed", timed_out = false }, nil)
+				else response({ pane = 71, child = { pid = 10, argv = { "/bin/bash" } }, foreground = { pid = 10 } }, callback) end
+			end,
+		}
+		local fake = {
+			runtime = { os = "linux" }, json = runtime.json,
+			on = function(name, callback) hooks[name] = callback end,
+			timer = function(ms, callback) table.insert(timers, { ms = ms, fn = callback }) end,
+			pane = { write = function(pane, text)
+				local job = authority.execution_job(binding, id)
+				check(pane == 71 and job.stage == "submission_intent" and job.command .. "\r" == text, "real durable intent precedes the only input")
+				table.insert(writes, text)
+			end },
+		}
+		local function install()
+			local chunk = assert(loadstring(runtime.fs.read(root .. "/host_executor.luau"), "pending-claim-executor"))
+			setfenv(chunk, setmetatable({ tern = fake, os = setmetatable({ time = function() return db.now end }, { __index = os }),
+				require = function(name) return if name == "./native_cli" then adapter else load(name) end,
+			}, { __index = environment }))
+			local subject = chunk()
+			subject.install(authority, function(changed, err)
+				check(changed == binding or changed.session_key == binding.session_key, "notification keeps the bound session")
+				check(err == nil, outcome .. ": lifecycle observation persists without error")
+				-- Host notifications queue a sweep before the asynchronous native
+				-- callback. Empty inventory deliberately exercises the observed boundary.
+				fake.timer(1, function()
+					sweeps += 1
+					assert(authority.sweep(binding, {}, nil, db.now) ~= nil)
+				end)
+			end)
+			return subject
+		end
+		local function drain()
+			local turns = 0
+			while true do
+				local index = nil
+				for position, timer in ipairs(timers) do if timer.ms <= 50 then index = position; break end end
+				if index == nil then return end
+				turns += 1; assert(turns <= 32, "claim fixture callbacks remain bounded")
+				table.remove(timers, index).fn()
+			end
+		end
+		local subject = install(); drain()
+		local spec = { program = "/bin/bash", args = { "-l", "-c", ticket }, env = {
+			TERN_PANE = "71", TERN_EXE = "/opt/tern", TERN_PANE_SOCKET = "/tmp/tern.sock", TERN_WINDOW_KEY = "",
+		} }
+		check(hooks.spawn(copy(spec)) ~= nil, outcome .. ": native filter accepts the admitted ticket")
+		drain()
+		local a = by_id(snapshot(authority, binding))
+		local job = authority.execution_job(binding, id)
+		check(sweeps > 0 and inspection ~= nil and a[id].sequence == 1 and a[id].phase == "Starting" and a[id].unresolved
+			and job.stage == "claimed" and job.native.pane == 71 and job.command == nil and #writes == 0,
+			outcome .. ": an actual deferred claim survives its notification sweep before native callback")
+		check(hooks.spawn(copy(spec)) == nil, outcome .. ": the pending ticket cannot be claimed twice")
+		if outcome == "reload" then
+			timers, hooks = {}, {}
+			subject = install(); drain()
+		else
+			if outcome == "pane_exited" then hooks.pane_exited({ pane = 71, status = 0 }) end
+			response(inventory(), inspection)
+		end
+		a = by_id(snapshot(authority, binding)); job = authority.execution_job(binding, id)
+		if outcome == "submit" then
+			check(#writes == 1 and job.stage == "submitted" and job.command ~= nil, "the original pending callback submits once after exact native membership/readiness/process proof")
+			subject.attach(binding)
+			check(hooks.spawn(copy(spec)) == nil and #writes == 1, "attach and the consumed ticket cannot repeat the configured input")
+			drain()
+			a = by_id(snapshot(authority, binding)); job = authority.execution_job(binding, id)
+			check(a[id].phase == "Exited" and job.stage == "resolved" and a[id].exit_status == nil, "post-submission inventory absence retains ordinary settlement without inventing success")
+		elseif outcome == "reload" then
+			check(#writes == 0 and a[id].phase == "Exited" and job.stage == "resolved" and job.command == nil, "real reload never resumes an unsubmitted claim and ordinary sweep still settles it")
+		else
+			check(#writes == 0 and job.stage == "failed" and a[id].phase == "Failed" and not a[id].unresolved and a[id].sequence == 2
+				and a[id].exit_status == nil and job.command == nil, outcome .. ": existing native failure ends the pre-submission claim without a provider exit status or input")
+			local ended = db.image(); drain()
+			same(db.image(), ended, outcome .. ": later sweeps preserve terminal history")
+		end
+	end
 end
 
 -- Cold start: a store written before automatic settlement holds blocking
@@ -1780,16 +2204,361 @@ sections.retired_fields = function()
 	local stored = image.authority
 	stored.config.hosts["host-A"].agents[1].duplicate_policy = "skip"
 	stored.sessions[binding.session_key].managed_imports["bridge-import"][1].duplicate_policy = "allow"
+	stored.config.hosts["host-A"].agents[1].include_all=true
+	stored.sessions[binding.session_key].managed_imports["bridge-import"][1].include_all=false
 	local old_db = boundary(image)
 	local upgraded = modules(old_db)
 	local view = snapshot(upgraded, binding)
 	check(#view.records == 2 and view.records[1].id == "agent" and view.records[1].duplicate_policy == nil, "a stored record carrying duplicate_policy is read with it stripped")
+	check(view.records[1].include_all==nil and view.config_revision==stored.config_revision,"retired bulk policy is removed without changing retained configuration epoch")
+	same(old_db.peek("authority-roster-original"),stored,"roster normalization preserves an exact readback original before its next durable write")
 	check(assert(upgraded.managed_import(binding, -1, "bridge-import", { record("imported") })).replayed, "an old receipt carrying duplicate_policy still replays exactly")
 	check(submit(upgraded, binding, reserve_request(binding, "window", 1, view.config_revision, "agent")).ok, "the stripped record launches")
 	local saved = old_db.peek("authority")
 	check(saved.config.hosts["host-A"].agents[1].duplicate_policy == nil and saved.sessions[binding.session_key].managed_imports["bridge-import"][1].duplicate_policy == nil, "the next persist writes canonical values")
+	check(saved.config.hosts["host-A"].agents[1].include_all==nil and saved.sessions[binding.session_key].managed_imports["bridge-import"][1].include_all==nil,"retired bulk policy never reappears in the roster or import receipts")
+end
+
+-- These fixtures exercise the real writer/lifecycle, not a provider or native
+-- platform. Native inventory and result-file bytes are explicit boundary inputs.
+local function default_fixture(roster,run_id)
+	local db,authority,binding,config,launch,load=fresh(roster)
+	local f={db=db,a=authority,b=binding,config=config,launch=launch,load=load,context=setup_context(binding),sequences={},
+		run=run_id or "run-default"}
+	function f.send(op,data,observer)
+		observer=observer or "default-window"
+		local n=(f.sequences[observer] or 0)+1;f.sequences[observer]=n
+		local r=request(binding,observer,n,snapshot(f.a,binding).config_revision,op,data,if n>1 then {observer.."/"..tostring(n-1)} else {})
+		local reply=submit(f.a,binding,r,f.context)
+		if reply.ok and reply.result.job then f.job=reply.result.job end
+		return reply,r
+	end
+	local reply=f.send("start_setup",{setup_run_id=f.run,command="truthful-default --profile 'work account' --opaque=$VALUE",
+		cwd=f.context.inventory.sessions[1].tabs[1].blocks[1].cwd,window=f.context.window,config_pane=700})
+	check(reply.ok,"default bootstrap admitted: "..tostring(reply.error))
+	function f.step(op,extra)
+		local data={attempt_id=f.job.id,setup_run_id=f.run}
+		for k,v in pairs(extra or {}) do data[k]=v end
+		return f.send(op,data)
+	end
+	function f.bind()
+		check(f.step("setup_claim").ok,"native setup claim persisted")
+		check(f.step("setup_begin").ok,"native setup effect intent persisted")
+		table.insert(f.context.inventory.sessions[1].tabs[1].blocks,{id=42,command=f.job.setup.command,cwd=f.job.cwd})
+		check(f.step("setup_bind",{pane=9001}).ok,"native setup source bound separately from SDK identity")
+	end
+	function f.envelope()
+		return {schema=1,kind="spawn-setup-result",setup_run_id=f.run,binding=f.job.setup.binding,path=f.job.setup.result_path}
+	end
+	function f.result(records,padding)
+		local bytes=runtime.json.encode({schema=2,setup_run_id=f.run,confirmed=true,agents=records})..string.rep(" ",padding or 0)
+		db.files[f.job.setup.result_path]=bytes
+		return bytes
+	end
+	function f.accept(records,padding)
+		local bytes=f.result(records,padding)
+		local ok,why=f.a.setup_submission(f.b,f.envelope(),f.context)
+		check(ok,"explicit setup bytes retained: "..tostring(why))
+		f.job=snapshot(f.a,f.b).jobs[1]
+		return bytes
+	end
+	function f.import_data()
+		return {attempt_id=f.job.id,setup_run_id=f.run,pending_digest=f.job.pending_digest,confirmed=true}
+	end
+	return f
+end
+sections.setup_default=function()
+	do
+		local _,authority,binding=fresh(nil)
+		local context=setup_context(binding)
+		local original=context.inventory.sessions[1].tabs[1].blocks[1].cwd
+		context.inventory.sessions[1].tabs[1].blocks[1].cwd=original.."/moved"
+		local refused=submit(authority,binding,request(binding,"moved-folder",1,0,"start_setup",{setup_run_id="stale-folder",command="native-default",cwd=original,window=context.window,config_pane=700}),context)
+		local retained=snapshot(authority,binding)
+		check(not refused.ok and #retained.jobs==0 and #retained.attempts==0,"a changed native Config folder refuses setup before reserving or starting a helper")
+	end
+	local f=default_fixture(nil,"run/with:unsafe\\filename")
+	local view=snapshot(f.a,f.b)
+	check(#view.records==0 and view.config_revision==0 and #view.attempts==1,"empty-roster setup neither inserts nor enables a record")
+	check(f.job.backend=="setup-default" and f.job.ticket==nil and view.attempts[1].mode=="Setup default","setup-only native effect never becomes ordinary Native OMP or shell ticket")
+	check(f.job.setup.command=="truthful-default --profile 'work account' --opaque=$VALUE" and f.job.setup.config_pane==700 and f.job.setup.host_config_pane==10,"opaque command and separate SDK/native Config IDs are immutable")
+	check(f.job.setup.result_path:match("setup%-result%-%x+%.json$")~=nil and not f.job.setup.result_path:find(f.run,1,true),"unsafe run IDs never become filenames")
+	check(f.job.initial_prompt:find(f.job.setup.binding,1,true) and f.job.initial_prompt:find("submission command",1,true),"provider-neutral skill carries exact run binding and helper")
+	local before=f.db.image()
+	for _,field in ipairs({"backend","user","host","record_id"}) do
+		local bad=request(f.b,"bad",1,0,"start_setup",{setup_run_id="other",command="default",cwd=f.job.cwd,window=f.context.window,config_pane=700})
+		bad.data[field]="override"
+		check(not f.a.request(f.b,bad,f.context),"setup rejects unsupported route override "..field)
+		same(f.db.image(),before,"route override cannot allocate another attempt")
+	end
+	check(f.a.claim_execution(f.b,f.job.id,native())==nil,"setup cannot enter ordinary retained-shell claim")
+	check(f.a.execution_record(f.b,f.job.id)==nil,"setup bootstrap is never resolved from a saved record")
+	local out_of_order=f.step("setup_bind",{pane=9001})
+	check(not out_of_order.ok and f.job.stage=="admitted","native bind requires durable pre-effect intent")
+	table.insert(f.context.inventory.sessions[1].tabs[1].blocks,{id=41,command=f.job.setup.command,cwd=f.job.cwd})
+	f.bind()
+	view=snapshot(f.a,f.b)
+	check(f.job.stage=="submitted" and f.job.native_pane==42 and f.job.setup.agent_pane==9001 and view.attempts[1].pane==42,"one bind preserves both pane domains")
+	check(view.attempts[1].observer_id==view.namespace.."/executor" and f.job.observer_id=="default-window","executor identity and request observer remain distinct")
+	check(not f.step("setup_begin").ok and not f.step("setup_bind",{pane=9002}).ok,"effect begin and native binding are one-use")
+	same(snapshot(f.a,f.b).records,{},"native effect lifecycle never imports its bootstrap")
+end
+sections.setup_submission=function()
+	local f=default_fixture();f.bind()
+	local records={record("submitted",{arguments={"literal null","quote \" slash \\ Ω"}})}
+	local base=f.result(records)
+	local bytes=base..string.rep(" ",120000-#base)
+	f.db.files[f.job.setup.result_path]=bytes
+	local envelope=f.envelope()
+	for _,field in ipairs({"binding","setup_run_id","path"}) do
+		local wrong=copy(envelope);wrong[field]..="-wrong"
+		refused_unchanged(f.db,function()return f.a.setup_submission(f.b,wrong,f.context)end,"wrong submission "..field)
+	end
+	check(f.db.file_reads[envelope.path]==nil,"binding/path/run refusals precede any file read")
+	local closed=copy(f.context);table.remove(closed.inventory.sessions[1].tabs[1].blocks,2)
+	refused_unchanged(f.db,function()return f.a.setup_submission(f.b,envelope,closed)end,"closed source submission")
+	check(f.db.file_reads[envelope.path]==nil,"inactive source does not read the file")
+	local original=f.db.image()
+	f.db.files[envelope.path]='{"schema":2,"setup_run_id":"run-default","confirmed":true,"agents":[],"unknown":null}'
+	check(not f.a.setup_submission(f.b,envelope,f.context),"unknown null member cannot disappear through native JSON")
+	same(f.db.image(),original,"invalid raw schema never retains pending bytes")
+	f.db.files[envelope.path]=bytes.." "
+	check(not f.a.setup_submission(f.b,envelope,f.context),"120001 complete bytes refuse rather than truncate to the valid 120000-byte prefix")
+	same(f.db.image(),original,"over-bound result preserves pending capacity and accepted-state absence")
+	f.db.files[envelope.path]=bytes
+	check(f.a.setup_submission(f.b,envelope,f.context),"large complete submission accepted")
+	local read_count=f.db.file_reads[envelope.path]
+	f.db.files[envelope.path]="changed after submission"
+	local accepted=f.db.image()
+	check(not f.a.setup_submission(f.b,envelope,f.context),"duplicate explicit submission refused")
+	same(f.db.image(),accepted,"duplicate cannot replace immutable accepted bytes")
+	local pending=assert(f.a.setup_pending(f.b,f.job.id))
+	check(pending.bytes==bytes and not pending.consumed and f.db.file_reads[envelope.path]==read_count,"pending retrieval reads immutable durable bytes, never mutable file")
+	local view=snapshot(f.a,f.b);f.job=view.jobs[1]
+	check(f.job.pending_bytes==#bytes and f.job.pending_digest==f.load("wire/codec").sha256(bytes) and f.job.pending==nil,"public metadata identifies complete bytes without carrying them")
+	check(#runtime.json.encode(view)<120000 and #runtime.json.encode(f.db.peek("authority"))>#bytes,"large result is stored once outside bounded public projection")
+	local writes=f.db.authority_writes
+	local reply=f.send("import_records",f.import_data())
+	check(reply.ok and reply.result.imported==1 and f.db.authority_writes==writes+1,"records, one-use consumption, reply and watermark persist atomically")
+	local consumed=assert(f.a.setup_pending(f.b,f.job.id))
+	check(consumed.consumed and consumed.bytes==nil and f.db.file_reads[envelope.path]==read_count,"successful import releases raw bytes and never rereads the source file")
+	check(#snapshot(f.a,f.b).attempts==1 and #snapshot(f.a,f.b).records==1,"import reserves no new launch")
+	check(not f.send("import_records",f.import_data()).ok,"new request cannot reuse consumed automatic result")
+end
+sections.setup_import_fences=function()
+	local variants={
+		function(f)f.context.window="another-window" end,
+		function(f)f.context.config_pane=11 end,
+		function(f)f.context.inventory.clients[1].since+=1 end,
+		function(f)f.context.epoch="fixture-host:2" end,
+		function(f)f.context.inventory.sessions[1].tabs[1].blocks[2].command="pane reused" end,
+		function(f)f.context.inventory.sessions[1].tabs[1].blocks[2].cwd="/different" end,
+		function(f)table.remove(f.context.inventory.sessions[1].tabs[1].blocks,2)end,
+		function(f)edit(f.a,f.b,"replace-records",{records={record("manual-change")}})end,
+	}
+	for index,mutate in ipairs(variants) do
+		local f=default_fixture();f.bind();f.accept({record("wanted")});mutate(f)
+		local before=snapshot(f.a,f.b)
+		local reply=f.send("import_records",f.import_data())
+		check(not reply.ok,"fresh native/config source fence "..index.." refuses")
+		local after=snapshot(f.a,f.b)
+		same(after.records,before.records,"fresh source fence preserves all records")
+		check(not assert(f.a.setup_pending(f.b,f.job.id)).consumed,"fresh source fence preserves unconsumed pending bytes")
+	end
+	local f=default_fixture();f.bind();f.accept({record("wanted")})
+	local data=f.import_data();data.confirmed=nil
+	refused_unchanged(f.db,function()return f.a.request(f.b,request(f.b,"default-window",5,0,"import_records",data),f.context)end,"missing explicit native confirmation")
+	data=f.import_data();data.pending_digest=string.rep("0",64)
+	check(not f.send("import_records",data).ok,"changed reviewed digest refuses")
+	check(not f.send("import_records",f.import_data(),"another-window").ok,"another observer cannot borrow a result")
+	local before=f.db.image();f.db.fail_after(1)
+	local next_sequence=(f.sequences["default-window"] or 0)+1
+	local r=request(f.b,"default-window",next_sequence,0,"import_records",f.import_data())
+	check(not f.a.request(f.b,r,f.context),"atomic storage failure refuses the entire import")
+	same(f.db.image(),before,"failed write preserves records, pending bytes and request watermark")
+	f.db.fail_authority_at=nil
+	check(f.a.request(f.b,r,f.context),"explicit retry of an uncommitted import can succeed")
+	check(snapshot(f.a,f.b).replies[r.request_id].ok,"retried import is committed, not a launch replay")
+	local committed=f.db.image()
+	check(f.a.request(f.b,r,f.context),"identical retained request returns its one existing receipt")
+	same(f.db.image(),committed,"retained import replay writes nothing")
+	check(not f.a.reviewed_setup_preparation(f.b,r.request_id,f.job.id,r.data.pending_digest),"plain Save settings only is never a preparation or paid-model approval")
+	do
+		local function preparation(f)
+			return {nonce="prepare-receipt",revision=1,window=f.context.window,native_namespace="fixture-desktop",native_conn=1,native_since=10,
+				entries={{nonce="prepare-receipt-1",record_id="wanted",label="custom — wanted",backend="local-terminal",revision=2}},
+				consents={{nonce="prepare-receipt-1",window_consent="explicit-record-native-consent"}}}
+		end
+		local signed=default_fixture();signed.bind();signed.accept({record("wanted")})
+		local data=signed.import_data();data.preparation=preparation(signed)
+		local receipt,issued=signed.send("import_records",data)
+		check(receipt.ok and #snapshot(signed.a,signed.b).records==1,"one final approval saves exact settings plus explicit preparation consent without starting checks")
+		local before=signed.db.image()
+		local captured=assert(signed.a.reviewed_setup_preparation(signed.b,issued.request_id,signed.job.id,data.pending_digest))
+		same(captured,data.preparation,"preparation projection is the exact immutable successful import request, including record nonces and native recipient")
+		same(signed.db.image(),before,"reading the actual preparation receipt acknowledges or deletes nothing")
+		check(not signed.a.reviewed_setup_preparation(signed.b,"missing-receipt",signed.job.id,data.pending_digest),"an unrelated saved-state receipt cannot authorize preparation")
+		local other=assert(signed.a.open("host-A",5))
+		check(not signed.a.reviewed_setup_preparation(other,issued.request_id,signed.job.id,data.pending_digest),"another session cannot borrow an original Config's approval")
+		edit(signed.a,signed.b,"replace-records",{records={record("wanted",{enabled=false})}})
+		check(not signed.a.reviewed_setup_preparation(signed.b,issued.request_id,signed.job.id,data.pending_digest),"a later settings revision cannot reuse an old successful import receipt for preparation")
+		for _,mutate in ipairs({
+			function(value)value.entries[1].record_id="unrelated" end,
+			function(value)value.entries[1].revision+=1 end,
+			function(value)value.window="another-window" end,
+			function(value)value.consents[1].nonce="different-record-consent" end,
+		}) do
+			local guarded=default_fixture();guarded.bind();guarded.accept({record("wanted")})
+			local proposed=guarded.import_data();proposed.preparation=preparation(guarded);mutate(proposed.preparation)
+			local accepted,why=guarded.a.request(guarded.b,request(guarded.b,"default-window",5,0,"import_records",proposed,{"default-window/4"}),guarded.context)
+			if accepted then check(not snapshot(guarded.a,guarded.b).replies["default-window/5"].ok,"changed scope is a real refused import outcome") else check(type(why)=="string","malformed consent is refused by the closed request contract") end
+			check(#snapshot(guarded.a,guarded.b).records==0 and not assert(guarded.a.setup_pending(guarded.b,guarded.job.id)).consumed,"changed roster, revision, recipient or nonce cannot save or authorize model preparation")
+		end
+	end
+end
+sections.setup_import_conflicts=function()
+	local existing=record("existing")
+	local f=default_fixture({existing});f.bind()
+	f.accept({existing,record("new")})
+	local reply=f.send("import_records",f.import_data())
+	check(reply.ok and reply.result.imported==1 and #snapshot(f.a,f.b).records==2,"identical existing ID skips while new record imports")
+	local conflict=default_fixture({existing});conflict.bind()
+	conflict.accept({record("new"),record("existing",{command="divergent"})})
+	local before=snapshot(conflict.a,conflict.b)
+	local refused=conflict.send("import_records",conflict.import_data())
+	check(not refused.ok and refused.error:find("record-conflict",1,true),"one divergent ID refuses whole operation")
+	same(snapshot(conflict.a,conflict.b).records,before.records,"divergent import cannot partially insert earlier records")
+	check(not assert(conflict.a.setup_pending(conflict.b,conflict.job.id)).consumed,"conflict cannot consume reviewed bytes")
+	local full={};for index=1,32 do full[index]=record("id-"..index) end
+	local maximum=default_fixture();maximum.bind();maximum.accept(full)
+	check(maximum.send("import_records",maximum.import_data()).result.imported==32,"32 complete reviewed records import without any bootstrap record")
+	local overflow=default_fixture();overflow.bind();table.insert(full,record("id-33"));overflow.result(full)
+	check(not overflow.a.setup_submission(overflow.b,overflow.envelope(),overflow.context),"33 records refuse before immutable submission acceptance")
+	local unreviewed=default_fixture();unreviewed.bind()
+	local claimed=setup_record("self-certified");claimed.mailbox.verified=true;claimed.mailbox.evidence_ref="agent-asserted"
+	unreviewed.result({record("ordinary-first"),claimed})
+	local accepted,claim_error=unreviewed.a.setup_submission(unreviewed.b,unreviewed.envelope(),unreviewed.context)
+	check(not accepted and claim_error:find("new record",1,true) and #snapshot(unreviewed.a,unreviewed.b).records==0,"guided ingress rejects self-certified readiness before retaining any partial import")
+	check(unreviewed.a.setup_pending(unreviewed.b,unreviewed.job.id)==nil,"rejected readiness leaves no immutable pending result preventing correction and fresh approval")
+	local manual=default_fixture();manual.bind()
+	local refused_manual=manual.send("import_records",{manual=true,setup_run_id="manual-untrusted",confirmed=true,records={record("ordinary-first"),claimed}},"manual-owner")
+	check(not refused_manual.ok and #snapshot(manual.a,manual.b).records==0,"the same readiness claims rejected at guided ingress cannot enter through manual review, even beside ordinary records")
+	claimed.mailbox.verified=false;claimed.mailbox.evidence_ref=nil
+	unreviewed.accept({record("ordinary-first"),claimed})
+	local corrected=unreviewed.send("import_records",unreviewed.import_data())
+	check(corrected.ok and corrected.result.imported==2,"a corrected explicitly reviewed ordinary proposal saves rather than remaining trapped behind its rejected readiness claim")
+	local preserved=setup_record("already-saved");preserved.mailbox.verified=true;preserved.mailbox.evidence_ref="actual-prior-setup"
+	local keep=default_fixture({preserved});keep.bind();keep.accept({preserved})
+	check(keep.send("import_records",keep.import_data()).ok and snapshot(keep.a,keep.b).records[1].mailbox.verified==true,"an identical previously saved verified record preserves its actual prior setup")
+end
+sections.setup_discard=function()
+	local f=default_fixture({record("existing")});f.bind()
+	f.accept({record("existing",{command="conflicting"}),record("not-imported")})
+	check(not f.send("import_records",f.import_data()).ok,"conflicting reviewed result remains available for an explicit discard decision")
+	local before=snapshot(f.a,f.b)
+	local data=f.import_data()
+	for _,field in ipairs({"attempt_id","setup_run_id","pending_digest"}) do
+		local changed=copy(data);changed[field]=if field=="pending_digest" then string.rep("0",64) else changed[field].."-wrong"
+		check(not f.send("discard_setup_result",changed).ok and not assert(f.a.setup_pending(f.b,f.job.id)).consumed,"discard refuses a changed exact pending identity: "..field)
+	end
+	local original_context=f.context;f.context=copy(f.context);f.context.window="not-an-observed-window"
+	check(not f.send("discard_setup_result",data).ok and not assert(f.a.setup_pending(f.b,f.job.id)).consumed,"discard requires actual current native Config membership, not a caller window label")
+	f.context=original_context
+	local reply,request_value=f.send("discard_setup_result",data)
+	check(reply.ok and reply.result.discarded==true,"exact explicit decision consumes only its reviewed pending submission")
+	local after=snapshot(f.a,f.b)
+	same(after.records,before.records,"discard imports no conflicting or adjacent records")
+	same(after.attempts,before.attempts,"discard preserves existing helper/launch history without claiming exit")
+	check(after.config_revision==before.config_revision and after.jobs[1].setup_discarded==true and assert(f.a.setup_pending(f.b,f.job.id)).consumed,"discard retains exact digest metadata distinctly from an import and leaves the roster revision unchanged")
+	local settled=f.db.image()
+	check(f.a.request(f.b,request_value,f.context),"identical discard delivery returns its existing receipt")
+	same(f.db.image(),settled,"discard replay does not consume another submission or mutate history")
+	check(not f.send("discard_setup_result",data).ok,"a new decision cannot discard an already consumed submission twice")
+	local fresh=f.send("start_setup",{setup_run_id="fresh-after-discard",command="truthful-default",cwd=f.job.cwd,window=f.context.window,config_pane=700})
+	check(fresh.ok and #snapshot(f.a,f.b).attempts==#before.attempts+1,"a discarded conflicting result no longer strands the single-run guard and a separately approved fresh run may be admitted")
+end
+sections.setup_default_recovery=function()
+	for _,claimed in ipairs({false,true}) do
+		local f=default_fixture()
+		if claimed then check(f.step("setup_claim").ok,"claim before expiry fixture") end
+		f.db.now+=30
+		local view=snapshot(f.a,f.b)
+		check(view.jobs[1].stage=="failed" and view.attempts[1].phase=="Failed","admitted and claimed native setup expire at exactly 30 seconds")
+		check(not f.step("setup_begin").ok,"expired setup never obtains effect permission")
+	end
+	local f=default_fixture();f.step("setup_claim");f.step("setup_begin")
+	f.db.now+=300
+	local reloaded=modules(f.db);f.a=reloaded
+	check(snapshot(f.a,f.b).jobs[1].stage=="submission_intent","unbound persisted native effect is never reinterpreted as an expired ticket")
+	check(f.a.sweep(f.b,{[10]={}},"fixture-host:1",f.db.now)==0,"normal sweep cannot settle an uncertain unbound effect as never-started")
+	check(not f.step("setup_begin").ok,"reload cannot obtain another native effect permission")
+	check(f.step("setup_uncertain").ok and snapshot(f.a,f.b).attempts[1].unresolved,"explicit uncertain native outcome retains reservation")
+	local pending=default_fixture();pending.bind();pending.accept({record("recovered")})
+	table.remove(pending.context.inventory.sessions[1].tabs[1].blocks,2)
+	check(pending.a.sweep(pending.b,{[10]={}},"fixture-host:1",pending.db.now)==1,"closed setup source settles its launch without discarding result")
+	edit(pending.a,pending.b,"clear-history",{attempt_revision=snapshot(pending.a,pending.b).attempt_revision})
+	check(#snapshot(pending.a,pending.b).attempts==1 and assert(pending.a.setup_pending(pending.b,pending.job.id)).bytes~=nil,"unconsumed result protects otherwise-finished history")
+	check(not pending.send("import_records",pending.import_data()).ok,"closed native source cannot automatically import")
+	local manual=pending.send("import_records",{setup_run_id=pending.run,records={record("recovered")},manual=true,confirmed=true},"manual-review")
+	check(manual.ok and manual.result.imported==1,"explicit disclosed manual recovery works in original host/session after source closure")
+	check(assert(pending.a.setup_pending(pending.b,pending.job.id)).consumed,"manual recovery consumes matching retained result atomically")
+	edit(pending.a,pending.b,"clear-history",{attempt_revision=snapshot(pending.a,pending.b).attempt_revision})
+	check(#snapshot(pending.a,pending.b).attempts==0,"consumed finished result returns to normal history eligibility")
+	local retained=default_fixture();retained.bind();retained.accept({record("retained-reference")})
+	table.remove(retained.context.inventory.sessions[1].tabs[1].blocks,2)
+	local reference=retained.import_data();reference.manual=true
+	local changed=copy(reference);changed.pending_digest=string.rep("0",64)
+	check(not retained.send("import_records",changed,"manual-review").ok,"manual retained recovery refuses a changed reviewed digest")
+	changed=copy(reference);changed.setup_run_id="another-run"
+	check(not retained.send("import_records",changed,"manual-review").ok,"manual retained recovery refuses a borrowed run identity")
+	check(#snapshot(retained.a,retained.b).records==0 and not assert(retained.a.setup_pending(retained.b,retained.job.id)).consumed,
+		"refused manual references preserve records and the pending source")
+	local mixed=copy(reference);mixed.records={record("replacement")}
+	refused_unchanged(retained.db,function()
+		return retained.a.request(retained.b,request(retained.b,"mixed-review",1,snapshot(retained.a,retained.b).config_revision,"import_records",mixed),retained.context)
+	end,"manual reference cannot substitute a second record payload")
+	local recovered=retained.send("import_records",reference,"manual-review")
+	check(recovered.ok and recovered.result.imported==1 and assert(retained.a.setup_pending(retained.b,retained.job.id)).consumed,
+		"explicit manual reference imports and consumes same-session retained bytes after source closure")
+	check(not retained.send("import_records",reference,"manual-review").ok,"consumed manual reference cannot be imported twice")
+	local strict=default_fixture();strict.bind();strict.accept({record("strict")})
+	local saved=strict.db.image()
+	for index,mutate in ipairs({
+		function(job)job.setup.extra=true end,
+		function(job)job.setup.native_session+=1 end,
+		function(job)job.setup.before_panes={10,10} end,
+		function(job)job.native.pane+=1 end,
+		function(job)job.setup.agent_pane=nil end,
+		function(job)job.pending.digest=string.rep("0",64)end,
+		function(job)job.pending.length+=1 end,
+		function(job)job.pending.consumed=true end,
+		function(job)job.ticket="exit 125 # SPAWN:"..job.token end,
+		function(job)
+			job.pending.bytes='{"schema":2,"setup_run_id":"run-default","confirmed":true,"agents":[],"unknown":null}'
+			job.pending.length=#job.pending.bytes;job.pending.digest=strict.load("wire/codec").sha256(job.pending.bytes)
+		end,
+	}) do
+		local damaged=copy(saved);mutate(damaged.authority.sessions[strict.b.session_key].jobs[strict.job.id])
+		local db=boundary(damaged);local a=modules(db)
+		local view,why=a.snapshot(strict.b)
+		check(view==nil and type(why)=="string","strict setup recovery validator refuses changed binding/projection/result "..index)
+		same(db.image(),damaged,"corrupt setup recovery never repairs or replays uncertain work")
+	end
+	local legacy=copy(saved);legacy.authority.sessions[strict.b.session_key].jobs[strict.job.id].backend="native-agent"
+	local old=modules(boundary(legacy));local view,why=old.snapshot(strict.b)
+	check(view==nil and why:find("earlier Native OMP setup protocol",1,true),"old retained setup work has visible mixed-version hold, never reinterpretation")
+	local isolated=assert(strict.a.open("host-A",5))
+	table.remove(strict.context.inventory.sessions[1].tabs[1].blocks,2)
+	check(strict.a.sweep(strict.b,{[10]={}},"fixture-host:1",strict.db.now)==1,"retention fixture closes original native source")
+	local preview=assert(strict.a.forget_sessions(isolated,{[5]=true},false))
+	check(preview.sessions==0 and preview.kept==1,"unconsumed closed-source result prevents ended-session garbage collection")
+	local single=default_fixture()
+	check(single.step("setup_claim").ok and single.step("setup_begin").ok,"one explicit setup may reach native effect intent")
+	local previous=single.job.id
+	local duplicate=single.send("start_setup",{setup_run_id="second-run",command="trusted-default",cwd=single.job.cwd,window=single.context.window,config_pane=700})
+	check(not duplicate.ok and #snapshot(single.a,single.b).jobs==1 and snapshot(single.a,single.b).jobs[1].id==previous,"a different run ID cannot admit a second paid setup helper while the original run remains unfinished")
 end
 
 local run = assert(sections[section], "unknown authority test section: " .. section)
-run()
-return "PASS " .. section .. " " .. tostring(checks) .. " SPAWN authority checks"
+local artifact=run()
+return "PASS " .. section .. " " .. tostring(checks) .. " SPAWN authority checks" .. (if artifact then "\nSPAWN_AUTHORITY_V4_JSON "..artifact else "")

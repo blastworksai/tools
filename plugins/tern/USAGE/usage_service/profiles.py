@@ -14,15 +14,15 @@ import os
 from pathlib import Path
 import re
 import stat
-import subprocess
 import sys
 import tempfile
 
 import provider_metadata as helper
+from .process_supervisor import run_bounded_async
 from .protocol import ServiceError, decode, encode
 
 BUNDLE = ("provider_metadata.py", "metadata_providers.py",
-          "usage_service/__init__.py", "usage_service/readers.py")
+          "usage_service/__init__.py", "usage_service/process_supervisor.py", "usage_service/readers.py")
 # SPAWN provider -> the provider CLI whose login USAGE reads.
 KINDS = {"claude": "claude", "openai": "codex", "kimi": "kimi", "muse": "muse",
          "antigravity": "agy", "grok": "grok"}
@@ -142,50 +142,28 @@ async def acquire_usage(store, spec):
         argv = [executable, "-I", "-B", str(bundle / "provider_metadata.py"), "--headless"]
         if user:
             argv = ["/usr/bin/sudo", "-n", "-u", user, "--", *argv]
-        process = None
         try:
-            process = await asyncio.create_subprocess_exec(*argv, stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL, env=env,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-            async def exchange():
-                process.stdin.write(raw)
-                await process.stdin.drain()
-                process.stdin.close()
-                output = bytearray()
-                while chunk := await process.stdout.read(8192):
-                    output.extend(chunk)
-                    if len(output) > helper.MAX_BYTES:
-                        raise ServiceError("source_usage_unavailable")
-                await process.wait()
-                if process.returncode != 0:
-                    raise ServiceError("source_usage_unavailable")
-                try:
-                    value = decode(bytes(output))
-                except ServiceError:
-                    raise ServiceError("source_usage_unavailable") from None
-                # A helper that failed before identifying itself is not an identity mismatch.
-                if not isinstance(value, dict) or "source_uid" not in value:
-                    raise ServiceError("source_usage_unavailable")
-                if any(value.get(k) != v for k, v in expected.items()):
-                    raise ServiceError("source_context_ambiguous")
-                result = {"version": 1}
-                if "metadata" in value:
-                    result["metadata"] = _metadata(value["metadata"])
-                if "usage" in value:
-                    result["usage"] = helper.project_usage(value["usage"], set())
-                if "error" in value:
-                    result["error"] = value["error"] if value["error"] in ERRORS else "source_usage_unavailable"
-                return result
-            return await asyncio.wait_for(exchange(), timeout=75)
-        except TimeoutError:
-            raise ServiceError("source_timeout", 503) from None
+            completed = await run_bounded_async(argv, env, None, 75, raw)
+            if completed.error is not None:
+                raise ServiceError(completed.error, 503)
+            try:
+                value = decode(completed.stdout)
+            except ServiceError:
+                raise ServiceError("source_usage_unavailable") from None
+            # A helper that failed before identifying itself is not an identity mismatch.
+            if not isinstance(value, dict) or "source_uid" not in value:
+                raise ServiceError("source_usage_unavailable")
+            if any(value.get(k) != v for k, v in expected.items()):
+                raise ServiceError("source_context_ambiguous")
+            result = {"version": 1}
+            if "metadata" in value:
+                result["metadata"] = _metadata(value["metadata"])
+            if "usage" in value:
+                result["usage"] = helper.project_usage(value["usage"], set())
+            if "error" in value:
+                result["error"] = value["error"] if value["error"] in ERRORS else "source_usage_unavailable"
+            return result
+        except ServiceError:
+            raise
         except (OSError, TypeError, ValueError, helper.SafeError):
             raise ServiceError("source_usage_unavailable", 503) from None
-        finally:
-            if process is not None and process.returncode is None:
-                process.terminate()
-                try:
-                    await asyncio.wait_for(process.wait(), timeout=15)
-                except TimeoutError:
-                    process.kill()
-                    await process.wait()

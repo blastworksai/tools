@@ -1,8 +1,8 @@
 --!strict
 -- Owner-local stdlib launcher only. No HTTP, authority-file reads or shell.
 -- Callbacks are (successful envelope | nil, {code,message} | nil, fresh cx | nil).
--- invalidate completes outstanding calls as cancelled; it cannot kill running
--- Tern processes, so every process also has a Tern timeout and stale callbacks drop.
+-- Unload releases only this VM's client lease. The service's bounded lease expiry
+-- remains authoritative when unload or a process callback cannot finish.
 local companion = {}
 local MAX_BODY = 1048576
 local PROBE_MS = 3000
@@ -56,6 +56,8 @@ local MESSAGES: { [string]: string } = {
 	source_metadata_disabled = "Headless usage reads are off; choose Allow headless usage reads in USAGE Setup.",
 	source_roster_invalid = "SPAWN's account list is invalid. Check its configuration in SPAWN.",
 	source_roster_unavailable = "SPAWN's account list could not be read.",
+	source_roster_version = "This SPAWN source version is unsupported; update USAGE. Accounts were not changed.",
+	display_disabled = "Enable Show usage in ORCH+ in USAGE Setup.",
 	local_login_unavailable = "No usable local provider login is available.",
 	vendor_usage_unavailable = "The provider's usage endpoint cannot currently prove this allowance.",
 	source_timeout = "The provider usage read exceeded its deadline.",
@@ -79,6 +81,9 @@ local pending: { [Job]: boolean } = {}
 local selected: { string }? = nil
 local clientId: string? = nil
 local clientKind: string? = nil
+local leaseId: string? = nil
+local leasePrefix: { string }? = nil
+local closed = false
 
 local function failure(code: string): Failure
 	local known = if MESSAGES[code] ~= nil then code else "internal_error"
@@ -107,6 +112,7 @@ end
 
 local function newJob(callback: Callback, timeout: number): Job
 	local job: Job = { generation = generation, deadline = tern.now() + timeout, callback = callback, done = false }
+	if closed then deferFailure(job, "cancelled"); return job end
 	pending[job] = true
 	job.timer = tern.timer(timeout, function(cx)
 		job.timer = nil
@@ -116,7 +122,7 @@ local function newJob(callback: Callback, timeout: number): Job
 end
 
 local function live(job: Job): boolean
-	return not job.done and job.generation == generation
+	return not closed and not job.done and job.generation == generation
 end
 
 local function run(job: Job, argv: { string }, stdin: string?, timeout: number, done: (any?, string?, any?) -> ())
@@ -173,7 +179,7 @@ local function candidates(): ({ { string } }?, string?)
 		if executable(base) then
 			for minor = 15, 11, -1 do
 				local directory = if variable == "LOCALAPPDATA" then "/Programs/Python/Python3" else "/Python3"
-				table.insert(paths, { base .. directory .. tostring(minor) .. "/python.exe" })
+				table.insert(paths, { (base :: string) .. directory .. tostring(minor) .. "/python.exe" })
 			end
 		end
 	end
@@ -217,6 +223,9 @@ local function launch(job: Job, command: string, input: any)
 	if not encoded then deferFailure(job, "invalid_request"); return end
 	if #stdin > MAX_BODY then deferFailure(job, "snapshot_too_large"); return end
 	discover(job, function(argv)
+		if command == "ensure" or (command == "rpc" and input.operation == "register_client") then
+			leasePrefix = table.clone(argv)
+		end
 		table.insert(argv, tern.plugin.dir .. "/usage_service.py")
 		table.insert(argv, command)
 		table.insert(argv, "--data-root")
@@ -253,6 +262,34 @@ local function launch(job: Job, command: string, input: any)
 	end)
 end
 
+local function clientLease(): string
+	if leaseId == nil then
+		-- Logical window/host names recur after reload. A late old release must
+		-- never remove the replacement VM's independently renewed lease.
+		leaseId = string.format("%s:%d:%08x:%08x", clientKind or "client", os.time(),
+			math.random(1, 2147483647), math.random(1, 2147483647))
+	end
+	return leaseId :: string
+end
+
+local function releaseLease()
+	local id, prefix = leaseId, leasePrefix
+	leaseId, leasePrefix = nil, nil
+	if id == nil or prefix == nil then return end
+	local argv = table.clone(prefix)
+	table.insert(argv, tern.plugin.dir .. "/usage_service.py")
+	table.insert(argv, "rpc")
+	table.insert(argv, "--data-root")
+	table.insert(argv, tern.plugin.data .. "/companion")
+	-- process.run starts synchronously and its bounded child survives VM unload.
+	-- Do not discover/install/start a service or wait for a callback here.
+	local ok = pcall(function()
+		tern.process.run(argv, { cwd = tern.plugin.data, timeout_ms = REQUEST_MS,
+			stdin = tern.json.encode({ operation = "unregister_client", payload = { client_id = id } }) }, function() end)
+	end)
+	if not ok then tern.log.warn("USAGE client_release_deferred") end
+end
+
 -- Configure before ensure; changing clients cancels the preceding owner's work.
 function companion.set_client(id: string, kind: string)
 	if id ~= clientId or kind ~= clientKind then companion.invalidate() end
@@ -263,6 +300,7 @@ end
 -- A configured usage_python is authoritative: invalid/missing never falls back.
 function companion.ensure(callback: Callback, options: any?)
 	local job = newJob(callback, ENSURE_MS)
+	if closed then return end
 	if type(clientId) ~= "string" or #clientId < 1 or #clientId > 160 or not clientId:match("^[%w_.:%-]+$")
 		or (clientKind ~= "host" and clientKind ~= "window" and clientKind ~= "setup") then
 		deferFailure(job, "invalid_request"); return
@@ -273,12 +311,23 @@ function companion.ensure(callback: Callback, options: any?)
 			if key ~= "install_dependencies" or type(value) ~= "boolean" then deferFailure(job, "invalid_request"); return end
 		end
 	end
-	launch(job, "ensure", { client_id = clientId, client_kind = clientKind,
+	launch(job, "ensure", { client_id = clientLease(), client_kind = clientKind,
 		install_dependencies = options ~= nil and options.install_dependencies == true })
+end
+
+function companion.renew(callback: Callback)
+	local job = newJob(callback, REQUEST_MS)
+	if closed then return end
+	if clientId == nil or (clientKind ~= "host" and clientKind ~= "window") then
+		deferFailure(job, "invalid_request"); return
+	end
+	launch(job, "rpc", { operation = "register_client",
+		payload = { client_id = clientLease(), kind = clientKind, ttl_seconds = 90 } })
 end
 
 function companion.request(operation: string, payload: any, callback: Callback)
 	local job = newJob(callback, REQUEST_MS)
+	if closed then return end
 	if type(operation) ~= "string" or #operation > 64 or not operation:match("^[a-z][a-z_]*$") or type(payload) ~= "table" then
 		deferFailure(job, "invalid_request"); return
 	end
@@ -287,11 +336,35 @@ end
 
 function companion.invalidate()
 	generation += 1
+	releaseLease()
 	selected = nil
 	for job in pending do
 		if job.timer ~= nil then job.timer:cancel(); job.timer = nil end
 		deferFailure(job, "cancelled")
 	end
+end
+
+function companion.unload()
+	if closed then return end
+	closed = true
+	companion.invalidate()
+end
+
+function companion.on_unload(callback: (any?) -> ()): boolean
+	local ok, err = pcall(tern.on, "unload", callback)
+	if ok then return true end
+	-- Older native runtimes reject this newer documented event. Only that
+	-- exact capability rejection permits lease expiry instead of registration.
+	local unsupported = if tern.context == "host" then 'tern.on: unknown host event "unload" ('
+		elseif tern.context == "window" then 'tern.on: unknown window event `unload`' else nil
+	-- Native registration failures are userdata, with their diagnostic exposed
+	-- by tostring. Keep the original object for every non-capability failure.
+	local rendered = tostring(err)
+	if unsupported ~= nil and rendered:find(unsupported, 1, true) ~= nil then
+		tern.log.warn("USAGE unload event unavailable; abandoned companion client leases expire automatically")
+		return false
+	end
+	error(err, 0)
 end
 
 return companion

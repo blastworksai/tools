@@ -3,10 +3,14 @@
 local view = {}
 function view.draw(ui, plan, source, errorText, updated)
     if errorText then
-        return {main = ui.node("checklist", {mode = "full", phases = {{id = "error", items = {{id = "error", text = "Plan unavailable", status = "blocked", note = errorText}}}}})}
+        return {main = ui.col({
+            ui.node("checklist", {mode = "full", phases = {{id = "error", items = {{id = "error", text = "Plan unavailable", status = "blocked", note = errorText}}}}}),
+        })}
     end
     if not plan then
-        return {main = ui.text({ui.span("Reading the selected interactive plan…", "muted")})}
+        return {main = ui.col({
+            ui.text({ui.span("Reading the selected interactive plan…", "muted")}),
+        })}
     end
     local items, done = {}, 0
     for _, cp in plan.checkpoints do

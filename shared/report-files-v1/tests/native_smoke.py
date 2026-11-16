@@ -24,11 +24,14 @@ TESTS = Path(__file__).resolve().parent
 ROOT = TESTS.parents[2]
 BASELINE = 'b8c9df4e8ea920586f51d7dd5ecec09963a1bc69'
 GROUPS = {
-    'orch': ('state', 'transport', 'authority', 'dispatch', 'reports', 'gates', 'health', 'workflow', 'setup_ui', 'readiness_ui'),
-    'spawn': ('behavior', 'authority', 'backend', 'dispatch', 'window_dispatch', 'mailbox', 'host_editor', 'retirement_adapter', 'managed_route', 'page_navigation'),
+    'orch': ('state', 'transport', 'authority', 'dispatch', 'reports', 'gates', 'health', 'workflow', 'source_adapter', 'source_ui', 'picker_ui', 'conversation_ui', 'channel', 'setup_ui', 'form_ui', 'readiness_ui', 'rulings', 'reclamation'),
+    'spawn': ('behavior', 'setup_review', 'authority', 'backend', 'dispatch', 'dispatch_state', 'dispatch_migration', 'window_dispatch', 'window_journal', 'window_migration', 'mailbox', 'host_editor', 'retirement_adapter', 'managed_route', 'page_navigation', 'terminal_identity', 'setup_discovery'),
+    'usage': ('accounts', 'aggregate', 'capacity', 'display', 'companion', 'host_setup', 'identity', 'metadata_runner', 'presentation', 'protocol', 'roster', 'setup', 'snapshot', 'source_collect', 'usage_channel', 'window'),
+    'work': ('projects', 'spawn', 'window', 'orchestration'),
 }
-PLUGINS = {'orch': 'ORCH+', 'spawn': 'SPAWN'}
-SCENARIOS = ('reports', 'setup', 'policy', 'lifecycle', 'rulings', 'recovery', 'repository')
+PLUGINS = {'orch': 'ORCH+', 'spawn': 'SPAWN', 'usage': 'USAGE', 'work': 'WORK'}
+SCENARIOS = ('reports', 'setup', 'policy', 'lifecycle', 'rulings', 'recovery', 'repository',
+             'conversation-fixture', 'conversation-provider', 'project-start-fixture', 'usage-display-product')
 
 
 def isolation_library():
@@ -59,7 +62,8 @@ def source_digest(root):
     h = hashlib.sha256()
     for family in PLUGINS.values():
         for path in sorted((root/'plugins/tern'/family).rglob('*')):
-            if path.is_file() and path.suffix in ('.luau', '.sh', '.awk', '.jq', '.ps1', '.toml', '.json'):
+            runtime_skill = path == root/'plugins/tern/SPAWN/skills/setup/SKILL.md'
+            if path.is_file() and (runtime_skill or path.suffix in ('.luau', '.py', '.sh', '.awk', '.jq', '.ps1', '.toml', '.json')):
                 h.update(str(path.relative_to(root)).encode())
                 h.update(path.read_bytes())
     return h.hexdigest()
@@ -70,7 +74,7 @@ def sections(path):
     text = path.read_text()
     listed = re.findall(r'table\.find\(\{([^}]+)\},\s*section\)', text, re.S)
     if listed:
-        values = re.findall(r'[\"\']([a-z_][a-z0-9_]*)[\"\']', listed[-1])
+        values = re.findall(r'[\"\']([a-z_][a-z0-9_]*)[\"\']', listed[0])
     else:
         values = re.findall(r'\bsections\.([a-z_][a-z0-9_]*)\s*=\s*function', text)
         if not values:
@@ -89,15 +93,20 @@ def select_suites(root, selection):
     if len(set(requested)) != len(requested):
         raise ValueError('duplicate suite selections')
     tasks = []
+    corpus = None
     for selected in requested:
         family, separator, selector = selected.partition(':')
         if not separator:
             raise ValueError('use orch:workflow,spawn:backend or all')
         group, _, requested_section = selector.partition('/')
-        if family == 'shared' and group == 'corpus' and not requested_section:
-            corpus = json.loads((root/'shared/report-files-v1/corpus.json').read_text())
+        if family == 'shared' and group == 'corpus':
+            if corpus is None:
+                corpus = json.loads((root/'shared/report-files-v1/corpus.json').read_text())
+            cases = [case for case in corpus['cases'] if not requested_section or case['id'] == requested_section]
+            if not cases:
+                raise ValueError('unknown corpus case '+selected)
             for consumer in ('orch', 'spawn'):
-                for case in corpus['cases']:
+                for case in cases:
                     tasks.append(dict(id=f'shared:{consumer}/{case["id"]}', family='shared', root=str(root/'plugins/tern'/PLUGINS[consumer]), consumer='wire/codec', case_id=case['id']))
             continue
         if family not in GROUPS or group not in GROUPS[family]:
@@ -239,13 +248,40 @@ def scenarios(base, root, selection, args, evidence, processes, lib):
     results = {}
     evidence['scenarios'] = results
     for name in requested:
+        if name == 'project-start-fixture':
+            from product_c2 import product_project_start
+            results[name] = product_project_start(base, root, evidence, processes, lib, args)
+            continue
+        if name in ('conversation-fixture', 'conversation-provider'):
+            from product_c2 import product_conversation_journey
+            results[name] = product_conversation_journey(
+                base, root, evidence, processes, lib, args,
+                mode='provider' if name == 'conversation-provider' else 'fixture')
+            continue
+        if name == 'usage-display-product':
+            from product_scenario import product_usage_display
+            results[name] = product_usage_display(base, root, evidence, processes, lib, args)
+            continue
         if name in ('setup', 'policy'):
             from product_c2 import product_setup, product_policy
             run = product_setup if name == 'setup' else product_policy
             results[name] = run(base, root, evidence, processes, lib, args)
             continue
-        if name != 'reports':
-            results[name] = {'status': 'unavailable', 'reason': 'checkpoint runtime driver not implemented; no fixture substitute is accepted'}
+        if name == 'lifecycle':
+            from product_c3 import lifecycle
+            results[name] = lifecycle(base, root, evidence, processes, lib, args)
+            continue
+        if name == 'recovery':
+            from product_recovery import recovery
+            results[name] = recovery(base, root, evidence, processes, lib, args)
+            continue
+        if name == 'rulings':
+            from product_rulings import rulings
+            results[name] = rulings(base, root, evidence, processes, lib, args)
+            continue
+        if name == 'repository':
+            from product_repository import repository
+            results[name] = repository(base, root, evidence, processes, lib, args)
             continue
         from product_scenario import product_reports
         comparison = {}
@@ -285,14 +321,20 @@ def scenarios(base, root, selection, args, evidence, processes, lib):
             entry['status'] = 'passed' if baseline else 'unavailable'
         if not baseline:
             entry['comparison_limitation'] = '--baseline-archive is required for C1 before/after product-path acceptance; current product proof alone does not qualify the comparison'
-    evidence['passed'] = all(value['status'] == 'passed' for value in results.values())
+    executed = [value for value in results.values() if value['status'] != 'not_run']
+    evidence['passed'] = bool(executed) and all(value['status'] == 'passed' for value in executed)
+    if args.runtime_cases is not None:
+        evidence['runtime_cases'] = args.runtime_cases
+        evidence['runtime_cell_coverage_complete'] = all(
+            value.get('qualification_complete') is True for value in results.values())
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument('--suites')
-    mode.add_argument('--scenarios')
+    mode.add_argument('--scenarios', help='comma-separated names: '+','.join(SCENARIOS)+
+                      '; conversation-provider explicitly consents to approved provider usage')
     parser.add_argument('--evidence', required=True, type=Path)
     parser.add_argument('--baseline-archive', type=Path, help='verified git archive of pinned '+BASELINE)
     parser.add_argument('--source', type=Path, default=ROOT, help='owned source root (default this checkout)')
@@ -300,10 +342,22 @@ def main():
                         help='actual deterministic native policy cells (comma-separated)')
     parser.add_argument('--policy-cases', default='passed,failed,missing,stale,empty',
                         help='actual helper check cases (comma-separated)')
+    parser.add_argument('--runtime-cases',
+                        help='bounded C3 cells, comma-separated: lifecycle/migration/NAME, lifecycle/retention/NAME, recovery/NAME or rulings/NAME; omitted means all required cells')
+    parser.add_argument('--retention-rehearsal', action='store_true',
+                        help='EXPLICIT CONSENT: one non-qualifying 65-cycle rehearsal under a separately approved supervisor; never mandatory-soak evidence')
     parser.add_argument('--capture-hold', type=int, default=0,
                         help='hold each C2 owned desktop for inspection, at most 600 seconds; release via metadata release_file')
     parser.add_argument('--capture-desktop', action='store_true',
                         help='owned 1920x1080 Xvfb/native window, 17px native fonts, passive display metadata; no video process')
+    parser.add_argument('--stop-after-source-open', action='store_true',
+                        help='focused conversation-fixture smoke ending after the actual ORCH+ Open plan button opens its source; not full journey qualification')
+    parser.add_argument('--stop-after-settings', action='store_true',
+                        help='focused conversation-fixture settings interaction/save/close/Browse pass; stop before creating an orchestration or launching work')
+    parser.add_argument('--stop-after-startup-exit', action='store_true',
+                        help='focused offline conversation-fixture smoke: one actual terminal startup exits with status 2; verify its bound failed-start surface without replay')
+    parser.add_argument('--stop-after-custom-settings', action='store_true',
+                        help='focused offline conversation-fixture smoke: Custom creation automatically opens its instance editor; instance Save preserves reusable defaults')
     parser.add_argument('--capture-start-hold', type=int, default=0,
                         help='pause before C2 inputs for recorder attachment, at most 600 seconds; metadata exposes release path')
     parser.add_argument('--control-metadata', type=Path,
@@ -312,8 +366,14 @@ def main():
                         help='verified prior-version source archive for native create/update/adoption qualification')
     parser.add_argument('--provider-readiness', action='store_true',
                         help='EXPLICIT CONSENT: policy scenario uses real configured-provider native readiness, not deterministic workers')
+    parser.add_argument('--provider-coordinator', action='store_true',
+                        help='EXPLICIT CONSENT: hybrid policy/runtime scenarios use a bounded genuine Native OMP coordinator with deterministic terminal workers; NOT provider-worker qualification')
+    parser.add_argument('--provider-native-c3', action='store_true',
+                        help='EXPLICIT CONSENT: recovery/rulings include bounded real native OMP handover/document workers using existing authentication')
     parser.add_argument('--provider-agent-dir', type=Path,
                         help='explicit existing approved native OMP agent directory used in place; credentials are never copied')
+    parser.add_argument('--usage-spawn-fixture', type=Path,
+                        help='raw authority JSON emitted by the actual SPAWN usage_roster_fixture; no seeded substitute')
     parser.add_argument('--provider-approve-landing', action='store_true',
                         help='explicitly answer only the ordinary owner gate for the disposable readiness landing; never native tool/auth/billing gates')
     args = parser.parse_args()
@@ -326,9 +386,62 @@ def main():
             parser.error('--provider-readiness requires --provider-agent-dir and --scenarios policy')
         if args.policy_cases != 'passed,failed,missing,stale,empty':
             parser.error('provider readiness uses the product fixed real passing-check task; --policy-cases selects deterministic qualification only')
-    elif args.provider_agent_dir or args.provider_approve_landing:
-        parser.error('provider authentication/landing consent options require --provider-readiness')
+    selected = set(args.scenarios.split(',')) if args.scenarios else set()
+    if args.stop_after_startup_exit or args.stop_after_custom_settings:
+        if (selected != {'conversation-fixture'} or args.provider_agent_dir or args.stop_after_settings
+                or args.stop_after_source_open or (args.stop_after_startup_exit and args.stop_after_custom_settings)):
+            parser.error('focused startup/Custom settings stops require only conversation-fixture, without provider credentials or another stop point')
+    if 'conversation-provider' in selected and not args.provider_agent_dir:
+        parser.error('--scenarios conversation-provider requires --provider-agent-dir')
+    if 'project-start-fixture' in selected and (args.provider_agent_dir or args.provider_coordinator or args.provider_readiness):
+        parser.error('--scenarios project-start-fixture is offline terminal transport proof; provider flags are not accepted')
+    hybrid = selected.intersection(('lifecycle', 'recovery', 'rulings', 'repository'))
+    if 'policy' in selected and not args.provider_readiness:
+        hybrid.add('policy')
+    if hybrid and not args.provider_coordinator:
+        parser.error('Hybrid scenarios '+','.join(sorted(hybrid))+' require --provider-coordinator --provider-agent-dir /absolute/approved/agent-dir before launch; terminal fixtures are not eligible coordinators. Use conversation-fixture for offline conversation coverage.')
+    if args.provider_coordinator and (not hybrid or not args.provider_agent_dir):
+        parser.error('--provider-coordinator requires --provider-agent-dir and a hybrid policy/lifecycle/recovery/rulings/repository scenario; conversation-provider and provider-readiness retain separate consent')
+    if args.provider_agent_dir:
+        from product_c2 import provider_prerequisite
+        unavailable = provider_prerequisite(args)
+        if unavailable:
+            parser.error(unavailable['reason'])
+    if 'usage-display-product' in selected and not args.usage_spawn_fixture:
+        parser.error('--scenarios usage-display-product requires --usage-spawn-fixture from the current SPAWN writer')
+    if args.runtime_cases is not None:
+        args.runtime_cases = args.runtime_cases.split(',')
+        namespaces = {'lifecycle/migration', 'lifecycle/retention', 'recovery', 'rulings', 'repository'}
+        if not selected or not selected.issubset({'lifecycle', 'recovery', 'rulings', 'repository'}):
+            parser.error('--runtime-cases requires only lifecycle, recovery, rulings and/or repository scenarios')
+        if len(set(args.runtime_cases)) != len(args.runtime_cases):
+            parser.error('--runtime-cases must not contain duplicate cells')
+        if any(not cell.rpartition('/')[2] or cell.rpartition('/')[0] not in namespaces
+               or cell.split('/')[0] not in selected for cell in args.runtime_cases):
+            parser.error('--runtime-cases must name cells within the selected scenarios')
+    if args.retention_rehearsal and (selected != {'lifecycle'} or
+            args.runtime_cases != ['lifecycle/retention/retention-native-rehearsal']):
+        parser.error('--retention-rehearsal requires only --scenarios lifecycle and --runtime-cases lifecycle/retention/retention-native-rehearsal')
+    if args.provider_native_c3:
+        if not args.provider_agent_dir or not selected.intersection(('recovery', 'rulings')):
+            parser.error('--provider-native-c3 requires --provider-agent-dir and --scenarios recovery and/or rulings')
+    if args.provider_agent_dir and not (args.provider_readiness or args.provider_native_c3
+                                       or args.provider_coordinator or 'conversation-provider' in selected):
+        parser.error('provider authentication requires explicit --provider-coordinator, --provider-readiness, --provider-native-c3 or conversation-provider selection')
+    if (args.provider_agent_dir and selected.intersection(('recovery', 'rulings'))
+            and not (args.provider_native_c3 or args.provider_coordinator)):
+        parser.error('provider-backed recovery/rulings require --provider-native-c3 or hybrid --provider-coordinator consent')
+    if args.provider_approve_landing and not args.provider_readiness:
+        parser.error('landing consent requires --provider-readiness; C3 consent cannot approve a landing')
     evidence = {'passed': False, 'mode': 'suites' if args.suites else 'scenarios', 'platform': sys.platform, 'checks': []}
+    if args.retention_rehearsal:
+        evidence.update(purpose='non-qualifying retention rehearsal', qualification_complete=False)
+    if args.provider_coordinator:
+        evidence['hybrid_qualification'] = {
+            'coordinator': 'genuine bounded Native OMP, approved authentication in place',
+            'workers': 'deterministic managed terminals unless separately opted into provider-native-c3',
+            'not_claimed': 'genuine-provider-worker qualification or autonomous provider reasoning',
+            'automatic_native_permission_answers': False}
     processes = []
     lib = None
     sweep = None
@@ -338,7 +451,8 @@ def main():
         lib = isolation_library()
         if not lib.TERN:
             raise RuntimeError('unavailable: tern not on PATH')
-        base = Path(tempfile.mkdtemp(prefix='report-native-'))
+        # The private Unix socket path also includes the full scenario name.
+        base = Path(tempfile.mkdtemp(prefix='rn-'))
         evidence['scratch'] = str(base)
         sweep = lib.Sweep(base)
         evidence['runtime'] = subprocess.run([lib.TERN, '--version'], capture_output=True, text=True, timeout=10, check=True, env={k: v for k, v in os.environ.items() if not k.startswith(('TERN_', 'STENCIL_'))}).stdout.strip()

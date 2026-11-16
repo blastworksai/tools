@@ -1,3 +1,4 @@
+# Generated from shared/report-files-v1 by sync.py; edit the canonical source.
 # Closed worker report/reply schemas, kept in step with wire/codec.luau. The caller
 # checks strict JSON, provisioned binding and exact message hashes separately.
 def id: type=="string" and test("^[A-Za-z0-9_-]{1,96}\\z");
@@ -14,6 +15,14 @@ def entries($minimum;$maximum;check): type=="array" and length>=$minimum and len
 def references: entries(0;256;text(1024));
 def texts: entries(0;256;text(32768));
 def nonnegative: type=="number" and .>=0 and .<=9007199254740991 and .==floor;
+def context_snapshot:
+ shape(["current_tokens","window_tokens","observed_at_ms"];["first_turn_tokens"]) and
+ (.current_tokens|nonnegative) and (.window_tokens|positive) and (.observed_at_ms|nonnegative) and
+ .current_tokens<=.window_tokens and optional("first_turn_tokens";nonnegative) and
+ ((has("first_turn_tokens")|not) or .first_turn_tokens<=.window_tokens);
+def measured:
+ optional("context_used_pct";percent) and optional("context_snapshot";context_snapshot) and
+ ((has("context_used_pct") and has("context_snapshot"))|not);
 def exit_code: type=="number" and .>=-2147483648 and .<=4294967295 and .==floor;
 def absolute: text(4096) and test("^(/|[A-Za-z]:[/\\\\]|\\\\\\\\)");
 def class: type=="string" and test("^[a-z][a-z0-9-]{0,31}\\z");
@@ -22,20 +31,35 @@ def revision: type=="string" and test("^[0-9a-f]{40}([0-9a-f]{24})?\\z");
 def relative_path($n): text($n) and (startswith("/")|not) and (test("\\\\|^[A-Za-z]:|(^|/)\\.\\.(/|\\z)")|not);
 def finding: shape(["finding_id","path","summary"];["line"]) and (.finding_id|id) and (.path|text(1024)) and optional("line";positive) and (.summary|text(400));
 def findings: entries(0;32;finding) and ((map(.finding_id)|unique|length)==length);
+def bounded($n): text($n) and (contains("\u0000")|not);
+def nonblank($n): bounded($n) and test("[^ \t\r\n\u000b\u000c]");
+def project_choice:
+ (has("orch_project_id")!=has("new_project_name")) and optional("orch_project_id";id) and optional("new_project_name";nonblank(160));
+def template_fields:
+ type=="object" and length<=16 and all(to_entries[];
+  (.key|class and .!="input") and (.value|type=="string" and utf8bytelength<=2048 and (contains("\u0000")|not)));
+def proposed_source:
+ if .kind|IN("plan_file","board") then
+  fields(["kind","path","revision"]) and (.path|absolute and bounded(4096)) and (.revision|nonblank(1024))
+ else shape(["kind","template_id","revision","input"];["custom_fields"]) and .kind=="template" and (.template_id|id) and (.revision|nonblank(1024)) and (.input|nonblank(32768)) and optional("custom_fields";template_fields) end;
+def project_start:
+ fields(["owner_id","owner_generation","activation_token","orch_project_id","project_revision","decision_context"]) and
+ (.owner_id|id) and (.owner_generation|positive) and (.activation_token|sha) and
+ (.orch_project_id|id) and (.project_revision|positive) and (.decision_context|sha);
 def report_payload:
  .kind as $kind | .payload |
  if $kind=="REGISTER" then
-  fields(["capabilities"]) and (.capabilities|entries(1;7;IN("report-files-v1","native-ask-v1","worker-poll-v1","argv-v1","coordinator-control-v1","check-runner-v1","release-manager-v1")) and (length==(unique|length)) and index("report-files-v1")!=null)
- elif $kind=="READY" then shape(["state"];["summary","context_used_pct"]) and .state=="idle" and optional("summary";text(1024)) and optional("context_used_pct";percent)
+  fields(["capabilities"]) and (.capabilities|entries(1;8;IN("report-files-v1","native-ask-v1","worker-poll-v1","argv-v1","coordinator-control-v1","project-start-v1","check-runner-v1","release-manager-v1")) and (length==(unique|length)) and index("report-files-v1")!=null)
+ elif $kind=="READY" then shape(["state"];["summary","context_used_pct","context_snapshot"]) and .state=="idle" and optional("summary";text(1024)) and measured
  elif $kind=="ACCEPTED" then fields(["assignment_sha256"]) and (.assignment_sha256|sha)
- elif $kind=="HEARTBEAT" then shape(["state"];["summary","request_id","context_used_pct"]) and (.state|IN("working","idle","waiting","blocked")) and optional("summary";text(1024)) and optional("request_id";id) and optional("context_used_pct";percent)
+ elif $kind=="HEARTBEAT" then shape(["state"];["summary","request_id","context_used_pct","context_snapshot"]) and (.state|IN("working","idle","waiting","blocked")) and optional("summary";text(1024)) and optional("request_id";id) and measured
  elif $kind=="WAITING" then shape(["reason"];["request_id"]) and (.reason|text(1024)) and optional("request_id";id)
  elif $kind=="BLOCKED" then shape(["reason"];["evidence"]) and (.reason|text(32768)) and optional("evidence";references)
  elif $kind=="ASK" then
   shape(["question","options"];["evidence"]) and (.question|text(32768)) and optional("evidence";references) and
   (.options|entries(1;16;fields(["id","label"]) and (.id|id) and (.label|text(1024))) and ((map(.id)|unique|length)==length))
  elif $kind=="CHECKPOINT" then
-  shape(["checkpoint_id","task_ref","project_id","worktree_ref","artifact_revision","completed","remaining","holds","checks"];["plan_ref","plan_revision","request_id"]) and optional("request_id";id) and
+  shape(["checkpoint_id","task_ref","project_id","worktree_ref","artifact_revision","completed","remaining","holds","checks"];["plan_ref","plan_revision","request_id","context_used_pct","context_snapshot"]) and optional("request_id";id) and measured and
   (.checkpoint_id|id) and (.task_ref|text(1024)) and (.project_id|id) and (.worktree_ref|text(1024)) and (.artifact_revision|text(1024)) and
   (.completed|texts) and (.remaining|texts) and (.holds|texts) and
   (.checks|entries(0;256;fields(["check_id","artifact_revision","outcome","evidence_ref"]) and (.check_id|id) and (.artifact_revision|text(1024)) and (.outcome|IN("passed","failed","not_run")) and (.evidence_ref|text(1024)))) and
@@ -73,11 +97,23 @@ def report_payload:
   (.outcome!="stale_target" or .observed_target_revision!=.target_revision) and
   (if .outcome=="landed" then has("reason")|not elif .outcome=="stale_target" then true else has("reason") end)
  elif $kind=="COORDINATOR_PROPOSAL" then
-  shape(["owner_id","owner_generation","activation_token","proposal_id","kind","work_id","project_id"];["checkpoint_id","record_id","record_revision","prompt"]) and
-  (.owner_id|id) and (.owner_generation|positive) and (.activation_token|sha) and (.proposal_id|id) and (.work_id|id) and (.project_id|id) and
-  (if .kind=="dispatch" then (has("checkpoint_id")|not) and (.record_id|text(1024)) and (.record_revision|type=="number" and .>=0 and .<=9007199254740991 and .==floor) and (.prompt|text(32768))
-   else (.kind|IN("report","review","rollover","landing")) and (has("record_id")|not) and (has("record_revision")|not) and (has("prompt")|not) and
-    (if .kind=="report" then has("checkpoint_id")|not else .checkpoint_id|id end) end)
+  (.owner_id|id) and (.owner_generation|positive) and (.activation_token|sha) and (.proposal_id|id) and
+  (if .kind=="new_work" then
+   shape(["owner_id","owner_generation","activation_token","proposal_id","kind","record_id","record_revision","prompt","scope","checks"];["orch_project_id","new_project_name","base_ref","repository_id","target_ref","target_revision"]) and project_choice and
+   (.record_id|text(1024)) and (.record_revision|nonnegative) and (.prompt|nonblank(32768)) and
+   (.scope|fields(["paths","systems"]) and (.paths|entries(0;64;bounded(256))) and (.systems|entries(0;16;bounded(80)))) and
+   (.checks|entries(0;16;fields(["check_id","argv"]) and (.check_id|id) and (.argv|entries(1;16;bounded(512)))) and (map(.check_id)|unique|length)==length) and
+   optional("base_ref";bounded(256)) and optional("repository_id";id) and optional("target_ref";bounded(256)) and optional("target_revision";revision) and
+   (has("target_ref")==has("target_revision")) and ((has("target_ref")|not) or has("repository_id"))
+  elif .kind=="add_source" then
+   shape(["owner_id","owner_generation","activation_token","proposal_id","kind","source"];["orch_project_id","new_project_name"]) and project_choice and (.source|proposed_source)
+  else
+   shape(["owner_id","owner_generation","activation_token","proposal_id","kind","work_id","project_id"];["checkpoint_id","record_id","record_revision","prompt"]) and (.work_id|id) and (.project_id|id) and
+   (if .kind=="dispatch" then (has("checkpoint_id")|not) and (.record_id|text(1024)) and (.record_revision|nonnegative) and (.prompt|text(32768))
+    else (.kind|IN("report","review","rollover","landing")) and (has("record_id")|not) and (has("record_revision")|not) and (has("prompt")|not) and
+     (if .kind=="report" then has("checkpoint_id")|not else .checkpoint_id|id end) end)
+  end)
+ elif $kind=="PROJECT_START_CLAIM" then project_start
  elif $kind=="COORDINATOR_RELEASE" then
   fields(["owner_id","owner_generation","activation_token","quiescent"]) and (.owner_id|id) and (.owner_generation|positive) and (.activation_token|sha) and .quiescent==true
  elif $kind=="reply_ack" then
@@ -85,7 +121,7 @@ def report_payload:
  else false end;
 def correlations:
  (has("action_id")==has("action_revision")) and optional("action_id";id) and optional("action_revision";positive) and
- (if .kind|IN("REVIEW_RESULT","LANDING_RESULT","LABEL","DEPLOY_RESULT","reply_ack","COORDINATOR_RELEASE") then has("action_id")
+ (if .kind|IN("REVIEW_RESULT","LANDING_RESULT","LABEL","DEPLOY_RESULT","reply_ack","COORDINATOR_RELEASE","PROJECT_START_CLAIM") then has("action_id")
   elif .kind|IN("CHECKPOINT","DONE","WAITING","BLOCKED") then true else has("action_id")|not end) and
  (has("handover_id")==has("handover_token")) and optional("handover_id";id) and optional("handover_token";token) and
  (.kind=="ACCEPTED" or (has("handover_id")|not));
@@ -96,13 +132,22 @@ def report:
  .version==3 and binding and (.enrolment_token|token) and (.event_id|id) and (.seq|positive) and correlations and report_payload;
 def reply:
  .version==1 and binding and (.message_id|id) and (.reply_seq|positive) and (.action_id|id) and (.action_revision|positive) and
- fields(["version","logical_session_id","worker_id","worker_generation","launch_request_id","work_id","message_id","reply_seq","action_id","action_revision","kind","payload"]+(if .kind=="owner_decision" then ["gate_id","gate_revision"] else [] end)) and
+ fields(["version","logical_session_id","worker_id","worker_generation","launch_request_id","work_id","message_id","reply_seq","action_id","action_revision","kind","payload"]+(if .kind|IN("owner_decision","record_ruling") then ["gate_id","gate_revision"] else [] end)) and
  (if .kind=="assignment" then
   .payload|fields(["assignment_ref","assignment_sha256","instructions"]) and (.assignment_ref|text(1024)) and (.assignment_sha256|sha) and (.instructions|text(32768))
  elif .kind=="report_request" then
   .payload|fields(["request_id","requested_kind","reason"]) and (.request_id|id) and (.requested_kind|IN("HEARTBEAT","CHECKPOINT")) and (.reason|text(1024))
  elif .kind=="owner_decision" then
   (.gate_id|id) and (.gate_revision|positive) and (.payload|fields(["choice_id","answer"]) and (.choice_id|id) and (.answer|text(32768)))
+ elif .kind=="record_ruling" then
+  (.gate_id|id) and (.gate_revision|positive) and
+  (.payload|fields(["path","marker","entry","expected_document_sha256","expected_non_rulings_sha256"]) and
+   (.path|absolute and (test("\\x00")|not)) and
+   (.marker|text(256) and test("^orchplus-ruling:[A-Za-z0-9_-]+:[A-Za-z0-9_-]+\\z")) and
+   (.entry|text(8192) and (test("[\\r\\x00]")|not) and (endswith("\n")|not) and
+    (split("\n")|all(.[];startswith("> ") and (.[2:]|test("[<>`]")|not)))) and
+   (.expected_document_sha256|sha) and (.expected_non_rulings_sha256|sha)) and
+  ((.payload.marker|split(":")|last)==.gate_id)
  elif .kind=="landing_grant" then
   .payload|shape(["landing_id","grant_id","project_id","checkpoint_id","repo_ref","target_ref","target_revision","source_ref","source_revision","builder_work_id","proof"];["review_id","reviewer_family"]) and
   (.landing_id|id) and (.grant_id|id) and (.project_id|id) and (.checkpoint_id|id) and (.repo_ref|text(1024)) and (.target_ref|text(1024)) and
@@ -127,6 +172,7 @@ def reply:
   .payload|fields(["landing_id","project_id","repo_ref","target_ref","expected_revision","current_revision","reason"]) and
   (.landing_id|id) and (.project_id|id) and (.repo_ref|text(1024)) and (.target_ref|text(1024)) and
   (.expected_revision|text(1024)) and (.current_revision|text(1024)) and (.reason|text(1024))
+ elif .kind=="project_start" then .payload|project_start
  elif .kind=="coordinator_activation" then
   .payload|fields(["owner_id","owner_generation","activation_token","instructions"]) and (.owner_id|id) and (.owner_generation|positive) and (.activation_token|sha) and (.instructions|text(32768))
  elif .kind=="coordinator_retirement" then

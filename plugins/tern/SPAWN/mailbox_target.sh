@@ -5,6 +5,8 @@ set -eu
 umask 077
 root=$1 handle=$2 mode=$3 selected=$4 operation=$5 identity=$6 report_floor=$7 reply_floor=$8
 producer_helper=$9
+withdrawn_starts_b64=${10:-}
+[ -z "$withdrawn_starts_b64" ] || [ "$mode" = retire ] || [ "$mode" = reconcile_retire ] || { printf "binding_mismatch\n"; exit 0; }
 out() { printf '%s\n' "$1"; exit 0; }
 full() { printf 'full\n%s\n%s\n%s\n' "$1" "$2" "$3"; exit 0; }
 case "$handle" in ''|*[!A-Za-z0-9_-]*) out binding_mismatch;; esac
@@ -34,6 +36,94 @@ decode() {
  else base64 -D; fi
 }
 regular() { [ ! -L "$1" ] && [ -f "$1" ]; }
+# Withdrawal checks use the same reviewed, bundled JSON validators as consumption.
+fail() { out "$1"; }
+b64() { base64 < "$1" | tr -d '\r\n'; }
+un64() { decode; }
+safe_file() { regular "$1" && [ "$(wc -c < "$1")" -le "$2" ] || out binding_mismatch; }
+strict() {
+ safe_file "$1" "$2"
+ [ "$(wc -c < "$1")" -eq "$(tr -d '\000' < "$1" | wc -c)" ] || out invalid_schema
+ { if iconv -f UTF-8 -t UTF-8 "$1" 2>/dev/null; then printf '\n0\n'; else printf '\n1\n'; fi; } | awk 'END { exit ($0 != "0") }' || out invalid_schema
+ awk -f "$validator" "$1" || out invalid_schema
+}
+has_capability() { jq -e --arg name "$1" '(.capabilities // [])|type=="array" and index($name)!=null' "$box/provision.json" >/dev/null || out unsupported_capability; }
+bind_check() {
+ jq -e --argjson binding "$binding" 'all(["logical_session_id","worker_id","worker_generation","launch_request_id","work_id"][];. as $key|$binding[$key]==$value[$key])' --argjson value "$(cat "$1")" "$box/provision.json" >/dev/null || out binding_mismatch
+}
+# This is authorization to discard exact physical bytes, never a consumer ACK.
+validate_withdrawn() {
+ [ -n "$withdrawn_starts_b64" ] || return 0
+ [ "${#withdrawn_starts_b64}" -le 4096 ] || fail invalid_schema
+ printf '%s' "$withdrawn_starts_b64" | un64 > "$work/withdrawn" || fail invalid_schema
+ strict "$work/withdrawn" 3072
+ [ "$(b64 "$work/withdrawn")" = "$withdrawn_starts_b64" ] || fail invalid_schema
+ jq -e --argjson floor "$reply_floor" '
+  def integer: type=="number" and .>=1 and .<=9007199254740991 and .==floor;
+  type=="array" and length>=1 and length<=8 and
+  all(.[]; type=="object" and keys==["message_id","message_sha256","reply_seq"] and
+   (.reply_seq|integer) and (.message_id|type=="string" and test("\\A[A-Za-z0-9_-]{1,96}\\z")) and
+   (.message_sha256|type=="string" and test("\\A[0-9a-f]{64}\\z"))) and
+  ([.[].reply_seq]==[range($floor+1;$floor+1+length)])
+ ' "$work/withdrawn" >/dev/null || fail invalid_schema
+ has_capability coordinator-control-v1; has_capability project-start-v1
+ jq -e --arg handle "$handle" '
+  def id: type=="string" and test("\\A[A-Za-z0-9_-]{1,96}\\z");
+  .binding as $b | .handle==$handle and $b.mailbox_handle==$handle and
+  ($b|keys)==["enrolment_token","launch_request_id","logical_session_id","mailbox_handle","work_id","worker_generation","worker_id"] and
+  ([$b.logical_session_id,$b.worker_id,$b.launch_request_id,$b.work_id,$b.mailbox_handle]|all(.[];id)) and
+  ($b.worker_generation|type=="number" and .>=1 and .<=9007199254740991 and .==floor) and
+  ($b.enrolment_token|type=="string" and test("\\A[A-Za-z0-9_-]{16,128}\\z"))
+ ' "$box/provision.json" >/dev/null || fail binding_mismatch
+ jq -r '.[].reply_seq' "$work/withdrawn" > "$work/withdrawn-seqs"
+ # Include hidden entries; every above-floor slot must be expressly named.
+ for entry in "$box/replies/"* "$box/replies/".[!.]* "$box/replies/"..?*; do
+  [ ! -e "$entry" ] && [ ! -L "$entry" ] && continue
+  safe_dir "$entry"
+  n=${entry##*/}; case "$n" in ''|0*|*[!0-9]*) fail binding_mismatch;; esac
+  [ "${#n}" -le 16 ] && [ "$n" -le 9007199254740991 ] || fail binding_mismatch
+  [ "$n" -le "$reply_floor" ] || jq -e --argjson n "$n" 'any(.[];.reply_seq==$n)' "$work/withdrawn" >/dev/null || fail incomplete
+ done
+ while IFS= read -r reply_seq; do
+  slot_dir=$box/replies/$reply_seq; safe_dir "$slot_dir"
+  manifest=$slot_dir/manifest.json; strict "$manifest" 2048
+  jq -e --arg handle "$handle" --argjson seq "$reply_seq" --slurpfile withdrawn "$work/withdrawn" '
+   (keys|sort)==(["transport","version","type","mailbox_handle","direction","slot","message_id","message_sha256","message_bytes","count"]|sort) and
+   .transport=="report-files-v1" and .version==1 and .type=="manifest" and .direction=="reply" and .mailbox_handle==$handle and .slot==$seq and
+   (.message_bytes|type=="number" and .>=1 and .<=65536 and .==floor) and .count==(.message_bytes/2048|ceil) and
+   (. as $m|any($withdrawn[0][];.reply_seq==$seq and .message_id==$m.message_id and .message_sha256==$m.message_sha256))
+  ' "$manifest" >/dev/null || fail binding_mismatch
+  count=$(jq -r '.count' "$manifest"); seen=0
+  for part in "$slot_dir/"* "$slot_dir/".[!.]* "$slot_dir/"..?*; do
+   [ ! -e "$part" ] && [ ! -L "$part" ] && continue
+   safe_file "$part" 4096; name=${part##*/}
+   case "$name" in manifest.json) ;; chunk-*.json)
+    idx=${name#chunk-}; idx=${idx%.json}; case "$idx" in ''|0*|*[!0-9]*) fail binding_mismatch;; esac
+    [ "${#idx}" -le 2 ] && [ "$idx" -le "$count" ] || fail binding_mismatch;;
+    *) fail binding_mismatch;; esac
+   seen=$((seen+1))
+  done
+  [ "$seen" -eq "$((count+1))" ] || fail incomplete
+  index=1; : > "$work/reply"
+  while [ "$index" -le "$count" ]; do
+   chunk=$slot_dir/chunk-$index.json; strict "$chunk" 4096
+   jq -e --argjson manifest "$(cat "$manifest")" --argjson index "$index" '
+    (keys|sort)==(["transport","version","type","mailbox_handle","direction","slot","message_id","message_sha256","index","count","data_b64"]|sort) and
+    .type=="chunk" and .index==$index and (. as $chunk|all(["transport","version","mailbox_handle","direction","slot","message_id","message_sha256","count"][];. as $key|$chunk[$key]==$manifest[$key])) and
+    (.data_b64|type=="string" and length>=4 and length<=2732 and length%4==0 and test("^[A-Za-z0-9+/]*={0,2}$"))
+   ' "$chunk" >/dev/null || fail content_conflict
+   encoded=$(jq -r '.data_b64' "$chunk"); printf '%s' "$encoded" | un64 > "$work/slice" 2>/dev/null || fail invalid_schema
+   [ "$(b64 "$work/slice")" = "$encoded" ] || fail invalid_schema
+   expected=2048; [ "$index" -lt "$count" ] || expected=$(jq '.message_bytes-(.count-1)*2048' "$manifest")
+   [ "$(wc -c < "$work/slice")" -eq "$expected" ] || fail incomplete
+   cat "$work/slice" >> "$work/reply"; index=$((index+1))
+  done
+  [ "$(hash "$work/reply")" = "$(jq -r '.message_sha256' "$manifest")" ] || fail content_conflict
+  strict "$work/reply" 65536; bind_check "$work/reply"
+  jq -e --argjson seq "$reply_seq" --arg message "$(jq -r '.message_id' "$manifest")" '.kind=="project_start" and .reply_seq==$seq and .message_id==$message' "$work/reply" >/dev/null || fail binding_mismatch
+  jq -e -f "$reply_validator" "$work/reply" >/dev/null || fail invalid_schema
+ done < "$work/withdrawn-seqs"
+}
 if [ "$mode" = provision ]; then
  safe_dir "${producer_helper%/*}"
  regular "$producer_helper" && [ -r "$producer_helper" ] || out binding_mismatch
@@ -77,6 +167,38 @@ case "$mode" in
   ;;
  *) if [ ! -e "$box" ] && [ ! -L "$box" ]; then [ "$mode" != reconcile_retire ] || out retired; out missing; fi; safe_dir "$box";;
 esac
+# Read-only observation: no admission lock, publication or cleanup side effect.
+if [ "$mode" = inventory ]; then
+ case "$selected" in ''|*[!0-9]*) out binding_mismatch;; esac
+ [ "${#selected}" -le 12 ] && [ "$selected" -ge 1 ] && [ "$selected" -le 315360000000 ] || out binding_mismatch
+ now=$(date +%s) || out storage_error
+ case "$now" in ''|*[!0-9]*) out storage_error;; esac
+ observed=$((now*1000)); cutoff=$((observed-selected))
+ inventory=$(
+  { find "$box" -print || printf '!storage_error\n'; } | (
+   files=0 stale=0 directories=0
+   while IFS= read -r entry; do
+    [ "$entry" != "$box" ] || continue
+    case "$entry" in ("$box"/*) ;; (*) out storage_error;; esac
+    [ ! -L "$entry" ] || out binding_mismatch
+    relative=${entry#"$box"/}
+    case "$relative" in (*/*/*/*) out binding_mismatch;; esac
+    if [ -d "$entry" ]; then
+     directories=$((directories+1)); [ "$directories" -le 1024 ] || out storage_error
+    elif regular "$entry"; then
+     files=$((files+1)); [ "$files" -le 1000000 ] || out storage_error
+     if modified=$(stat -c %Y "$entry" 2>/dev/null); then :
+     elif modified=$(stat -f %m "$entry" 2>/dev/null); then :
+     else out storage_error; fi
+     case "$modified" in ''|*[!0-9]*) out storage_error;; esac
+     [ $((modified*1000)) -gt "$cutoff" ] || stale=$((stale+1))
+    else out binding_mismatch; fi
+   done
+   printf '{"observed_at_ms":%s,"open_files":%s,"stale_files":%s}\n' "$observed" "$files" "$stale"
+  )
+ )
+ out "$inventory"
+fi
 # Read request input before acquiring shared admission: a slow stdin sender
 # cannot hold the mailbox capacity gate. Read-only/compaction need no input.
 case "$mode" in
@@ -106,7 +228,10 @@ if ! mkdir "$admission" 2>/dev/null; then
  printf 'admission_full\ncapacity_admission\n1\n1\n'; exit 0
 fi
 admitted=1
-cleanup() { [ "$admitted" = 0 ] || rmdir "$admission"; }
+clear_withdrawn_work() {
+ [ -z "${work:-}" ] || { for file in "$work/"*; do [ ! -e "$file" ] || rm "$file"; done; rmdir "$work"; work=; }
+}
+cleanup() { clear_withdrawn_work; [ "$admitted" = 0 ] || rmdir "$admission"; }
 trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
 # Target and worker hold the same short-lived lock through scan and commit.
@@ -161,6 +286,58 @@ if [ "$mode" = reconcile_compact ]; then
  done
  out compacted
 fi
+# All retirement safety checks precede deletion, including settled-prefix deletion.
+if [ "$mode" = retire ]; then
+ case "$report_floor:$reply_floor" in *[!0-9:]*) out binding_mismatch;; esac
+ [ -n "$report_floor" ] && [ -n "$reply_floor" ] && [ "${#report_floor}" -le 16 ] && [ "${#reply_floor}" -le 16 ] &&
+  [ "$report_floor" -le 9007199254740991 ] && [ "$reply_floor" -le 9007199254740991 ] || out binding_mismatch
+ for entry in "$box/"* "$box/".[!.]* "$box/"..?*; do
+  [ ! -e "$entry" ] && [ ! -L "$entry" ] && continue
+  case "${entry##*/}" in reports|replies|acks|watermarks|producer|consumer|staging|capacity.lock) safe_dir "$entry";;
+   provision.json|manifest.json) regular "$entry" || out binding_mismatch;; *) out binding_mismatch;; esac
+ done
+ for child in producer consumer staging; do
+  safe_dir "$box/$child"
+  for entry in "$box/$child/"* "$box/$child/".[!.]* "$box/$child/"..?*; do
+   [ ! -e "$entry" ] && [ ! -L "$entry" ] || out incomplete
+  done
+ done
+ for stream in reports replies acks watermarks; do
+  safe_dir "$box/$stream"
+  floor=$report_floor; [ "$stream" != replies ] || floor=$reply_floor
+  for entry in "$box/$stream/"* "$box/$stream/".[!.]* "$box/$stream/"..?*; do
+   [ ! -e "$entry" ] && [ ! -L "$entry" ] && continue
+   n=${entry##*/}; case "$stream" in acks|watermarks) n=${n%.json}; [ "${entry##*/}" = "$n.json" ] || out binding_mismatch;; esac
+   case "$n" in ''|0*|*[!0-9]*) out binding_mismatch;; esac
+   [ "${#n}" -le 16 ] && [ "$n" -le 9007199254740991 ] || out binding_mismatch
+   if [ "$n" -gt "$floor" ]; then
+    [ "$stream" = watermarks ] || { [ "$stream" = replies ] && [ -n "$withdrawn_starts_b64" ]; } || out incomplete
+   fi
+   case "$stream" in acks|watermarks) regular "$entry" || out binding_mismatch;; *)
+    safe_dir "$entry"
+    for part in "$entry/"* "$entry/".[!.]* "$entry/"..?*; do
+     [ ! -e "$part" ] && [ ! -L "$part" ] && continue
+     regular "$part" || out binding_mismatch
+     name=${part##*/}; case "$name" in manifest.json) ;; chunk-*.json)
+      idx=${name#chunk-}; idx=${idx%.json}; case "$idx" in ''|0*|*[!0-9]*) out binding_mismatch;; esac
+      [ "${#idx}" -le 2 ] && [ "$idx" -le 32 ] || out binding_mismatch;; *) out binding_mismatch;; esac
+    done;; esac
+  done
+ done
+ regular "$box/provision.json" || out incomplete
+ if [ -n "$withdrawn_starts_b64" ]; then
+  safe_dir "${producer_helper%/*}"
+  validator=${producer_helper%/*}/mailbox_json.awk; reply_validator=${producer_helper%/*}/mailbox_reply.jq
+  safe_file "$validator" 16384; safe_file "$reply_validator" 32768
+  for tool in jq iconv awk base64; do command -v "$tool" >/dev/null 2>&1 || out storage_error; done
+  strict "$box/provision.json" 2048
+  jq -e --arg handle "$handle" '.handle==$handle and .binding.mailbox_handle==$handle' "$box/provision.json" >/dev/null || out binding_mismatch
+  binding=$(jq -c '.binding' "$box/provision.json")
+  work=$box/staging/withdraw-$operation; mkdir "$work" || out incomplete
+  validate_withdrawn
+  clear_withdrawn_work
+ fi
+fi
 if [ "$mode" = compact ] || [ "$mode" = retire ]; then
  for stream in reports replies acks; do
   floor=$report_floor; [ "$stream" != replies ] || floor=$reply_floor
@@ -168,7 +345,7 @@ if [ "$mode" = compact ] || [ "$mode" = retire ]; then
    [ -e "$entry" ] || continue
    n=${entry##*/}; [ "$stream" != acks ] || n=${n%.json}
    case "$n" in ''|0*|*[!0-9]*) out binding_mismatch;; esac
-   [ "$n" -le "$floor" ] || { [ "$mode" != retire ] || out incomplete; continue; }
+   [ "$n" -le "$floor" ] || { [ "$mode" = retire ] && [ "$stream" = replies ] && [ -n "$withdrawn_starts_b64" ]; } || { [ "$mode" != retire ] || out incomplete; continue; }
    if [ "$stream" = acks ]; then regular "$entry" || out binding_mismatch; rm "$entry"
    else
     safe_dir "$entry"

@@ -15,7 +15,7 @@ import sys
 CANON = Path(__file__).resolve().parent
 ROOT = Path(__file__).resolve().parents[2]
 PLUGINS = ROOT/'plugins/tern'
-MODULES = ('version', 'manifest', 'source', 'requires', 'confirm', 'state', 'discovery', 'cli', 'window')
+MODULES = ('version', 'manifest', 'source', 'requires', 'confirm', 'journal', 'state', 'discovery', 'cli', 'shell', 'observe', 'remote', 'host', 'window')
 HEADER = b'-- Vendored from shared/tern-updater by sync.py; edit there, then run sync.py.\n'
 REGISTER = 'require("./updater/window").register('
 
@@ -39,8 +39,18 @@ def resolve(arg):
     return path
 
 
+def shell_source():
+    source = (PLUGINS/'SPAWN/backend.luau').read_bytes()
+    start, end = b'local Backend = {}', b'-- Mailbox adapters use this same identity-fenced SSH transport constructor.'
+    if source.count(start) != 1 or source.count(end) != 1:
+        raise ValueError('SPAWN serializer boundaries changed; update the shared extraction explicitly')
+    body = start + source.split(start, 1)[1].split(end, 1)[0]
+    return (b'-- Generated from plugins/tern/SPAWN/backend.luau by updater sync.py; edit the serializer there.\n'
+            + body.rstrip() + b'\nreturn Backend\n')
+
+
 def expected():
-    return {f'{m}.luau': HEADER + (CANON/f'{m}.luau').read_bytes() for m in MODULES}
+    return {f'{m}.luau': HEADER + (shell_source() if m == 'shell' else (CANON/f'{m}.luau').read_bytes()) for m in MODULES}
 
 
 def problems(plugin_dir, want):
@@ -66,9 +76,15 @@ def main(argv=None):
     want = expected()
     if args.check:
         found = [p for d in dirs for p in problems(d, want)]
+        if not (CANON/'shell.luau').is_file() or (CANON/'shell.luau').read_bytes() != shell_source():
+            found.append(f'differs {CANON / "shell.luau"}')
         for line in found:
             print(line)
         return 1 if found else 0
+    generated = shell_source()
+    if not (CANON/'shell.luau').is_file() or (CANON/'shell.luau').read_bytes() != generated:
+        (CANON/'shell.luau').write_bytes(generated)
+        print(f'wrote {CANON / "shell.luau"}')
     for d in dirs:
         target = d/'updater'
         target.mkdir(exist_ok=True)

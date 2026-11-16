@@ -74,7 +74,8 @@ end
 local function decode_calendar(raw: any): any?
 	if type(raw) ~= "table" then return nil end
 	local calendar = {}
-	for key, bounds in { year = { 1970, 2100 }, month = { 1, 12 }, day = { 1, 31 }, hour = { 0, 23 }, minute = { 0, 59 } } do
+	local calendar_bounds: { [string]: { number } } = { year = { 1970, 2100 }, month = { 1, 12 }, day = { 1, 31 }, hour = { 0, 23 }, minute = { 0, 59 } }
+	for key, bounds in calendar_bounds do
 		local value = raw[key]
 		if value ~= nil then
 			if not finite(value) or value % 1 ~= 0 or value < bounds[1] or value > bounds[2] then return nil end
@@ -348,7 +349,7 @@ end
 
 -- Inputs are decoded at ingress. Expiry changes presentation, never membership or
 -- source timestamps. Removal belongs to the owner of the keyed publisher set.
--- Returns { accounts, consumers, unresolved, freshness = { next_change_at_ms } };
+-- Returns { accounts, consumers, unresolved, roster_conflicts, freshness = { next_change_at_ms } };
 -- every account window carries `freshness` (fresh/stale/last_known/unavailable).
 function snapshot.project(snapshots: { [string]: SourceSnapshot }, now_ms: number): any
 	local readings: { Reading } = tern.json.array()
@@ -366,21 +367,22 @@ function snapshot.project(snapshots: { [string]: SourceSnapshot }, now_ms: numbe
 	end
 	local consumer_readings = roster.consumer_readings(snapshots)
 	local projected = account_grouping.retain_muse(readings, consumer_readings)
-	local accounts, consumers, unresolved = roster.project(snapshots, projected, readings, consumer_readings)
+	local accounts, consumers, unresolved, conflicts = roster.project(snapshots, projected, readings, consumer_readings)
 	for _, account_value in accounts do
 		local account: any = account_value
 		for _, value in account.windows do
 			local window: any = value
 			local stale = now_ms - window.observed_at_ms > snapshot.LEASE_MS
 				or (window.resets_at_ms ~= nil and window.resets_at_ms <= now_ms)
-			window.freshness = if window.used == nil then "unavailable" elseif window.last_known_reason ~= nil then "last_known" elseif stale then "stale" else "fresh"
+			-- Age outranks the failure label: an old value is stale whatever kept it.
+			window.freshness = if window.used == nil then "unavailable" elseif stale then "stale" elseif window.last_known_reason ~= nil then "last_known" else "fresh"
 			if window.used ~= nil then
 				expires(window.observed_at_ms + snapshot.LEASE_MS + 1)
 				if window.resets_at_ms ~= nil then expires(window.resets_at_ms) end
 			end
 		end
 	end
-	return { accounts = accounts, consumers = consumers, unresolved = unresolved,
+	return { accounts = accounts, consumers = consumers, unresolved = unresolved, roster_conflicts = conflicts,
 		freshness = { next_change_at_ms = next_change } }
 end
 
