@@ -960,6 +960,7 @@ class WindowContract(unittest.TestCase):
         window = self.source('window.luau')
         self.assertIn('synced.settingsChanged(before, after)', window)
         self.assertNotIn('lastRev', window)
+        self.assertIn('synced.mark(key, entry.rev, gen)', window)
 
     def test_manifest_keeps_version_and_icon(self):
         manifest = self.source('plugin.toml')

@@ -257,7 +257,7 @@ do
 	w.run(1000)
 	check(w.kv["status_prompt.v2"] ~= nil and w.kv["status_prompt.v2"].token == flag.token, "host re-asserts a clobbered flag")
 	w.run(20000)
-	check(#w.timers == 0, "the host stops polling after its grace period")
+	check(#w.timers == 1 and w.timers[1].vm == "host" and w.timers[1].at - w.now > 0, "after its grace period the host only idles on one slow tick")
 end
 
 -- 13. A flag lost to a whole-store kv.json write after the host's grace period, then a host restart, never re-asks.
@@ -443,8 +443,7 @@ do
 	w.run(0)
 	local flag = w.kv["status_prompt.v2"]
 	w.run(3000)
-	w.kv["status_prompt.v2"] = flag -- resurrected by a stale write
-	w.load("host2").host_serve()
+	w.kv["status_prompt.v2"] = flag -- resurrected by a stale write; no host restart follows
 	w.load("w2").ensure(w.window("w2", false), "spawn")
 	w.run(3000)
 	check(#w.picks == 1 and w.picks[1].window == "w2", "a resurrected flag of a released token does not suppress the question")
@@ -460,15 +459,14 @@ do
 	check(w.kv["status_prompt.v2"] ~= nil, "granted")
 	local late = hold(w, "w1")
 	w.run(30000)
-	check(#w.timers == 0, "the host stopped polling")
+	check(#w.timers == 1 and w.timers[1].vm == "host", "the host is only idling on its slow tick")
 	give_back(w, late)
 	w.run(1000)
 	check(#w.picks == 0, "the delayed window opened no picker")
 	check(w.kv["status_prompt.v2"] == nil and w.files["/data/status_prompt.v2.done"] == nil, "a release after the host stopped still clears the grant")
-	w.load("host2").host_serve()
-	w.load("w2").ensure(w.window("w2", false), "spawn")
+	w.load("w2").ensure(w.window("w2", false), "spawn") -- no host restart: the host still serves
 	w.run(3000)
-	check(#w.picks == 1 and w.picks[1].window == "w2", "after a host restart the next healthy start asks once")
+	check(#w.picks == 1 and w.picks[1].window == "w2", "the next healthy start asks once with no host restart")
 end
 
 -- 22b. A release left in kv that no running host consumed: a host start processes it.

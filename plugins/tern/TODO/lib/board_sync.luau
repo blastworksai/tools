@@ -68,7 +68,7 @@ end
 -- Each removal shrinks the board until a later read sees it whole. Returns ops and whether the
 -- read was truncated, or nil plus a reason when nothing safe can be done on a truncated board.
 local TRUNCATED = "The board holds more cards than one read returns; TODO will not sync it."
-function sync.diff(desired: { any }, snapshot: any): ({ any }?, string?, boolean?)
+function sync.diff(desired: { any }, snapshot: any, excess: number?): ({ any }?, string?, boolean?)
     local lanes, managed, extras, truncated = {}, {}, {}, false
     for _, lane in snapshot.lanes or {} do
         if (lane.more or 0) > 0 then truncated = true end
@@ -109,6 +109,25 @@ function sync.diff(desired: { any }, snapshot: any): ({ any }?, string?, boolean
         if not wanted[id] then table.insert(ops, { op = "remove", id = id, card = current.card.id }) end
     end
     for _, card in extras do table.insert(ops, { op = "remove", id = managedId(card), card = card.id }) end
+    -- `excess` is how many more cards the board holds than this window can account for (apply measures it). On a
+    -- truncated read the surplus is hidden past the 500-card limit, where no read can ever show it. Taking that many
+    -- visible managed cards off brings the board back under the limit; the next read then sees every card, and the
+    -- ordinary duplicate and missing-card repair above puts the right ones back.
+    if truncated and excess and excess > 0 then
+        local gone = {}
+        for _, op in ops do if op.op == "remove" then gone[op.card] = true; excess -= 1 end end
+        for l = #(snapshot.lanes or {}), 1, -1 do
+            local cards = snapshot.lanes[l].cards
+            for c = #cards, 1, -1 do
+                if excess <= 0 then break end
+                local id = managedId(cards[c])
+                if id and not gone[cards[c].id] then
+                    gone[cards[c].id] = true; excess -= 1
+                    table.insert(ops, { op = "remove", id = id, card = cards[c].id })
+                end
+            end
+        end
+    end
     if truncated and #ops == 0 then return nil, TRUNCATED end
     return ops, nil, truncated
 end
@@ -123,6 +142,7 @@ local function call(board: any, spec: any, op: any): any
 end
 
 local RETRIES = 3
+local READ_ROWS = 500
 local MAX_SHRINK_PASSES = 8 -- passes that only shrink a truncated board; each one removed or fixed cards
 local active: { [any]: boolean } = {}
 
@@ -138,6 +158,7 @@ local active: { [any]: boolean } = {}
 -- turning sync off stops a pass that is already running. done(ok, problem, operations)
 function sync.apply(cx: any, spec: any, plan: any, done: (ok: boolean, problem: string?, count: number) -> (), enabled: (() -> boolean)?)
     local shrinks = 0
+    local expected: number? = nil -- cards the board should hold, known only from a whole, self-consistent read
     if active[spec] then done(false, "A board sync is already running.", 0); return end
     active[spec] = true
     local desired = sync.desired(plan)
@@ -154,12 +175,26 @@ function sync.apply(cx: any, spec: any, plan: any, done: (ok: boolean, problem: 
     local STOPPED = "Board sync was turned off."
     local function pass(live: any, attempt: number)
         if not allowed() then finish(false, STOPPED); return end
-        local started, reading = pcall(function() return live.board:read(spec, { rows = 500 }) end)
+        local started, reading = pcall(function() return live.board:read(spec, { rows = READ_ROWS }) end)
         if not started then finish(false, "Could not read the board: " .. tostring(reading)); return end
         reading:next(function(snapshot, err, fresh)
             local now = fresh or live
             if err or type(snapshot) ~= "table" then finish(false, "Could not read the board: " .. tostring(err)); return end
-            local ops, why, truncated = sync.diff(desired, snapshot)
+            local seen, isTruncated = 0, false
+            for _, lane in snapshot.lanes or {} do
+                seen += #lane.cards
+                if (lane.more or 0) > 0 then isTruncated = true end
+            end
+            local excess: number? = nil
+            if not isTruncated then
+                -- Trust `total` only when it agrees with what a whole read shows; otherwise it is not a card count.
+                expected = if type(snapshot.total) == "number" and snapshot.total == seen then seen else nil
+            elseif expected and expected <= READ_ROWS and type(snapshot.total) == "number" and snapshot.total > expected then
+                -- Someone else wrote since our last whole read. Only act when taking the surplus off leaves the board
+                -- readable in one read, so that whatever the removals take wrongly can be added back.
+                excess = snapshot.total - expected
+            end
+            local ops, why, truncated = sync.diff(desired, snapshot, excess)
             if not ops then finish(false, why); return end
             if #ops == 0 then finish(true, nil); return end
             local function step(current: any, index: number)
@@ -186,6 +221,9 @@ function sync.apply(cx: any, spec: any, plan: any, done: (ok: boolean, problem: 
                     local after = fresh2 or current
                     if problem or result == false then failed(problem or "refused", after); return end
                     total += 1
+                    if expected then
+                        if op.op == "add" then expected += 1 elseif op.op == "remove" then expected -= 1 end
+                    end
                     step(after, index + 1)
                 end)
             end

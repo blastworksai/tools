@@ -8,16 +8,24 @@ local gate = {}
 
 function gate.new()
 	local revs: { [string]: number } = {}
+	local generation = 0
 	local self = {}
 	function self.matches(key: string, rev: number): boolean return revs[key] == rev end
-	function self.mark(key: string, rev: number) revs[key] = rev end
-	function self.reset() revs = {} end
+	-- A sync pass takes the generation when it starts; its result is remembered only if no reset happened since.
+	-- Without that, a pass that was already running when sync was turned off and on again would report success
+	-- for a board that was edited in between, and the reset would be undone.
+	function self.generation(): number return generation end
+	function self.mark(key: string, rev: number, gen: number): boolean
+		if gen ~= generation then return false end
+		revs[key] = rev
+		return true
+	end
+	function self.reset() revs = {}; generation += 1 end
 	-- Call with the settings before and after every change.
 	function self.settingsChanged(before: any, after: any)
 		local wasOn = settings.mode(before) == "glitch-sync"
 		local isOn = settings.mode(after) == "glitch-sync"
-		if isOn and (not wasOn or before.attach ~= after.attach) then revs = {} end
-		if not isOn then revs = {} end
+		if not isOn or not wasOn or before.attach ~= after.attach then self.reset() end
 	end
 	return self
 end

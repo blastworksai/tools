@@ -22,7 +22,8 @@ local FLAG = "status_prompt.v2"
 local REQUEST = "status_prompt.v2.request"
 local RELEASE = "status_prompt.v2.release"
 local WIDGET_ID = "status"
-local POLL_MS = 250
+local POLL_MS = 250 -- a waiting window
+local HOST_POLL_MS = 1000 -- the host: one request/release read per tick, for as long as the daemon runs
 local WAIT_MS = 15000
 local FRESH_S = 30 -- a request older than this belongs to a window that is gone
 local REASSERT_MS = 10000 -- the host re-writes a flag that another VM's concurrent kv.json write clobbered
@@ -144,29 +145,31 @@ function status_prompt.host_release(): boolean
 	return cleared
 end
 
--- Host only: polls for the first request until it is granted, then guards the flag briefly and stops.
--- Starts no timer on a plugin whose flag is already set.
+-- Host only: serves requests for as long as the daemon runs, so a window that starts at any time, including after a
+-- late release, is answered. The idle tick is cheap (the release and request slots, plus a released flag or marker).
+-- Starts no timer on a plugin whose flag is already set and not released.
 function status_prompt.host_serve()
 	status_prompt.host_release()
 	if asked() then return end
 	local granted: string? = nil
 	local until_ms = 0
 	local function step()
-		if granted ~= nil and (status_prompt.host_release() or is_released(granted)) then
+		-- Also clears a released flag/marker that a stale whole-store kv write brought back.
+		local released = status_prompt.host_release()
+		if granted ~= nil and (released or is_released(granted)) then
 			granted = nil -- the grant was handed back: serve the next request instead of re-asserting the flag
 			until_ms = 0
 		end
 		if granted == nil then
 			granted = status_prompt.host_claim()
 			if granted ~= nil then until_ms = tern.now() + REASSERT_MS end
-		else
+		elseif tern.now() < until_ms then
 			local flag = tern.kv.get(FLAG)
 			if type(flag) ~= "table" or flag.token ~= granted then
 				tern.kv.set(FLAG, { state = "granted", token = granted, at = os.time() })
 			end
-			if tern.now() >= until_ms then return end
 		end
-		tern.timer(POLL_MS, step)
+		tern.timer(if granted ~= nil and tern.now() < until_ms then POLL_MS else HOST_POLL_MS, step)
 	end
 	tern.timer(0, step)
 end
@@ -225,11 +228,12 @@ function status_prompt.ensure(cx: any, plugin_id: string)
 	local function step(fresh: any?)
 		local live = fresh or cx
 		local flag = tern.kv.get(FLAG)
-		if flag ~= nil then
+		-- A flag naming a released token is a stale leftover: it counts as absent, so this window requests its own grant.
+		if flag ~= nil and not (type(flag) == "table" and is_released(flag.token)) then
 			if type(flag) == "table" and flag.token == token then ask(live, token) end
 			return
 		end
-		if marker_set() then
+		if marker_set() and not is_released(marker_token()) then
 			-- The grant is on disk even though a stale kv write dropped the flag: the named window still asks, once.
 			if marker_token() == token then ask(live, token) end
 			return

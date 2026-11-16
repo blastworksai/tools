@@ -164,6 +164,7 @@ local function syncTick(cx: any)
     end)
     if not prepared then syncStatus = "Could not create the TODO board file."; failedAt = tern.now(); return end
     busy = true
+    local gen = synced.generation()
     local function stillOn(): boolean
         local now = settings.load(tern.kv)
         return settings.mode(now) == "glitch-sync" and now.attach == target.pane
@@ -179,7 +180,7 @@ local function syncTick(cx: any)
             release()
             busy = false
             if ok then
-                synced.mark(key, entry.rev); syncStatus = "Board synced · " .. tostring(count) .. " change(s)"
+                synced.mark(key, entry.rev, gen); syncStatus = "Board synced · " .. tostring(count) .. " change(s)"
             elseif stillOn() then
                 failedAt = tern.now(); syncStatus = problem
             end
