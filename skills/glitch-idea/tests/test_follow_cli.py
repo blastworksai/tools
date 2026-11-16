@@ -199,6 +199,12 @@ class FollowLoopUnitTests(unittest.TestCase):
         self.assertEqual(idea._follow(self.fd, client, 0, 1, self.Error)['error']['code'], 'agent_transport_timeout')
         self.assertEqual(client.afters, [0, 0, 0])
 
+    def test_follow_is_refused_off_posix_before_any_file_is_made(self):
+        target = self.path.parent/'other.jsonl'
+        with patch.object(idea.os, 'name', 'nt'):
+            with self.assertRaises(idea.IdeaError) as caught: idea._follow_file(str(target))
+        self.assertEqual(caught.exception.code, 'follow_unsupported'); self.assertFalse(target.exists())
+
     def test_a_short_write_still_lands_one_whole_line(self):
         real = os.write
         with patch.object(idea.os, 'write', side_effect=lambda fd, data: real(fd, bytes(data[:3]))):

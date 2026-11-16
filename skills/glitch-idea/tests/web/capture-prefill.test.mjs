@@ -134,6 +134,24 @@ test('the terminal-captured prefill survives a state refresh, and a cleared fiel
   }, {stateExtra: {idea_id: ID, drafts: {capture: {raw_text: 'from the terminal'}}, default_workspace: dflt}});
 });
 
+// Review round 2: a terminal-captured idea, then "Capture a new idea" (folds.js selectAuthority resets the buffers and loads
+// a state with no idea): the new idea must still get its prefill, in both orders.
+test('switching between a terminal-captured idea and a new idea prefills each', async () => {
+  const fresh = () => ({raw_text: '', workspace: {name: '', path: '', confirmed: false}});
+  const select = async (h, extra) => {
+    h.flow.buffers.capture = fresh(); h.flow.dirty.clear();
+    h.flow.load({...structuredClone(h.state), drafts: {}, accepted: {}, ...extra}); await h.settle();
+  };
+  await app(async h => {
+    await open(h); assert.deepEqual(fields(h), ['Session Site', '/work/session']);
+    await select(h, {idea_id: null}); assert.deepEqual(fields(h), ['Session Site', '/work/session']);
+    await select(h, {idea_id: ID, drafts: {capture: {raw_text: 'from the terminal'}}});
+    h.flow.buffers.capture = {raw_text: 'from the terminal'}; h.flow.onChange(); await h.settle();
+    assert.deepEqual(fields(h), ['Session Site', '/work/session']);
+    await select(h, {idea_id: null}); assert.deepEqual(fields(h), ['Session Site', '/work/session']);  // new, existing, new
+  }, {stateExtra: {idea_id: ID, drafts: {capture: {raw_text: 'from the terminal'}}, session_workspace: mine, default_workspace: dflt}});
+});
+
 test('an idea whose Capture already holds a workspace is never prefilled', async () => {
   await app(async h => { await open(h); assert.deepEqual(fields(h), ['Saved Site', '/work/saved']); },
     {stateExtra: {idea_id: ID, accepted: {capture: {raw_text: 'x', workspace: saved}}, session_workspace: mine, default_workspace: dflt}});

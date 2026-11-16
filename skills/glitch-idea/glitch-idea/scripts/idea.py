@@ -375,9 +375,9 @@ def _follow_file(path,runtime=None,new=False):
         require(folder!=home and not folder.startswith(home.rstrip(os.sep)+os.sep),
                 'The --follow file must not sit in the runtime folder','usage')
     refused=lambda: IdeaError('follow_not_private','The --follow file must sit in an existing folder only this account can open (mode 0700)')
-    if os.name!='posix':
-        try: return os.open(path,os.O_WRONLY|os.O_CREAT|os.O_APPEND|(os.O_EXCL if new else 0),0o600)
-        except OSError: raise refused() from None
+    # The owner-only checks below are POSIX descriptor checks; elsewhere --follow is refused (fail closed), and the
+    # runtime itself is not yet qualified there.
+    require(os.name=='posix','--follow needs Linux or another POSIX system for now; run events without it','follow_unsupported')
     from idea_runtime import RuntimeError as OwnerError,_open_chain
     try: parent=_open_chain(target.parent,create=False,private_leaf=True)
     except (OwnerError,OSError): raise refused() from None

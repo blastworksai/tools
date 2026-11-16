@@ -324,7 +324,10 @@ class AgentProtocolTextTests(unittest.TestCase):
         self.assertRegex(skill, r"(?i)on delivery, restart the loop at once.{0,80}`events --session <id> --after <sequence> --follow <file>`")
         self.assertRegex(commands, r"(?i)`session-open`, `browser-open` and `events` take `--follow FILE`")
         self.assertRegex(commands, r"(?i)`agent_transport_timeout` and `busy` are waited again from the same cursor, up to three in a row")
-        self.assertRegex(commands, r"(?i)refused before a session opens or the owner is contacted \(`follow_not_private`")
+        self.assertRegex(commands, r"(?i)before a session opens or the owner is contacted, a folder another account can open.{0,120}\(`follow_not_private`")
+        for body in (skill, commands):
+            self.assertRegex(body, r"(?i)`--follow` on a system other than Linux.{0,80}`follow_unsupported`")
+            self.assertNotRegex(body, r"(?i)refuses any other place")
         self.assertRegex(commands, r"(?i)in Orca mode `--follow` is `usage`, as it is with `--reconnect`")
         self.assertRegex(commands, r"(?i)a launch needs a new FILE.{0,80}`follow_exists`, before any session opens")
         self.assertRegex(commands, r"(?i)with `--follow`, `--timeout` must be at least 1 second")
