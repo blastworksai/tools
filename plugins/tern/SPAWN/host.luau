@@ -986,7 +986,8 @@ local function spawn_page(state,lead)
 			ui.node("col",{grow=1},{ui.text(ui.span("02 · Start an agent","muted"))}),
 			ui.button("Close",{size="sm",variant="quiet",actions={click="close"},key="spawn-close"}),
 		}),
-		ui.md("# Start an agent"),
+		-- Plain bold text, not Markdown: some Tern builds draw a Markdown heading as its raw "#" source.
+		ui.node("row",{role="spawn-title"},{ui.text(ui.span("Start an agent","strong"))}),
 		ui.text(ui.span(lead,"muted")),
 	}
 	local agents=spawn_agent_rows(state)

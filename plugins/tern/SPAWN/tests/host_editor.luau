@@ -458,7 +458,9 @@ do
  local navActs={}
  for _,button in ipairs(page_nodes('button')) do if button.p and type(button.p.actions)=='table' then navActs[button.p.actions.click]=true end end
  for _,page in ipairs(prefs_pages) do check(navActs['page-go:'..page.id],'the Start an agent page navigates to '..page.id) end
- check(#page_nodes('md')==1 and page_nodes('md')[1].text=='# Start an agent','the page shows its title once, as a heading')
+ local titles={};for _,n in ipairs(page_nodes('row')) do if n.p and n.p.role=='spawn-title' then table.insert(titles,n) end end
+ check(#titles==1 and titles[1].c[1].text=='Start an agent','the page shows its title once, as bold text')
+ check(#page_nodes('md')==0,'the page draws no Markdown, so no build can show a raw # title')
  check(navActs.refresh and navActs['advanced-open'] and navActs.close,'the Start an agent page keeps Refresh, Advanced and Close')
  definition.event(state,{ev='action',act='page-go:setup'},cx)
  check(state.page=='setup' and definition.view(state,cx).main.children[1].k=='prefs','a page-go click opens Setup on the prefs layout')
