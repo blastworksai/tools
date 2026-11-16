@@ -7,21 +7,18 @@
 You'll find skills and tools that I've tinkered with, that I find useful, and that I want to share with the world here. 
 Everything is MIT License, so fork away. Feedback is appreciated, and stars are a dopamine hit, so hit me.
 
-Published [Walkdown](https://github.com/BytesFromToby/Walkdown) reviews cite findings to file and line.
-Where available, follow the Walkdown link in the table for the results.
-
 ## SKILLS
 
-| Skill | What it does | Walkdown review |
-| --- | --- | --- |
-| [DANGER PROTOCOL](skills/dangerprotocol/README.md) | Read-only check of a GitHub repo before you install or run it. | [results](https://blastworksai.github.io/tools/skills/dangerprotocol/walkdown/summary.html) |
-| [ROCKET FUEL](skills/rocket-fuel/README.md) | Founder-led collaboration with assigned seats and Operator-selected BASIC or FULL adversarial convergence. | [results](https://blastworksai.github.io/tools/skills/rocket-fuel/walkdown/summary.html) |
-| [TERN PLUGIN DEVELOPMENT](skills/tern-plugin-development/README.md) | Create, test, debug, and package Tern plugins with isolated integration tests and pure Luau modules. | [results](https://blastworksai.github.io/tools/skills/tern-plugin-development/walkdown/summary.html) |
-| [GCC SKILL REVIEW](skills/gcc-skill-review/README.md) | Find the weak step in your own skill: map its steps, check each one over five fresh runs, fix the one that fails and prove the fix. Method by Kem, [Glitch Cat Club](https://glitchcatclub.com) · [@kem_glitch](https://www.instagram.com/kem_glitch/). | [results](https://blastworksai.github.io/tools/skills/gcc-skill-review/walkdown/summary.html) |
-| [GLITCH IDEA](skills/glitch-idea/README.md) | Capture a software idea, explore it step by step in a local browser page with your agent, and hand a planning prompt to `/glitch-plan`. Opens on your own computer over SSH, docked in Tern. | [results](https://blastworksai.github.io/tools/skills/glitch-idea/walkdown/summary.html) |
-| [STUDIO](skills/studio/README.md) | Build big things with one orchestrator and many small checked lanes: specs and frozen contracts first, one task per check and commit, every lane reviewed, every result demonstrated. Method from the [Chatdom.io build write-up](https://devpost.com/software/chatdom-io). | [results](https://blastworksai.github.io/tools/skills/studio/walkdown/summary.html) |
-| [IDEA DISCOVERY](skills/idea-discovery/SKILL.md) | Discover ideas worth exploring with AI through a guided conversation. | [results](https://blastworksai.github.io/tools/skills/idea-discovery/walkdown/summary.html) |
-| [GLITCH STUDIO](skills/glitch-studio/README.md) | Build a product with one orchestrator and many checked lanes through `/glitch-idea`, `/glitch-plan` and `/glitch-execute`: study, domain skills, frozen contracts, review and proof. Method from the [Chatdom.io build write-up](https://devpost.com/software/chatdom-io). | [results](https://blastworksai.github.io/tools/skills/glitch-studio/walkdown/summary.html) |
+| Skill | What it does |
+| --- | --- |
+| [DANGER PROTOCOL](skills/dangerprotocol/README.md) | Read-only check of a GitHub repo before you install or run it. |
+| [ROCKET FUEL](skills/rocket-fuel/README.md) | Founder-led collaboration with assigned seats and Operator-selected BASIC or FULL adversarial convergence. |
+| [TERN PLUGIN DEVELOPMENT](skills/tern-plugin-development/README.md) | Create, test, debug, and package Tern plugins with isolated integration tests and pure Luau modules. |
+| [GCC SKILL REVIEW](skills/gcc-skill-review/README.md) | Find the weak step in your own skill: map its steps, check each one over five fresh runs, fix the one that fails and prove the fix. Method by Kem, [Glitch Cat Club](https://glitchcatclub.com) · [@kem_glitch](https://www.instagram.com/kem_glitch/). |
+| [GLITCH IDEA](skills/glitch-idea/README.md) | Capture a software idea, explore it step by step in a local browser page with your agent, and hand a planning prompt to `/glitch-plan`. Opens on your own computer over SSH, docked in Tern. |
+| [STUDIO](skills/studio/README.md) | Build big things with one orchestrator and many small checked lanes: specs and frozen contracts first, one task per check and commit, every lane reviewed, every result demonstrated. Method from the [Chatdom.io build write-up](https://devpost.com/software/chatdom-io). |
+| [IDEA DISCOVERY](skills/idea-discovery/SKILL.md) | Discover ideas worth exploring with AI through a guided conversation. |
+| [GLITCH STUDIO](skills/glitch-studio/README.md) | Build a product with one orchestrator and many checked lanes through `/glitch-idea`, `/glitch-plan` and `/glitch-execute`: study, domain skills, frozen contracts, review and proof. Method from the [Chatdom.io build write-up](https://devpost.com/software/chatdom-io). |
 
 ## PLUGINS
 
