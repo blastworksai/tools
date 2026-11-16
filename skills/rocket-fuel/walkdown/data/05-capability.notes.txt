@@ -1,0 +1,3 @@
+note: stage 5 limit: a Bash grant is recorded under private-data and as execute posture, never as external-comms; Bash can reach the network, as can every shell, so this map does not count it there
+note: stage 5 limit: hook bytes are an estimate from the sizes of files the hook script references (stage 3 static edges); hooks are never run to measure their output
+note: 1 of 3 trifecta legs present; a map of capability, not a verdict

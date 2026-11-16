@@ -11,7 +11,7 @@ import socket
 import time
 from urllib.parse import quote, urlencode
 
-from idea_bridge import BridgeError, decode_json
+from idea_bridge import BODY_DEADLINE, BridgeError, decode_json
 from idea_asset_evidence import MAX_FILE
 from idea_domain import IdeaError
 from idea_proposals import CORRELATION, LIMIT, OPERATIONS, _bounded
@@ -27,6 +27,17 @@ AGENT_REFUSALS = frozenset(('agent_unavailable', 'agent_unauthorized', 'wrong_ge
                             'proposal_commit_uncertain', 'operation_unavailable', 'busy',
                             'unsupported_asset_type', 'too_large', 'stale_revision', 'request_conflict', 'not_found',
                             'idea_archived', 'invalid_input'))
+
+# The answer did not arrive within this client's own deadline (or the socket timed out). The service
+# never sends this code: it says the answer was late, not that the agent was refused. A request may have
+# been applied, so respond and asset report it as committed_uncertain.
+LATE = 'agent_transport_timeout'
+
+# The service takes the binding lock for every agent request, waiting up to BODY_DEADLINE for it (then it
+# answers busy); a page request holding that lock (the draft save of a fill, the state read after it) delays
+# the answer meanwhile. The client's deadline covers that wait, so a slow answer is still the service's own.
+MARGIN = 2  # bounded loopback transport, past the service's own budget
+WORK = 5    # a non-wait request's own work under the lock (the budget before the lock was counted)
 
 # Raw-body asset door: type -> accepted leading bytes (the service checks the same).
 ASSET_MAGIC = {'image/png': (b'\x89PNG\r\n\x1a\n',), 'application/zip': (b'PK\x03\x04', b'PK\x05\x06')}
@@ -78,7 +89,8 @@ class AgentClient:
         _check(_integer(after) and type(timeout) in (int, float) and math.isfinite(timeout)
                and 0 <= timeout <= 25, 'invalid_agent_input')
         query = urlencode(dict(session_id=self.__channel._session_id, after=after, timeout=format(timeout, '.6f')))
-        value = self.__request('events', query=query, timeout=timeout + 2)
+        # The service takes the lock before the wait and again after it.
+        value = self.__request('events', query=query, timeout=timeout + 2 * BODY_DEADLINE + MARGIN)
         _check(set(value) == {'ok','code','session_id','agent_status','reason','sequence','events'})
         _check(value['session_id'] == self.__channel._session_id and _integer(value['sequence'])
                and value['sequence'] >= after and type(value['agent_status']) is str
@@ -180,8 +192,9 @@ class AgentClient:
         self.__closed = True
         return value
 
-    def __request(self, operation, *, query=None, raw=None, timeout=5, extra=None):
+    def __request(self, operation, *, query=None, raw=None, timeout=None, extra=None):
         _check(not self.__closed, 'agent_closed')
+        timeout = BODY_DEADLINE + WORK if timeout is None else timeout
         channel = self.__channel
         path = '/agent/v1/' + operation + ('?' + query if query is not None else '')
         method = 'GET' if operation == 'events' else 'POST'
@@ -199,10 +212,11 @@ class AgentClient:
             buffer = bytearray()
             def receive():
                 remaining = deadline - time.monotonic()
-                _check(remaining > 0, 'agent_unavailable')
+                _check(remaining > 0, LATE)
                 connection.settimeout(remaining)
                 chunk = connection.recv(4096)
-                _check(chunk and time.monotonic() <= deadline, 'agent_unavailable')
+                _check(chunk, 'agent_unavailable')
+                _check(time.monotonic() <= deadline, LATE)
                 return chunk
             while b'\r\n\r\n' not in buffer:
                 buffer.extend(receive())
@@ -251,6 +265,8 @@ class AgentClient:
             return copy.deepcopy(value)
         except (BridgeError, IdeaError, ValueError, UnicodeError, RecursionError):
             raise AgentClientError('invalid_agent_response') from None
+        except TimeoutError:
+            raise AgentClientError(LATE) from None
         except OSError:
             raise AgentClientError('agent_unavailable') from None
         finally:

@@ -24,12 +24,20 @@ import time
 import tempfile
 from urllib.parse import urlsplit
 
+# The owner child starts here, not in idea.py: a shared install is read-only at run time, so write no
+# bytecode into it. Set before any sibling module is imported.
+try:
+    if json.loads((Path(__file__).resolve().parent.parent/'.glitch-idea-install.json').read_bytes()[:65536]).get('shared') is True:
+        sys.dont_write_bytecode = True
+except Exception:
+    pass
+
 from idea_bridge import BridgeError, BridgeServer, Response, check
 from idea_domain import IdeaError, check_id, decode, encoded, require
 from idea_native import (open_browser, close_browser_page, browser_page_pairing, navigate_browser_page,
                          NativeError, OrcaBinding)
 from idea_runtime import Runtime, RuntimeError as OwnerError, MAX_BINDINGS
-from idea_service import Service, TrustedContext
+from idea_service import Service, TrustedContext, session_workspace as validate_session_workspace
 from idea_sessions import SessionPolicy, AgentBinding
 from idea_steps import load_registry, TrustedRoute
 from idea_proposals import Broker
@@ -45,7 +53,12 @@ COMMON = {'challenge','instance_nonce','store_sha256'}
 OPEN_FIELDS = COMMON | {'mode','binding_id','selected_idea_id'}
 CREDENTIAL_FIELDS = COMMON | {'binding_id','session_id','expected_generation'}
 DISCARD_FIELDS = COMMON | {'binding_id','confirm'}
-CONTROL_FIELDS = {'binding-open':OPEN_FIELDS,'agent-credentials':CREDENTIAL_FIELDS,'binding-discard':DISCARD_FIELDS,'binding-list':COMMON}
+TERN_OFFER_FIELDS = COMMON | {'rid','url'}
+TERN_STATE_FIELDS = COMMON | {'rid'}
+# Keys a request MAY add to a control message. Only present when used, so every request without them is the previous release's.
+CONTROL_OPTIONAL = {'binding-open':{'session_workspace'}}
+CONTROL_FIELDS = {'binding-open':OPEN_FIELDS,'agent-credentials':CREDENTIAL_FIELDS,'binding-discard':DISCARD_FIELDS,'binding-list':COMMON,
+                  'tern-offer':TERN_OFFER_FIELDS,'tern-state':TERN_STATE_FIELDS}
 CHILD = Path(__file__).resolve()
 _children = []  # Retain handles; no killing/ownership authority follows from PID.
 _children_lock = threading.Lock()
@@ -149,13 +162,21 @@ class _AgentProvider:
         return record
 
 
+SAVED_LOADS = 'loads'  # beside runtime/stores: that folder admits only its own four names
+
+
+def saved_load_path(runtime):
+    """The owner's saved load for this store: private to the account, kept between starts."""
+    return runtime.runtime_root / SAVED_LOADS / (runtime.store_sha256 + '.json')
+
+
 class OwnerService:
     """Composition under one owned Runtime; no public owner secret access."""
     def __init__(self,runtime,config=None,*,workspace_resolver=None,server_factory=BridgeServer):
         self.runtime = runtime
         self.config = _config(config,runtime.store_path)
         self.actor = _actor()
-        self.store = Store(runtime.store_path,observer=self.actor)
+        self.store = Store(runtime.store_path,observer=self.actor,saved_load=saved_load_path(runtime))
         self.handlers, self.routes = load_registry()
         self.workspace_resolver = workspace_resolver
         self.admission = threading.RLock()
@@ -184,7 +205,7 @@ class OwnerService:
             check(record['actor'] == self.actor,'session_binding_mismatch',403)
             try:
                 self.policy.open_binding(self.actor,record['receipt_session_id'],record['selected_idea_id'],
-                                         binding_id=record['binding_id'],resume=True)
+                                         binding_id=record['binding_id'],resume=True,session_workspace=record.get('session_workspace'))
             except IdeaError as exc:
                 # The ideas store is shared, so an idea can be removed while a saved session still selects it; one
                 # such session must not keep the whole service from starting. Set it aside (never deleted) only when
@@ -202,18 +223,19 @@ class OwnerService:
         self._restoring = False
         # Warm the store's load cache before the server listens: a large store takes seconds to parse cold, and
         # the first binding-open would otherwise spend its whole client budget on that read and fail owner_unavailable
-        # after the owner still created the session. A slow start now shows as service_readiness_timeout (safe to retry).
+        # after the owner still created the session. The helper waits for a service it started itself (see own_spawn_timeout in ensure_service).
         # A store error here propagates exactly as it does from the restore above; a cache hit makes this near-free.
         try:
             with self.store.transaction(): pass
         except Exception:
             pass  # a store error is not a startup failure: the first real read raises the same typed error to the client
         self.server = server_factory(self.policy,routes=self.routes,control=self.control,activity=runtime,agent=self.agent,
-                                    port=self.config.get('browser_port',0),tunnel_probe=runtime.owner_tunnel_probe())
+                                    port=self.config.get('browser_port',0))
         self.worker = None
 
     def application(self,record):
         return Service(self.store,self.config,TrustedContext(record['actor'],record['receipt_session_id'],record['selected_idea_id']),
+                       session_workspace=record.get('session_workspace'),
                        handlers=self.handlers,workspace_resolver=self.workspace_resolver,agent_provider=self.agent_provider,
                        handoff_provider=self.handoff_provider)
 
@@ -419,6 +441,17 @@ class OwnerService:
             self._free(binding_id)
             return dict(binding_id=binding_id,was_in_use=was)
 
+    def _tern_offer(self,payload):
+        rid,url = payload['rid'],payload['url']
+        check(type(rid) is str and type(url) is str,'invalid_control')
+        check(self.server.tern.offer(rid,url,self.server.server_port),'tern_offer_refused',409)
+        return {}
+
+    def _tern_state(self,payload):
+        rid = payload['rid']
+        check(type(rid) is str and re.fullmatch(r'[0-9a-f]{32}',rid),'invalid_control')
+        return dict(state=self.server.tern.state(rid))
+
     def _open(self,payload):
         mode,binding_id,selected = (payload[key] for key in ('mode','binding_id','selected_idea_id'))
         check(type(mode) is str and mode in ('new','resume','repair'),'invalid_control')
@@ -426,6 +459,9 @@ class OwnerService:
               (mode in ('resume','repair') and type(binding_id) is str and re.fullmatch(r'binding_[0-9a-f]{32}',binding_id)), 'invalid_control')
         check(mode != 'repair' or selected is None, 'invalid_control')
         check(selected is None or (type(selected) is str and re.fullmatch(r'idea_[0-9a-f]{32}',selected)), 'invalid_control')
+        prefill = payload.get('session_workspace')
+        check(prefill is None or mode == 'new','invalid_control')
+        prefill = validate_session_workspace(prefill)  # a bad folder is refused here, before any session is allocated
         with self.admission:
             check(not self.stopped.is_set(),'busy',503)
             records = {record['binding_id']:record for record in self.runtime.list_bindings()}
@@ -444,7 +480,7 @@ class OwnerService:
                     with self.store.transaction() as state:
                         check(selected in state['ideas'],'not_found',404)
                 sid = self.store.create_session()
-                binding_id = self.policy.open_binding(self.actor,sid,selected)
+                binding_id = self.policy.open_binding(self.actor,sid,selected,session_workspace=prefill)
                 self.members.add(binding_id)
             elif mode == 'repair':
                 # A rebuilt tab: browser credentials only; the agent generation stays as it is.
@@ -460,7 +496,8 @@ class OwnerService:
                 check(prior['actor'] == self.actor,'session_binding_mismatch',403)
                 sid = prior['receipt_session_id']
                 selected = prior['selected_idea_id'] if selected is None else selected
-                self.policy.open_binding(self.actor,sid,selected,binding_id=binding_id,resume=True)
+                self.policy.open_binding(self.actor,sid,selected,binding_id=binding_id,resume=True,
+                                         session_workspace=prior.get('session_workspace'))
             code = self.policy.issue_pairing(binding_id)
             return dict(binding_id=binding_id,session_id=sid,selected_idea_id=selected,pairing_code=code)
 
@@ -470,10 +507,12 @@ class OwnerService:
             if operation in ('probe','stop'):
                 body,callback = self.runtime.control(operation,payload,request.header('Authorization'),self.request_stop)
                 return Response(body,after_send=callback)
-            check(operation in CONTROL_FIELDS and type(payload) is dict and set(payload) == CONTROL_FIELDS[operation],'invalid_control')
+            check(operation in CONTROL_FIELDS and type(payload) is dict and CONTROL_FIELDS[operation] <= set(payload)
+                  <= CONTROL_FIELDS[operation] | CONTROL_OPTIONAL.get(operation,set()),'invalid_control')
             body = self.runtime.validate_owner({key:payload[key] for key in COMMON},request.header('Authorization'),operation,payload)
             body.update({'binding-open':self._open,'agent-credentials':self._credentials,
-                         'binding-discard':self._discard,'binding-list':self._list}[operation](payload))
+                         'binding-discard':self._discard,'binding-list':self._list,
+                         'tern-offer':self._tern_offer,'tern-state':self._tern_state}[operation](payload))
             return Response(body)
         except OwnerError as exc:
             return Response(dict(ok=False,code=exc.code),401 if exc.code == 'owner_unauthorized' else 409)
@@ -586,20 +625,32 @@ def _check_origin_port(probe,port):
     if found != port: raise LaunchError('port_mismatch',port=port)
 
 
+OWN_SPAWN_TIMEOUT = 30
+
+
 def ensure_service(store_path,runtime_root,config=None,*,runtime_python=None,readiness_timeout=5,
-                   spawn=subprocess.Popen,clock=time.monotonic,sleep=time.sleep):
+                   spawn=subprocess.Popen,clock=time.monotonic,sleep=time.sleep,own_spawn_timeout=OWN_SPAWN_TIMEOUT):
     require(type(readiness_timeout) in (int,float) and math.isfinite(readiness_timeout) and 0 < readiness_timeout <= 5,
             'Readiness budget must be at most five seconds')
+    require(type(own_spawn_timeout) in (int,float) and math.isfinite(own_spawn_timeout) and 0 < own_spawn_timeout <= OWN_SPAWN_TIMEOUT,
+            'Own-spawn budget must be at most thirty seconds')
     runtime = Runtime(store_path,runtime_root)
     config = _config(config,runtime.store_path)
     executable = source_python(runtime_python)
-    deadline = clock()+readiness_timeout
+    started = clock()
+    short_deadline = started+readiness_timeout
+    # A service this call started itself is waited for beyond the short bound while its child is alive (a cold load of
+    # a large store takes seconds); the short bound alone decides every other case, and a child that exited ends the wait.
+    own_deadline = started+max(own_spawn_timeout,readiness_timeout)
+    child = None
     spawned = False
     mismatched = False
     busy = None
     fixed = config.get('browser_port')
     port_held = False
-    while clock() < deadline:
+    while True:
+        deadline = own_deadline if child is not None and child.poll() is None else short_deadline
+        if clock() >= deadline: break
         try:
             found = runtime.probe_owner(timeout=min(1,max(.001,deadline-clock())))
             if fixed is not None: _check_origin_port(found,fixed)
@@ -641,13 +692,17 @@ def ensure_service(store_path,runtime_root,config=None,*,runtime_python=None,rea
 
 
 def open_session(store_path,runtime_root,config=None,*,binding_id=None,selected_idea_id=None,runtime_python=None,
-                 readiness_timeout=5,timeout=5,spawn=subprocess.Popen):
+                 readiness_timeout=5,timeout=5,spawn=subprocess.Popen,session_workspace=None):
     # Validate typed caller selections before starting a child or allocating SID.
     if selected_idea_id is not None: check_id(selected_idea_id)
+    # The Capture prefill for this one new session: refused before any service starts or session exists.
+    require(session_workspace is None or binding_id is None,'A resumed session keeps the workspace it was opened with','usage')
+    session_workspace = validate_session_workspace(session_workspace)
     require(binding_id is None or (type(binding_id) is str and re.fullmatch(r'binding_[0-9a-f]{32}',binding_id)), 'Invalid binding ID')
     ensure_service(store_path,runtime_root,config,runtime_python=runtime_python,readiness_timeout=readiness_timeout,spawn=spawn)
     # One binding-open only. Never auto-retry a NEW request after wire ambiguity.
-    return Runtime(store_path,runtime_root).open_binding('new' if binding_id is None else 'resume',binding_id,selected_idea_id,timeout)
+    return Runtime(store_path,runtime_root).open_binding('new' if binding_id is None else 'resume',binding_id,selected_idea_id,timeout,
+                                                         session_workspace=session_workspace)
 
 
 def _check_orcabinding(orcabinding):

@@ -9,6 +9,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest.mock import patch
 from urllib.parse import parse_qs, urlsplit
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'glitch-idea/scripts'))
@@ -193,8 +194,11 @@ class AgentClientTests(unittest.TestCase):
         self.assertEqual(sum(c[1]=='/agent/v1/respond' for c in self.calls),2)
 
     def test_total_deadline_stops_trickling_headers(self):
+        # The total deadline still bounds a trickling peer; with no lock budget it is the 2 s margin alone,
+        # and running out of it is a late answer, never the service's own agent_unavailable.
         client=self.client(); self.mode='trickle'; start=time.monotonic()
-        self.assert_error(AgentClientError,lambda:client.events(timeout=0),'agent_unavailable')
+        with patch('idea_agent_client.BODY_DEADLINE',0):
+            self.assert_error(AgentClientError,lambda:client.events(timeout=0),'agent_transport_timeout')
         self.assertLess(time.monotonic()-start,2.8)
 
     PNG = b'\x89PNG\r\n\x1a\n' + b'x' * 20

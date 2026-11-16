@@ -281,7 +281,7 @@ class ExplorationTests(Base):
 
     def test_sketch_inner_method_is_a_method_or_null(self):
         value = fields()['exploration']
-        for method in (None, 'bounded-plan', 'adaptive-slices', 'appetite-led', 'experiment-led'):
+        for method in (None, 'bounded-plan', 'bmad', 'adaptive-slices', 'appetite-led', 'experiment-led'):
             value['sketch'][0]['method'] = method
             self.assertEqual(validate_step_fields('exploration', value)['sketch'][0]['method'], method)
         for bad in ('overall', 'shape', 3, True):
@@ -293,7 +293,7 @@ class ExplorationTests(Base):
 
     def test_investment_and_experiment_follow_the_accepted_method(self):
         base = fields()['exploration']
-        for selected in ('bounded-plan', 'adaptive-slices', 'appetite-led', 'experiment-led'):
+        for selected in ('bounded-plan', 'bmad', 'adaptive-slices', 'appetite-led', 'experiment-led'):
             value = copy.deepcopy(base)
             if selected == 'appetite-led':
                 self.assertIn('investment', step_requirements('exploration', value, selected))

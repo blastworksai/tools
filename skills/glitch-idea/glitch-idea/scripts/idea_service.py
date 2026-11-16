@@ -259,15 +259,8 @@ def _agent_overlay(value, live, idea):
     return copy.deepcopy(value)
 
 
-def default_workspace(value):
-    """Validate the optional trusted default_workspace setting: None, or dict(name, path).
-
-    The path must be absolute and an existing folder; anything else is a plain config error.
-    Nothing here picks a folder: the owner names it in config.json.
-    """
-    if value is None:
-        return None
-    bad = lambda why: IdeaError('invalid_config', 'default_workspace '+why)
+def _workspace_object(value, bad):
+    # One rule set for a trusted workspace object; `bad(why)` builds the error each caller owns.
     if type(value) is not dict or set(value) != {'name', 'path'}:
         raise bad('must be an object with exactly name and path')
     name, path = value['name'], value['path']
@@ -280,14 +273,42 @@ def default_workspace(value):
     return dict(name=name, path=path)
 
 
+def default_workspace(value):
+    """Validate the optional trusted default_workspace setting: None, or dict(name, path).
+
+    The path must be absolute and an existing folder; anything else is a plain config error.
+    Nothing here picks a folder: the owner names it in config.json.
+    """
+    if value is None:
+        return None
+    return _workspace_object(value, lambda why: IdeaError('invalid_config', 'default_workspace '+why))
+
+
+def session_workspace(value):
+    """Validate one session's Capture prefill: None, or dict(name, path) under the default_workspace rules.
+
+    The folder must also be readable. Anything else is workspace_unavailable, raised before a session exists.
+    """
+    if value is None:
+        return None
+    result = _workspace_object(value, lambda why: IdeaError('workspace_unavailable', 'Session workspace '+why))
+    if not os.access(result['path'], os.R_OK | os.X_OK):
+        raise IdeaError('workspace_unavailable', 'Session workspace path must be a readable folder: '+result['path'])
+    return result
+
+
 class Service:
-    def __init__(self,store,config,trusted_context,*,handlers=None,workspace_resolver=None,handoff_provider=None,agent_provider=None):
+    def __init__(self,store,config,trusted_context,*,handlers=None,workspace_resolver=None,handoff_provider=None,agent_provider=None,
+                 session_workspace=None):
         require(isinstance(trusted_context,TrustedContext), 'Trusted caller context is required')
         text(trusted_context.actor,'trusted actor',200)
         require(type(trusted_context.session_id) is str and re.fullmatch(r'session_[0-9a-f]{32}',trusted_context.session_id) is not None, 'Invalid durable session ID')
         if trusted_context.selected_idea_id is not None: check_id(trusted_context.selected_idea_id)
         require(type(config) is dict, 'Trusted configuration must be an object')
         self.store, self.config, self.context = store, copy.deepcopy(config), trusted_context
+        # This session's Capture prefill (dict(name, path)), validated by the owner. It never moves an idea and is kept off
+        # the trusted context, so step handlers never see it.
+        self.session_workspace = copy.deepcopy(session_workspace)
         # The plain migration line: kept from this service's own first open, shown once, then cleared.
         self._migrated, self._notified = [], False
         self._note_migration()
@@ -428,6 +449,7 @@ class Service:
                           resume=dict(required=True,reason='agent_disconnected'),**projection)
             result.update(copy.deepcopy(handoff_view))
             result.update(default_workspace=copy.deepcopy(self.config.get('default_workspace')),
+                          session_workspace=copy.deepcopy(self.session_workspace),
                           lifecycle=None, home=None, delivered_ref=None, review_cause=None)
             if idea is not None and projection['steps']['assess']['status'] == 'review-needed' and idea['revisions'][-1]['action'] == 'import':
                 result['review_cause'] = 'imported'  # the last revision is the import's own: the cause stands until Assess is accepted again

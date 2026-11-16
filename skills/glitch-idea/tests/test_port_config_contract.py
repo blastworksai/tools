@@ -1,4 +1,6 @@
 """Contract drift: installer, launch config and run-time helper must accept and refuse the same port/mode values."""
+import contextlib
+import io
 import json
 from pathlib import Path
 import shutil
@@ -16,10 +18,11 @@ from idea_domain import IdeaError
 
 GOOD = (1024, 8840, 65535)
 BAD = (True, False, 0, 80, 1023, 65536, '8840', 8840.0, [], {}, -1)
-MODES_GOOD = ('link', 'system', 'ssh')
+MODES_GOOD = ('link', 'system', 'tern')
 MODES_BAD = ('orca', '', 1, True, 0, [], 'LINK')
-CLIENTS_GOOD = ('workstation', 'a' * 255, 'workstation.tailnet.example.net', 'x-1')
-CLIENTS_BAD = ('', 'a' * 256, 'two words', 'tab\there', 'new\nline', 'nul\x00', '-oProxyCommand=x', '-J', 1, True, 0, [], {})
+RETIRED = (dict(ssh_client='workstation'), dict(ssh_server_port=22), dict(browser_mode='ssh'),
+           dict(ssh_client='workstation', ssh_server_port=22, browser_mode='ssh'),
+           dict(ssh_client='two words', ssh_server_port=0))  # retired keys are dropped unread, valid or not
 
 
 class Contract(unittest.TestCase):
@@ -34,7 +37,10 @@ class Contract(unittest.TestCase):
     def installer(self, **extra):
         (self.local / 'config.json').write_text(json.dumps(dict(store_path='ideas', **extra)))
         try:
-            return 'ok', install.effective_config(self.source, self.destination, None, False)
+            with contextlib.redirect_stderr(io.StringIO()) as err:
+                config = install.effective_config(self.source, self.destination, None, False)
+            self.stderr = err.getvalue()
+            return 'ok', config
         except install.InstallError as exc:
             return 'refused', str(exc)
 
@@ -122,38 +128,43 @@ class Contract(unittest.TestCase):
                 self.assertEqual(self.installer(browser_mode=m)[0], 'refused')
                 self.assertEqual(self.runtime(browser_mode=m), ('refused', 'invalid_config'))
 
-    def test_good_ssh_clients_accepted_by_installer_and_runtime(self):
-        for c in CLIENTS_GOOD:
-            with self.subTest(client=c):
-                status, cfg = self.installer(ssh_client=c)
-                self.assertEqual((status, cfg.get('ssh_client')), ('ok', c))
-                self.assertEqual(self.runtime(ssh_client=c)[0], 'ok')
+    def test_retired_ssh_settings_are_dropped_by_the_installer_with_one_line(self):
+        for old in RETIRED:
+            with self.subTest(old=old):
+                status, cfg = self.installer(**old)
+                self.assertEqual(status, 'ok')
+                for key in ('ssh_client', 'ssh_server_port', 'browser_mode'):
+                    self.assertNotIn(key, cfg)
+                self.assertEqual(len(self.stderr.strip().splitlines()), 1, self.stderr)
+                for key in old:
+                    self.assertIn(key, self.stderr)
+                for value in ('workstation', 'two words'):
+                    self.assertNotIn(value, self.stderr)  # names the keys dropped, never their values
+        self.installer(browser_mode='tern')
+        self.assertEqual(self.stderr, '')  # nothing retired, nothing said
 
-    def test_bad_ssh_clients_refused_by_installer_and_runtime(self):
-        for c in CLIENTS_BAD:
-            with self.subTest(client=c):
-                self.assertEqual(self.installer(ssh_client=c)[0], 'refused')
-                self.assertEqual(self.runtime(ssh_client=c), ('refused', 'invalid_config'))
+    def test_retired_ssh_settings_leave_the_other_settings_alone(self):
+        status, cfg = self.installer(ssh_client='workstation', browser_mode='ssh', browser_port=8840, prototype_port=8841)
+        self.assertEqual((status, cfg['browser_port'], cfg['prototype_port']), ('ok', 8840, 8841))
+        self.assertNotIn('browser_mode', cfg)
 
-    def test_null_ssh_client_is_unset(self):
-        status, cfg = self.installer(ssh_client=None)
-        self.assertEqual(status, 'ok')
-        self.assertNotIn('ssh_client', cfg)
-        self.assertEqual(self.runtime(ssh_client=None), ('ok', (None, None, None)))
+    def test_retired_ssh_settings_read_as_absent_by_the_runtime(self):
+        for old in RETIRED:
+            with self.subTest(old=old):
+                self.assertEqual(self.runtime(**old), ('ok', (None, None, None)))
+        self.assertEqual(self.runtime(ssh_client='x', browser_mode='tern', browser_port=8840), ('ok', (8840, None, 'tern')))
 
-    def test_ssh_server_port_bounds_agree(self):
-        for v in (1, 22, 2222, 65535):
-            with self.subTest(good=v):
-                self.assertEqual(self.installer(ssh_server_port=v)[1].get('ssh_server_port'), v)
-                self.assertEqual(self.runtime(ssh_server_port=v)[0], 'ok')
-        for v in (True, False, 0, -1, 65536, '22', 22.0, [], {}):
-            with self.subTest(bad=v):
-                self.assertEqual(self.installer(ssh_server_port=v)[0], 'refused')
-                self.assertEqual(self.runtime(ssh_server_port=v), ('refused', 'invalid_config'))
-        self.assertNotIn('ssh_server_port', self.installer(ssh_server_port=None)[1])
+    def test_any_other_unknown_key_is_still_refused_by_the_installer(self):
+        for extra, named in ((dict(not_a_key=1), 'not_a_key'), (dict(ssh_clients='x'), 'ssh_clients'),
+                             (dict(ssh_client='workstation', not_a_key=1), 'not_a_key')):
+            with self.subTest(extra=extra):
+                status, message = self.installer(**extra)
+                self.assertEqual(status, 'refused')
+                self.assertIn('Unsupported configuration keys', message)
+                self.assertIn(named, message)
 
     def test_launch_config_allow_list_refuses_the_keys_it_does_not_carry(self):
-        for key, v in (('prototype_port', 8841), ('browser_mode', 'link'), ('ssh_client', 'workstation'), ('ssh_server_port', 22)):
+        for key, v in (('prototype_port', 8841), ('browser_mode', 'link')):
             with self.subTest(key=key):
                 self.assertEqual(self.launch(**{key: v}), ('refused', 'invalid_config'))
 
@@ -161,7 +172,6 @@ class Contract(unittest.TestCase):
         for key in ('browser_port', 'prototype_port'):
             self.assertIn(key, self.installer(**{key: 80})[1])
         self.assertIn('browser_mode', self.installer(browser_mode='orca')[1])
-        self.assertIn('ssh_client', self.installer(ssh_client='two words')[1])
 
 
 if __name__ == '__main__':

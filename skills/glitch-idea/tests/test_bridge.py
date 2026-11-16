@@ -362,6 +362,16 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(self.request('/api/v1/requests/missing')[0], 404)
         self.assertEqual(self.request('/api/v1/state', {}, method='POST')[0], 405)
 
+    def test_removed_tunnel_probe_route_answers_like_any_unknown_route(self):
+        for authenticated in (True, False):
+            with self.subTest(authenticated=authenticated):
+                for query in ('?nonce=' + 'ab' * 16, '', '?nonce=zz'):
+                    probe = self.request('/api/v1/tunnel-probe' + query, authenticated=authenticated)
+                    unknown = self.request('/api/v1/no-such-route' + query, authenticated=authenticated)
+                    self.assertEqual(probe[0], 404)
+                    self.assertNotIn('proof', json.dumps(probe[1]) if isinstance(probe[1], dict) else str(probe[1]))
+                    self.assertEqual(probe[0:2], unknown[0:2])
+
     def test_stable_binding_static_queries_and_typed_single_selector_header(self):
         selector='binding_'+'1'*32
         idea='idea_'+'2'*32

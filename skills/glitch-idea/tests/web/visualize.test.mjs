@@ -572,3 +572,58 @@ test('SKILLS-96: the rendered Visualize page says what each control does, in pla
   assert.match(page,/Earlier design: draft\.md/);assert.match(page,/Chosen design: draft\.md/);assert.match(page,/1 upload was started and not finished/);
   assert.match(page,/3 leftover pieces of earlier uploads/);assert.doesNotMatch(page,BANNED);assert.ok(!page.includes(SET),'the set id is not shown');
 });
+test('Claude Design road: a box is enabled with no button press, and ticking it starts the design set; nothing is saved until Accept',async()=>{
+  const h=harness(),asset=h.addAsset('design.md'),other=h.addAsset('other.md');h.reload();
+  const box=h.get('visualize-member-'+asset.asset_id);assert.equal(box.disabled,false);assert.equal(h.get('visualize-member-'+other.asset_id).disabled,false);
+  assert.equal(h.flow.buffers.visualize.disposition,null);
+  box.change({checked:true});
+  assert.equal(h.flow.buffers.visualize.disposition,'accepted_set');assert.equal(h.flow.buffers.visualize.source,'claude_design');assert.equal(h.flow.buffers.visualize.design_set_id,null);
+  assert.equal(h.get('visualize-member-'+asset.asset_id).checked,true);
+  assert.equal(writes(h).some(call=>call.route==='/api/v1/visual-set/accept'),false);
+  assert.equal(h.get('visualize-accept').disabled,false);
+  await h.get('visualize-accept').click();
+  const request=writes(h).find(call=>call.route==='/api/v1/visual-set/accept').payload;
+  assert.equal(request.fields.source,'claude_design');assert.deepEqual(request.asset_ids,[asset.asset_id]);
+});
+test('Prototype road: the pair shows ticked and locked, every other box and the choose button are disabled, Accept saves the pair',async()=>{
+  const h=connectAgent(harness()),files=pngZip(h),extra=h.addAsset('notes.md');h.reload();
+  await h.get('visualize-prototype').click();fillPrototype(h,files);await new Promise(resolve=>setTimeout(resolve,20));h.draw();
+  for(const f of [files.zip,files.png]){const box=h.get('visualize-member-'+f.asset_id);assert.equal(box.checked,true);assert.equal(box.disabled,true);}
+  const other=h.get('visualize-member-'+extra.asset_id);assert.equal(other.checked,false);assert.equal(other.disabled,true);
+  assert.equal(h.get('visualize-new-set').disabled,true);
+  assert.ok(h.body.all().some(node=>node.textContent==="Your prototype's two files are the design; press Accept."));
+  assert.equal(h.get('visualize-accept').disabled,false);
+  await h.get('visualize-accept').click();
+  const request=writes(h).find(call=>call.route==='/api/v1/visual-set/accept').payload;
+  assert.equal(request.fields.source,'prototype');assert.deepEqual(request.asset_ids,[files.zip.asset_id,files.png.asset_id]);
+});
+test('Prototype road: neither the choose button nor any tickbox replaces the prototype source or assets',async()=>{
+  const h=connectAgent(harness()),files=pngZip(h),extra=h.addAsset('notes.md');h.reload();
+  await h.get('visualize-prototype').click();fillPrototype(h,files);await new Promise(resolve=>setTimeout(resolve,20));h.draw();
+  const before=copy(h.flow.buffers.visualize);
+  await h.get('visualize-new-set').click();h.get('visualize-member-'+extra.asset_id).change({checked:true});h.get('visualize-member-'+files.zip.asset_id).change({checked:false});
+  assert.deepEqual(h.flow.buffers.visualize,before);assert.equal(h.flow.buffers.visualize.source,'prototype');
+  assert.ok(h.get('visualize-prototype-shot'));assert.equal(h.get('visualize-accept').disabled,false);
+});
+test('Review: unticking after Accept changes the design; the saved set is not resubmitted behind the ticks',async()=>{
+  const h=harness(),a=h.addAsset('a.md'),b=h.addAsset('b.md');h.reload();
+  h.get('visualize-member-'+a.asset_id).change({checked:true});h.get('visualize-member-'+b.asset_id).change({checked:true});
+  await h.get('visualize-accept').click();await new Promise(resolve=>setTimeout(resolve,20));h.draw();
+  const first=writes(h).filter(call=>call.route==='/api/v1/visual-set/accept');assert.equal(first.length,1);assert.deepEqual(first[0].payload.asset_ids,[a.asset_id,b.asset_id]);
+  h.get('visualize-member-'+b.asset_id).change({checked:false});
+  assert.equal(h.flow.buffers.visualize.design_set_id,null);assert.equal(h.get('visualize-member-'+b.asset_id).checked,false);
+  await h.get('visualize-accept').click();
+  const again=writes(h).filter(call=>call.route==='/api/v1/visual-set/accept').at(-1).payload;
+  assert.deepEqual(again.asset_ids,[a.asset_id]);assert.equal(again.fields.design_set_id,null);
+});
+test('Review: a file ticked before the prototype arrived is not shown ticked beside the pair',async()=>{
+  const h=connectAgent(harness()),files=pngZip(h),extra=h.addAsset('notes.md');h.reload();
+  h.get('visualize-member-'+extra.asset_id).change({checked:true});assert.equal(h.get('visualize-member-'+extra.asset_id).checked,true);
+  await h.get('visualize-prototype').click();fillPrototype(h,files);await new Promise(resolve=>setTimeout(resolve,20));h.draw();
+  const other=h.get('visualize-member-'+extra.asset_id);assert.equal(other.checked,false);assert.equal(other.disabled,true);
+  for(const f of [files.zip,files.png])assert.equal(h.get('visualize-member-'+f.asset_id).checked,true);
+  assert.doesNotMatch(text(h),/ticked as the design/);
+  await h.get('visualize-accept').click();
+  const request=writes(h).find(call=>call.route==='/api/v1/visual-set/accept').payload;
+  assert.equal(request.fields.source,'prototype');assert.deepEqual(request.asset_ids,[files.zip.asset_id,files.png.asset_id]);
+});

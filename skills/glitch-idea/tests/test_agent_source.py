@@ -128,7 +128,7 @@ class PureSourceTests(unittest.TestCase):
             self.assert_code('operation_unavailable',lambda:source.prepare_source(domain(),KEY,operation))
 
     def test_memory_statuses_exact_typed_results_and_method_schema(self):
-        values = [dict(status='found',sources=['safe-reference'],rationale='Observed preference',preferred_method='adaptive-slices'),
+        values = [dict(status='found',sources=['safe-reference'],rationale='Observed preference',preferred_method='bmad'),
             dict(status='varied',sources=['safe-reference'],rationale='Past choices differed',preferred_method=None),
             dict(status='searched_no_preference',sources=[],rationale='Search complete'),
             dict(status='unavailable',sources=[],rationale=None),dict(status='error',sources=[],rationale='Retrieval failed')]
@@ -302,7 +302,7 @@ class AdapterTests(unittest.TestCase):
             reply=evidence(state,self.sid,operation='method',request_id='method-1')
             link=self.store.persist_agent_proposal(state,reply,actor=ACTOR,validate_current=source.validate_current)
         with self.store.transaction() as state:
-            changed=fields()['method']; changed.update(selection='adaptive-slices',reason='Human chooses another route')
+            changed=fields()['method']; changed.update(selection='bmad',reason='Human chooses another route')
             payload=self.payload(state['ideas'][KEY],'method',changed,link['proposal_id'])
             self.assertEqual(self.validate(state,payload)['operation'],'method')
             payload['fields']['memory']=dict(status='found',sources=['forged-reference'],rationale='Forged preference',preferred_method='bounded-plan')
@@ -331,7 +331,7 @@ class AdapterTests(unittest.TestCase):
             link=self.store.persist_agent_proposal(state,reply,actor=ACTOR,validate_current=source.validate_current)
         with self.store.transaction(write=True) as state:
             idea=state['ideas'][KEY];changed=copy.deepcopy(reply['proposal'])
-            changed.update(selection='adaptive-slices',reason='Human chooses another route')
+            changed.update(selection='bmad',reason='Human chooses another route')
             state['ideas'][KEY]=save_draft(idea,'method',changed,
                 expected_revision=idea['revision'],expected_draft_version=0)['idea']
             self.store.commit(state)

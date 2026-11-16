@@ -17,7 +17,9 @@ WORKFLOW_VERSION = 2
 STEP_ORDER = ('capture', 'priorities', 'shape', 'method', 'visualize', 'assess', 'review')
 STEP_STATUSES = ('todo', 'current', 'saved', 'review-needed', 'unsaved', 'skipped', 'not-applicable')
 SCOPES = ('small-change', 'capability', 'project', 'epic')
-METHODS = ('bounded-plan', 'adaptive-slices', 'appetite-led', 'experiment-led')
+# Frozen reader: METHODS is what can be chosen today; the retired value is still read from v2 evidence.
+METHODS = ('bounded-plan', 'bmad', 'appetite-led', 'experiment-led')
+READABLE_METHODS = METHODS + ('adaptive-slices',)
 MEMORY_STATUSES = ('found', 'searched_no_preference', 'unavailable', 'error')
 STEP_FIELDS = {
     'capture': frozenset(('raw_text', 'workspace')),
@@ -183,7 +185,7 @@ VALIDATORS = {
     'shape': {'outcome': _draft_text, 'scope': lambda v, n: _enum(v, SCOPES, n),
               'scope_reason': _draft_text, 'alternatives': _alternatives,
               'assumptions': _text_list, 'next_slice': _draft_text, 'learning': _text_list},
-    'method': {'selection': lambda v, n: _enum(v, METHODS, n), 'reason': _draft_text,
+    'method': {'selection': lambda v, n: _enum(v, READABLE_METHODS, n), 'reason': _draft_text,
                'investment': _investment, 'experiment': _experiment, 'memory': _memory},
     'visualize': {'disposition': lambda v, n: _enum(v, ('accepted_set', 'skipped', 'not-applicable'), n),
                   'reason': _draft_text, 'design_set_id': _opaque_id, 'brief_evidence_id': _opaque_id},
@@ -245,7 +247,7 @@ def step_requirements(step, fields):
                 needed(k+'.'+str(index), _meaningful(item))
     elif step == 'method':
         selected = fields.get('selection')
-        needed('selection', selected in METHODS)
+        needed('selection', selected in READABLE_METHODS)
         nonempty('reason')
         if selected == 'appetite-led':
             investment = nested('investment', ('cap', 'unit', 'boundary'), ('unit', 'boundary'))

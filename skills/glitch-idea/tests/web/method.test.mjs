@@ -95,7 +95,7 @@ test('Method memory reply never selects a method or touches the reason; explicit
   const h=harness();assert.equal(h.flow.buffers.method.selection,null);assert.equal(h.get('method-accept').disabled,true);
   await h.flow.requestProposal('method');h.complete();await h.flow.refreshAgent();
   assert.equal(h.flow.buffers.method.selection,null);
-  for(const key of ['bounded-plan','adaptive-slices','appetite-led','experiment-led'])assert.equal(h.get('method-choice-'+key)['aria-pressed'],'false');
+  for(const key of ['bounded-plan','bmad','appetite-led','experiment-led'])assert.equal(h.get('method-choice-'+key)['aria-pressed'],'false');
   assert.equal(h.get('method-proposal-'+PID).all().some(node=>/Recommend/i.test(node.textContent)),false);
   h.get('method-reason').input('Human reason');
   await h.get('method-use-proposal-'+PID).click();assert.equal(h.flow.buffers.method.selection,null);
@@ -105,6 +105,15 @@ test('Method memory reply never selects a method or touches the reason; explicit
   await h.get('method-accept').click();
   assert.equal(h.writes.at(-1).payload.fields.selection,'appetite-led');assert.equal(h.writes.at(-1).payload.fields.reason,'Human reason');
   assert.equal(h.writes.at(-1).payload.proposal_id,PID);assert.equal(Object.hasOwn(h.writes.at(-1).payload.fields,'investment'),false);
+});
+
+test('a saved retired method is not "no method", is read-only, and picking a card replaces it',async()=>{
+  const h=harness();h.flow.edit('method',{selection:'adaptive-slices',reason:'',memory:copy(NO_MEMORY)});h.draw();
+  assert.equal(h.get('method-accept').disabled,false);assert.equal(h.get('method-accept-reason'),undefined);
+  assert.equal(h.get('method-choice-adaptive-slices'),undefined);assert.match(h.get('method-retired-adaptive-slices').textContent,/Vertical Slicing \(Agile\)/);
+  await h.get('method-choice-bmad').click();
+  assert.equal(h.flow.buffers.method.selection,'bmad');assert.equal(h.get('method-retired-adaptive-slices'),undefined);
+  assert.equal(h.get('method-choice-bmad')['aria-pressed'],'true');
 });
 
 test('archived or unknown Method cannot accept valid answers and keeps draft and memory line visible',async()=>{
@@ -150,7 +159,7 @@ test('the reason is optional, helped, and never blocks Accept; no budget or expe
   assert.ok(h.body.all().some(node=>node.textContent==='Helps /glitch-plan understand the choice, and teaches your Glitch your preference over time.'));
   assert.equal(h.get('method-reason').value,'');assert.equal(h.get('method-reason').required,undefined);
   assert.equal(h.get('method-accept').disabled,false);assert.equal(h.get('method-accept-reason'),undefined);assert.equal(h.get('method-accept').title,undefined);
-  for(const key of ['experiment-led','appetite-led','adaptive-slices']){
+  for(const key of ['experiment-led','appetite-led','bmad']){
     await h.get('method-choice-'+key).click();
     const ids=h.body.all().map(node=>node.id||'');
     assert.equal(ids.some(id=>/^method-(investment|experiment)/.test(id)),false,key);

@@ -48,7 +48,7 @@ export const UPLOAD_MAX_BYTES = 25 * 1024 * 1024;
 // Fixed transport schemas. Host paths are evidence text only.
 const HANDOFF = /^handoff_[0-9a-f]{32}$/;
 const HASH = /^[0-9a-f]{64}$/;
-const METHODS = new Set(['bounded-plan', 'adaptive-slices', 'appetite-led', 'experiment-led']);
+const METHODS = new Set(['bounded-plan', 'bmad', 'appetite-led', 'experiment-led', 'adaptive-slices']);
 const HANDOFF_PAYLOAD = ['request_id', 'idea_id', 'expected_revision', 'expected_draft_version', 'expected_backlog_revision'];
 const HANDOFF_RECEIPT = ['ok', 'code', 'request_id', 'write_state', 'idea_id', 'revision', 'draft_version',
   'backlog_revision', 'handoff_index', 'handoff_id', 'path', 'sha256', 'handoff', 'handoff_current'];
@@ -88,6 +88,9 @@ function hostPath(value) {
   const normalized = windows ? value.replaceAll('\\', '/') : value;
   if (normalized.split('/').includes('..') || normalized.split('/').includes('.')) return null;
   return normalized;
+}
+function sessionWorkspace(value) {
+  return value === null || (exact(value, ['name', 'path']) && typeof value.name === 'string' && typeof value.path === 'string');
 }
 function invalidReply(uncertain = false) { throw new ApiError('invalid_response', 0, {}, uncertain); }
 const SETTINGS_WHERE = new Set(['native', 'api']);
@@ -333,8 +336,11 @@ export class IdeaApi {
     return this.session();
   }
 
-  state(ideaId = null) {
-    return this.request('state' + (ideaId ? '?idea_id=' + encodeURIComponent(ideaId) : ''));
+  async state(ideaId = null) {
+    const data = await this.request('state' + (ideaId ? '?idea_id=' + encodeURIComponent(ideaId) : ''));
+    // session_workspace is null or exactly {name, path}; an older service sends no such key, which the page reads as null.
+    if (data !== null && typeof data === 'object' && Object.hasOwn(data, 'session_workspace') && !sessionWorkspace(data.session_workspace)) invalidReply();
+    return data;
   }
 
   write(operation, payload) {

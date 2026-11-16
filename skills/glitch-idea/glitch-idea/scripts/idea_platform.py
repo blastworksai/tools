@@ -50,8 +50,20 @@ SHARED_DIR_MODE = 0o2770
 SHARED_SEAL_MODE = 0o440
 
 
+SHARED_ROOT_BITS = stat.S_IRWXG
+
+
+def is_shared_mode(mode):
+    """The one rule for a shared store root: a directory, setgid, with group read, write and execute.
+
+    A root the group can write but not enter or list (2720, 2730) is not shared: a second account could never use it.
+    The installer's store check applies the same test on its own (it imports nothing from here); a test keeps them equal.
+    """
+    return stat.S_ISDIR(mode) and bool(mode & stat.S_ISGID) and mode & SHARED_ROOT_BITS == SHARED_ROOT_BITS
+
+
 def is_shared_root(root):
-    """A store root that is setgid and group-writable is a shared-group store.
+    """A store root that is setgid with group read, write and execute is a shared-group store.
 
     Measured on each call, so it is deterministic and follows the root's own mode.
     Every other root stays owner-only.
@@ -62,7 +74,96 @@ def is_shared_root(root):
         mode = os.stat(root).st_mode
     except OSError:
         return False
-    return stat.S_ISDIR(mode) and bool(mode & stat.S_ISGID) and bool(mode & stat.S_IWGRP)
+    return is_shared_mode(mode)
+
+
+def _owner_name(path, stop):
+    """The owner of path, or of its nearest ancestor that can be read, down to stop; a numeric id when no name is known."""
+    current = Path(path)
+    while True:
+        try:
+            uid = os.lstat(current).st_uid
+            break
+        except OSError:
+            if current == stop or current.parent == current:
+                return 'unknown'
+            current = current.parent
+    try:
+        import pwd
+        return pwd.getpwuid(uid).pw_name
+    except Exception:
+        return str(uid)
+
+
+SHARED_GROUP_PLACEHOLDER = '<shared group>'
+
+
+def conversion_commands(root, group=None):
+    """The four commands that make an existing store usable by a group, as its owner runs them.
+
+    Writable files become 660 and sealed read-only files stay read-only (440): a blanket recursive group-write
+    would unseal the store's evidence files.
+    """
+    import shlex
+    where = shlex.quote(str(root))
+    # A real group name comes from the system's group database and is pasted into a shell: always quoted.
+    # Only an unknown group (None) shows the placeholder, which the owner replaces before running anything.
+    group = SHARED_GROUP_PLACEHOLDER if group is None else shlex.quote(str(group))
+    return ['chgrp -R %s %s' % (group, where),
+            'find %s -type d -exec chmod 2770 {} +' % where,
+            'find %s -type f -perm /200 -exec chmod 660 {} +' % where,
+            'find %s -type f ! -perm /200 -exec chmod 440 {} +' % where]
+
+
+def _group_name(root):
+    try:
+        import grp
+        return grp.getgrgid(os.lstat(root).st_gid).gr_name
+    except Exception:
+        return None
+
+
+def not_shared_error(exc, store):
+    """Turn a permission refusal on the store, or on something inside it, into one named error; else None.
+
+    The message names the refused path and its owner and lists the commands the owner runs; the same commands ride
+    the error as `fix`. Nothing is repaired here and this never raises: an error about an error would hide the first.
+    """
+    try:
+        if not isinstance(exc, OSError) or exc.errno not in (errno.EACCES, errno.EPERM) or store is None:
+            return None
+        refused = exc.filename
+        if isinstance(refused, bytes):
+            refused = os.fsdecode(refused)
+        if type(refused) is not str or not refused:
+            return None
+        root = Path(os.path.abspath(str(store)))
+        target = Path(os.path.abspath(refused))
+        # Inside-or-not is decided on resolved paths: a store reached through a symlink still counts, and a link
+        # inside the store that points outside it does not. The path shown is the one that was refused.
+        real_root = Path(os.path.realpath(root))
+        real_target = Path(os.path.realpath(target))
+        if real_target != real_root and real_root not in real_target.parents:
+            return None
+        at_root = real_target == real_root
+        usable = is_shared_root(root) and os.access(root, os.R_OK | os.W_OK | os.X_OK)
+        if usable and not at_root:
+            fix = conversion_commands(root, _group_name(root))
+            text = ('This account was refused permission on %s in a shared store. Its owner (%s) must convert the store:'
+                    % (target, _owner_name(target, root)))
+        else:
+            try:
+                mode = '%04o' % stat.S_IMODE(os.lstat(root).st_mode)
+            except OSError:
+                mode = 'unknown'
+            # The top folder's present group may be its owner's own; only the owner knows the group to share with.
+            fix = conversion_commands(root, None)
+            text = ('This account cannot use the store %s: its top folder is not shared with it (mode %s, owner %s). '
+                    'To share it, its owner runs:' % (root, mode, _owner_name(root, root)))
+        return IdeaError('store_not_shared', '\n'.join([text, *('  ' + line for line in fix)]),
+                         path=str(target), store=str(root), fix=fix)
+    except Exception:
+        return None
 
 
 def store_root_of(path):

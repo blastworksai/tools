@@ -3,13 +3,19 @@
 It is never the app's port or origin. It serves only regular files under one owner-private
 folder inside the runtime root's prototypes/ directory, answers GET/HEAD only, sets no
 cookie, reads no cookie, and stops when its session ends or after a hard maximum lifetime.
+
+Every launch makes one random key. It is the first path segment of every served address
+(http://127.0.0.1:<port>/<key>/...); a request without it answers exactly like a missing file.
+The port is fixed and known to every local account, so the key is what keeps them out.
 """
 import errno
+import hmac
 import json
 import mimetypes
 import os
 from pathlib import Path
 import re
+import secrets
 import signal
 import stat
 import sys
@@ -22,6 +28,7 @@ from idea_domain import IdeaError
 
 CSP = "sandbox allow-scripts; default-src 'self' 'unsafe-inline'; frame-ancestors 'none'"
 SESSION = re.compile(r'session_[0-9a-f]{32}')
+KEY = re.compile(r'[A-Za-z0-9_-]{32,}')
 ENCODED_DANGER = re.compile(r'%(2e|2f|5c|00)', re.IGNORECASE)
 MAX_LIFETIME = 4 * 3600
 POLL_SECONDS = 3.0
@@ -133,7 +140,14 @@ class Handler(BaseHTTPRequestHandler):
         port = self.server.server_address[1]
         if self.headers.get('Host') not in ('127.0.0.1:%d' % port, 'localhost:%d' % port):
             return self._refuse(421, head)
-        path, status = resolve_target(self.server.root, self.path)
+        # The key is compared on the raw first segment, before any decoding, in constant time.
+        target = self.path.split('?', 1)[0].split('#', 1)[0]
+        segment, slash, rest = target[1:].partition('/')
+        if not (target.startswith('/') and slash and hmac.compare_digest(
+                segment.encode('utf-8', 'replace'), self.server.key.encode('ascii'))):
+            return self._refuse(404, head)
+        # http.server folds a leading '//' of the whole target to '/'; do the same behind the key.
+        path, status = resolve_target(self.server.root, '/' + rest.lstrip('/'))
         if status is not None:
             return self._refuse(status, head)
         flags = os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_CLOEXEC', 0) | getattr(os, 'O_NONBLOCK', 0)
@@ -178,9 +192,15 @@ class PrototypeServer(ThreadingHTTPServer):
     allow_reuse_address = False
     allow_reuse_port = False
 
-    def __init__(self, root, port=0):
+    def __init__(self, root, port=0, key=None):
         if not (type(port) is int and (port == 0 or 1024 <= port <= 65535)):
             raise ValueError('Invalid trusted port')
+        # Never keyless: no caller, flag or config can switch the key off.
+        if key is None:
+            key = secrets.token_urlsafe(32)
+        if type(key) is not str or not KEY.fullmatch(key):
+            raise ValueError('Invalid prototype key')
+        self.key = key
         self.root = str(root)
         if port and os.name == 'posix':
             # A fixed port must rebind straight after a stop (TIME_WAIT); POSIX SO_REUSEADDR still refuses a live listener.
@@ -246,7 +266,7 @@ def serve_prototype(session_id, directory, store_path, runtime_root, *, alive=No
             signal.signal(sig, lambda *_: stop.set())
     worker = threading.Thread(target=server.serve_forever, kwargs={'poll_interval': .1}, daemon=True)
     worker.start()
-    out.write(json.dumps(dict(ok=True, origin='http://127.0.0.1:%d/' % port, port=port,
+    out.write(json.dumps(dict(ok=True, origin='http://127.0.0.1:%d/%s/' % (port, server.key), port=port,
                               ssh_line='ssh -L %d:127.0.0.1:%d %s' % (port, port, host),
                               fixed_port=fixed_port),
                          separators=(',', ':')) + '\n')

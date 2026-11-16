@@ -287,6 +287,20 @@ class RuntimeTests(unittest.TestCase):
         self.rewrite('discovery.json', discovery)
         self.assert_code('owner_identity_mismatch', self.client.probe_owner)
 
+    def test_discovery_from_the_previous_release_with_a_tunnel_probe_is_still_accepted(self):
+        self.start()
+        discovery = json.loads((self.owner.path / 'discovery.json').read_bytes())
+        self.assertNotIn('tunnel_probe', discovery)
+        self.rewrite('discovery.json', dict(discovery, tunnel_probe='ab' * 16))
+        self.assertEqual(self.client.probe_owner()['identity']['service'], 'glitch-idea')  # tolerated and ignored
+        self.rewrite('discovery.json', dict(discovery, tunnel_probe='XYZ'))
+        self.assert_code('runtime_corrupt', self.client.probe_owner)  # a malformed value is still corrupt
+
+    def test_a_new_owner_writes_no_tunnel_probe_into_its_discovery_record(self):
+        self.start()
+        self.assertNotIn('tunnel_probe', json.loads((self.owner.path / 'discovery.json').read_bytes()))
+        self.assertFalse(hasattr(self.owner, 'owner_tunnel_probe') or hasattr(self.owner, 'tunnel_probe_secret'))
+
     def test_owner_refusals_are_reported_as_their_own_codes(self):
         # Demo finding: an owner refusal (409 agent_unavailable from session-close) read as an identity failure.
         self.start()

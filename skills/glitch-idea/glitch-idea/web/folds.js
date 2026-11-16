@@ -43,8 +43,11 @@ const canonical = value => Array.isArray(value) ? value.map(canonical) :
   value && typeof value === 'object' ? Object.fromEntries(Object.keys(value).sort().map(key => [key, canonical(value[key])])) : value;
 const same = (a, b) => JSON.stringify(canonical(a)) === JSON.stringify(canonical(b));
 // The one owner of the method labels (stored ids never change).
-export const METHOD_LABELS = Object.freeze({'bounded-plan': 'Full Plan Up Front', 'adaptive-slices': 'Vertical Slicing (Agile)',
-  'appetite-led': 'Fixed Budget, Build what Fits', 'experiment-led': 'Experiment First'});
+export const METHOD_LABELS = Object.freeze({'bounded-plan': 'Full Plan Up Front', 'bmad': 'BMAD (Roles and Stories)',
+  'appetite-led': 'Fixed Budget, Build what Fits', 'experiment-led': 'Experiment First', 'adaptive-slices': 'Vertical Slicing (Agile)'});
+// What an operator can newly pick, in card order. A retired method stays readable on saved ideas and is never offered.
+export const SELECTABLE_METHODS = Object.freeze(['bounded-plan', 'bmad', 'appetite-led', 'experiment-led']);
+export const RETIRED_METHODS = Object.freeze(['adaptive-slices']);
 
 export const statusLabel = status => ({todo: 'To do', current: 'Current', saved: 'Saved',
   'review-needed': 'Review needed', unsaved: 'Unsaved', skipped: 'Skipped'}[status] ?? 'Unavailable');
@@ -72,7 +75,8 @@ function tabStorage() {
   catch { return null; } // Browser privacy settings may deny access.
 }
 const REQUEST = /^[A-Za-z0-9_.:-]{1,128}$/;
-const METHODS = ['bounded-plan', 'adaptive-slices', 'appetite-led', 'experiment-led'];
+// Every stored id, retired included: this list validates saved and server data, so an old idea still loads.
+const METHODS = [...SELECTABLE_METHODS, ...RETIRED_METHODS];
 const SCOPES = ['small-change', 'capability', 'project', 'epic'];
 const MEMORY = ['found', 'varied', 'searched_no_preference', 'unavailable', 'error'];
 const REASONS = ['wrong_generation', 'wrong_session', 'agent_unavailable', 'stale_revision', 'stale_source', 'supporting_evidence'];

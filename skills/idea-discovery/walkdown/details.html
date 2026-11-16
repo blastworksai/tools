@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>idea-discovery-release in detail</title>
+<style>
+:root {
+  --bg: #f6f5f1; --card: #ffffff; --ink: #1f2328; --muted: #5d6470; --line: #e3e1da;
+  --none-bg: #e8f1ea; --none-ink: #2f6b3c; --look-bg: #fbeed6; --look-ink: #8a5a00;
+  --fact-bg: #e7eef8; --fact-ink: #2c5282;
+  --s1: #2a78d6; --s2: #eb6834; --s3: #1baf7a; --s4: #eda100;   /* validated, light, on #ffffff */
+  --meter: #2a78d6; --track: #cde2fb; --over: #2a78d6; --grid: #e1e0d9;
+  --on-s1: #ffffff; --on-light: #1f2328;
+}
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme="light"])) {
+    --bg: #17191c; --card: #212429; --ink: #e8e6e1; --muted: #a3a8b0; --line: #343840;
+    --none-bg: #1f3325; --none-ink: #8fd19e; --look-bg: #3a2e14; --look-ink: #f2c46d;
+    --fact-bg: #1e2a3a; --fact-ink: #9cbcf0;
+    --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500;   /* validated, dark, on #212429 */
+    --meter: #3987e5; --track: #184f95; --grid: #2c2c2a;
+    --on-s1: #ffffff; --on-light: #111316;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #17191c; --card: #212429; --ink: #e8e6e1; --muted: #a3a8b0; --line: #343840;
+  --none-bg: #1f3325; --none-ink: #8fd19e; --look-bg: #3a2e14; --look-ink: #f2c46d;
+  --fact-bg: #1e2a3a; --fact-ink: #9cbcf0;
+  --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500;
+  --meter: #3987e5; --track: #184f95; --grid: #2c2c2a;
+  --on-s1: #ffffff; --on-light: #111316;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink);
+       font: 17px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+main { max-width: 780px; margin: 0 auto; padding: 28px 16px 48px; }
+header h1 { font-size: 2rem; margin: 0 0 4px; letter-spacing: -0.01em; }
+.meta { color: var(--muted); font-size: 0.9rem; margin: 0 0 14px; }
+.what { margin: 0 0 6px; }
+.how { color: var(--muted); font-size: 0.95rem; margin: 0 0 26px; }
+h2 { font-size: 1.05rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin: 0 0 10px; }
+h3 { font-size: 0.98rem; margin: 18px 0 8px; }
+.rows { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
+details { background: var(--card); border: 1px solid var(--line); border-radius: 12px; }
+summary { list-style: none; cursor: pointer; padding: 14px 16px; display: grid;
+          grid-template-columns: 1fr auto; gap: 4px 12px; align-items: start; }
+summary::-webkit-details-marker { display: none; }
+.q { font-weight: 650; font-size: 1.05rem; }
+.a { grid-column: 1 / -1; }
+.chip { font-size: 0.8rem; font-weight: 650; padding: 3px 10px; border-radius: 999px; white-space: nowrap; }
+.none { background: var(--none-bg); color: var(--none-ink); }
+.look, .notes { background: var(--look-bg); color: var(--look-ink); }
+.fact { background: var(--fact-bg); color: var(--fact-ink); }
+.more { grid-column: 1 / -1; color: var(--muted); font-size: 0.85rem; }
+details[open] .more { display: none; }
+.body { padding: 0 16px 16px; border-top: 1px solid var(--line); }
+.body ul { margin: 12px 0 0; padding-left: 20px; }
+.body li { margin: 6px 0; }
+.where { color: var(--muted); font-size: 0.85rem; }
+.explain { background: var(--bg); border-radius: 8px; padding: 10px 12px; font-size: 0.92rem; margin-top: 12px; }
+code { font: 0.9em ui-monospace, "Cascadia Mono", Consolas, monospace; }
+
+/* memory table with meters */
+.tablewrap { overflow-x: auto; margin-top: 12px; }
+table.mem { width: 100%; border-collapse: collapse; font-size: 0.93rem; }
+table.mem th { text-align: left; font-weight: 650; color: var(--muted); font-size: 0.82rem;
+               padding: 6px 8px; border-bottom: 1px solid var(--grid); vertical-align: bottom; }
+table.mem td { padding: 9px 8px; border-bottom: 1px solid var(--grid); vertical-align: top; }
+table.mem th.num, table.mem td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.cell-meter { width: 24%; min-width: 64px; }
+table.mem td.rowname { min-width: 10em; }
+@media (max-width: 560px) {
+  table.mem { font-size: 0.88rem; }
+  table.mem th, table.mem td { padding-left: 5px; padding-right: 5px; }
+  .rowname small { display: none; }
+}
+.pct { font-variant-numeric: tabular-nums; font-size: 0.85rem; }
+.meter { height: 8px; background: var(--track); border-radius: 4px; margin-top: 4px; position: relative; }
+.meter > span { position: absolute; left: 0; top: 0; bottom: 0; background: var(--meter); border-radius: 4px; min-width: 2px; }
+.meter.over > span { width: 100%; }
+.meter.over::after { content: ""; position: absolute; right: -6px; top: -3px; border-left: 7px solid var(--meter);
+                     border-top: 7px solid transparent; border-bottom: 7px solid transparent; }
+.rowname small { display: block; color: var(--muted); font-size: 0.8rem; }
+
+/* skill list room */
+.room { display: grid; gap: 10px; margin-top: 8px; }
+.room .lbl { display: flex; justify-content: space-between; gap: 10px; font-size: 0.92rem; }
+
+/* package stacked bar */
+.stack { display: flex; gap: 2px; height: 30px; margin-top: 14px; background: var(--card); }
+.seg { display: flex; align-items: center; justify-content: center; font-size: 0.85rem; font-weight: 650;
+       font-variant-numeric: tabular-nums; cursor: default; }
+.seg:first-child { border-radius: 4px 0 0 4px; } .seg:last-child { border-radius: 0 4px 4px 0; }
+.seg.c1 { background: var(--s1); color: var(--on-s1); } .seg.c2 { background: var(--s2); color: var(--on-light); }
+.seg.c3 { background: var(--s3); color: var(--on-light); } .seg.c4 { background: var(--s4); color: var(--on-light); }
+.legend { list-style: none; padding: 0; margin: 10px 0 0; display: grid; gap: 6px; }
+.legend li { display: flex; gap: 8px; align-items: baseline; margin: 0; }
+.sw { width: 12px; height: 12px; border-radius: 3px; flex: none; transform: translateY(1px); }
+.sw.c1 { background: var(--s1); } .sw.c2 { background: var(--s2); } .sw.c3 { background: var(--s3); } .sw.c4 { background: var(--s4); }
+.legend .n { font-variant-numeric: tabular-nums; font-weight: 650; min-width: 1.6em; text-align: right; }
+
+/* hosts */
+.hosts { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; margin-top: 12px; }
+.host { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; font-size: 0.9rem; }
+.host b { display: block; }
+.host .st { color: var(--muted); font-size: 0.82rem; }
+.host.has { border-color: var(--s1); }
+.host.has .st { color: var(--ink); }
+
+/* what it can do */
+.can { list-style: none; padding: 0; margin: 12px 0 8px; display: grid; gap: 6px; }
+.can li { display: flex; gap: 10px; align-items: baseline; }
+.mark { font-weight: 700; width: 1.4em; text-align: center; }
+.yes { color: var(--look-ink); } .no { color: var(--none-ink); }
+
+/* tooltip */
+[data-tip] { cursor: default; }
+#tip { position: fixed; pointer-events: none; z-index: 10; background: var(--ink); color: var(--card);
+       font-size: 0.82rem; padding: 6px 9px; border-radius: 6px; max-width: 260px; display: none; }
+
+footer { margin-top: 28px; color: var(--muted); font-size: 0.9rem; }
+footer a { color: var(--fact-ink); }
+
+.sec { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px; margin: 0 0 14px; }
+.sec-head { display: flex; justify-content: space-between; gap: 12px; align-items: baseline; }
+.sec h2 { font-size: 1.2rem; text-transform: none; letter-spacing: 0; color: var(--ink); margin: 0; }
+.sec .a { margin: 6px 0 4px; font-size: 1.02rem; }
+.bul { margin: 10px 0 0; padding-left: 20px; } .bul li { margin: 5px 0; }
+.places { margin: 8px 0 0; padding-left: 20px; } .places li { margin: 5px 0; overflow-wrap: anywhere; }
+.files { list-style: none; padding: 0; margin: 6px 0 0; columns: 2 300px; } .files li { margin: 3px 0; break-inside: avoid; overflow-wrap: anywhere; }
+details.fold { border: none; border-radius: 0; margin-top: 10px; }
+details.fold > summary { display: block; padding: 6px 0; color: var(--fact-ink); font-weight: 600; font-size: 0.93rem; }
+details.fold > summary::before { content: "▸ "; } details.fold[open] > summary::before { content: "▾ "; }
+.fold-body { padding: 0 0 4px; }
+table.tbl { width: 100%; border-collapse: collapse; font-size: 0.92rem; margin-top: 8px; }
+table.tbl th { text-align: left; color: var(--muted); font-size: 0.82rem; font-weight: 650; padding: 6px 8px; border-bottom: 1px solid var(--grid); }
+table.tbl td { padding: 7px 8px; border-bottom: 1px solid var(--grid); vertical-align: top; }
+table.tbl .num { text-align: right; font-variant-numeric: tabular-nums; }
+table.grid .c { text-align: center; } table.grid td.c { font-weight: 700; }
+table.grid small { display: block; font-size: 0.78rem; }
+.hbars { display: grid; gap: 7px; margin: 10px 0 4px; }
+.hb { display: grid; grid-template-columns: minmax(10em, 44%) 1fr; gap: 10px; align-items: center; font-size: 0.86rem; }
+.hb-l { overflow-wrap: break-word; min-width: 0; }
+.hb-t { display: flex; align-items: center; gap: 6px; }
+.hb-f { height: 14px; background: var(--meter); border-radius: 0 4px 4px 0; min-width: 2px; }
+.hb-v { font-variant-numeric: tabular-nums; color: var(--muted); white-space: nowrap; }
+nav.toc { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 0.9rem; margin: 0 0 18px; }
+nav.toc a { color: var(--fact-ink); }
+
+.chip.unmeasured { background: var(--track); color: var(--muted); }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; }
+.card-head { padding: 14px 16px; display: grid; grid-template-columns: 1fr auto; gap: 4px 12px; align-items: start; }
+.sub { margin: 14px 0 0; }
+.since { margin: 10px 0 0; font-size: 0.92rem; }
+.warnline { background: var(--look-bg); color: var(--ink); border-radius: 12px; padding: 12px 16px; margin-top: 14px; font-size: 0.95rem; }
+.warnline a { color: var(--fact-ink); }
+</style>
+</head>
+<body>
+<main>
+<header><h1>idea-discovery-release in detail</h1><p class="meta">Checked 12 November 2026 · folder 2f2f942 · 1 file · License: MIT · <a href="summary.html">back to the summary</a></p><p class="license">No license file at the top level; SKILL.md says MIT.</p><p class="what">It holds <b>1 skill</b> (step-by-step instructions the AI follows for a task). Everything behind the summary, question by question; long lists are folded, tap to open them.</p></header><nav class="toc"><a href="#switch">Switching on</a><a href="#memory">Memory</a><a href="#package">Package</a><a href="#elsewhere">Other computers</a><a href="#hosts">Other AI tools</a><a href="#tools">Tools</a><a href="#clean">Finished</a><a href="#careful">Careful</a><a href="#limits">Not checked</a></nav><section id="switch" class="sec"><div class="sec-head"><h2>Will its skills switch on when they should?</h2><span class="chip none">Nothing to look at</span></div><p class="a">Yes. Its one skill is set up to switch on by itself.</p><details class="fold"><summary>All 1, one by one</summary><div class="fold-body"><div class="tablewrap"><table class="tbl"><thead><tr><th>Name</th><th>Type</th><th>Switches on</th></tr></thead><tbody><tr><td><b>idea-discovery</b><small class="where">SKILL.md</small></td><td>skill</td><td>✓ by itself</td></tr></tbody></table></div></div></details></section><section id="memory" class="sec"><div class="sec-head"><h2>How much of the AI&#x27;s memory does it use?</h2><span class="chip fact">up to 4%</span></div><p class="a">Very little on Claude. On a local AI, its biggest skill takes about 4% of the memory.</p><div class="explain">The AI holds text in pieces called <b>tokens</b> (about ¾ of a word each). A <b>local AI</b> running on your own computer typically holds about 32,000 tokens at once; <b>Claude</b> holds about 200,000. These are estimates from file sizes.</div><div class="tablewrap"><table class="mem"><thead><tr><th>What</th><th class="num">Tokens</th><th>Local AI<br>(32k tokens)</th><th>Claude<br>(200k tokens)</th></tr></thead><tbody><tr><td class="rowname">Always there once installed<small>the short descriptions of its 1 skill</small></td><td class="num">43</td><td class="cell-meter" data-tip="43 of 32,000 tokens: 0.1%"><span class="pct">under 1%</span><div class="meter"><span style="width:0.1%"></span></div></td><td class="cell-meter" data-tip="43 of 200,000 tokens: 0.0%"><span class="pct">under 1%</span><div class="meter"><span style="width:0.0%"></span></div></td></tr><tr><td class="rowname">Its biggest skill (SKILL), with everything it reads<small>only while it runs</small></td><td class="num">1,186</td><td class="cell-meter" data-tip="1,186 of 32,000 tokens: 3.7%"><span class="pct">4%</span><div class="meter"><span style="width:3.7%"></span></div></td><td class="cell-meter" data-tip="1,186 of 200,000 tokens: 0.6%"><span class="pct">under 1%</span><div class="meter"><span style="width:0.6%"></span></div></td></tr></tbody></table></div><h3>Room for the list of skills</h3><p class="where">The AI keeps a short list of every skill you have installed, with a set amount of room. This repository's descriptions alone take about 43 tokens.</p><div class="room"><div data-tip="43 tokens of about 320 room: 13%"><div class="lbl"><span>Local AI: about 320 tokens of room</span><span class="pct">13%</span></div><div class="meter"><span style="width:13.4%"></span></div></div><div data-tip="43 tokens of about 2,000 room: 2%"><div class="lbl"><span>Claude: about 2,000 tokens of room</span><span class="pct">2%</span></div><div class="meter"><span style="width:2.1%"></span></div></div></div></section><section id="package" class="sec"><div class="sec-head"><h2>What comes in the package?</h2><span class="chip none">Nothing extra</span></div><p class="a">1 of its 1 files do the work. Nothing else comes along.</p><div class="stack" role="img" aria-label="1 files by how they are used"><div class="seg c1" style="flex:1" data-tip="1 files: do the work: the skills, the helpers, and the files they read">1</div></div><ul class="legend"><li><span class="sw c1"></span><span class="n">1</span><span>do the work: the skills, the helpers, and the files they read</span></li></ul><h3>Every file, by group</h3><details class="fold"><summary><span class="sw c1"></span> 1 do the work: the skills, the helpers, and the files they read</summary><div class="fold-body"><ul class="files"><li><code>SKILL.md</code> <span class="where">4.6 KB</span></li></ul></div></details></section><section id="elsewhere" class="sec"><div class="sec-head"><h2>Will it work on someone else&#x27;s computer?</h2><span class="chip none">Nothing to look at</span></div><p class="a">Yes. Everything it uses is something it says to install, and nothing ties it to one computer.</p></section><section id="hosts" class="sec"><div class="sec-head"><h2>Will it work with AI tools other than Claude?</h2><span class="chip fact">0 of 7 tools</span></div><p class="a">No AI tool finds its files where they sit; each skill has to be installed first.</p><ul class="bul"><li>1 skill sits where no tool looks; a tool reads them once they are installed.</li></ul><div class="hosts"><div class="host"><b>✗ Claude Code</b><span class="st">none of its files</span></div><div class="host"><b>✗ Codex</b><span class="st">none of its files</span></div><div class="host"><b>✗ Gemini CLI</b><span class="st">none of its files</span></div><div class="host"><b>✗ Cursor</b><span class="st">none of its files</span></div><div class="host"><b>✗ GitHub Copilot</b><span class="st">none of its files</span></div><div class="host"><b>✗ Windsurf</b><span class="st">none of its files</span></div><div class="host"><b>✗ Others</b><span class="st">tools that read AGENTS.md</span></div></div><details class="fold"><summary>Skills to install (1)</summary><div class="fold-body"><ul class="files"><li><code>SKILL.md</code></li></ul></div></details></section><section id="tools" class="sec"><div class="sec-head"><h2>Does it ask only for the tools it needs?</h2><span class="chip none">Nothing to look at</span></div><p class="a">None of its skills or helpers lists its tools; they use whatever the AI already has.</p><ul class="bul"><li>No step repeats “until it works” without a limit.</li><li>It has no hooks (commands that run by themselves on every message or action).</li></ul></section><section id="clean" class="sec"><div class="sec-head"><h2>Is it finished and up to date?</h2><span class="chip none">Nothing to look at</span></div><p class="a">Yes. No unfinished notes, no dates that will go stale, and no older tool names.</p><ul class="bul"><li>No AI model names fixed in place.</li></ul></section><section id="careful" class="sec"><div class="sec-head"><h2>Anything to be careful about?</h2><span class="chip none">Nothing found</span></div><p class="a">Walkdown found none of the security concerns it looks for.</p><p class="sub"><b>What it can do</b></p><ul class="can"><li><span class="mark no">✗</span><span>Read your files</span></li><li><span class="mark no">✗</span><span>Take in content from outside, such as web pages or files you didn&#x27;t write</span></li><li><span class="mark no">✗</span><span>Send your data somewhere</span></li></ul><p class="where">A tool that does all three could be tricked into sending your data away. This one does none of the three. It also adds its own text to the AI&#x27;s memory before you type.</p><h3>Why it can do these</h3><p class="where">The three together are the lethal trifecta, Simon Willison&#x27;s name for three things an AI tool can do. Each one is ordinary on its own. A tool that does all three can be steered by text from outside into sending your data away.</p><h3>Text hidden from people</h3><p>Nothing hidden from people.</p><h3>Wording that shapes how the AI decides</h3><p>1 line matches the wording of a risky request. Being listed doesn't mean something is wrong; each is a place to read. Who reads them: the AI (1).</p><div class="hbars"><div class="hb" data-tip="0 lines"><span class="hb-l">Reaching out (sending data, secrets, loading text from elsewhere)</span><span class="hb-t"><span class="hb-f" style="width:0.6%"></span><span class="hb-v">0</span></span></div><div class="hb" data-tip="0 lines"><span class="hb-l">Taking the wheel (overriding instructions, claimed permission, redefined words, steering a review, conditions)</span><span class="hb-t"><span class="hb-f" style="width:0.6%"></span><span class="hb-v">0</span></span></div><div class="hb" data-tip="1 lines"><span class="hb-l">Changing the environment (permissions, settings, scripts and hooks, actions that need your OK)</span><span class="hb-t"><span class="hb-f" style="width:100.0%"></span><span class="hb-v">1</span></span></div><div class="hb" data-tip="0 lines"><span class="hb-l">Talking to you (steps a person is told to run)</span><span class="hb-t"><span class="hb-f" style="width:0.6%"></span><span class="hb-v">0</span></span></div></div><h3>Web addresses</h3><p class="where">2 links to 1 site. Walkdown gathered them and opened none.</p><div class="tablewrap"><table class="tbl"><thead><tr><th>Site</th><th class="num">Links</th><th>Read by</th><th>Named in its docs</th></tr></thead><tbody><tr><td>nav.al</td><td class="num">2</td><td>the AI</td><td>no</td></tr></tbody></table></div><h3>Passwords and keys</h3><p>No lines look like a saved password, key, or token.</p></section><section id="limits" class="sec"><div class="sec-head"><h2>What Walkdown didn't check</h2></div><p class="a">Every step ran and passed its own checks.</p><div class="a">Skipped in this run, most often because an optional tool is not installed:<ul class="bul"><li>Model reads (optional): not run</li></ul></div><p class="a">The optional model reads (a second opinion from an AI) were not run.</p><details class="fold"><summary>Every limit of this run (17)</summary><div class="fold-body"><ul class="places"><li>Stage 02-reader validation INCOMPLETE (gate 20/31, negative 22/24, recall 1/1; skipped: 13 rows; measured 2026-11-12, same code and fixtures): its zeros are not validated for the skipped checks.</li><li>(02-reader) tesseract not installed (no tesseract binary, no pytesseract): images and PDF pages are skipped for OCR (read.divergence skip); images and PDFs with no text layer are listed as read.unread</li><li>(02-reader) html render: playwright not installed: HTML files are read with static style only (read.divergence skip, carrier rendered)</li><li>(02-reader) v1 limit: the language check (read.language) reads prose only: Markdown, plain text, PDF, DOCX, and OCR text; Markdown code blocks, comments in code, config values, and HTML are not checked for language, and a paragraph under five words is too short to judge</li><li>(03-graph) v1 limit: manifest versus disk compares skills, agents, and commands, and only the kinds a manifest names; a manifest that names none relies on its folders and is not compared, and plugins a marketplace leaves out are not compared</li><li>(04-phrases) limit: files that do not decode as text (PDF, DOCX, images) are scanned from stage 2&#x27;s extracted text, phrase patterns only</li><li>(05-capability) stage 5 limit: a Bash grant is recorded under private-data and as execute posture, never as external-comms; Bash can reach the network, as can every shell, so this map does not count it there</li><li>(05-capability) stage 5 limit: hook bytes are an estimate from the sizes of files the hook script references (stage 3 static edges); hooks are never run to measure their output</li><li>soft.label skipped for SKILL.md: no labeling backend</li><li>soft.read skipped for None: no relational backend</li><li>(06-soft) skipped: soft.label x1: no labeling backend</li><li>(06-soft) skipped: soft.read x1: no relational backend</li><li>Static examination only. Nothing in the artifact was executed, fetched, or installed.</li><li>Stage 6 answers are located observations from the backends section 6 names; they never change a stage 1 to 5 finding. Hit counts carry a benign share only when stage 6 labels ran.</li><li>Version drift (class 8): each run examines one pinned copy. walkdown.py compares it with the previous run of the same repository when there is one (changes.md next to this report); what the artifact becomes after its next update is seen only by auditing it again.</li><li>English-language scope: the phrase layer is blind to non-English text (stage 2 lists non-Latin runs, and prose passages in another language in Latin script; a short line can slip past that check).</li><li>Stage 4 matches patterns; a payload phrased outside every pattern reads as no hit. A zero here is not safety.</li></ul></div></details></section><footer><p>Mark each place as you go: <a href="review.html">go through each place</a> · every finding with its file and line: <a href="full.md">full.md</a></p><p>What this is not: static examination only. &quot;Clean&quot; means these stages found nothing; it does not mean the artifact is safe. This report offers possible issues with evidence and reaches no verdict. What to do with it is yours to decide.</p></footer>
+</main>
+<div id="tip" role="tooltip"></div>
+<script>
+(function () {
+  var tip = document.getElementById("tip");
+  function show(ev) {
+    var t = ev.currentTarget.getAttribute("data-tip"); if (!t) return;
+    tip.textContent = t; tip.style.display = "block";
+    var b = ev.currentTarget.getBoundingClientRect();
+    var x = (ev.clientX || b.left) + 12, y = (ev.clientY || b.top) + 14;
+    tip.style.left = Math.min(x, window.innerWidth - tip.offsetWidth - 8) + "px"; tip.style.top = y + "px";
+  }
+  function hide() { tip.style.display = "none"; }
+  document.querySelectorAll("[data-tip]").forEach(function (el) {
+    el.setAttribute("tabindex", "0");
+    el.addEventListener("mousemove", show); el.addEventListener("mouseleave", hide);
+    el.addEventListener("focus", show); el.addEventListener("blur", hide);
+  });
+})();
+</script>
+</body>
+</html>

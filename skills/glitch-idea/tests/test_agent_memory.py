@@ -117,7 +117,7 @@ class ProvenanceTests(unittest.TestCase):
             return self.store.persist_agent_proposal(state,evidence,actor=self.context.actor,validate_current=source.validate_current)
 
     def validate(self,state,value=FOUND,*,live=None,context=None,accepted=None,proposals=None):
-        proposed=fields()['method'];proposed.update(selection='adaptive-slices',reason='Human chose another route')
+        proposed=fields()['method'];proposed.update(selection='bmad',reason='Human chose another route')
         proposed['memory']=copy.deepcopy(value)
         return memory.validate_method_memory(state,state['ideas'][KEY],proposed,context or self.context,
             live_binding=self.live if live is None else live,
@@ -185,7 +185,7 @@ class ProvenanceTests(unittest.TestCase):
         self.publish(operation='method',request='method-found')
         with self.store.transaction(write=True) as state:
             idea=state['ideas'][KEY];proposed=fields()['method'];proposed['memory']=copy.deepcopy(FOUND)
-            proposed['selection']='adaptive-slices'
+            proposed['selection']='bmad'
             state['ideas'][KEY]=save_draft(idea,'method',proposed,
                 expected_revision=idea['revision'],expected_draft_version=0)['idea']
             self.store.commit(state)

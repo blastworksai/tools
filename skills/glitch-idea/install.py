@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -18,7 +19,7 @@ PRODUCT = "glitch-idea-personal"
 MANIFEST = ".glitch-idea-install.json"
 SUPPORTED_KEYS = frozenset(("store_path", "plan_validator_argv", "validator_timeout_seconds",
                             "runtime_root", "runtime_python", "default_workspace",
-                            "browser_port", "prototype_port", "browser_mode", "ssh_client", "ssh_server_port"))
+                            "browser_port", "prototype_port", "browser_mode", "account_ports_file"))
 MINIMUM_PYTHON = (3, 10)
 # A Glitch Brain is identified by its engine updater beside its operations manual.
 BRAIN_MARKERS = (Path(".claude") / "scripts" / "update.py", Path("operations-reference.md"))
@@ -172,7 +173,8 @@ def check_runtime(python, source):
             "pyyaml": reply.get("pyyaml"), "status": "ready"}
 
 
-def effective_config(source, destination, explicit_store, recognized, explicit_runtime=None):
+def effective_config(source, destination, explicit_store, recognized, explicit_runtime=None,
+                     shared=False, account_ports_file=None):
     installed_config = destination / "config.json"
     source_config = source / "config.json"
     if recognized:
@@ -182,6 +184,13 @@ def effective_config(source, destination, explicit_store, recognized, explicit_r
     else:
         config_path = source_config if source_config.exists() else source.parent / "config.json"
     config = read_json(config_path) if config_path.exists() else {}
+    # Retired ssh mode: these keys, and a browser_mode of "ssh", are dropped (read as absent) before the unknown-key refusal.
+    retired = [key for key in ("ssh_client", "ssh_server_port") if key in config]
+    if config.get("browser_mode") == "ssh":
+        retired.append("browser_mode")
+    if retired:
+        config = {key: value for key, value in config.items() if key not in retired}
+        print(f"Dropped retired ssh mode settings from {config_path}: {', '.join(retired)} (ssh mode no longer exists).", file=sys.stderr)
     unknown = sorted(set(config) - SUPPORTED_KEYS)
     if unknown:
         raise InstallError(f"Unsupported configuration keys in {config_path}: {', '.join(unknown)}; "
@@ -217,6 +226,25 @@ def effective_config(source, destination, explicit_store, recognized, explicit_r
                 or not os.path.isabs(workspace["path"])):
             raise InstallError("default_workspace must be null or an object with a one-line name and an absolute path")
         result["default_workspace"] = {"name": workspace["name"], "path": workspace["path"]}
+    registry = account_ports_file if account_ports_file is not None else config.get("account_ports_file")
+    if registry is not None:
+        if os.name != "posix":
+            raise InstallError("account_ports_file is not supported on Windows")
+        if not _clean_text(registry):
+            raise InstallError("account_ports_file must be a path of clean text (no control characters), the same rule the helper applies")
+        registry = absolute_path(registry, "account_ports_file")
+        if os.path.isdir(registry):
+            raise InstallError(f"account_ports_file must name a file, not a folder: {registry}")
+    if shared and registry is None:
+        raise InstallError("--shared needs --account-ports-file /absolute/path (the registry of each account's two ports); nothing changed")
+    if registry is not None:
+        result["account_ports_file"] = str(registry)
+        inline = [key for key in ("browser_port", "prototype_port") if config.get(key) is not None]
+        if inline and not shared:
+            raise InstallError(f"account_ports_file and {' / '.join(inline)} are two sources of one fact; remove the ports from the configuration")
+        if inline:
+            config = {key: value for key, value in config.items() if key not in inline}
+            print(f"Dropped {', '.join(inline)} from {config_path}: a shared install takes each account's ports from {registry}.", file=sys.stderr)
     # Same bounds the helper enforces at run time; each key is written only when the seat sets it.
     for key in ("browser_port", "prototype_port"):
         if config.get(key) is not None:  # a JSON null is unset, as the helper reads it
@@ -227,24 +255,15 @@ def effective_config(source, destination, explicit_store, recognized, explicit_r
     if "browser_port" in result and "prototype_port" in result and result["browser_port"] == result["prototype_port"]:
         raise InstallError("browser_port and prototype_port must differ")
     if config.get("browser_mode") is not None:
-        if config["browser_mode"] not in ("link", "system", "ssh"):
-            raise InstallError("browser_mode must be 'link', 'system' or 'ssh'")
+        if config["browser_mode"] not in ("link", "system", "tern"):
+            raise InstallError("browser_mode must be 'link', 'system' or 'tern'")
         result["browser_mode"] = config["browser_mode"]
-    if config.get("ssh_client") is not None:  # a JSON null is unset, as the helper reads it
-        client = config["ssh_client"]
-        # Same bounds as the helper: an ssh config Host alias, one token, never an option (no leading dash).
-        if (not isinstance(client, str) or not 1 <= len(client) <= 255 or client.startswith("-")
-                or any(ch.isspace() or ord(ch) < 32 or ord(ch) == 127 for ch in client)):
-            raise InstallError("ssh_client must be a one-word ssh config Host alias of 1 to 255 characters, not starting with '-'")
-        result["ssh_client"] = client
-    if config.get("ssh_server_port") is not None:  # the sshd port client detection reads connections on
-        sshd = config["ssh_server_port"]
-        if type(sshd) is not int or not 1 <= sshd <= 65535:
-            raise InstallError("ssh_server_port must be an integer from 1 to 65535")
-        result["ssh_server_port"] = sshd
     if len(json_bytes(result)) > LAUNCH_CONFIG_LIMIT:
         raise InstallError(f"store_path and plan_validator_argv together exceed the {LAUNCH_CONFIG_LIMIT}-byte launch limit")
     explicit_runtime = explicit_runtime or {}
+    if shared and ("runtime_root" in explicit_runtime or config.get("runtime_root") is not None):
+        raise InstallError("--shared takes no runtime_root: one folder would be every account's runtime; "
+                           "each account uses its own default under its own home")
     for key in ("runtime_root", "runtime_python"):
         if key in config and config[key] is None:
             # A present null is malformed, not unset: refuse it rather than drop it.
@@ -268,7 +287,7 @@ def effective_config(source, destination, explicit_store, recognized, explicit_r
 
 
 def install(source, skills_root, store=None, dry_run=False, runtime_python=None, venv=None,
-            runtime_root=None):
+            runtime_root=None, shared=False, account_ports_file=None):
     if source.is_symlink():
         raise InstallError("Source skill must be a materialized directory")
     source = source.expanduser().resolve()
@@ -298,7 +317,12 @@ def install(source, skills_root, store=None, dry_run=False, runtime_python=None,
         if venv.is_dir() and any(venv.iterdir()) and not (venv / "pyvenv.cfg").is_file():
             raise InstallError(f"--venv {venv} is a nonempty directory that is not a virtual environment")
         explicit_runtime["runtime_python"] = venv_python(venv)
+    if shared and os.name != "posix":
+        raise InstallError("--shared is not supported on Windows")
+    if account_ports_file is not None and not shared and os.name != "posix":
+        raise InstallError("account_ports_file is not supported on Windows")
     recognized = destination.exists()
+    was_shared = False
     if recognized:
         marker = destination / MANIFEST
         if not marker.is_file():
@@ -306,7 +330,8 @@ def install(source, skills_root, store=None, dry_run=False, runtime_python=None,
         manifest = read_json(marker)
         if manifest.get("product") != PRODUCT or manifest.get("format_version") != 1:
             raise InstallError(f"Unrecognized installation at {destination}; nothing changed")
-    config = effective_config(source, destination, store, recognized, explicit_runtime)
+        was_shared = manifest.get("shared") is True
+    config = effective_config(source, destination, store, recognized, explicit_runtime, shared, account_ports_file)
     if venv is not None:
         place, store_path = real(venv), real(config["store_path"])
         runtime_home = real(config["runtime_root"]) if "runtime_root" in config else real(default_runtime_root())
@@ -318,12 +343,18 @@ def install(source, skills_root, store=None, dry_run=False, runtime_python=None,
     payload["config.json"] = json_bytes(config)
     current = tree_files(destination) if recognized else {}
     current.pop(MANIFEST, None)
-    action = "unchanged" if recognized and current == payload else "upgraded" if recognized else "installed"
-    return _publish(source, skills_root, destination, config, payload, action, recognized,
-                    venv, dry_run)
+    same = recognized and current == payload and was_shared == shared
+    drift = same and shared and _shared_drift(destination, payload, source, _skills_gid(skills_root))
+    action = ("repaired" if drift else "unchanged" if same else "upgraded" if recognized else "installed")
+    store_facts = _store_gate(config["store_path"], skills_root) if shared else None
+    result = _publish(source, skills_root, destination, config, payload, action, recognized,
+                      venv, dry_run, shared)
+    if store_facts is not None:
+        result["store"] = store_facts
+    return result
 
 
-def _publish(source, skills_root, destination, config, payload, action, recognized, venv, dry_run):
+def _publish(source, skills_root, destination, config, payload, action, recognized, venv, dry_run, shared=False):
     created_venv = False
     if venv is not None and not dry_run and not venv_python(venv).exists():
         # Standard library only: creating a venv downloads nothing. It runs only after
@@ -338,7 +369,7 @@ def _publish(source, skills_root, destination, config, payload, action, recogniz
         created_venv = True
     try:
         result = _install_files(source, skills_root, destination, config, payload, action,
-                                recognized, venv, dry_run)
+                                recognized, venv, dry_run, shared)
     except (InstallError, OSError) as exc:
         if not created_venv:
             raise
@@ -352,7 +383,85 @@ def _publish(source, skills_root, destination, config, payload, action, recogniz
     return result
 
 
-def _install_files(source, skills_root, destination, config, payload, action, recognized, venv, dry_run):
+def _group_name(gid):
+    try:
+        import grp
+        return grp.getgrgid(gid).gr_name
+    except (ImportError, KeyError):
+        return str(gid)
+
+
+def _shared_mode(path, relative, payload, source):
+    """The mode a shared install gives this path: folders 2750, files 640, 750 for a source script that is executable."""
+    if path.is_dir():
+        return 0o2750
+    runnable = relative in payload and (source / relative).is_file() and (source / relative).stat().st_mode & 0o111
+    return 0o750 if runnable else 0o640
+
+
+def _shared_drift(destination, payload, source, gid):
+    """True when an installed shared tree no longer has the modes, group or executable bits an install gives it."""
+    for path in [destination, *destination.rglob("*")]:
+        if path.is_symlink():
+            continue
+        relative = path.relative_to(destination).as_posix()
+        if "__pycache__" in path.parts or path.suffix == ".pyc":
+            continue
+        info = path.stat()
+        if info.st_gid != gid or stat.S_IMODE(info.st_mode) != _shared_mode(path, relative, payload, source):
+            return True
+    return False
+
+
+def _skills_gid(skills_root):
+    return skills_root.stat().st_gid if skills_root.exists() else os.getgid()
+
+
+def _clean_text(value, limit=4096):
+    """The runtime's clean-text rule (idea.py's _clean_text; a test keeps the two in agreement)."""
+    return (type(value) is str and bool(value.strip()) and len(value) <= limit
+            and all(32 <= ord(c) != 127 and not 0xD800 <= ord(c) <= 0xDFFF for c in value))
+
+
+def _store_gate(store, skills_root):
+    """A shared install checks the store's top folder, read-only, with one lstat: nothing is created, changed or left behind.
+
+    The root must be a real directory, setgid, with group read, write and execute (2770), in a group this account belongs
+    to. idea_platform.is_shared_root applies the same test at run time (a test keeps the two equal).
+    What is already inside the store is not checked: converting a single-account store is the operator's step."""
+    store = Path(store)
+    group = _group_name(_skills_gid(skills_root))
+    create = f"mkdir '{store}' && chgrp {group} '{store}' && chmod 2770 '{store}'"
+    fix = f"chgrp {group} '{store}' && chmod 2770 '{store}'"
+    try:
+        info = os.lstat(store)
+    except FileNotFoundError:
+        raise InstallError(f"A shared install needs its store to exist first, and {store} does not. Create it, then rerun: {create} ; nothing changed") from None
+    if not stat.S_ISDIR(info.st_mode):
+        raise InstallError(f"The store {store} is not a real folder; nothing changed")
+    if not info.st_mode & stat.S_ISGID or info.st_mode & 0o070 != 0o070:
+        raise InstallError(f"A shared install needs a store several accounts can use, and {store} is not setgid with group read, write "
+                           f"and execute (mode 2770). Run: {fix} ; then rerun. Nothing changed")
+    if info.st_gid not in {os.getgid(), *os.getgroups()}:
+        raise InstallError(f"The store {store} belongs to group {_group_name(info.st_gid)}, which this account is not in; run: {fix} ; nothing changed")
+    return {"path": str(store), "status": "ready"}
+
+
+def _share(stage, payload, source, gid):
+    """Shared modes, applied to the staged tree before it is renamed in: group first, since chown clears setgid."""
+    for path in [stage, *sorted(stage.rglob("*"))]:
+        if path.is_symlink():
+            continue
+        try:
+            os.chown(path, -1, gid)
+        except OSError as exc:
+            raise InstallError(f"Cannot give {path.name} to the skills folder's group ({_group_name(gid)}): {exc.strerror}; "
+                               "the installing account must belong to that group") from exc
+        os.chmod(path, _shared_mode(path, path.relative_to(stage).as_posix(), payload, source))
+
+
+def _install_files(source, skills_root, destination, config, payload, action, recognized, venv, dry_run,
+                   shared=False):
     if "runtime_python" not in config:
         runtime = {"status": "not_configured",
                    "message": "Browser launch needs a runtime: rerun with --venv PATH or --runtime-python PATH"}
@@ -362,6 +471,11 @@ def _install_files(source, skills_root, destination, config, payload, action, re
         runtime = check_runtime(Path(config["runtime_python"]), source)
     result = {"ok": True, "action": action, "destination": str(destination),
               "store_path": config["store_path"], "dry_run": dry_run, "runtime": runtime}
+    gid = None
+    if shared:
+        gid = _skills_gid(skills_root)
+        result["shared"] = {"account_ports_file": config["account_ports_file"], "group": _group_name(gid),
+                            "folder_mode": "2750", "file_mode": "640"}
     if dry_run or action == "unchanged":
         return result
     skills_root.mkdir(parents=True, exist_ok=True)
@@ -380,10 +494,14 @@ def _install_files(source, skills_root, destination, config, payload, action, re
         marker = {"product": PRODUCT, "format_version": 1,
                   "installed_at": datetime.now(timezone.utc).isoformat(),
                   "source": str(source), "files": hashes}
+        if shared:
+            marker["shared"] = True
         with (stage / MANIFEST).open("wb") as stream:
             stream.write(json_bytes(marker))
             stream.flush()
             os.fsync(stream.fileno())
+        if shared:
+            _share(stage, payload, source, gid)
         if recognized:
             backup_home = skills_root / ".glitch-idea-backups"
             if backup_home.is_symlink():
@@ -415,11 +533,14 @@ def main():
     parser.add_argument("--runtime-python", help="Absolute path of an existing interpreter that has the pinned PyYAML")
     parser.add_argument("--venv", help="Absolute path of a per-skill virtual environment; created if absent")
     parser.add_argument("--runtime-root", help="Absolute owner-private directory for the browser service's runtime files")
+    parser.add_argument("--shared", action="store_true",
+                        help="One copy for several OS accounts: group-readable, read-only at run time; needs --account-ports-file")
+    parser.add_argument("--account-ports-file", help="Absolute path of the registry that gives each account its two ports")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
     try:
         result = install(args.source, args.skills_root, args.store, args.dry_run,
-                         args.runtime_python, args.venv, args.runtime_root)
+                         args.runtime_python, args.venv, args.runtime_root, args.shared, args.account_ports_file)
     except InstallError as exc:
         print(json.dumps({"ok": False, "error": {"code": exc.code, "message": str(exc)}}))
         return 1

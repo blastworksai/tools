@@ -12,8 +12,28 @@ MAX_STATE = 64 * MAX_INPUT
 MAX_NUMBER = 10**12
 SHAPE_KEYS = {'outcome','scope','scope_reason','alternatives','method','method_reason','assumptions','next_slice','learning'}
 # The one human label per method id (stored ids never change).
-METHOD_LABELS = {'bounded-plan': 'Full Plan Up Front', 'adaptive-slices': 'Vertical Slicing (Agile)',
-                 'appetite-led': 'Fixed Budget, Build what Fits', 'experiment-led': 'Experiment First'}
+# adaptive-slices is retired: a saved idea still reads and shows it, it can no longer be chosen.
+METHOD_LABELS = {'bounded-plan': 'Full Plan Up Front', 'bmad': 'BMAD (Roles and Stories)',
+                 'appetite-led': 'Fixed Budget, Build what Fits', 'experiment-led': 'Experiment First',
+                 'adaptive-slices': 'Vertical Slicing (Agile)'}
+SELECTABLE_METHODS = ('bounded-plan', 'bmad', 'appetite-led', 'experiment-led')
+RETIRED_METHODS = ('adaptive-slices',)
+# The one source for each selectable method's contract: its label and its two owner-approved lines.
+# references/methods.md and the planning prompt's Method section must read exactly these words.
+METHOD_CONTRACTS = {
+    'bounded-plan': {'label': METHOD_LABELS['bounded-plan'],
+                     'fixed_now': 'Clear scope and acceptance criteria',
+                     'earns_next': 'Verification of the bounded change'},
+    'bmad': {'label': METHOD_LABELS['bmad'],
+             'fixed_now': 'A written brief, requirements and architecture before any building',
+             'earns_next': 'Each story is built and checked against those documents'},
+    'appetite-led': {'label': METHOD_LABELS['appetite-led'],
+                     'fixed_now': "Operator's investment cap and outcome boundaries",
+                     'earns_next': 'Completed bet or explicit stop/reshape'},
+    'experiment-led': {'label': METHOD_LABELS['experiment-led'],
+                       'fixed_now': 'A question, evidence criterion and bounded experiment',
+                       'earns_next': 'Evidence supports proceeding, changing or stopping'},
+}
 ASSESS_KEYS = {'method','version','inputs','basis','assumptions','confidence','provenance'}
 
 
@@ -72,7 +92,7 @@ def shape(value):
         if value[key] is not None:
             text(value[key],key)
     require(value['scope'] in (None,'small-change','capability','project','epic'),'Invalid scope')
-    require(value['method'] in (None,'bounded-plan','adaptive-slices','appetite-led','experiment-led'),'Invalid method')
+    require(value['method'] is None or value['method'] in SELECTABLE_METHODS + RETIRED_METHODS,'Invalid method')
     require(isinstance(value['alternatives'],list) and len(value['alternatives'])<=1000,'alternatives must be a list')
     for alternative in value['alternatives']:
         exact(alternative,{'route','reason'},'alternative')

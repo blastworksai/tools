@@ -1,0 +1,138 @@
+---
+name: rocket-fuel
+description: A collaboration protocol for founder-led AI work, adapted from the Wickman/Winters Visionary/Integrator model. Invoke only when the Operator explicitly calls it. On invocation, recommend BASIC or FULL and ask the Operator which convergence budget to use.
+license: MIT
+metadata:
+  status: active
+allowed-tools: Read, Bash, Grep, Glob
+---
+
+# ROCKETFUEL — a founder-led collaboration protocol
+
+Adapted from *Rocket Fuel* by Gino Wickman and Mark C. Winters.
+The protocol separates direction, planning, execution, and review so that AI-assisted work stays bounded and independently verified.
+
+## Seats
+
+### Founder / Owner
+
+The Founder sets direction, priorities, constraints, and the final call. Their vision should be captured in their own words rather than paraphrased into a different goal.
+
+Execution begins only with the Founder's explicit approval. This is a structural gate, not an exception for unusually risky work.
+
+### Visionary
+
+The Visionary owns:
+
+- Planning and sequencing.
+- Standards and executable acceptance criteria.
+- Scope and intent review.
+- Review of results against the agreed standard.
+
+The Visionary may propose, challenge, and review, but does not silently take over execution.
+
+### Integrator
+
+The Integrator owns:
+
+- Idea filtering and shiny-object protection.
+- Cadence and execution tie-breaks.
+- Building inside the approved scope and sandbox.
+- Calling bounded specialist support.
+- Reporting results and evidence.
+
+The Integrator may suggest changes to the plan; the Founder and Visionary retain their respective decision rights.
+
+### Seat rules
+
+- Authority belongs to the assigned seat, not to a model, product, or tool.
+- A person or agent may occupy different seats in different tasks, but an assignment must be explicit.
+- Reassigning one seat does not automatically move another actor.
+- A vacated seat remains vacant until explicitly filled.
+- An override replaces the current assignment for its stated scope; it does not accumulate with it. The actor returns to an unassigned state afterward.
+- Specialist profiles are task-scoped and do not acquire standing authority from the seat that calls them.
+
+## Two tiers
+
+### Organization
+
+At the organization tier, the Visionary holds planning, standards, acceptance criteria, and review. The Integrator holds filtering, cadence, building, execution tie-breaks, and reporting. The Founder retains direction and final authority.
+
+### Delivery team
+
+Relative to delegated specialists, the dispatching seat writes the specification and contract, then delegates execution. Results still receive independent review against the Visionary's standard.
+
+Deterministic plumbing belongs in scripts rather than model delegation. Do not hand-build work that a bounded specialist was dispatched to perform.
+
+## Independent review and attribution
+
+- The reviewer must not be the author of the work being reviewed.
+- The reviewer independently reproduces decisive evidence before approval, merge, migration, release, or deployment.
+- Pasted output is a lead, not proof. Access to an artifact is not verification of it.
+- Attribution follows the actor that actually performed the action, not a self-declared role.
+- A self-review must remain visibly labeled as a self-review.
+- A review that cannot observe the required artifact or execution remains unapproved and names exactly what could not be observed.
+- Support specialists have no standing authority beyond their bounded dispatch.
+
+## The Founder's two gates
+
+1. **Explicit dispatch:** execution begins only on the Founder's explicit go.
+2. **Capability-complete notification:** when a coherent capability is complete, notify the Founder for human review. Finishing a single task is not necessarily completing a capability.
+
+Neither gate relaxes the other. The Founder has the final call.
+
+## Runtime context
+
+Session context, task links, and remembered obligations can point to current work, but they are not proof of workflow state. Completion, approval, release, and deployment require current source-of-truth checks and their normal gates.
+
+## Adversarial tiers
+
+Rocket Fuel is **invoke-only**. On invocation, recommend **BASIC** or **FULL** with a short rationale and ask the Operator which tier to use. The Operator's selection binds that invocation. The skill never changes tiers or adds rounds on its own; a material new risk goes back to the Operator as a fresh decision.
+
+### BASIC
+
+- Run at most **two rounds**: the strategist proposes, the builder attacks, and the strategist amends for the second attack. Each attack must be narrower than the previous one.
+- Stop immediately on convergence.
+- Without convergence after round 2, stop and surface both positions and the exact disagreement to the Founder for intervention.
+- There is no third BASIC round and no automatic promotion to FULL.
+
+### FULL — the convergence protocol
+
+- **Rounds 1-3:** the strategist proposes and amends; the builder attacks. Each attack must be narrower than the previous one. Stop immediately on convergence.
+- **After three NO-SHIPs, swap seats for up to two more rounds.** The previous builder authors a complete alternative honoring every locked Founder ruling; the previous strategist becomes the adversary.
+- Without convergence after round 5, return both positions and the exact disagreement to the Operator. The Operator may **extend** with additional rounds or **overrule** by directing the outcome. Extension does not require a new Founder ruling.
+- Founder rulings remain fixed throughout every round and role swap unless the Operator expressly overrules them.
+
+The Builder is always free to SUGGEST; the Integrator filters. **Authorship is symmetric; termination is not.** Both seats propose and attack, but the Operator controls the tier, every extension, and every overrule. The Integrator's personal proof-run is required at every tier and sits outside these round budgets, as do all other independent proof, review, and deployment gates.
+
+Record every round's critique, including rejected points and the reasons for rejecting them. Silently rejecting every critique and accepting every critique both destroy the value of independent review.
+
+## Issue processing
+
+1. **Identify:** state the root issue in one sentence.
+2. **Discuss:** make each point once; repetition is not additional evidence.
+3. **Solve:** decide who owns the action before deciding the detailed method.
+
+Turn solutions into actions that can be verified in the next cycle. Keep each cycle to three to seven attainable priorities; more than that removes meaningful prioritization.
+
+## Dispatch mechanics
+
+Every dispatch should be bounded and reproducible:
+
+- Give the executor a written destination, scope, acceptance criteria, authority, tool limits, and finish line.
+- Use the least-privileged sandbox appropriate to the task. Set network and filesystem permissions explicitly.
+- State sandbox and permission settings on both initial dispatch and resume; never assume a resumed session inherited safe settings.
+- Give every dispatch a hard timeout and a defined stop condition.
+- Ensure non-interactive invocations receive end-of-file on standard input rather than waiting indefinitely for input.
+- Keep dispatches that share mutable state sequential unless parallel execution has been explicitly designed and authorized.
+- Record which model or runtime performed the work when that affects provenance or reproducibility.
+- Preserve the argument transcript: every critique, accepted change, rejected point, and rejection reason.
+- Split claims into **verified in this session** and **unverified information from the model or memory**.
+- Test network restrictions early when network access is material to the task.
+- Verify by inspecting the output artifact and the process state. Do not treat elapsed time or the exit status of a compound command as sufficient proof.
+
+A dispatch grants only the authority written into it. It does not implicitly grant approval, merge, migration, deployment, publishing, spending, or access to secrets.
+
+## Attribution
+
+- Collaboration model: *Rocket Fuel*, Gino Wickman and Mark C. Winters.

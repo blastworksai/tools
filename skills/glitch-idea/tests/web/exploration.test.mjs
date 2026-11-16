@@ -91,7 +91,12 @@ test('the chip defaults to overall method and an inner method updates it and the
   assert.equal(chip.textContent, 'overall method'); assert.equal(chip['data-overall'], 'true');
   const select = byId(first.body, 'exploration-sketch-0-method');
   assert.deepEqual(select.children.map(option => option.textContent),
-    ['Overall method', 'Full Plan Up Front', 'Vertical Slicing (Agile)', 'Fixed Budget, Build what Fits', 'Experiment First']);
+    ['Overall method', 'Full Plan Up Front', 'BMAD (Roles and Stories)', 'Fixed Budget, Build what Fits', 'Experiment First']);
+  // A new choice never offers the retired method, and a sketched item that already carries it still shows its label.
+  const old = draw({agent: 'disconnected', buffer: {sketch: [{...items(1)[0], method: 'adaptive-slices'}]}});
+  assert.equal(old.body.all().find(node => /\bmethod-chip\b/.test(node.className)).textContent, 'Vertical Slicing (Agile)');
+  assert.deepEqual(byId(old.body, 'exploration-sketch-0-method').children.map(option => option.textContent),
+    ['Overall method', 'Full Plan Up Front', 'BMAD (Roles and Stories)', 'Fixed Budget, Build what Fits', 'Experiment First', 'Vertical Slicing (Agile)']);
   select.listeners.change({target: {value: 'experiment-led'}});
   assert.equal(edits.at(-1).fields.sketch[0].method, 'experiment-led');
   const second = draw({agent: 'disconnected', buffer: {sketch: [{...items(1)[0], method: 'experiment-led'}]}});

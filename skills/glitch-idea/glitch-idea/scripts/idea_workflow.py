@@ -10,7 +10,7 @@ import hashlib
 import json
 import re
 
-from idea_domain import (ASSESS_KEYS, MAX_INPUT, MAX_NUMBER, IdeaError,
+from idea_domain import (ASSESS_KEYS, MAX_INPUT, MAX_NUMBER, RETIRED_METHODS, IdeaError,
                          assessment, check_id, integer, require, shape, text)
 
 WORKFLOW_VERSION = 3
@@ -63,7 +63,9 @@ def derive_dependencies(discovery_first):
 STEP_ORDER = derive_step_order(DISCOVERY_BEFORE_METHODS)
 STEP_STATUSES = ('todo', 'current', 'saved', 'review-needed', 'unsaved', 'skipped')
 SCOPES = ('small-change', 'capability', 'project', 'epic')
-METHODS = ('bounded-plan', 'adaptive-slices', 'appetite-led', 'experiment-led')
+# What can be chosen today; a retired method is still read from a saved idea, never newly chosen.
+METHODS = ('bounded-plan', 'bmad', 'appetite-led', 'experiment-led')
+READABLE_METHODS = METHODS + RETIRED_METHODS
 MEMORY_STATUSES = ('found', 'varied', 'searched_no_preference', 'unavailable', 'error')
 STEP_FIELDS = {
     'capture': frozenset(('raw_text', 'workspace')),
@@ -176,7 +178,7 @@ def _sketch(value, name):
     for item in value:
         _nested(item, {'title', 'why_next', 'done_when', 'method'}, name,
                 {'title': _draft_text, 'why_next': _draft_text, 'done_when': _draft_text,
-                 'method': lambda v, n: _enum(v, METHODS, n)})
+                 'method': lambda v, n: _enum(v, READABLE_METHODS, n)})
 
 
 def _investment(value, name):
@@ -193,7 +195,7 @@ def _memory(value, name):
     _nested(value, {'status', 'sources', 'rationale', 'preferred_method'}, name,
             {'status': lambda v, n: _enum(v, MEMORY_STATUSES, n),
              'sources': _text_list, 'rationale': _draft_text,
-             'preferred_method': lambda v, n: _enum(v, METHODS, n)})
+             'preferred_method': lambda v, n: _enum(v, READABLE_METHODS, n)})
 
 
 def check_memory_preference(memory, name='memory'):
@@ -204,7 +206,7 @@ def check_memory_preference(memory, name='memory'):
     status = memory.get('status')
     preferred = memory.get('preferred_method')
     if status == 'found':
-        require(type(preferred) is str and preferred in METHODS, name+'.preferred_method is required when memory is found')
+        require(type(preferred) is str and preferred in READABLE_METHODS, name+'.preferred_method is required when memory is found')
     elif status is not None:
         require(preferred is None, name+'.preferred_method must be null unless memory is found')
 
@@ -287,7 +289,7 @@ def _asset_ids(value, name):
 VALIDATORS = {
     'capture': {'raw_text': lambda v, n: _draft_text(v, n, MAX_INPUT), 'workspace': _workspace},
     'priorities': {k: lambda v, n: integer(v, n, 1, 10) for k in ('urgency', 'importance')},
-    'method': {'selection': lambda v, n: _enum(v, METHODS, n), 'reason': _draft_text, 'memory': _memory},
+    'method': {'selection': lambda v, n: _enum(v, READABLE_METHODS, n), 'reason': _draft_text, 'memory': _memory},
     'discovery': {k: _draft_text for k in ('problem', 'audience', 'workaround', 'evidence', 'kill_criteria')}
                  | {'challenges': _challenges, 'prior_art': _prior_art, 'prior_art_none': _boolean,
                     'prior_art_searched': _draft_text},
@@ -398,13 +400,13 @@ def step_requirements(step, fields, method_selection=None, legacy=False):
                 needed('experiment', fields.get('experiment') is None)
     elif step == 'method':
         # The reason is optional: it helps planning and teaches the user's preference.
-        needed('selection', fields.get('selection') in METHODS)
+        needed('selection', fields.get('selection') in READABLE_METHODS)
         memory = nested('memory', ('status', 'sources', 'rationale'))
         needed('memory.status', memory.get('status') in MEMORY_STATUSES)
         needed('memory.sources', type(memory.get('sources')) is list)
         for index, source in enumerate(memory.get('sources') or []):
             needed('memory.sources.'+str(index), _meaningful(source))
-        needed('memory.preferred_method', (memory.get('preferred_method') in METHODS)
+        needed('memory.preferred_method', (memory.get('preferred_method') in READABLE_METHODS)
                if memory.get('status') == 'found' else memory.get('preferred_method') is None)
         if memory.get('status') == 'found':
             needed('memory.sources', bool(memory.get('sources')))
@@ -460,6 +462,32 @@ def validate_step_fields(step, fields, partial=False, method_selection=None, leg
         missing = step_requirements(step, fields, method_selection, legacy=legacy)
         require(not missing, 'Acceptance requires: '+', '.join(missing), 'not_ready')
     return copy.deepcopy(fields)
+
+
+def _chosen(value, stored, name):
+    """A newly submitted retired method is refused; one the saved idea already holds passes unchanged."""
+    if value is not None and not (type(value) is str and value in RETIRED_METHODS and value in stored):
+        _enum(value, METHODS, name)
+
+
+def refuse_new_retired(workflow, step, fields):
+    """Refuse choosing a retired method; the stored accepted fields and draft say what is unchanged.
+
+    The method selection compares with the selection already saved.
+    A sketch item compares with the saved item at its position or with the same title.
+    memory.preferred_method is not a choice: it records what the operator's memory reports, which may be a retired
+    method, so it is read and never refused here.
+    """
+    old = [f for f in (workflow['steps'][step]['fields'], workflow['drafts'].get(step)) if f]
+    if step == 'method':
+        if 'selection' in fields:
+            _chosen(fields['selection'], [f.get('selection') for f in old], 'method.selection')
+    elif step == 'exploration':
+        for index, item in enumerate(fields.get('sketch') or []):
+            _chosen(item.get('method'),
+                    [o.get('method') for f in old for i, o in enumerate(f.get('sketch') or [])
+                     if i == index or o.get('title') == item.get('title')],
+                    'exploration.sketch.'+str(index)+'.method')
 
 
 def empty_workflow():
@@ -799,6 +827,7 @@ def save_draft(idea, step, fields, *, expected_revision, expected_draft_version)
     _cas(result, expected_revision, expected_draft_version)
     fields = validate_step_fields(step, fields, partial=True)
     workflow = result['workflow']
+    refuse_new_retired(workflow, step, fields)
     navigated = workflow['current_step'] != step
     workflow['current_step'] = step
     if step in workflow['drafts'] and workflow['drafts'][step] == fields:
@@ -917,6 +946,7 @@ def accept_step(idea, step, fields, *, expected_revision, expected_draft_version
     _enum(step, STEP_ORDER, 'step')
     require(step != 'review', 'Review is derived from a verified handoff packet', 'derived_step')
     fields = validate_step_fields(step, fields, method_selection=accepted_method_selection(result['workflow']))
+    refuse_new_retired(result['workflow'], step, fields)
     _hash(source_digest, 'source_digest')
     text(actor, 'actor', 200)
     text(timestamp, 'timestamp', 100)

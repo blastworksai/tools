@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Local idea lifecycle CLI adapter. Python 3.10+."""
 import argparse
+import json as _json
 import math
 import os
 import re
@@ -8,10 +9,17 @@ import stat
 from pathlib import Path
 import sys
 
+# A shared install is read-only at run time: write no bytecode beside the scripts. This runs before any
+# sibling module is imported, so none of them leaves a .pyc in the shared folder.
+try:
+    _marker=Path(__file__).resolve().parent.parent/'.glitch-idea-install.json'
+    if _json.loads(_marker.read_bytes()[:65536]).get('shared') is True: sys.dont_write_bytecode=True
+except Exception:
+    pass
+
 from idea_domain import IdeaError, decode, encoded, number, require, text
 from idea_store import read_bytes
 from idea_service import run_legacy as run, default_workspace
-from idea_ssh import valid_ssh_alias, SshError, MESSAGES as SSH_MESSAGES
 
 
 class Parser(argparse.ArgumentParser):
@@ -76,8 +84,11 @@ def parser():
             p.add_argument('--readiness-timeout',type=float,default=5)
             p.add_argument('--resume')
             p.add_argument('--idea-id')
+            # Both or neither: this one new session's Capture prefill (never a move).
+            p.add_argument('--workspace-name')
+            p.add_argument('--workspace-path')
         if name == 'browser-open':
-            p.add_argument('--browser',choices=('link','orca','system','ssh'))
+            p.add_argument('--browser',choices=('link','orca','system','tern'))
             p.add_argument('--orca-worktree')
             p.add_argument('--orca-terminal')
             p.add_argument('--orca-host')
@@ -118,7 +129,16 @@ def parser():
     return cli
 
 
+_SOURCE_CACHE=None  # set only while main() runs, so one invocation reads its configuration (and registry) once
+
+
 def _configuration_source():
+    if _SOURCE_CACHE is None: return _read_configuration_source()
+    if 'value' not in _SOURCE_CACHE: _SOURCE_CACHE['value']=_read_configuration_source()
+    return _SOURCE_CACHE['value']
+
+
+def _read_configuration_source():
     skill_dir=Path(__file__).resolve().parent.parent
     installed=(skill_dir/'.glitch-idea-install.json').exists()
     require(not installed or (skill_dir/'config.json').is_file(),'Installed skill config.json is missing; restore its durable store and validator configuration','invalid_config')
@@ -132,7 +152,77 @@ def _configuration_source():
     timeout=value.get('validator_timeout_seconds',30)
     number(timeout,'validator_timeout_seconds',1,120)
     base=path.parent if path else skill_dir.parent
+    value=_with_account_ports(value)
     return value,base,skill_dir,installed,argv,timeout
+
+
+ACCOUNT_PORTS_LIMIT=65536
+
+
+class PortsError(IdeaError):
+    """An account-registry fault. Its message is built here from the registry path and the account name only (both checked
+    as clean text first), so launcher verbs may show it; every other error stays reduced to its code there."""
+    def __init__(self,message): super().__init__('invalid_config',message)
+
+
+def _shown(exc):
+    """What a launcher-facing verb says: the code, or the registry diagnostic that is safe by construction."""
+    return str(exc) if isinstance(exc,PortsError) else exc.code
+
+
+def _clean_text(value,limit=4096):
+    return (type(value) is str and bool(value.strip()) and len(value)<=limit
+            and all(32<=ord(c)!=127 and not 0xD800<=ord(c)<=0xDFFF for c in value))
+
+
+def _account_name():
+    """The OS account this process runs as; the registry row key. Tests replace this to act as another account."""
+    if os.name!='posix': raise PortsError('account_ports_file is not supported on Windows')
+    import pwd
+    try: return pwd.getpwuid(os.getuid()).pw_name
+    except KeyError: raise PortsError('This account has no name the ports registry can be looked up by') from None
+
+
+def _account_registry(path):
+    """Read and validate the registry once: {account: (browser_port, prototype_port)}; every fault is invalid_config naming the file."""
+    try: registry=decode(read_bytes(path,limit=ACCOUNT_PORTS_LIMIT))
+    except (IdeaError,OSError) as exc:
+        raise PortsError('account_ports_file %s cannot be read: %s'%(path,exc.code if isinstance(exc,IdeaError) else exc.strerror or 'io_error')) from None
+    problem=None
+    seats={}
+    if type(registry) is not dict or type(registry.get('schema')) is not int or registry['schema']!=1: problem='it is not schema 1'
+    elif type(registry.get('seats')) is not dict: problem='seats must be an object'
+    else:
+        used={}
+        if not all(_clean_text(account,256) for account in registry['seats']):
+            raise PortsError('account_ports_file %s is invalid: an account name is not clean text'%path)
+        for account,row in registry['seats'].items():
+            if type(row) is not dict or set(row)!={'browser_port','prototype_port'} or not account:
+                problem='the row for "%s" is malformed'%account;break
+            for key in ('browser_port','prototype_port'):
+                port=row[key]
+                if type(port) is not int or not 1024<=port<=65535: problem='%s of "%s" must be an integer from 1024 to 65535'%(key,account);break
+                if port in used: problem='port %d is used twice ("%s" and "%s")'%(port,used[port],account);break
+                used[port]=account
+            if problem: break
+            seats[account]=(row['browser_port'],row['prototype_port'])
+    if problem is not None: raise PortsError('account_ports_file %s is invalid: %s'%(path,problem))
+    return seats
+
+
+def _with_account_ports(value):
+    """With account_ports_file set, this account's two ports come from its registry row, as if written in config.json."""
+    registry=value.get('account_ports_file')
+    if registry is None: return value
+    if not (_clean_text(registry) and os.path.isabs(registry)): raise PortsError('account_ports_file must be an absolute path of clean text')
+    if os.name!='posix': raise PortsError('account_ports_file is not supported on Windows')
+    if 'browser_port' in value or 'prototype_port' in value:
+        raise PortsError('account_ports_file and browser_port or prototype_port are two sources of one fact; remove the ports from the configuration')
+    account=_account_name()
+    if not _clean_text(account,256): raise PortsError('This account has no name the ports registry can be looked up by')
+    seats=_account_registry(registry)
+    if account not in seats: raise PortsError('account_ports_file %s has no row for account "%s"'%(registry,account))
+    return dict(value,browser_port=seats[account][0],prototype_port=seats[account][1])
 
 
 def _fixed_ports(value):
@@ -142,12 +232,11 @@ def _fixed_ports(value):
         port=value.get(key)
         require(port is None or (type(port) is int and 1024<=port<=65535),'Invalid '+key.replace('_',' '),'invalid_config')
         ports[key]=port
+    # Retired ssh mode: ssh_client and ssh_server_port are ignored and browser_mode "ssh" reads as unset, so a seat that
+    # has not been reinstalled still starts.
     mode=value.get('browser_mode')
-    require(mode is None or mode in ('link','system','ssh'),'Invalid browser mode','invalid_config')
-    client=value.get('ssh_client')
-    require(client is None or valid_ssh_alias(client),'Invalid ssh client','invalid_config')
-    sshd=value.get('ssh_server_port')
-    require(sshd is None or (type(sshd) is int and 1<=sshd<=65535),'Invalid ssh server port','invalid_config')
+    if mode=='ssh': mode=None
+    require(mode is None or mode in ('link','system','tern'),'Invalid browser mode','invalid_config')
     require(ports['browser_port'] is None or ports['browser_port']!=ports['prototype_port'],
             'browser_port and prototype_port must differ','invalid_config')
     return ports['browser_port'],ports['prototype_port'],mode
@@ -210,9 +299,41 @@ def _private_home():
     return Path.home()
 
 
+def _xdg_runtime_root():
+    """The OS runtime dir's glitch-idea folder when XDG_RUNTIME_DIR names an owner-only directory, else None."""
+    xdg=os.environ.get('XDG_RUNTIME_DIR')
+    if not xdg or not os.path.isabs(xdg): return None
+    try: info=os.lstat(xdg)
+    except OSError: return None
+    if not (stat.S_ISDIR(info.st_mode) and info.st_uid==os.getuid() and stat.S_IMODE(info.st_mode)==0o700):
+        return None
+    return Path(xdg)/'glitch-idea'
+
+
+def _private_child(open_chain,home,name):
+    """Open (creating 0700 if absent) one owner-only folder inside the home, anchored on the home's own
+    descriptor: the home must already exist and pass the chain, and nothing but this leaf is ever created.
+    The leaf is opened no-follow and checked on its descriptor; an existing folder is never re-moded."""
+    from idea_runtime import _directory
+    flags=os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC
+    parent=open_chain(home,create=False,private_leaf=False)
+    try:
+        try: os.mkdir(name,0o700,dir_fd=parent)
+        except FileExistsError: pass
+        child=os.open(name,flags,dir_fd=parent)
+        try: _directory(child,private=True)
+        except Exception:
+            os.close(child); raise
+        return child
+    finally:
+        os.close(parent)
+
+
 def _default_runtime_root():
-    """Home first; when its chain is not private, the OS runtime dir by itself. Returns (path, fallback or None)."""
-    home_default=_private_home()/'.local/state/glitch-idea'
+    """Home default first; when its chain is not private, the OS runtime dir; then an owner-only
+    .glitch-idea folder directly in the private home. Returns (path, fallback or None)."""
+    home=_private_home()
+    home_default=home/'.local/state/glitch-idea'
     if os.name!='posix': return home_default,None
     try:
         from idea_runtime import RuntimeError as OwnerError,_open_chain
@@ -222,13 +343,14 @@ def _default_runtime_root():
         except OwnerError as exc:
             if exc.code!='runtime_not_private': return home_default,None
         else: return home_default,None
-        xdg=os.environ.get('XDG_RUNTIME_DIR')
-        if not xdg or not os.path.isabs(xdg): return home_default,None
-        info=os.lstat(xdg)
-        if not (stat.S_ISDIR(info.st_mode) and info.st_uid==os.getuid() and stat.S_IMODE(info.st_mode)==0o700):
-            return home_default,None
-        target=Path(xdg)/'glitch-idea'
-        return target,{'from':str(home_default),'to':str(target),'reason':'home_not_private'}
+        target=_xdg_runtime_root()
+        if target is not None:
+            return target,{'from':str(home_default),'to':str(target),'reason':'home_not_private'}
+        # The descriptor chain creates the folder 0700 if absent and refuses a symlink, a file,
+        # another owner's folder or a loose mode; an existing folder is checked, never re-moded.
+        target=home/'.glitch-idea'
+        os.close(_private_child(_open_chain,home,target.name))
+        return target,{'from':str(home_default),'to':str(target),'reason':'home_state_not_private'}
     except Exception:
         return home_default,None
 
@@ -344,10 +466,6 @@ def _safe_launch_details(details):
         elif type(value) is str and re.fullmatch(prefix+r'[0-9a-f]{32}',value):
             result[key]=value
     if type(details.get('resume_required')) is bool: result['resume_required']=details['resume_required']
-    client=details.get('ssh_client')
-    if valid_ssh_alias(client): result['ssh_client']=client
-    aliases=details.get('client_aliases')
-    if type(aliases) is list and 0<len(aliases)<=16 and all(valid_ssh_alias(a) for a in aliases): result['client_aliases']=list(aliases)
     if type(details.get('port')) is int and 1 <= details['port'] <= 65535: result['port']=details['port']
     return result
 
@@ -384,10 +502,22 @@ def run_launcher(args):
                     'Invalid binding ID','invalid_input')
             require(args.idea_id is None or (type(args.idea_id) is str and re.fullmatch(r'idea_[0-9a-f]{32}',args.idea_id)),
                     'Invalid idea ID','invalid_input')
+        prefill=None
+        if args.command!='serve':
+            name,wpath=getattr(args,'workspace_name',None),getattr(args,'workspace_path',None)
+            require((name is None)==(wpath is None),'--workspace-name and --workspace-path must be given together or not at all','usage')
+            if name is not None:
+                require(args.resume is None and getattr(args,'reconnect',None) is None,
+                        'A session workspace only goes with a new session, not --resume or --reconnect','usage')
+                prefill=dict(name=name,path=wpath)
         orcabinding=None
         if args.command=='browser-open':
-            # Effective mode first: the flag, else the configured browser_mode (validated by _fixed_ports).
+            # Effective mode first: the flag, else the configured browser_mode (validated by _fixed_ports),
+            # else pane mode when this process sits in a Tern pane (a default only: the plugin's claim is the proof).
             if args.browser is None: args.browser=_fixed_ports(_configuration_source()[0])[2]
+            if args.browser is None:
+                import idea_tern
+                if idea_tern.default_is_tern(): args.browser='tern'
             require(args.browser is not None,'Browser mode is required: pass --browser or set browser_mode','browser_mode_required')
         reconnect=getattr(args,'reconnect',None)
         if reconnect is not None:
@@ -410,22 +540,23 @@ def run_launcher(args):
             return dict(ok=True,code='stopped',**({'runtime_root_fallback':args.runtime_root_fallback} if args.runtime_root_fallback else {}))
         options=dict(binding_id=args.resume,selected_idea_id=args.idea_id,runtime_python=executable,
                      readiness_timeout=args.readiness_timeout)
+        if prefill is not None: options['session_workspace']=prefill  # only when given: other calls stay as they were
         # Keep released open_session's five-second mutation timeout; probes remain
         # <=1s within readiness budget. Never retry an ambiguous NEW here.
         if args.command=='session-open': result=open_session(store,runtime,config,**options)
         elif reconnect is not None:
             result=reconnect_browser_session(store,runtime,config,binding_id=reconnect,orcabinding=orcabinding,
                                              runtime_python=executable,readiness_timeout=args.readiness_timeout)
-        elif args.browser=='ssh':
-            from idea_ssh import open_ssh_session
-            source=_configuration_source()[0]
-            result=open_ssh_session(store,runtime,config,ssh_client=source.get('ssh_client'),
-                                    ssh_server_port=source.get('ssh_server_port'),**options)
+        elif args.browser=='tern':
+            import idea_tern
+            paths,version=idea_tern.pane_terminals()  # the ancestor road first; else the account's agent pane
+            terminal=(paths[0] if version==1 else paths) if paths else None  # one path stays a string, as before
+            result=idea_tern.open_tern_session(store,runtime,config,terminal=terminal,version=version,**options)
         else: result=open_browser_session(store,runtime,config,mode=args.browser,orcabinding=orcabinding,**options)
         if args.runtime_root_fallback: result=dict(result,runtime_root_fallback=args.runtime_root_fallback)
         return dict(ok=True,**result)
-    except (LaunchError,NativeError,RuntimeError,BridgeError,IdeaError,SshError) as exc:
-        result=dict(ok=False,error=dict(code=exc.code,message=SSH_MESSAGES.get(exc.code,exc.code) if isinstance(exc,SshError) else exc.code),
+    except (LaunchError,NativeError,RuntimeError,BridgeError,IdeaError) as exc:
+        result=dict(ok=False,error=dict(code=exc.code,message=_shown(exc)),
                     **_safe_launch_details(getattr(exc,'details',{})))
         sessions=_safe_sessions(getattr(exc,'sessions',None)) if exc.code=='binding_capacity' else None
         if sessions is not None: result['sessions']=sessions
@@ -456,7 +587,7 @@ def run_sessions(args):
             return dict(ok=False,error=dict(code='session_in_use',message='session_in_use'),warning=DISCARD_WARNING)
         return dict(ok=True,binding_id=value['binding_id'],was_in_use=value['was_in_use'])
     except (RuntimeError,IdeaError) as exc:
-        return dict(ok=False,error=dict(code=exc.code,message=exc.code))
+        return dict(ok=False,error=dict(code=exc.code,message=_shown(exc)))
     except Exception:
         return dict(ok=False,error=dict(code='launcher_failed',message='launcher_failed'))
 
@@ -474,7 +605,7 @@ def run_prototype(args):
         extra={} if prototype_port is None else dict(port=prototype_port)
         return serve_prototype(args.session,args.dir,store,runtime,**extra)
     except (RuntimeError,IdeaError) as exc:
-        return dict(ok=False,error=dict(code=exc.code,message=exc.code))
+        return dict(ok=False,error=dict(code=exc.code,message=_shown(exc)))
     except Exception:
         return dict(ok=False,error=dict(code='launcher_failed',message='launcher_failed'))
 
@@ -528,7 +659,7 @@ def run_agent(args):
         if args.command=='asset': return client.asset(**asset)
         return client.session_close()
     except (AgentClientError,RuntimeError,BridgeError,IdeaError) as exc:
-        result=dict(ok=False,error=dict(code=exc.code,message=exc.code))
+        result=dict(ok=False,error=dict(code=exc.code,message=_shown(exc)))
         state=getattr(exc,'write_state',None)
         if type(state) is str and state in ('not_applied','committed_uncertain'):
             result['write_state']=state
@@ -538,8 +669,27 @@ def run_agent(args):
 
 
 def main(argv=None):
+    global _SOURCE_CACHE
+    _SOURCE_CACHE={}
+    try: return _main(argv)
+    finally: _SOURCE_CACHE=None
+
+
+def _not_shared(exc,args):
+    """The named error for a permission refusal on this command's store, or None; never raises."""
+    try:
+        from idea_platform import not_shared_error
+        store=getattr(args,'store',None)
+        if store is None: store=configuration()['store_path']
+        return not_shared_error(exc,os.path.realpath(str(Path(store).expanduser())))
+    except Exception:
+        return None
+
+
+def _main(argv=None):
     values=sys.argv[1:] if argv is None else list(argv)
     launching=_launcher_requested(values)
+    args=None
     try:
         cli=parser();cli.launcher_errors=launching
         args=cli.parse_args(values)
@@ -561,14 +711,20 @@ def main(argv=None):
             else:
                 result=dict(ok=True,**run(args,configuration()))
     except IdeaError as exc:
-        result=dict(ok=False,error=dict(code=exc.code,message=exc.code if launching else str(exc)),
+        result=dict(ok=False,error=dict(code=exc.code,message=_shown(exc) if launching else str(exc)),
                     **({} if launching else exc.details))
     except (OSError,UnicodeError,ValueError,RecursionError) as exc:
-        result=dict(ok=False,error=dict(code='launcher_failed' if launching else 'io_error',
-                    message='launcher_failed' if launching else str(exc)))
+        # A store verb names the refused path and the fix. Launch verbs keep their fixed, redacted errors.
+        refused=None if launching else _not_shared(exc,args)
+        if refused is not None:
+            result=dict(ok=False,error=dict(code=refused.code,message=str(refused)),**refused.details)
+        else:
+            result=dict(ok=False,error=dict(code='launcher_failed' if launching else 'io_error',
+                        message='launcher_failed' if launching else str(exc)))
     fallback=result.get('runtime_root_fallback') if launching else None
     if type(fallback) is dict:
-        sys.stderr.write('Runtime folder: the home folder is shared on this account, so Glitch idea uses %s for this login.\n'%fallback['to'])
+        shared='a folder on the path to ~/.local/state/glitch-idea' if fallback.get('reason')=='home_state_not_private' else 'the home folder'
+        sys.stderr.write('Runtime folder: %s is shared on this account, so Glitch idea uses %s for this login.\n'%(shared,fallback['to']))
     sys.stdout.buffer.write(encoded(result))
     return 0 if result['ok'] else 1
 

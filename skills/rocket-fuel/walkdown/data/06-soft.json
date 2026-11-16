@@ -1,0 +1,68 @@
+{
+ "stage": "06-soft",
+ "contract": 1,
+ "backends": [],
+ "findings": [
+  {
+   "check": "soft.question",
+   "file": "SKILL.md",
+   "line": 7,
+   "kind": "label",
+   "qid": "label:SKILL.md:7",
+   "question": "Does this line tell the reader to do the matched action, tell them not to, describe it, or quote / give an example of it?",
+   "sources": [
+    {
+     "stage": "04",
+     "check": "phrase.C.second-order",
+     "file": "SKILL.md",
+     "line": 7,
+     "patterns": [
+      "C.frontmatter-grant"
+     ]
+    }
+   ]
+  },
+  {
+   "check": "soft.question",
+   "file": null,
+   "line": null,
+   "kind": "relational",
+   "qid": "rel:legs",
+   "question": "Describe, as capability and not intent, how these three capabilities could combine in this artifact, citing the evidence given.",
+   "sources": [
+    {
+     "stage": "05",
+     "check": "cap.leg",
+     "file": null,
+     "line": null
+    },
+    {
+     "stage": "05",
+     "check": "cap.leg",
+     "file": null,
+     "line": null
+    },
+    {
+     "stage": "05",
+     "check": "cap.leg",
+     "file": null,
+     "line": null
+    }
+   ]
+  },
+  {
+   "check": "soft.label",
+   "file": "SKILL.md",
+   "line": 7,
+   "qid": "label:SKILL.md:7",
+   "skipped": "no labeling backend"
+  },
+  {
+   "check": "soft.read",
+   "file": null,
+   "line": null,
+   "qid": "rel:legs",
+   "skipped": "no relational backend"
+  }
+ ]
+}

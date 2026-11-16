@@ -1,0 +1,6 @@
+{
+  "name": "gcc-skill-review",
+  "kind": "local-skill",
+  "summary": "Find the weak step in your own skill: map its steps, check each one over five fresh runs, fix the one that fails and prove the fix.",
+  "way_in": "Ask for the GCC skill review to find the weak step in one of your skills."
+}

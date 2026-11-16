@@ -420,7 +420,7 @@ async function main() {
     if (!memoryText.includes('Your Glitch remembers') || !memoryText.includes('Memory offline.') || /Usually:/.test(memoryText)) throw new Error('missing-memory line wrong: ' + memoryText.slice(0, 160));
     await click('#method-choice-bounded-plan');
     const cards = await read(`[...document.querySelectorAll('#method-cards .method-card-name')].map(n => n.textContent)`);
-    if (cards.join('|') !== 'Full Plan Up Front|Vertical Slicing (Agile)|Fixed Budget, Build what Fits|Experiment First') throw new Error('method cards wrong: ' + cards.join('|'));
+    if (cards.join('|') !== 'Full Plan Up Front|BMAD (Roles and Stories)|Fixed Budget, Build what Fits|Experiment First') throw new Error('method cards wrong: ' + cards.join('|'));
     await shot('02c-method');
     await accept('method', 'method-accept');  // no reason needed: "Why this method?" is optional
     return 'a method card chosen with no reason (optional); four cards by their new names; missing memory shown honestly: ' + memoryText.slice(0, 80);
@@ -912,22 +912,22 @@ async function main() {
       })), 'Usually: Full Plan Up Front.', async () => {
         // The human chooses a method different from the remembered one; using the memory result
         // must never change that choice (the agent sends memory only, only the human selects).
-        await click('#method-choice-adaptive-slices');
+        await click('#method-choice-bmad');
         const before = await read(`document.querySelector('[id^="method-choice-"][aria-pressed="true"]')?.id ?? null`);
-        if (before !== 'method-choice-adaptive-slices') throw new Error('the human method choice did not register before Use: ' + before);
+        if (before !== 'method-choice-bmad') throw new Error('the human method choice did not register before Use: ' + before);
         await shot('09-method-selected');
       });
       const choiceAfterUse = await read(`document.querySelector('[id^="method-choice-"][aria-pressed="true"]')?.id ?? null`);
-      if (choiceAfterUse !== 'method-choice-adaptive-slices') throw new Error('using the memory result changed the human method choice to ' + choiceAfterUse);
+      if (choiceAfterUse !== 'method-choice-bmad') throw new Error('using the memory result changed the human method choice to ' + choiceAfterUse);
       const line = await read(`document.querySelector('#method-memory p')?.textContent ?? ''`);
       if (line !== 'Usually: Full Plan Up Front.') throw new Error('memory line did not take the agent memory result: ' + line);
       await typeInto('#method-reason', edited);
       await accept('method', 'method-accept');
       const fields = savedOf().workflow?.steps?.method?.fields ?? {};
-      if (fields.selection !== 'adaptive-slices') throw new Error('accepted method is not the human choice: ' + fields.selection);
+      if (fields.selection !== 'bmad') throw new Error('accepted method is not the human choice: ' + fields.selection);
       if (fields.memory?.status !== 'found' || fields.memory?.preferred_method !== 'bounded-plan') throw new Error('the memory result was not accepted: ' + JSON.stringify(fields.memory));
       if (acceptedAt('method', edited) !== 'workflow.steps.method.fields.reason') throw new Error('reason accepted in the wrong field');
-      return agentObs(log, `waiting panel "${waiting.slice(0, 50)}"; memory shown "${shown.slice(0, 60)}"; human choice adaptive-slices kept over the remembered bounded-plan; memory found saved beside it`);
+      return agentObs(log, `waiting panel "${waiting.slice(0, 50)}"; memory shown "${shown.slice(0, 60)}"; human choice bmad kept over the remembered bounded-plan; memory found saved beside it`);
     });
     await step('agent_proposal_discovery', async () => {
       const raw = 'Fixture suggested problem.', edited = 'Human edited problem.';
@@ -1083,9 +1083,9 @@ async function main() {
       const saved = idea(['show', id]).json.idea.workflow?.steps?.method?.fields?.selection ?? null;
       if (saved) throw new Error('a method selection exists in saved state without the human: ' + saved);
       // The human then decides (leaves the idea clean): the choice is theirs, memory saved beside it.
-      await click('#method-choice-adaptive-slices'); await accept('method', 'method-accept');
+      await click('#method-choice-bmad'); await accept('method', 'method-accept');
       const mine = idea(['show', id]).json.idea.workflow?.steps?.method?.fields ?? {};
-      if (mine.selection !== 'adaptive-slices' || mine.memory?.preferred_method !== 'bounded-plan') throw new Error('accepted method is not the human choice with memory beside it: ' + JSON.stringify(mine).slice(0, 160));
+      if (mine.selection !== 'bmad' || mine.memory?.preferred_method !== 'bounded-plan') throw new Error('accepted method is not the human choice with memory beside it: ' + JSON.stringify(mine).slice(0, 160));
       return agentObs(log, 'agent memory (remembered bounded-plan) shown as "' + line + '"; no method selected before or after Use, none saved; the selection stays the human\'s');
     });
   }

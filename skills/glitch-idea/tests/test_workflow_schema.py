@@ -132,7 +132,7 @@ class WorkflowSchemaTests(unittest.TestCase):
         self.assert_rejected(lambda: validate_step_fields('exploration', value, partial=True))
 
     def test_exploration_conditional_fields_follow_the_accepted_method(self):
-        for selected in ('bounded-plan', 'adaptive-slices', 'appetite-led', 'experiment-led'):
+        for selected in ('bounded-plan', 'bmad', 'adaptive-slices', 'appetite-led', 'experiment-led'):
             value = fixtures()['exploration']
             if selected == 'appetite-led':
                 value['investment'] = {'cap': 2, 'unit': 'sessions', 'boundary': 'Fixture only'}

@@ -58,6 +58,15 @@ Everything in them is demo content.
 | macOS | Not yet qualified. The POSIX code path is shared with Linux, but no verification rows exist yet. |
 | Windows (native) | Not yet qualified. Browser launch refuses to start on Windows (`privacy_unqualified`) until owner-private runtime directories are qualified there. The command forms below are shown so that the installer and the helper can be run, not as a claim that the browser flow works. |
 
+| Agent | State |
+| --- | --- |
+| Claude Code | Works best: the page opens above the asking pane, even when your focus is elsewhere. |
+| Codex | Works; keep the asking pane in focus until the page opens. With several Codex sessions of one account and none of their panes in focus, the page opens beside the pane you are on. |
+| Grok, Muse, Kimi | The agents make it work, but by a non-standard path: Grok and Kimi make their own runtime folder when the default one is refused; Muse writes its own event loop. |
+| Antigravity CLI | Unproven: the agent did not find the installed skill. |
+
+Claude Code was tried on 13 Nov 2026 on two accounts, Codex on 15 Nov 2026 with one and with two sessions, and Grok, Muse, Kimi and Antigravity CLI once each on 15 Nov 2026, all on Linux.
+
 Where this document says "not yet qualified" it means exactly that: nothing has been observed, so nothing is claimed.
 
 ## Requirements
@@ -66,7 +75,7 @@ Where this document says "not yet qualified" it means exactly that: nothing has 
 - **PyYAML 6.0.3 (MIT)**, pinned in `glitch-idea/requirements.txt`, inside the runtime interpreter's environment.
 - A browser on the machine you sit at (the operator's own computer).
 - **pip**, which you run yourself when the installer asks for PyYAML.
-- Optional, for SSH mode (the browser is on another computer than the one running the service): an SSH client and SSH keys in each direction; the detail is in the runbook.
+- The skill itself uses no SSH client and no SSH keys. A browser on another computer than the service needs a standing tunnel you set up once, with whatever client and login that tunnel uses (see "When the browser is on another computer").
 - Privacy: Discovery's prior-art question searches the web with your agent's own web tool, and the query describes your idea. Everything else stays on 127.0.0.1.
 
 The installer never downloads anything.
@@ -126,6 +135,67 @@ The default skills root is `~/.codex/skills` (`--skills-root` selects another pe
 No configuration file is required; the default store is the `ideas/` folder inside this checkout (`<checkout>/ideas`), outside the installed skill, so deleting the checkout deletes that store unless you chose another with `--store`.
 Keep that directory when replacing or removing the checkout.
 
+## Shared install for several accounts
+
+One installed copy can serve several OS accounts on one Linux or macOS machine.
+Each account reaches it through a symlink in its own skills folder; the only thing that differs per account is its two ports.
+Nothing is written into any home by the install, and nothing is written into the shared folder when the skill runs: the helper and the owner service write no bytecode, and the runtime folder stays per account (the default is under each account's own home, `~/.local/state/glitch-idea`).
+A single-account install, and every Windows install, is unchanged.
+
+1. **Write the registry** once, as one JSON file the accounts can read:
+
+   ```json
+   {"schema": 1, "host": "this-machine",
+    "seats": {"alice": {"browser_port": 41001, "prototype_port": 41002},
+              "bob":   {"browser_port": 41003, "prototype_port": 41004}}}
+   ```
+
+   Each key under `seats` is an OS account name.
+   Ports are integers from 1024 to 65535, and no port may appear twice anywhere in the file.
+2. **Create the store before the first shared install.**
+   The idea store only counts as shared when its root is setgid with group read, write and execute (`2770`), in a group the installing account belongs to. The installer and the running skill apply the same test; a root the group can write but not enter or list is treated as one account's private store:
+
+   ```bash
+   mkdir /path/to/ideas && chgrp <shared group> /path/to/ideas && chmod 2770 /path/to/ideas
+   ```
+
+   `--shared` never creates or changes a store.
+   It makes one read-only check of the store's top folder: it must exist, be a real folder (not a symlink), be setgid with group read, write and execute (`2770`), and be in a group the installing account belongs to.
+   Otherwise it refuses and prints the commands.
+   It does not look inside the store.
+   Converting an existing single-account store is your step: run these as its owner before the install.
+
+   ```bash
+   chgrp -R <shared group> /path/to/ideas
+   find /path/to/ideas -type d -exec chmod 2770 {} +
+   find /path/to/ideas -type f -perm /200 -exec chmod 660 {} +
+   find /path/to/ideas -type f ! -perm /200 -exec chmod 440 {} +
+   ```
+
+   The last line keeps sealed read-only evidence (the runtime writes those files `440` in a shared store) readable by the group without making them writable.
+   The installer cannot prove the store's contents are usable by the group; the first run as a second account is the proof.
+3. **Install once** into a folder whose group is the group the accounts share:
+
+   ```bash
+   python3 install.py --shared --account-ports-file /absolute/path/to/ports.json --skills-root /shared/skills --store /absolute/path/to/ideas --runtime-python /absolute/path/to/python
+   ```
+
+   `--shared` makes folders `2750` (setgid) and files `640`, with the group of `--skills-root`; a source script that is executable stays executable (`750`).
+   It needs `--account-ports-file` on a fresh install, or an installed config that already has the key.
+   The installed `config.json` carries `account_ports_file` and no `browser_port` or `prototype_port`: ports left over from an earlier install are dropped, with one line on stderr.
+   `--shared` takes no `runtime_root`, because one folder would be every account's runtime.
+   The install marker records `"shared": true`; `--dry-run` reports the same plan plus the registry, group and modes.
+4. **Link it** from each account's skills folder: `ln -s /shared/skills/glitch-idea ~/.codex/skills/glitch-idea`.
+   Each agent CLI reads its own folder: Claude Code reads `~/.claude/skills`, Codex reads `~/.codex/skills`.
+   The Kimi accounts tested so far carry links in `~/.claude/skills`, `~/.codex/skills` and `~/.agents/skills`; which one Kimi reads has not been isolated.
+   Run as that account, the helper finds its own row by account name and uses those two ports exactly as if they were written in `config.json`.
+5. **Deploy a release** by rerunning the install command once, as the account that owns the shared folder; every account sees the new version through its link.
+   A rerun also repairs modes, group or executable bits that have drifted, and reports `repaired` instead of `unchanged`.
+
+The shared folder's group-write bits are your choice of folder: the installer sets `2750`, so only the installing account can change the tree, and anything looser is your own decision.
+The registry, or a missing row for an account, is reported as `invalid_config` naming the registry and the account, on every verb including the launcher verbs.
+The accounts share one idea store if you point them at one; each account runs its own owner service from its own runtime folder.
+
 ## Configuration
 
 Copy `config.example.json` to `config.json` beside `install.py` if you need custom settings before installation.
@@ -140,16 +210,18 @@ Supported keys, and only these:
 | `runtime_python` | Absolute path of the runtime interpreter. |
 | `browser_port` | `null` or absent (random port), or an integer from 1024 to 65535. The idea page listens on this fixed loopback port. |
 | `prototype_port` | The same bounds, for `prototype-serve`. When both are set they must differ. |
-| `browser_mode` | `null` or absent (unset), `"link"`, `"system"` or `"ssh"`. The default for `browser-open` when `--browser` is omitted. `"ssh"` needs `browser_port`. |
-| `ssh_client` | Optional. The ssh config alias of your computer, for SSH mode; overrides detection. |
-| `ssh_server_port` | Optional. The ssh port of the machine running the service, for SSH mode (default 22). |
+| `browser_mode` | `null` or absent (unset), `"link"`, `"system"` or `"tern"`. The default for `browser-open` when `--browser` is omitted. |
+| `account_ports_file` | Absolute path of a registry that gives each OS account its two ports (see "Shared install for several accounts"). Set it instead of `browser_port` and `prototype_port`, never beside them. Not supported on Windows. |
 | `default_workspace` | Optional `{"name": ..., "path": ...}`: an absolute, existing folder that capture prefills (the field stays editable). A configured folder that does not exist is an `invalid_config` error. |
 
 Unset keeps random ports: with `browser_port` and `prototype_port` null or absent, each launch picks a fresh port as before.
 Set them when a standing tunnel must forward the same port every time (see the runbook, "Tern on a remote host").
-With `browser_mode` unset, `browser-open` needs `--browser` and fails with `browser_mode_required` without it.
+With `browser_mode` unset and outside a Tern pane, `browser-open` needs `--browser` and fails with `browser_mode_required` without it.
 `--browser link` prints a click-to-open link instead of opening a tab.
 If the configured port is taken, launch fails with `port_in_use` (or `prototype_port_in_use`) and never falls back to another port.
+
+A config that still carries the retired keys `ssh_client` or `ssh_server_port`, or `browser_mode: "ssh"`, is read as if they were absent: the two keys are ignored and the mode is unset.
+The helper does this at every launch, and the installer removes them from the file and prints one line saying so.
 
 Unknown keys, a key present with `null` for `runtime_root` or `runtime_python` (omit the key instead), a relative or symlinked `runtime_root`, and over-limit values are refused with an error rather than quietly dropped.
 That validation happens when the installer runs: the helper itself reads only the keys it uses and ignores others, so after editing an installed `config.json` by hand, rerun the installer to validate it.
@@ -184,29 +256,35 @@ idea_tool=~/.codex/skills/glitch-idea/scripts/idea.py
   `--resume binding_ID` re-pairs the same binding and keeps its saved selection and save receipts.
   A lost or uncertain NEW result is never retried automatically, and an error carrying `resume_required` must be resumed, not replaced by a fresh session.
 - The service accepts only its exact `127.0.0.1:<port>` origin.
+- A prototype is served on its own port under a private link, `http://127.0.0.1:<port>/<key>/`, with a key made for each launch.
+  Its port is fixed and known to every account on the machine, so the key is what keeps other accounts out: without it every address answers `not found`.
   It exits after 15 minutes without authenticated activity; saved ideas survive and the next launch needs fresh pairing.
 - The runtime root (default `.local/state/glitch-idea` under your account's home directory as the system records it, which on macOS and Linux is the password-database home, not `$HOME`) must be owned by you with mode exactly 0700, and no component of it may be a symlink.
   A looser directory is refused with `runtime_not_private`; keep it free of ACLs as well.
 
-### When the browser is on another computer (SSH)
+### When the browser is on another computer
 
 The browser opens on the computer you sit at, but the service listens on the machine where the helper ran.
-SSH mode (`browser-open --browser ssh`, or `browser_mode: "ssh"` in the configuration) finds your computer, checks the connection both ways and opens the page on it for you.
-The one-time link travels over ssh and never appears in a command line.
-On Windows with Tern and the Glitch Idea plugin, the page opens in a Tern browser pane above the focused pane; with no ready plugin you are handed the link instead. On macOS and Linux it opens in your default browser.
-The focused pane is the pane with focus in your Tern window, normally the one you just typed `/glitch-idea` in. Tern gives no way to tell which window pane a remote program runs in, so if you click another pane before the page opens, it lands above that one.
+The page port must be reachable from your computer under the same port number.
 
 Setup, once per seat:
 
 1. Give the seat a fixed `browser_port` (and `prototype_port` for prototypes).
-2. Keep a standing tunnel running on your computer that forwards that same port to the machine (`ssh -N`, left running).
-3. Give the account that runs the helper an ssh key that your computer accepts.
+2. Keep a standing tunnel running on your computer that forwards that same port to the machine, left running.
 
-If a direction is not working, the helper stops and names it (`ssh_no_key`, `ssh_tunnel_down` and the others; see the runbook, section 5.2).
-It never asks you to type a throwaway tunnel line.
-If several computers fit, set `ssh_client` to the ssh config alias of yours.
-With only a standing tunnel and no key back to your computer, use link mode (`browser_mode: "link"`): it prints a link and you click it.
-`--browser system` is for a browser on the same computer as the helper; it is not an SSH substitute.
+Then, inside a Tern pane, run `browser-open` with no `--browser` (see "Tern pane" below).
+In any other terminal use link mode (`browser_mode: "link"`): it prints a link and you click it.
+The helper never asks you to type a throwaway tunnel line.
+`--browser system` is for a browser on the same computer as the helper; it does not reach another computer.
+
+### Tern pane
+
+Inside a Tern pane, `browser-open` opens the page above or beside the pane that ran it (`--browser tern`, or `browser_mode: "tern"`).
+With neither the flag nor `browser_mode` set, the helper picks this road by itself when it runs inside a Tern pane.
+An explicit `browser_mode` always wins.
+No link is shown on success.
+It needs the Glitch Idea Tern plugin on the Tern that shows the window.
+If the page cannot be opened, you get a ready link to click and one plain reason (see the runbook, "Tern pane").
 
 ### Orca
 

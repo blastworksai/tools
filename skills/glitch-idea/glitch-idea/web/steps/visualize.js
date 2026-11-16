@@ -383,18 +383,26 @@ export function render(ctx) {
   briefBox.append(element('p','The brief uses your saved answers. Make the design with your chosen tool, then upload its files here.','help'));
   if(local.copyMessage){const message=element('p',local.copyMessage,'notice');message.id='visualize-copy-status';message.setAttribute('role','status');briefBox.append(message);}claude.append(briefBox);
   const {inventory}=renderUploads({...ctx,body:claude});
+  const ready=brief?prototypeSet(current(),inventory):null;
   const choices=element('section','','design-choice');choices.setAttribute('aria-label','Which files are the design');
   choices.append(element('h3','Which files are the design'));
-  choices.append(element('p','Uploading keeps a file with this idea; it does not make it the design. Press the button, tick each file that is part of the design, then press Accept.','help'));
+  choices.append(element('p','Uploading keeps a file with this idea; it does not make it the design. Tick each file that is part of the design, then press Accept.','help'));
+  if(ready)choices.append(element('p','Your prototype\'s two files are the design; press Accept.','help'));
   const newSet=button(inventory?.sets.length?'Start another design from other files':'Choose which files are the design',handle(()=>{local.members=[];change(make('accepted_set',null,'claude_design'));}));
-  newSet.id='visualize-new-set';newSet.disabled=Boolean(writeBlocked(ctx)||!brief||!inventory);choices.append(actions(element,newSet));
+  newSet.id='visualize-new-set';newSet.disabled=Boolean(writeBlocked(ctx)||!brief||!inventory||ready);choices.append(actions(element,newSet));
   for (const asset of inventory?.assets??[]) {
     const label=element('label',asset.name),check=element('input');check.type='checkbox';check.id='visualize-member-'+asset.asset_id;label.htmlFor=check.id;
-    check.checked=local.members.includes(asset.asset_id);check.disabled=Boolean(writeBlocked(ctx)||current().disposition!=='accepted_set'||current().design_set_id!==null||!brief);
+    const inPrototype=Boolean(ready&&(asset.asset_id===ready.zip.asset_id||asset.asset_id===ready.png.asset_id));
+    // With a ready prototype the ticks show exactly its pair, which is what Accept saves.
+    check.checked=ready?inPrototype:local.members.includes(asset.asset_id);check.disabled=Boolean(writeBlocked(ctx)||ready||!brief);
     check.addEventListener('change',event=>{
       if(check.disabled)return;
-      if(event.target.checked&&!local.members.includes(asset.asset_id))local.members.push(asset.asset_id);
-      else if(!event.target.checked)local.members=local.members.filter(id=>id!==asset.asset_id);
+      // The ticked boxes are the design being made. Any tick or untick that is not already editing a new
+      // Claude Design set starts one from the boxes as they now stand, so a saved or earlier design is never
+      // kept behind changed ticks.
+      const members=event.target.checked?[...new Set([...local.members,asset.asset_id])]:local.members.filter(id=>id!==asset.asset_id);
+      if(current().disposition!=='accepted_set'||current().design_set_id!==null||current().source!=='claude_design')edited(make('accepted_set',null,'claude_design'));
+      local.members=members;
       change({...current()});
     });const pick=element('div','','g-check');pick.append(check,label);choices.append(pick);
   }
@@ -405,12 +413,11 @@ export function render(ctx) {
     use.id='visualize-set-'+set.set_id;use.disabled=Boolean(writeBlocked(ctx)||!eligible);use.setAttribute('aria-pressed',String(current().design_set_id===set.set_id));setRow.append(actions(element,use));choices.append(setRow);
   }
   if(current().design_set_id){const chosen=inventory?.sets.find(set=>set.set_id===current().design_set_id);choices.append(element('p','Chosen design: '+(chosen?chosen.members.map(member=>member.name).join(', '):'an earlier design'),'help'));}
-  if(local.members.length)choices.append(element('p',local.members.length===1?'1 file ticked as the design.':local.members.length+' files ticked as the design.','help'));
+  if(!ready&&local.members.length)choices.append(element('p',local.members.length===1?'1 file ticked as the design.':local.members.length+' files ticked as the design.','help'));
   claude.append(choices);
 
   // Card 2: Prototype Here. The terminal builds it; the page only asks and shows the result.
   const state=flow.state, agent=state?.agent_status==='connected';
-  const ready=brief?prototypeSet(current(),inventory):null;
   const answer=flow.proposals('visualize').filter(item=>!item.stale&&item.accepted_revision===state?.revision).at(-1);
   const skill=answer?.proposal?.prototype_skill, waiting=flow.proposalPending?.key==='visualize', talking=state?.conversation?.operation==='visual_brief';
   const phase=ready||!agent?null:(waiting||talking)?'building':skill==='available'?'missed':null;

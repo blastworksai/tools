@@ -20,6 +20,13 @@ class SkillTextTests(unittest.TestCase):
     def test_skill_names_the_system_browser_flag(self):
         self.assertIn("--browser system", SKILL)
 
+    def test_capture_prefill_paragraph(self):
+        flat = " ".join(SKILL.split())
+        for needle in ("`--workspace-name`", "`--workspace-path`", "`browser-open`",
+                       "Never ask the operator for a path only to prefill it, and never guess one",
+                       "Do not pass them together with `--resume`"):
+            self.assertIn(needle, flat)
+
     def test_apiv_framing_line(self):
         self.assertIn("This is Align, the A of APIV (Align · Plan · Implement · Verify); /glitch-plan is the P", SKILL)
 
@@ -139,6 +146,27 @@ class SkillTextTests(unittest.TestCase):
         self.assertIn("browser.link", flat)
         self.assertIn("--resume", flat)
 
+    def test_tern_pane_road_names_opened_and_failure_warning(self):
+        para = next(p for p in SKILL.split("\n\n") if p.startswith("**Tern pane road"))
+        flat = " ".join(para.split())
+        self.assertIn("browser.opened", flat)
+        self.assertIn("tern_open_failed", flat)
+        self.assertIn("browser.link", flat)
+
+    def test_commands_document_tern_flag_and_five_failure_reasons(self):
+        self.assertIn("--browser tern", COMMANDS)
+        for reason in ("no_terminal", "plugin_no_answer", "open_failed", "no_result", "offer_failed"):
+            self.assertIn("`" + reason + "`", COMMANDS)
+
+    def test_ssh_mode_is_gone_from_skill_and_commands(self):
+        for name, text in (("SKILL.md", SKILL), ("commands.md", COMMANDS)):
+            lower = text.lower()
+            self.assertNotIn("ssh mode", lower, name)
+            for gone in ("ssh_open_failed", "ssh_client", "ssh_server_port", "--browser ssh"):
+                self.assertNotIn(gone, lower, name)
+            self.assertIsNone(re.search(r"`ssh_[a-z_]+`", lower), name)
+            self.assertIsNone(re.search(r"\bssh_[a-z]", lower), name)
+
 
 class VisualizeTextTests(unittest.TestCase):
     def test_visualize_section_documents_three_choices_and_prototype(self):
@@ -157,6 +185,36 @@ class VisualizeTextTests(unittest.TestCase):
         flat = " ".join(COMMANDS.split())
         self.assertIn("asset --session", flat)
         self.assertNotIn("see `idea.py --help`", flat)
+
+    def test_prototype_link_is_private_and_used_as_printed(self):
+        # SKILLS-158: the agent opens the keyed link exactly as printed and never stores or rebuilds it.
+        flat = " ".join(SKILL.split())
+        self.assertRegex(flat, r"`origin` is the prototype's private link.{0,80}key made for this launch.{0,120}`not found`")
+        self.assertRegex(flat, r"Use `origin` exactly as printed.{0,60}never rebuild it from `port`.{0,60}never write it into")
+        self.assertRegex(flat, r"new launch makes a new key")
+        self.assertRegex(flat, r"relative links.{0,120}never `/app\.js`")
+        commands = " ".join(COMMANDS.split())
+        self.assertRegex(commands, r"`origin` is `http://127\.0\.0\.1:<port>/<key>/`")
+        self.assertRegex(commands, r"without it, from any account, answers `not found`")
+        self.assertRegex(commands, r"linked relatively")
+        # The link never rides a command line: other accounts can read every command's arguments.
+        self.assertRegex(flat, r"Show `origin` to the operator alone on its own line")
+        self.assertRegex(flat, r"Never hand `origin` to a command.{0,200}arguments")
+        self.assertNotIn("tab create --url <origin>", SKILL)
+        self.assertNotRegex(flat, r"Open a second tab on `origin` \(")
+        self.assertRegex(commands, r"Never pass `origin` to a command")
+        self.assertRegex(flat, r"never write it into a `fill`, a `reply` to the page.{0,60}The one place it goes is your own message to the operator")
+        self.assertRegex(flat, r"no `curl`.{0,80}no `echo` into a file.{0,80}or in its environment")
+        self.assertRegex(flat, r"do not fetch the link yourself")
+        self.assertRegex(commands, r"in your own message in the terminal.{0,80}one place it goes")
+        self.assertRegex(commands, r"as an argument or in its environment")
+
+    def test_commands_document_store_not_shared(self):
+        # SKILLS-159: the agent shows the named error and its commands, and never widens the store itself.
+        commands = " ".join(COMMANDS.split())
+        self.assertRegex(commands, r"`store_not_shared`: a store command was refused permission.{0,200}`path`.{0,60}`store` and `fix`")
+        self.assertRegex(commands, r"never run the commands yourself.{0,120}unseal")
+        self.assertRegex(commands, r"run `list` to get this error with its path")
 
     def test_prototype_order_is_upload_fill_then_reply_last(self):
         order = r"upload both files.{0,200}then `?fill`?.{0,200}reply `?prototype_skill: \"available\"`? last.{0,200}unavailable\W{1,3} at once"
@@ -251,6 +309,19 @@ class AgentProtocolTextTests(unittest.TestCase):
             self.assertRegex(body, r"(?i)never re-run waits.{0,80}turn by turn.{0,120}every 25 seconds")
         self.assertRegex(flat(SKILL), r"(?i)empty waits never reset the idle clock, so a forgotten session still pauses after 600 seconds")
 
+    def test_events_loop_file_stays_private(self):
+        """SKILLS-168: the loop's output file goes where only this account can read it, never a shared temp folder."""
+        for text in (SKILL, COMMANDS):
+            body = flat(text)
+            self.assertRegex(body, r"(?i)the loop writes its file in a folder under this account's home that only this account can read.{0,20}mode 0700.{0,20}never a shared temp folder.{0,40}never the runtime folder")
+            self.assertNotIn('/tmp', text)
+
+    def test_runtime_home_fallback_is_documented(self):
+        """SKILLS-168: the third runtime road and its reason value, and agents never improvise a folder."""
+        commands = flat(COMMANDS)
+        self.assertRegex(commands, r"(?i)`\.glitch-idea` folder directly in that home.{0,40}created 0700.{0,160}never re-moded.{0,20}reason `home_state_not_private`")
+        self.assertRegex(flat(SKILL), r"(?i)reports `runtime_root_fallback`; use the folder it reports and never make a runtime folder of your own")
+
     def test_terminal_fills_reset_the_idle_clock(self):
         for text in (SKILL, COMMANDS):
             body = flat(text)
@@ -325,9 +396,10 @@ class RemoveIdeaTextTests(unittest.TestCase):
         self.assertIn("Removing an idea", SKILL)
 
 class ReadinessRetryTextTests(unittest.TestCase):
-    def test_skill_retries_service_readiness_timeout_once_more(self):
+    def test_skill_explains_service_readiness_timeout_after_the_own_spawn_wait(self):
         body = flat(SKILL)
-        self.assertRegex(body, r"`service_readiness_timeout`.{0,300}once more")
+        self.assertRegex(body, r"waits up to 30 seconds for a service it started itself.{0,200}`service_readiness_timeout`.{0,60}did not come up")
+        self.assertNotRegex(body, r"`service_readiness_timeout`.{0,300}once more")
 
 
 if __name__ == "__main__":
