@@ -32,6 +32,7 @@ local function world(preset)
 			plugin = { data = "/data" },
 			fs = {
 				exists = function(path) return w.files[path] ~= nil end,
+				remove = function(path) w.files[path] = nil end,
 				write = function(path, text) w.files[path] = text end,
 				read = function(path) return assert(w.files[path], "no such file") end,
 				mkdir = function() end,
@@ -61,8 +62,10 @@ local function world(preset)
 		w.now = stop
 	end
 	w.cxs = {}
+	w.reads = {}
 	-- bar_on: true = Plugin segments widget placed, false = absent, "raise" = reading `widgets` raises.
 	function w.window(name, bar_on)
+		w.reads[name] = 0
 		local widgets = { { id = "cwd" }, { id = "git" } }
 		if bar_on == true then table.insert(widgets, { id = "status" }) end
 		local settings_values = { widgets = widgets }
@@ -70,7 +73,8 @@ local function world(preset)
 		cx = {
 			settings = {
 				get = function(_self, key)
-					if bar_on == "raise" then error("runtime error: Unknown preference '" .. key .. "'") end
+					w.reads[name] += 1
+					if bar_on == "raise" or (type(bar_on) == "table" and bar_on.fail_after ~= nil and w.reads[name] > bar_on.fail_after) then error("runtime error: Unknown preference '" .. key .. "'") end
 					return settings_values[key]
 				end,
 				set = function(_self, key, value) settings_values[key] = value; return value end,
@@ -352,6 +356,43 @@ do
 	local fresh = w.window("w1-fresh", true)
 	w.picks[1].callback(w.picks[1].opts.items[1], nil, fresh)
 	check(#fresh.values.widgets == 3 and w.refreshes == 0, "an already placed widget is not appended twice")
+end
+
+-- 19. The preflight read succeeds but the read inside ask() fails: no picker, the grant is handed back through the
+-- host, and a later healthy start (even after a host restart) asks exactly once; no other window asks twice.
+do
+	local w = world()
+	serve_host(w)
+	local first = w.window("w1", { fail_after = 1 }) -- read 1 (preflight) ok, read 2 (inside ask) raises
+	w.load("w1").ensure(first, "spawn")
+	w.run(3000)
+	check(#w.picks == 0, "a read failing inside ask opens no picker")
+	check(w.kv["status_prompt.v2"] == nil, "the released grant clears the v2 flag")
+	check(w.files["/data/status_prompt.v2.done"] == nil, "the released grant clears the v2 marker")
+	check(w.kv["status_prompt.v2.release"] == nil, "the release request is consumed")
+	w.run(30000)
+	w.load("host2").host_serve() -- a host restart does not resurrect the grant
+	local second = w.window("w2", false)
+	w.load("w2").ensure(second, "spawn")
+	w.run(3000)
+	check(#w.picks == 1 and w.picks[1].window == "w2", "a later healthy start asks exactly once")
+	w.load("w3").ensure(w.window("w3", false), "spawn")
+	w.load("host3").host_serve()
+	w.run(20000)
+	check(#w.picks == 1, "no other window asks a second time")
+end
+
+-- 20. A release for a grant that moved on (another token) leaves the current grant alone.
+do
+	local w = world()
+	serve_host(w)
+	w.load("w1").ensure(w.window("w1", false), "spawn")
+	w.run(2000)
+	check(#w.picks == 1, "the first window holds the grant")
+	local host = w.load("hostx")
+	w.kv["status_prompt.v2.release"] = { token = "someone-else", at = 1 }
+	check(host.host_release() == false, "a foreign token releases nothing")
+	check(w.kv["status_prompt.v2"] ~= nil and w.files["/data/status_prompt.v2.done"] ~= nil, "the current grant stands")
 end
 
 return "PASS " .. checks .. " checks"

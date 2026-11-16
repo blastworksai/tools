@@ -20,6 +20,7 @@ local status_prompt = {}
 -- without ever seeing the question, so the flag, request and marker moved to v2 and those installs are asked once more.
 local FLAG = "status_prompt.v2"
 local REQUEST = "status_prompt.v2.request"
+local RELEASE = "status_prompt.v2.release"
 local WIDGET_ID = "status"
 local POLL_MS = 250
 local WAIT_MS = 15000
@@ -77,13 +78,40 @@ function status_prompt.host_claim(): string?
 	return token
 end
 
+-- Host only. A window whose question could not be asked (its settings read failed after the grant) hands the grant
+-- back by writing RELEASE = { token }. The host, the single serialiser, clears the flag and the marker only while they
+-- still carry that token, so a later healthy start asks exactly once; a grant that moved on is left alone.
+-- Returns true when it cleared a grant.
+function status_prompt.host_release(): boolean
+	local request = tern.kv.get(RELEASE)
+	if request == nil then return false end
+	tern.kv.set(RELEASE, nil)
+	local token = if type(request) == "table" and type(request.token) == "string" then request.token else nil
+	if token == nil then return false end
+	local flag = tern.kv.get(FLAG)
+	local flag_mine = type(flag) == "table" and flag.token == token
+	local marker_mine = marker_set() and marker_token() == token
+	if not flag_mine and not marker_mine then return false end
+	if flag_mine then tern.kv.set(FLAG, nil) end
+	-- The granted request stays in its slot; left there it would be granted again to the window that just gave up.
+	local pending = tern.kv.get(REQUEST)
+	if type(pending) == "table" and pending.token == token then tern.kv.set(REQUEST, nil) end
+	if marker_mine then pcall(tern.fs.remove, marker_path()) end
+	return true
+end
+
 -- Host only: polls for the first request until it is granted, then guards the flag briefly and stops.
 -- Starts no timer on a plugin whose flag is already set.
 function status_prompt.host_serve()
+	status_prompt.host_release()
 	if asked() then return end
 	local granted: string? = nil
 	local until_ms = 0
 	local function step()
+		if granted ~= nil and status_prompt.host_release() then
+			granted = nil -- the grant was handed back: serve the next request instead of re-asserting the flag
+			until_ms = 0
+		end
 		if granted == nil then
 			granted = status_prompt.host_claim()
 			if granted ~= nil then until_ms = tern.now() + REASSERT_MS end
@@ -109,8 +137,15 @@ local function widget_placed(cx: any): boolean?
 	return false
 end
 
-local function ask(cx: any)
-	if widget_placed(cx) ~= false then return end
+-- Hands this window's grant back through the host half; nothing is asked and the install stays unasked.
+local function release(token: string)
+	tern.kv.set(RELEASE, { token = token, at = os.time() })
+end
+
+local function ask(cx: any, token: string)
+	local placed = widget_placed(cx)
+	if placed == nil then release(token) end
+	if placed ~= false then return end
 	local items = {
 		{ label = "Yes, show plugin buttons", detail = "Recommended. Adds the Plugin segments widget to the status bar.", answer = true },
 		{ label = "No, leave it as it is", detail = "You can add Plugin segments in Settings later.", answer = false },
@@ -144,12 +179,12 @@ function status_prompt.ensure(cx: any, plugin_id: string)
 		local live = fresh or cx
 		local flag = tern.kv.get(FLAG)
 		if flag ~= nil then
-			if type(flag) == "table" and flag.token == token then ask(live) end
+			if type(flag) == "table" and flag.token == token then ask(live, token) end
 			return
 		end
 		if marker_set() then
 			-- The grant is on disk even though a stale kv write dropped the flag: the named window still asks, once.
-			if marker_token() == token then ask(live) end
+			if marker_token() == token then ask(live, token) end
 			return
 		end
 		if tern.now() >= deadline then
