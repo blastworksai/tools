@@ -52,6 +52,13 @@ class BmadSizeSteer(unittest.TestCase):
         self.assertIn('Big builds (a project or an epic)', fit)
         self.assertIn('smaller work usually goes faster with Full Plan Up Front', fit)
 
+    def test_no_text_contradicts_the_steer(self):
+        for name, text in (('methods.md', METHODS_MD), ('SKILL.md', SKILL), ('method.js', METHOD_JS)):
+            body = flat(text)
+            self.assertNotRegex(body, r'(?i)larger work', name)
+            self.assertNotRegex(body, r'(?i)BMAD[^.]{0,80}\b(best|good|suited|ideal)\b[^.]{0,40}\b(small|smaller) (change|work)', name)
+            self.assertNotRegex(body, r'(?i)\b(small|smaller) (change|work)[^.]{0,60}\b(use|choose|pick|prefer) BMAD', name)
+
     def test_methods_guide_points_smaller_work_to_apiv(self):
         self.assertRegex(flat(METHODS_MD), r'(?i)smaller work \(a small change or a capability\).{0,80}APIV.{0,80}Full Plan Up Front.{0,40}/glitch-plan.{0,60}fits better than BMAD')
 
@@ -62,12 +69,13 @@ class BmadSizeSteer(unittest.TestCase):
     def test_exploration_check_fires_once_for_small_change_and_capability(self):
         body = flat(SKILL.split('### Exploration', 1)[1].split('\n### ', 1)[0])
         self.assertRegex(body, r'\*\*BMAD size check\.\*\* Once the scope is agreed, if the overall method is BMAD \(`bmad`\) and the scope is `small-change` or `capability`, say once, in one plain line,')
-        self.assertRegex(body, r'(?i)never switch or fill the method yourself')
+        self.assertRegex(body, r'say once, in one plain line, that BMAD is meant for big builds \(a project or an epic\) and that Full Plan Up Front usually goes faster for work this size\.')
+        self.assertRegex(body, r'The operator switches on the Methods step in the page, or keeps BMAD; never switch or fill the method yourself\.')
         self.assertRegex(body, r'(?i)never raise it for a `project` or an `epic`')
 
     def test_keep_is_saved_once_and_never_asked_again(self):
         body = flat(SKILL.split('### Exploration', 1)[1].split('\n### ', 1)[0])
-        self.assertIn('add one entry to `assumptions` that begins `%s`' % KEEP_LABEL, body)
+        self.assertIn('If they keep BMAD, add one entry to `assumptions` that begins `%s` and names the scope, and send it with the other assumptions.' % KEEP_LABEL, body)
         self.assertRegex(body, r'Skip the check when the idea\'s `assumptions` already carry an entry that begins `' + re.escape(KEEP_LABEL) + r'`, also after a resume')
 
     def test_check_scopes_are_exactly_the_two_small_ones(self):
