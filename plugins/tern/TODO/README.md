@@ -4,7 +4,7 @@ Plan visibility for the interactive `/glitch-plan` → `/glitch-execute` workflo
 
 ## Status bar, settings and boards
 
-TODO lives in Tern's status bar: the **TODO** segment (icon `list-checks`) opens a **TODO Settings** pane, a new pane and never a popout. The same pane opens from the Command Palette (`Ctrl+Shift+P`) with **TODO: Open Settings**. If the status bar is off, the first window start asks once, per plugin installation, whether to turn it on (the shared status-bar prompt); the palette command always works. TODO adds nothing to the Files pane.
+TODO lives in Tern's status bar: the **TODO** segment (icon `list-checks`) opens a **TODO Settings** pane, a new pane and never a popout. The same pane opens from the Command Palette (`Ctrl+Shift+P`) with **TODO: Open Settings**. If the **Plugin segments** widget is not in the widget bar, the first window start asks once, per plugin installation, whether to add it (the shared status-bar prompt); the palette command always works. TODO adds nothing to the Files pane.
 
 The settings pane has these fields:
 

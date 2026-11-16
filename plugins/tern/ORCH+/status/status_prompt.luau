@@ -1,6 +1,6 @@
 -- Vendored from shared/plugin-status-v1 by sync.py; edit there, then run sync.py.
 --!strict
--- Shared "turn on the status bar?" prompt, asked at most once per plugin install.
+-- Shared "show plugin buttons in the status bar?" prompt, asked at most once per plugin install.
 --
 -- Window half:  require("./status/status_prompt").ensure(cx, "<plugin id>")  once, on the window's first start path
 --               (never inside a chrome formatter: tern.chrome.refresh() raises there).
@@ -16,8 +16,13 @@
 -- Fail closed: no host answer within WAIT_MS means no prompt (and no flag), so the next window start retries.
 local status_prompt = {}
 
-local FLAG = "status_prompt.v1"
-local REQUEST = "status_prompt.v1.request"
+-- v2: Tern 0.9.22 retired the `status_bar` preference for a widget bar (preference `widgets`; the Plugin segments
+-- widget is id "status"). Installs that asked under v1 hit "Unknown preference 'status_bar'" and were recorded as asked
+-- without ever seeing the question, so the flag, request and marker moved to v2 and those installs are asked once more.
+local FLAG = "status_prompt.v2"
+local REQUEST = "status_prompt.v2.request"
+local RELEASE = "status_prompt.v2.release"
+local WIDGET_ID = "status"
 local POLL_MS = 250
 local WAIT_MS = 15000
 local FRESH_S = 30 -- a request older than this belongs to a window that is gone
@@ -31,7 +36,7 @@ local started = false
 -- as "already asked". It names the token it granted, so the one waiting winner window can still recover its grant
 -- when a stale kv write drops the flag before that window polls; every other window only sees "already asked".
 local function marker_path(): string
-	return tern.plugin.data .. "/status_prompt.v1.done"
+	return tern.plugin.data .. "/status_prompt.v2.done"
 end
 
 local function marker_set(): boolean
@@ -74,13 +79,40 @@ function status_prompt.host_claim(): string?
 	return token
 end
 
+-- Host only. A window whose question could not be asked (its settings read failed after the grant) hands the grant
+-- back by writing RELEASE = { token }. The host, the single serialiser, clears the flag and the marker only while they
+-- still carry that token, so a later healthy start asks exactly once; a grant that moved on is left alone.
+-- Returns true when it cleared a grant.
+function status_prompt.host_release(): boolean
+	local request = tern.kv.get(RELEASE)
+	if request == nil then return false end
+	tern.kv.set(RELEASE, nil)
+	local token = if type(request) == "table" and type(request.token) == "string" then request.token else nil
+	if token == nil then return false end
+	local flag = tern.kv.get(FLAG)
+	local flag_mine = type(flag) == "table" and flag.token == token
+	local marker_mine = marker_set() and marker_token() == token
+	if not flag_mine and not marker_mine then return false end
+	if flag_mine then tern.kv.set(FLAG, nil) end
+	-- The granted request stays in its slot; left there it would be granted again to the window that just gave up.
+	local pending = tern.kv.get(REQUEST)
+	if type(pending) == "table" and pending.token == token then tern.kv.set(REQUEST, nil) end
+	if marker_mine then pcall(tern.fs.remove, marker_path()) end
+	return true
+end
+
 -- Host only: polls for the first request until it is granted, then guards the flag briefly and stops.
 -- Starts no timer on a plugin whose flag is already set.
 function status_prompt.host_serve()
+	status_prompt.host_release()
 	if asked() then return end
 	local granted: string? = nil
 	local until_ms = 0
 	local function step()
+		if granted ~= nil and status_prompt.host_release() then
+			granted = nil -- the grant was handed back: serve the next request instead of re-asserting the flag
+			until_ms = 0
+		end
 		if granted == nil then
 			granted = status_prompt.host_claim()
 			if granted ~= nil then until_ms = tern.now() + REASSERT_MS end
@@ -96,17 +128,42 @@ function status_prompt.host_serve()
 	tern.timer(0, step)
 end
 
-local function ask(cx: any)
-	if cx.settings:get("status_bar") == true then return end
+-- true = Plugin segments widget placed, false = absent, nil = the read failed (never guess; never ask on a failed read).
+local function widget_placed(cx: any): boolean?
+	local ok, list = pcall(function() return cx.settings:get("widgets") end)
+	if not ok or type(list) ~= "table" then return nil end
+	for _, entry in list do
+		if type(entry) == "table" and entry.id == WIDGET_ID then return true end
+	end
+	return false
+end
+
+-- Hands this window's grant back through the host half; nothing is asked and the install stays unasked.
+local function release(token: string)
+	tern.kv.set(RELEASE, { token = token, at = os.time() })
+end
+
+local function ask(cx: any, token: string)
+	local placed = widget_placed(cx)
+	if placed == nil then release(token) end
+	if placed ~= false then return end
 	local items = {
-		{ label = "Yes, turn on the status bar", detail = "Recommended. The plugin buttons live in the status bar.", answer = true },
-		{ label = "No, keep it off", detail = "You can turn it on later in Settings.", answer = false },
+		{ label = "Yes, show plugin buttons", detail = "Recommended. Adds the Plugin segments widget to the status bar.", answer = true },
+		{ label = "No, leave it as it is", detail = "You can add Plugin segments in Settings later.", answer = false },
 	}
-	cx:pick({ items = items, placeholder = "Would you like to turn on the status bar?", action = "choose" }):next(function(item: any, _err: any, fresh: any)
+	cx:pick({ items = items, placeholder = "Would you like to show plugin buttons in the status bar?", action = "choose" }):next(function(item: any, _err: any, fresh: any)
 		-- Dismiss (nil) and an error leave everything as it was; the flag is already set, so it is never asked again.
 		if type(item) ~= "table" or item.answer ~= true then return end
 		local live = fresh or cx
-		live.settings:set("status_bar", true)
+		local ok, current = pcall(function() return live.settings:get("widgets") end)
+		if not ok or type(current) ~= "table" then return end
+		local list = {}
+		for _, entry in current do
+			if type(entry) == "table" and entry.id == WIDGET_ID then return end
+			table.insert(list, entry)
+		end
+		table.insert(list, { id = WIDGET_ID })
+		if not pcall(function() live.settings:set("widgets", list) end) then return end
 		tern.chrome.refresh()
 	end)
 end
@@ -115,18 +172,20 @@ function status_prompt.ensure(cx: any, plugin_id: string)
 	if started then return end
 	started = true
 	if asked() then return end
+	-- A failed read of the widget placement means no request, no flag and no question; the next start retries.
+	if widget_placed(cx) == nil then return end
 	local token = plugin_id .. ":" .. cx:window_key() .. ":" .. tostring(os.time()) .. ":" .. tostring(math.random(1, 2147483647))
 	local deadline = tern.now() + WAIT_MS
 	local function step(fresh: any?)
 		local live = fresh or cx
 		local flag = tern.kv.get(FLAG)
 		if flag ~= nil then
-			if type(flag) == "table" and flag.token == token then ask(live) end
+			if type(flag) == "table" and flag.token == token then ask(live, token) end
 			return
 		end
 		if marker_set() then
 			-- The grant is on disk even though a stale kv write dropped the flag: the named window still asks, once.
-			if marker_token() == token then ask(live) end
+			if marker_token() == token then ask(live, token) end
 			return
 		end
 		if tern.now() >= deadline then

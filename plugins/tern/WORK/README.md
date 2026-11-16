@@ -14,7 +14,7 @@ This revision does **not** yet claim qualified real-device support on macOS, Win
 
 - Click the **WORK** segment (list icon) in Tern's status bar. Clicking it again with a WORK pane open in the tab closes that pane and returns focus to your previous pane.
 - Or run the Command Palette command `WORK` (`Ctrl+Shift+P` is the fallback when the status bar is hidden).
-- On first start, if the status bar is off, WORK offers once per install to turn it on. WORK no longer adds a button to the Files pane.
+- On first start, if the **Plugin segments** widget is not in the widget bar, WORK offers once per install to add it. WORK no longer adds a button to the Files pane.
 
 ## What it does
 
