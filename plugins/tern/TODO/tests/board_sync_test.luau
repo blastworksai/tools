@@ -328,26 +328,26 @@ local tests = {
         for id, count in b.managed() do assert(count == 1, "duplicate " .. id); n += 1 end
         assert(n == total(plan()))
     end},
-    {"a 300-entity plan raced by two windows (600 cards, past the 500-row read) still converges to one card per id", function()
+    {"a 250-entity plan raced by two windows (500 cards, the whole read) still converges to one card per id", function()
         local function big() return plan(nil, function(p)
             p.checkpoints = {}
-            for i = 1, 300 do table.insert(p.checkpoints, { id = "c" .. i, text = "Checkpoint " .. i, state = "pending" }) end
+            for i = 1, 250 do table.insert(p.checkpoints, { id = "c" .. i, text = "Checkpoint " .. i, state = "pending" }) end
         end) end
         local b = fakeBoard()
         local bp = big()
-        assert(#sync.desired(bp) == 300)
+        assert(#sync.desired(bp) == 250)
         -- both windows read the empty board and each queue every add, interleaved
         for _, d in sync.desired(bp) do
             b:add("x", { lane = d.lane, text = d.text, tags = d.tags }); b:add("x", { lane = d.lane, text = d.text, tags = d.tags })
         end
         local total = 0
         for _, l in b.lanes do total += #l.cards end
-        assert(total == 600, total)
+        assert(total == 500, total)
         local r = run(b, bp)
         assert(r.ok, r.problem)
         local n = 0
         for id, count in b.managed() do assert(count == 1, "duplicate " .. id); n += 1 end
-        assert(n == 300, n)
+        assert(n == 250, n)
     end},
     {"a truncated read never adds or creates lanes, but still removes duplicates it can see", function()
         local d = sync.desired(plan())
@@ -387,9 +387,9 @@ local extra = {
         assert(view.validate(p) == nil, view.validate(p))
         assert(#sync.desired(p) == 500)
     end},
-    {"two windows with no claim racing a 500-entity plan: the hidden duplicate half is found and the board ends with 500 cards", function()
+    {"two windows with no claim racing a 250-entity plan: both copies fit one read, every duplicate is removed", function()
         local b = fakeBoard()
-        local bp = nestedPlan(500)
+        local bp = nestedPlan(250)
         local other
         -- The other window read the empty board too; it writes its whole batch just before ours.
         b.onFirstWrite = function()
@@ -398,53 +398,125 @@ local extra = {
         local r = run(b, bp)
         assert(other and other.ok, other and other.problem)
         assert(r.ok, r.problem)
-        assert(cardCount(b) == 500, cardCount(b))
-        assertOnePerId(b, 500)
+        assert(cardCount(b) == 250, cardCount(b))
+        assertOnePerId(b, 250)
     end},
-    {"a stale grant lets a second window add while the first window's last add is pending: 501 cards are repaired", function()
+    {"a plan over 250 entities is refused visibly, reads nothing and writes nothing", function()
+        assert(sync.MAX_SYNC_ENTITIES == 250)
+        local b = fakeBoard()
+        local reads = 0
+        local original = b.read
+        function b.read(self, ...) reads += 1; return original(self, ...) end
+        local r = run(b, nestedPlan(251))
+        assert(not r.ok and r.problem == sync.TOO_BIG and r.count == 0, r.problem)
+        assert(reads == 0 and b.writes == 0 and cardCount(b) == 0)
+        local big = nestedPlan(500)
+        assert(view.validate(big) == nil, "a 500-entity plan is still valid for viewing")
+        local r500 = run(b, big)
+        assert(not r500.ok and b.writes == 0)
+        assert(run(b, nestedPlan(250)).ok, "250 is the largest syncable plan")
+    end},
+    {"a stale grant lets a second window verify and finish before the first window's pending add lands: the duplicate is removed by the next pass", function()
         local b, h, q = fakeBoard(), harness(), {}
-        local full, short = nestedPlan(500), nestedPlan(499)
-        assert(run(b, short).ok and cardCount(b) == 499)
+        local full, short = nestedPlan(250), nestedPlan(249)
+        assert(run(b, short).ok and cardCount(b) == 249)
         claim.host_serve(h.env("host"))
         local results, tracker = {}, { inside = 0, max = 0 }
-        -- A: claims, reads 499, and has the final add pending.
+        -- A: claims, reads 249, queues the missing add.
         local ea = window(h, asyncBoard(b, q), "A", full, results, tracker)
         h.run(function() return #q > 0 end)
-        local snapshotBeforeGrant = {}
-        table.remove(q, 1)() -- A read completes; its add is queued, not landed
-        assert(#q == 1 and cardCount(b) == 499, "q=" .. #q)
-        -- A stale whole-file rewrite drops A's grant.
-        h.rewriteStale(snapshotBeforeGrant)
+        table.remove(q, 1)() -- A's read completes; its add is queued, not landed
+        assert(#q == 1 and cardCount(b) == 249, "q=" .. #q)
+        -- A stale whole-file rewrite drops A's grant; B is granted the board and reads the same 249 cards.
+        h.rewriteStale({})
         assert(not claim.holds(ea, "board.md", "A"))
-        -- B is granted the board and reads the same 499 cards.
         window(h, asyncBoard(b, q), "B", full, results, tracker)
         h.run(function() return #q > 1 end)
-        -- B reads the same 499 cards and queues its add behind A's.
-        table.remove(q, 2)()
-        assert(#q == 2 and cardCount(b) == 499)
-        table.remove(q, 1)() -- A's add lands
-        table.remove(q, 1)() -- B's add lands
+        table.remove(q, 2)() -- B's read completes; B's add is queued behind A's
+        table.remove(q, 2)() -- B's add lands; B issues its verification read
+        assert(cardCount(b) == 250 and #q == 2, cardCount(b))
+        table.remove(q, 2)() -- B verifies 250 and finishes before A's add lands
+        assert(results.B and results.B.ok, results.B and results.B.problem)
+        table.remove(q, 1)() -- A's add lands now: a duplicate
+        assert(cardCount(b) == 251, cardCount(b))
+        drain(q)
+        assert(results.A and not results.A.ok, "A stops at its ownership check without verifying")
+        -- The plan never changes again. B's success is only provisional, so one delayed re-verification still runs.
+        local g, key, rev = gate.new(), "7:" .. full.plan_id, 1
+        local passes = 0
+        local function tick(nowMs)
+            if g.matches(key, rev, nowMs) then return end
+            local gen = g.generation()
+            local r = run(b, full); assert(r.ok, r.problem)
+            passes += 1
+            g.passed(key, rev, gen, r.count, nowMs)
+        end
+        g.passed(key, rev, g.generation(), results.B.count, 1000) -- B cached its success before A's add landed
+        tick(1000 + 30000)
+        assert(passes == 0 and cardCount(b) == 251, "no early re-read")
+        tick(1000 + gate.VERIFY_MS)
+        assert(passes == 1 and cardCount(b) == 250, cardCount(b))
+        assertOnePerId(b, 250)
+        tick(1000 + gate.VERIFY_MS + 1000)
+        assert(passes == 1, "a pass that fixed something arms exactly one more re-verification")
+        tick(1000 + 2 * gate.VERIFY_MS + 1000)
+        assert(passes == 2, "the clean delayed pass runs")
+        for t = 3, 6 do tick(1000 + t * gate.VERIFY_MS) end
+        assert(passes == 2, "a clean pass settles the revision: no periodic loop")
+    end},
+    {"an owner card appended between the read and the verification never costs a managed card or an owner card", function()
+        local b, q = fakeBoard(), {}
+        local p = nestedPlan(250)
+        assert(run(b, p).ok)
+        for i = 1, 249 do b.user("Pending", "mine " .. i) end -- 499 cards: still one whole read
+        local changed = nestedPlan(250)
+        changed.checkpoints[1].state = "done"
+        local removes = 0
+        local originalRemove = b.remove
+        function b.remove(self, ...) removes += 1; return originalRemove(self, ...) end
+        local result
+        sync.apply({ board = asyncBoard(b, q) }, "b-test.md", changed, function(ok, problem) result = { ok = ok, problem = problem } end)
+        table.remove(q, 1)()            -- the first read completes (499 cards)
+        b.user("Pending", "appended 1") -- the owner adds two untagged cards before the verification read
+        b.user("Pending", "appended 2")
+        drain(q)
+        assert(result, "the pass finished")
+        assert(removes == 0, "a removal was issued: " .. removes)
+        assertOnePerId(b, 250)
+        local mine = 0
+        for _, l in b.lanes do for _, c in l.cards do if c.text:sub(1, 8) == "appended" or c.text:sub(1, 5) == "mine " then mine += 1 end end end
+        assert(mine == 251, mine)
         assert(cardCount(b) == 501, cardCount(b))
-        drain(q)
-        h.run(function() return results.A and results.B end)
-        drain(q)
-        assert(results.A and results.B, "both windows finished")
-        assert(cardCount(b) == 500, cardCount(b))
-        assertOnePerId(b, 500)
+    end},
+    {"managed cards hidden behind the owner's cards in a truncated read: nothing added, nothing removed, a visible refusal", function()
+        local b = fakeBoard()
+        local p = nestedPlan(250)
+        assert(run(b, p).ok)
+        -- 300 owner cards come first in the Pending lane, so a 500-row read cuts the managed cards off.
+        local pending = b.lanes[1]
+        local mine = {}
+        for i = 1, 300 do table.insert(mine, { id = "u" .. i, text = "mine " .. i, done = false, tags = {} }) end
+        for _, c in pending.cards do table.insert(mine, c) end
+        pending.cards = mine
+        local before = cardCount(b)
+        local writes = b.writes
+        local r = run(b, p)
+        assert(not r.ok and r.problem:find("more cards", 1, true), r.problem)
+        assert(cardCount(b) == before and b.writes == writes)
     end},
     {"a healthy board past the read limit because of the owner's own cards is never thinned", function()
         local b = fakeBoard()
-        local p = nestedPlan(500)
+        local p = nestedPlan(250)
         assert(run(b, p).ok)
-        for i = 1, 3 do b.user("Pending", "mine " .. i) end
+        for i = 1, 251 do b.user("Pending", "mine " .. i) end
         local before = cardCount(b)
         local r = run(b, p)
         assert(not r.ok and r.problem:find("more cards", 1, true))
         assert(cardCount(b) == before, "no card may be removed from a board that merely holds many cards")
     end},
-    {"claim: two windows racing a 500-entity plan end with exactly 500 cards, one writer at a time", function()
+    {"claim: two windows racing a 250-entity plan end with exactly 250 cards, one writer at a time", function()
         local b, h = fakeBoard(), harness()
-        local bp = nestedPlan(500)
+        local bp = nestedPlan(250)
         claim.host_serve(h.env("host"))
         local results, tracker = {}, { inside = 0, max = 0 }
         window(h, b, "A", bp, results, tracker)
@@ -452,10 +524,10 @@ local extra = {
         h.run(function() return results.A and results.B end)
         assert(results.A and results.A.ok, results.A and results.A.problem)
         assert(results.B and results.B.ok, results.B and results.B.problem)
-        assert(cardCount(b) == 500, cardCount(b))
+        assert(cardCount(b) == 250, cardCount(b))
         assert(tracker.max == 1, tracker.max)
-        assertOnePerId(b, 500)
-        assert(results.A.count + results.B.count == 500, "the second window found the board already complete")
+        assertOnePerId(b, 250)
+        assert(results.A.count + results.B.count == 250, "the second window found the board already complete")
     end},
     {"claim: a window that died holding the board does not block it past the lease", function()
         local b, h = fakeBoard(), harness()

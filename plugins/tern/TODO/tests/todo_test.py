@@ -955,12 +955,14 @@ class WindowContract(unittest.TestCase):
         self.assertLess(window.index('board_claim.acquire('), window.index('board_sync.apply('))
         self.assertIn('board_claim.holds(', window)
         self.assertIn('board_claim.host_serve(', self.source('host.luau'))
+        self.assertIn('board_sync.MAX_SYNC_ENTITIES', window)
+        self.assertNotIn('excess', self.source('lib/board_sync.luau'))
 
     def test_turning_sync_on_forgets_the_cached_revision(self):
         window = self.source('window.luau')
         self.assertIn('synced.settingsChanged(before, after)', window)
         self.assertNotIn('lastRev', window)
-        self.assertIn('synced.mark(key, entry.rev, gen)', window)
+        self.assertIn('synced.passed(key, entry.rev, gen, count, tern.now())', window)
 
     def test_manifest_keeps_version_and_icon(self):
         manifest = self.source('plugin.toml')

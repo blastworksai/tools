@@ -154,7 +154,11 @@ local function syncTick(cx: any)
     local entry = tern.kv.get("plan/" .. string.format("%.0f", panel))
     if type(entry) ~= "table" or type(entry.rev) ~= "number" or plan_view.validate(entry.plan) ~= nil then return end
     local key = string.format("%.0f", panel) .. ":" .. entry.plan.plan_id
-    if synced.matches(key, entry.rev) or tern.now() - failedAt < RETRY_MS then return end
+    if synced.matches(key, entry.rev, tern.now()) or tern.now() - failedAt < RETRY_MS then return end
+    if #plan_view.entities(entry.plan) > board_sync.MAX_SYNC_ENTITIES then
+        syncStatus = board_sync.TOO_BIG
+        return
+    end
     local path = board_sync.boardPath(tern.plugin.data, entry.plan.plan_id)
     local prepared = pcall(function()
         if not tern.fs.exists(path) then
@@ -180,7 +184,7 @@ local function syncTick(cx: any)
             release()
             busy = false
             if ok then
-                synced.mark(key, entry.rev, gen); syncStatus = "Board synced · " .. tostring(count) .. " change(s)"
+                synced.passed(key, entry.rev, gen, count, tern.now()); syncStatus = "Board synced · " .. tostring(count) .. " change(s)"
             elseif stillOn() then
                 failedAt = tern.now(); syncStatus = problem
             end
