@@ -152,6 +152,9 @@ class FollowTests(unittest.TestCase):
 
     def test_the_runtime_folder_and_a_relative_path_are_usage(self):
         self.assert_refused(Path(self.owner.runtime_root)/'events.jsonl', 'usage')
+        below = Path(self.owner.runtime_root)/'loop'; below.mkdir(mode=0o700)
+        self.assert_refused(below/'events.jsonl', 'usage')  # a folder inside the runtime folder too
+        self.assertFalse((below/'events.jsonl').exists())
         self.assert_refused('events.jsonl', 'usage')
 
     def test_a_zero_wait_with_follow_is_refused_before_the_owner_is_contacted(self):
@@ -198,6 +201,31 @@ class FollowLoopUnitTests(unittest.TestCase):
         client = FakeClient([late(), late(), late(), self.wait(1, [{'x': 1}])])
         self.assertEqual(idea._follow(self.fd, client, 0, 1, self.Error)['error']['code'], 'agent_transport_timeout')
         self.assertEqual(client.afters, [0, 0, 0])
+
+    def test_a_file_owned_by_another_account_is_refused(self):
+        self.path.write_text(''); os.chmod(self.path, 0o600)
+        real, ino = os.fstat, os.lstat(self.path).st_ino
+        def foreign(fd):
+            info = real(fd)
+            if info.st_ino != ino: return info
+            fields = list(info); fields[4] = info.st_uid + 1
+            return os.stat_result(fields)
+        with patch.object(idea.os, 'fstat', side_effect=foreign):
+            with self.assertRaises(idea.IdeaError) as caught: idea._follow_file(str(self.path))
+        self.assertEqual(caught.exception.code, 'follow_not_private')
+
+    def test_a_folder_owned_by_another_account_is_refused(self):
+        import idea_runtime
+        real, ino = os.fstat, os.lstat(self.path.parent).st_ino
+        def foreign(fd):
+            info = real(fd)
+            if info.st_ino != ino: return info
+            fields = list(info); fields[4] = info.st_uid + 1
+            return os.stat_result(fields)
+        target = self.path.parent/'other.jsonl'
+        with patch.object(idea_runtime.os, 'fstat', side_effect=foreign):
+            with self.assertRaises(idea.IdeaError) as caught: idea._follow_file(str(target))
+        self.assertEqual(caught.exception.code, 'follow_not_private'); self.assertFalse(target.exists())
 
     def test_follow_is_refused_off_posix_before_any_file_is_made(self):
         target = self.path.parent/'other.jsonl'
