@@ -52,7 +52,12 @@ class WindowsCommandTests(unittest.TestCase):
         ]
         for executable, absolute, arguments, provider, selector in cases:
             with self.subTest(executable=executable):
-                self.assertEqual(self.spec(executable, arguments, provider), self.spec(absolute, arguments, provider))
+                # The account context is identical; only the absolute form also names the exact file
+                # SPAWN launches, so the usage read runs that file and not another on the search path.
+                bare, full = self.spec(executable, arguments, provider), self.spec(absolute, arguments, provider)
+                self.assertNotIn("command", bare)
+                self.assertEqual(full.pop("command"), absolute)
+                self.assertEqual(bare, full)
                 self.assertEqual(self.spec(absolute, arguments, provider)["selectors"],
                                  {selector: arguments[0].partition("=")[2]})
 

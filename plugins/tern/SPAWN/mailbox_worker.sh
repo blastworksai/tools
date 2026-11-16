@@ -403,8 +403,10 @@ case "$mode" in
   git_head
   argv_sha256=$(jq -j -c --arg id "$message" '.checks[]|select(.check_id==$id)|.argv' "$manifest" | hash_stdin)
   ran_at_ms=$(( $(date +%s) * 1000 ))
+  started_head=$head
   run_check
   git_head
+  [ "$head" = "$started_head" ] || fail 'git_unavailable: HEAD changed while the check ran'
   report_input=$(jq -cn --arg id "$message" --arg argv "$argv_sha256" --argjson code "$exit_code" --arg output "$output_sha256" --arg head "$head" --argjson at "$ran_at_ms" '{kind:"CHECK_RESULT",payload:{check_id:$id,argv_sha256:$argv,exit_code:$code,output_sha256:$output,head:$head,ran_at_ms:$at}}' | base64 | tr -d '\r\n');;
  checkout)
   manifest_verify
@@ -461,7 +463,7 @@ withdrawn_namespace() {
  for entry in "$box/"* "$box/".[!.]* "$box/"..?*; do
   [ ! -e "$entry" ] && [ ! -L "$entry" ] && continue
   case "${entry##*/}" in reports|replies|acks|watermarks|producer|consumer|staging|capacity.lock) safe_dir "$entry";;
-   provision.json|manifest.json) safe_file "$entry" 4096;; *) fail binding_mismatch;; esac
+   provision.json|manifest.json|checkout-base) safe_file "$entry" 4096;; *) fail binding_mismatch;; esac
  done
  for child in producer consumer staging; do
   for entry in "$box/$child/"* "$box/$child/".[!.]* "$box/$child/"..?*; do

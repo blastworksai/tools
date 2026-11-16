@@ -25,6 +25,28 @@ local REASSERT_MS = 10000 -- the host re-writes a flag that another VM's concurr
 
 local started = false
 
+-- kv.json is rewritten whole by every VM, so a concurrent write from a VM holding an older copy can drop the flag
+-- after the host's short re-assert window, and a later host restart would then ask a second time. A marker file
+-- in the data directory is a separate, never-rewritten record that the question was granted; it is only ever read
+-- as "already asked" and never carries the grant token.
+local function marker_path(): string
+	return tern.plugin.data .. "/status_prompt.v1.done"
+end
+
+local function marker_set(): boolean
+	local ok, exists = pcall(tern.fs.exists, marker_path())
+	return ok and exists == true
+end
+
+local function marker_write()
+	pcall(tern.fs.mkdir, tern.plugin.data)
+	pcall(tern.fs.write, marker_path(), "1\n")
+end
+
+local function asked(): boolean
+	return tern.kv.get(FLAG) ~= nil or marker_set()
+end
+
 local function fresh_request(value: any): string?
 	if type(value) ~= "table" or type(value.token) ~= "string" or type(value.at) ~= "number" then return nil end
 	if math.abs(os.time() - value.at) > FRESH_S then return nil end
@@ -33,7 +55,7 @@ end
 
 -- Host only. One synchronous step: grants the pending request, if any. Returns the granted token.
 function status_prompt.host_claim(): string?
-	if tern.kv.get(FLAG) ~= nil then return nil end
+	if asked() then return nil end
 	local pending = tern.kv.get(REQUEST)
 	local token = fresh_request(pending)
 	if token == nil then
@@ -41,13 +63,14 @@ function status_prompt.host_claim(): string?
 		return nil
 	end
 	tern.kv.set(FLAG, { state = "granted", token = token, at = os.time() })
+	marker_write()
 	return token
 end
 
 -- Host only: polls for the first request until it is granted, then guards the flag briefly and stops.
 -- Starts no timer on a plugin whose flag is already set.
 function status_prompt.host_serve()
-	if tern.kv.get(FLAG) ~= nil then return end
+	if asked() then return end
 	local granted: string? = nil
 	local until_ms = 0
 	local function step()
@@ -84,7 +107,7 @@ end
 function status_prompt.ensure(cx: any, plugin_id: string)
 	if started then return end
 	started = true
-	if tern.kv.get(FLAG) ~= nil then return end
+	if asked() then return end
 	local token = plugin_id .. ":" .. cx:window_key() .. ":" .. tostring(os.time()) .. ":" .. tostring(math.random(1, 2147483647))
 	local deadline = tern.now() + WAIT_MS
 	local function step(fresh: any?)
@@ -94,6 +117,7 @@ function status_prompt.ensure(cx: any, plugin_id: string)
 			if type(flag) == "table" and flag.token == token then ask(live) end
 			return
 		end
+		if marker_set() then return end
 		if tern.now() >= deadline then
 			-- Give up cleanly: a request left behind would be granted to a window that is no longer waiting.
 			local pending = tern.kv.get(REQUEST)

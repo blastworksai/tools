@@ -542,6 +542,25 @@ local tick = { kind = "workflow_tick", request_id = "forged-window-tick", orch_s
 	now_ms = 9999999999999, mono_ms = 9999999999999, epoch = "forged-window" }
 definition.event(view1, { ev = "action", act = "dispatch-command", value = runtime.json.encode(tick) }, cx1)
 check(ui_store.writes == config_writes, "window cannot supply host-only timer clock authority")
+-- Document obligations settle only through the dedicated ruling route; the generic dispatch route
+-- never forwards caller-supplied buffer or disk evidence.
+do
+	local sid = view1.orch_session_id
+	local owner = ui_store.value.sessions[sid].controller
+	local origin = { logical_session_id = sid, owner_id = owner.owner_id, owner_generation = owner.generation,
+		host_pane_id = "11", alias_nonce = view1.alias_nonce, window_key = "", window_epoch = "forged-ruling",
+		native_session_id = "2", window_host_id = "1" }
+	for _, name in { "ruling_observe", "ruling_prepare", "ruling_reissue", "ruling_remote", "associate_document" } do
+		local before_result, before_writes = view1.dispatch_command_result, ui_store.writes
+		local input = { kind = "dispatch", command = name, request_id = "forged-" .. name, orch_session_id = sid,
+			authority_namespace = ui_store.value.authority_namespace, expected_revision = ui_store.value.revision, command_seq = 1,
+			controller_pane = "11", origin = origin, gate_id = "gate-1", gate_revision = 1, path = "/fixture/forged.md",
+			writer = { kind = "native", pane = "11" }, evidence = { existing = true, document = "forged bytes" } }
+		definition.event(view1, { ev = "action", act = "dispatch-command", value = runtime.json.encode(input) }, cx1)
+		check(view1.dispatch_command_result == before_result and ui_store.writes == before_writes,
+			name .. " is ignored on the generic dispatch route, which cannot carry document evidence")
+	end
+end
 -- Explicit retirement uses the real host receiver; background closure cannot borrow it.
 do
 	local sid = view1.orch_session_id

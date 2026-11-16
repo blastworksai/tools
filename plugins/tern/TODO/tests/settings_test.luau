@@ -76,4 +76,27 @@ return {
         assert(glitch:find("Sync Glitch Plan to Tern Board?", 1, true) and glitch:find("ACT:sync=on", 1, true) and glitch:find("Board synced", 1, true))
         assert(glitch:find("ACT:attach=1", 1, true))
     end},
+    {"two windows changing different fields keep both changes, from stale snapshots", function()
+        local store = {}
+        local kv = { get = function(k) return store[k] end, set = function(k, v) store[k] = v end }
+        settings.save(kv, { glitch = true, sync = true, board = true, attach = 1 })
+        -- Both windows loaded the same settings; one turns sync off, the other changes the attach.
+        local base = settings.load(kv)
+        local first = settings.apply(base, "sync", "off", cands)
+        local second = settings.apply(base, "attach", "5", { cand(1, false), cand(5, false) })
+        settings.save(kv, first, base)
+        settings.save(kv, second, base)
+        local s = settings.load(kv)
+        assert(s.glitch == true and s.sync == false and s.attach == 5, tostring(s.sync) .. "/" .. tostring(s.attach))
+    end},
+    {"a cleared attach stays cleared and a legacy whole-object value is still read", function()
+        local store = { settings = { schema = 1, glitch = true, board = true, sync = true, attach = 4 } }
+        local kv = { get = function(k) return store[k] end, set = function(k, v) store[k] = v end }
+        local s = settings.load(kv)
+        assert(s.glitch and s.sync and s.attach == 4)
+        local cleared = settings.normalize(s); cleared.attach = nil
+        settings.save(kv, cleared, s)
+        local after = settings.load(kv)
+        assert(after.attach == nil and after.sync == true and after.glitch == true)
+    end},
 }

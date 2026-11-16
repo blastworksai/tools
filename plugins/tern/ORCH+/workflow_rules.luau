@@ -178,14 +178,14 @@ local function glob_match(g: string, s: string, gi: number, si: number): boolean
 	return si > #s
 end
 -- A changed file is in scope when a scope entry names it or an ancestor directory (literal), or a
--- glob matches it or an ancestor. `[`/`{` classes and globs with more than 8 wildcards fall back to
--- the literal-prefix comparison.
+-- glob matches it or an ancestor. `[`/`{` classes and globs with more than 8 wildcards are not
+-- supported and match nothing, so such a scope entry never widens what a worker may change.
 function M.path_in_scope(entry: string, p: string): boolean
 	entry, p = M.normalize_path(entry), M.normalize_path(p)
 	local first = entry:find(WILDCARD)
 	if not first then return M.path_within(entry, p) end
 	local _, wildcards = entry:gsub("[%*%?]", "")
-	if entry:find("[%[{]") or wildcards > 8 then return p:sub(1, first - 1) == entry:sub(1, first - 1) end
+	if entry:find("[%[{]") or wildcards > 8 then return false end
 	if glob_match(entry, p, 1, 1) then return true end
 	for index = #p, 1, -1 do
 		if p:sub(index, index) == "/" and glob_match(entry, p:sub(1, index - 1), 1, 1) then return true end

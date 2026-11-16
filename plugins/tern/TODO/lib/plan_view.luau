@@ -21,7 +21,7 @@ local function text(value, limit)
     return length ~= nil and length >= 1 and length <= limit
 end
 local function entity(item, label, extra, ids, active)
-    if type(item) ~= "table" or type(item.id) ~= "string" or not item.id:match("^[a-z][a-z0-9_%-]*$") or #item.id > 40 or ids[item.id] ~= nil then
+    if type(item) ~= "table" or type(item.id) ~= "string" or not item.id:match("^[a-z][a-z0-9_%-]*$") or #item.id > 40 or ids.seen[item.id] ~= nil then
         return label .. " ids must be stable and unique across the whole plan"
     end
     local allowed = { id = true, text = true, state = true, reason = true }
@@ -32,7 +32,7 @@ local function entity(item, label, extra, ids, active)
     if item.reason ~= nil and not text(item.reason, 400) then return "blocked reason must contain 1-400 characters" end
     if (item.state == "blocked") ~= (item.reason ~= nil) then return "only blocked " .. label .. "s carry a required reason" end
     if ids.count >= MAX_ENTITIES then return "too many checkpoints, tasks and steps" end
-    ids[item.id] = item.state; ids.count += 1
+    ids.seen[item.id] = item.state; ids.count += 1
     if item.state == "active" then table.insert(active, item.id) end
     return nil
 end
@@ -46,7 +46,8 @@ function view.validate(plan: any): string?
     if plan.schema ~= 1 and plan.schema ~= 2 then return "unsupported checkpoint schema" end
     if not known(plan, { schema = true, plan_id = true, title = true, current = true, checkpoints = true }) then return "checkpoint block has an unsupported field" end
     if #plan.checkpoints < 1 or #plan.checkpoints > MAX_CHECKPOINTS then return "use 1-30 agreed checkpoints" end
-    local ids: any, active = { count = 0 }, {}
+    -- Ids live in their own table: a plan id such as "count" must not collide with the counter.
+    local ids: any, active = { count = 0, seen = {} }, {}
     for _, checkpoint in plan.checkpoints do
         local problem = entity(checkpoint, "checkpoint", if plan.schema == 2 then { tasks = true } else {}, ids, active)
         if problem then return problem end
@@ -67,7 +68,7 @@ function view.validate(plan: any): string?
         end
     end
     local current = plan.current
-    if current ~= nil and (type(current) ~= "string" or (ids[current] ~= "active" and ids[current] ~= "blocked")) then
+    if current ~= nil and (type(current) ~= "string" or (ids.seen[current] ~= "active" and ids.seen[current] ~= "blocked")) then
         return "current must name an active/blocked entity, or be null"
     end
     if #active > 1 or (#active == 1 and current ~= active[1]) then return "at most one active entity, named by current" end

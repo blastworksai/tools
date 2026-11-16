@@ -321,6 +321,21 @@ local reopened = launch(false, true)
 check(stored().migration_complete == true and #stored().selected == 3, "reinstall or a second window with the record present does not migrate again")
 check(#reopened.created == 0, "a second window opens nothing by itself")
 
+-- A retained install whose first display beats the host's publication: no roster yet, so the
+-- migration stays pending and completes with the legacy first three once the roster arrives.
+reset_store({ usage_layout = "wide" })
+local early = launch(false, true)
+early:tick()
+early:reply("ensure", {})
+early:reply("display", { revision = "empty", complete = true, parts = runtime.json.array() })
+early:reply("usage_status", { state = "idle", completed = 0, total = 0 })
+check(stored().migration_complete == false and #stored().selected == 0, "a display answered before any roster is published leaves the migration pending")
+early:tick()
+early:reply("register_client", {})
+early:reply("display", display_for(roster))
+early:reply("usage_status", { state = "idle", completed = 0, total = 0 })
+check(stored().migration_complete == true and #stored().selected == 3, "the legacy first three are selected once the roster is published")
+
 -- Clicking an account segment opens that account's detail, resolved against the roster now.
 retained.commands.status_account_2.run(retained.cx)
 local opened = retained.created[#retained.created]

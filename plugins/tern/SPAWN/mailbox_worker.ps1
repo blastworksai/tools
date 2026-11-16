@@ -898,7 +898,7 @@ function WithdrawalPhysical([long]$Report) {
  foreach ($path in [IO.Directory]::EnumerateFileSystemEntries($box)) {
   $leaf=[IO.Path]::GetFileName($path)
   if ($leaf -cin @('reports','replies','acks','watermarks','producer','consumer','staging','capacity.lock')) { DirectorySafe $path }
-  elseif ($leaf -cin @('provision.json','manifest.json')) { $null=ReadFile $path 4096 }
+  elseif ($leaf -cin @('provision.json','manifest.json','checkout-base')) { $null=ReadFile $path 4096 }
   else { Fail 'binding_mismatch' }
  }
 }
@@ -1078,13 +1078,14 @@ function HelperReport {
  $script:checkout=(Get-Location -PSProvider FileSystem).ProviderPath
  $worktree='git_unavailable: not a git worktree'; $revision='^([0-9a-f]{40}|[0-9a-f]{64})\z'
  if ($Mode -eq 'run-checks') {
-  if ((GitLine @('rev-parse','HEAD')) -cnotmatch $revision) { Fail $worktree }
+  $startHead=GitLine @('rev-parse','HEAD'); if ($startHead -cnotmatch $revision) { Fail $worktree }
   $started=[DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
   $rest=@(); if ($argv.Length -gt 1) { $rest=$argv[1..($argv.Length-1)] }
   $code=[long]127; $output=Hash ([byte[]]@())
   $program=Application $argv[0]
   if ($program.Length -gt 0) { $run=RunProgram $program $rest $true; if ($null -ne $run) { $code=$run.code; $output=$run.sha256 } }
   $head=GitLine @('rev-parse','HEAD'); if ($head -cnotmatch $revision) { Fail $worktree }
+  if ($head -cne $startHead) { Fail 'git_unavailable: HEAD changed while the check ran' }
   return @{kind='CHECK_RESULT';payload=@{check_id=$CheckId;argv_sha256=(Hash (CanonicalArgv $argv));exit_code=$code;output_sha256=$output;head=$head;ran_at_ms=[long]$started}}
  }
  $top=GitLine @('rev-parse','--show-toplevel'); if ($top.Length -eq 0) { Fail $worktree }

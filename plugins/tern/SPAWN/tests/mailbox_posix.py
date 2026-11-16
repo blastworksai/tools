@@ -2113,6 +2113,23 @@ class PosixHelperModeTests(unittest.TestCase):
                 self.assertEqual(pin.read_bytes(), launch.encode() + b"\n")
                 self.assertEqual((second["base"], second["changed_files"]), (launch, ["outside-" + label + ".txt"]))
 
+    def test_checkout_launch_base_does_not_block_mailbox_retirement(self):
+        self.count += 1
+        mailbox = Mailbox(self.root, "pin_" + str(self.count), enrolment_token=OWNER, capabilities=CHECKS,
+                          manifest=canonical(dict(checks=[], base_ref="", files=[], scope=dict(paths=[], systems=[]))))
+        (mailbox.box / "checkout-base").write_text(git(self.repo, "rev-parse", "HEAD") + "\n")
+        chain = digest(f"report-files-v1\n{mailbox.handle}\n".encode())
+        result = mailbox.retire_authorized(0, 0, chain)
+        self.assertEqual((result.returncode, result.stdout), (0, b"producer_retired\n"), result.stderr)
+        self.assertEqual(mailbox.target("retire").stdout, b"retired\n")
+        self.assertFalse(mailbox.box.exists())
+
+    def test_check_result_refuses_when_head_moves_while_the_check_runs(self):
+        argv = ["git", "-C", str(self.repo), "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+                "commit", "--allow-empty", "-q", "-m", "moved"]
+        mailbox = self.mailbox(self.manifest([dict(check_id="moves", argv=argv)]))
+        self.refused(mailbox, "run-checks", "git_unavailable: HEAD changed while the check ran", message="moves")
+
     def test_checkout_rejects_tampered_launch_base(self):
         manifest = canonical(dict(checks=[], base_ref="", files=[], scope=dict(paths=[], systems=[])))
         for label, plant in (("garbage", lambda p: p.write_text("--output=x\n")),

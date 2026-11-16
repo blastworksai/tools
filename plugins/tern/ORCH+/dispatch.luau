@@ -9898,7 +9898,9 @@ function M.apply(registry: any, event: any, clock: any, reserve: any): (any?, an
 		if w and a.retry_loop and a.retry_loop.state == "stopped" then
 			return fail("loop_stopped", "The owner stopped retries of this action at the loop cap; it stays unexecuted. Cancel the work to end it.")
 		end
-		if w and loops.trips(a.retry_loop, cap) then
+		-- Only the owner's own retry counts toward or trips the cap; automatic rechecks neither consume it nor open its gate.
+		local owner_retry = event.trigger == "owner"
+		if w and owner_retry and loops.trips(a.retry_loop, cap) then
 			local loop = a.retry_loop
 			local g, err = loops.open(d, w, loop, "full_retry", event.action_id, "Owner retry of full backpressure reached " .. tostring(loop.count)
 				.. " attempts; last error: full:" .. a.response.payload.resource .. ". Action " .. event.action_id .. " (" .. a.request.op
@@ -9906,7 +9908,7 @@ function M.apply(registry: any, event: any, clock: any, reserve: any): (any?, an
 			if err then return nil, err end
 			answer = result("loop_capped", { gate_id = g.id, action_id = event.action_id })
 		else
-			if w then a.retry_loop = a.retry_loop or { count = 0 }; a.retry_loop.count += 1 end
+			if w then a.retry_loop = a.retry_loop or { count = 0 }; if owner_retry then a.retry_loop.count += 1 end end
 			local request = clone(a.request)
 			for _, key in { "authority_namespace", "admission_seq", "request_serial", "next_request_serial", "settled_before", "consumed" } do request[key] = nil end
 			if request.op ~= "launch" and request.op ~= "adopt" and request.op ~= "enrol" then request.request_id = next_id(d, "request-") end

@@ -172,5 +172,16 @@ if section == nil or section == "remote" then
 	check(R.remote_payload(o, worker) == nil, "remote writer is bound to exact provisioned incarnation")
 	check(not R.observe(o, evidence("existing")) and o.intent ~= nil, "remote receipt ACK alone does not satisfy authoritative disk confirmation")
 end
+if section == nil or section == "parser" then
+	-- Source-shape guard: the harness cannot run Windows PowerShell, so assert the injection class is absent.
+	-- A path inside `-Command` text is executed as PowerShell; it must travel as an environment variable.
+	local host = runtime.fs.read(root .. "/host.luau")
+	local at = assert(host:find('"-Command"', 1, true), "the Windows document check still uses powershell")
+	local script = host:sub(at, host:find("\n", host:find("\n", at, true) + 1, true))
+	check(host:find('ORCHPLUS_DOCUMENT_PATH = path', 1, true) and script:find("$env:ORCHPLUS_DOCUMENT_PATH", 1, true),
+		"the Windows document path travels as data in an environment variable")
+	check(not script:find("%f[%w_]path%s*}") and not script:find('" ..', 1, true) and not script:find(".. path", 1, true),
+		"the Windows document path is never appended to -Command text")
+end
 assert(section == nil or table.find({ "parser", "obligation", "writer", "remote" }, section), "unknown ruling test section")
 return "rulings: " .. tostring(checks) .. " checks"

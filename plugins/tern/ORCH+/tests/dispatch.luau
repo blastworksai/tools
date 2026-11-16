@@ -2406,7 +2406,7 @@ local function window_consumer(mode)
 				if stale_result_mode and a.request.op == "mailbox_publish_ack" then
 					table.insert(result_deliveries, { event = clone(ev), result = clone(last_result) })
 				end
-				if last_result.ok then last_receipt = { action_id = a.request.action_id, grant_id = a.claim.grant_id, response_sha256 = response_hash } end
+				if last_result.ok then last_receipt = { action_id = a.request.action_id, grant_id = a.claim.grant_id, response_sha256 = codec.sha256(response_bytes) } end
 				local retained = scoped_results[a.request.action_id] or {}
 				retained.result = last_result
 				if last_result.ok then retained.receipt = last_receipt end
@@ -3074,9 +3074,11 @@ local function window_consumer(mode)
 			for _ = 1, 24 do if launch_deliveries >= 1 then break end; tick() end
 			assert(wf:apply("pause").ok); assert(wf:apply("resume").ok)
 			-- Control is re-admitted between effects, so reaching the replayed delivery takes more ticks than it
-			-- once did; wait for it (bounded) and stop at the settling delivery, because the host's later receipt of
-			-- the already-committed result is a legitimate `already_consumed` and would replace the settled result.
+			-- once did. The fixture receipt carries the production response hash, so the window recognises settlement;
+			-- the extra ticks after the settling delivery must not replace the settled outcome checked below. (The
+			-- suite has a 60 s wall bound; about one second per tick, so the extra ticks stay few.)
 			for _ = 1, 36 do if launch_deliveries >= 3 then break end; tick() end
+			for _ = 1, 3 do tick() end
 			check(count_events("mailbox_provision") == 1 and count_events("launch") == 1 and launch_deliveries == 3,
 				"provision-to-launch chain performs each effect once and freshly observes the positively refused stale delivery")
 		end
@@ -7687,6 +7689,29 @@ if section == nil or section == "loop_caps_retry" then
 				"a stopped retry loop refuses the owner retry and opens no new gate")
 		end
 	end
+end
+if section == nil or section == "loop_caps_retry" then
+	-- Automatic capacity rechecks (no owner trigger) neither count toward the owner retry cap nor open its gate.
+	local FULL = { resource = "window_authorization", current = 1, limit = 1, retryable = true, effect_started = false }
+	local f = fixture(); f:catalog(0)
+	assert(f:apply("policy", { policy = { loop_cap = 1 } }).ok)
+	local queued = f:queue(false); assert(queued.ok, queued.message)
+	assert(f:finish(queued.action_id, "provisioned", { handle = "mailbox-auto", binding_digest = string.rep("e", 64),
+		capabilities = runtime.json.array({ "report-files-v1", "native-ask-v1" }), limits = {} }).ok)
+	local launch = f.authority.registry.dispatch.workers[queued.worker_id].launch_action_id
+	assert(f:finish(launch, "full", FULL).code == "backpressure")
+	for round = 1, 2 do
+		local automatic = f:apply("retry", { action_id = launch })
+		check(automatic.ok and automatic.code ~= "loop_capped" and open_loop_gates(f, "full_retry") == 0,
+			"automatic recheck " .. round .. " at loop_cap 1 opens no owner retry gate")
+		launch = assert(automatic.action_id)
+		check((f:action(launch).retry_loop or { count = 0 }).count == 0, "automatic recheck " .. round .. " leaves the owner retry count at zero")
+		assert(f:apply("claim", { action_id = launch, executor = f.origin.window_epoch }).code == "peer_reconcile_required")
+		assert(f:control("reconcile_session").ok)
+		assert(f:finish(launch, "full", FULL).code == "backpressure")
+	end
+	local owner = f:apply("retry", { action_id = launch, trigger = "owner" })
+	check(owner.ok and open_loop_gates(f, "full_retry") == 0, "the first owner retry still runs after automatic rechecks")
 end
 if section == nil or section == "loop_caps_reports" then
 	-- Automatic report requests without a new report, at cap 1 and cap 10.

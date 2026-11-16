@@ -9,8 +9,10 @@ from __future__ import annotations
 import asyncio
 import copy
 import hashlib
+import ntpath
 import os
 from pathlib import Path
+import posixpath
 import shlex
 import stat
 import time
@@ -258,6 +260,7 @@ class Refresh:
             raise ServiceError("source_context_ambiguous")
         # Inspect the launch command for selectors; never execute it or its arguments.
         command = definition.get("command")
+        command_path = None
         arguments = list(definition.get("arguments", []))
         if command:
             try:
@@ -296,6 +299,13 @@ class Refresh:
                 else:
                     executable = words[0].replace("\\", "/").rsplit("/", 1)[-1]
                     helper.validate_request({"version": 1, "provider": provider, "kind": kind, "command": executable})
+                    if executable != words[0]:
+                        # SPAWN runs this exact file, which may sit outside the search paths, or
+                        # beside another install of the same CLI. Read through the same file.
+                        if not (posixpath.isabs(words[0]) or ntpath.isabs(words[0])):
+                            raise ValueError("Relative provider executable is ambiguous")
+                        helper.validate_request({"version": 1, "provider": provider, "kind": kind, "command": words[0]})
+                        command_path = words[0]
                     arguments = words[1:] + arguments
             except (ValueError, helper.SafeError):
                 raise ServiceError("source_context_ambiguous") from None
@@ -337,6 +347,8 @@ class Refresh:
         spec = {"provider": provider, "kind": kind, "selectors": selectors, "source_uid": item["source_uid"]}
         if definition.get("user"):
             spec["user"] = definition["user"]
+        if command_path is not None:
+            spec["command"] = command_path
         return spec
 
     def request(self):

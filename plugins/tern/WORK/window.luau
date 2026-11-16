@@ -22,25 +22,14 @@ local function origin_ok(cx: any, pane_id: any): boolean
 	return type(pane_id) == "number" and panel_pane(cx, pane_id) == pane_id
 end
 
-local function tab_contains(tab: any, pane_id: number): boolean
-	if type(tab.panes) ~= "table" then return false end
-	for _, candidate in ipairs(tab.panes) do if candidate == pane_id then return true end end
-	return false
-end
-
-local function focused_tab(cx: any): any
+-- TabInfo.panes is only a count; PaneInfo.tab and SessionCx:tab_of name a pane's tab.
+local function panel_in_focused_tab(cx: any): number?
 	local focused = cx.session:focused()
 	if focused == nil then return nil end
-	for _, tab in ipairs(cx.session:tabs()) do if tab_contains(tab, focused) then return tab end end
-	return nil
-end
-
-local function panel_in_focused_tab(cx: any): number?
-	local tab = focused_tab(cx)
-	if tab == nil or type(tab.panes) ~= "table" then return nil end
-	for _, pane_id in ipairs(tab.panes) do
-		local panel = panel_pane(cx, pane_id)
-		if panel ~= nil then return panel end
+	local tab = cx.session:tab_of(focused)
+	if tab == nil then return nil end
+	for _, pane in ipairs(cx.session:panes()) do
+		if pane.tab == tab and pane.block == PANEL_BLOCK and pane.exited == nil then return pane.pane end
 	end
 	return nil
 end

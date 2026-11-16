@@ -249,6 +249,18 @@ class RefreshTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(spec["selectors"], {"CLAUDE_CONFIG_DIR": "/account-home"})
         self.assertEqual(self.spec_error(command="sudo -u another-account -H -- claude"), "source_context_ambiguous")
 
+    async def test_spawns_absolute_executable_is_carried_to_the_usage_read(self):
+        self.save([definition(1, "Codex", command="/opt/custom/codex/bin/codex", arguments=["--codex-home", "/account-home"])])
+        spec = self.refresh._spec(self.refresh.configuration()[3][0])
+        self.assertEqual(spec["command"], "/opt/custom/codex/bin/codex")
+        self.assertEqual(spec["selectors"], {"CODEX_HOME": "/account-home"})
+        # A bare name keeps the search-path lookup; a relative or misnamed file is never guessed.
+        self.save([definition(1, "Codex", command="codex")])
+        self.assertNotIn("command", self.refresh._spec(self.refresh.configuration()[3][0]))
+        for command in ("./codex", "bin/codex", "/opt/custom/not-codex", "/opt/my tools/codex"):
+            with self.subTest(command=command):
+                self.assertEqual(self.spec_error(provider="Codex", command=command), "source_context_ambiguous")
+
     async def test_root_controlled_seat_launcher_reads_that_users_default_context(self):
         launcher = "/usr/local/lib/seat/seat-agent-entry"
         with patch.object(refresh_module, "_root_controlled", return_value=True):

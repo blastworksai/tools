@@ -135,4 +135,12 @@ return {
         local p=detailed(function(p) p.checkpoints={} for c=1,30 do local t={} for i=1,20 do t[i]={id="t"..c.."x"..i,text="t",state="pending"} end p.checkpoints[c]={id="c"..c,text="c",state="pending",tasks=t} end p.current=nil end)
         assert(view.validate(p)~=nil)
     end},
+    {"ids that look like the validator's own bookkeeping ('count', 'seen') are valid and render",function()
+        local legacy={schema=1,plan_id="plan-4d31a4dc1f2e",title="Old",current="count",checkpoints={{id="count",text="Count",state="blocked",reason="r"},{id="seen",text="Seen",state="pending"}}}
+        assert(view.validate(legacy)==nil,view.validate(legacy))
+        local seen=rows(view.draw(ui,legacy,"L",nil,"t"))
+        assert(seen.count~=nil and seen.seen~=nil)
+        legacy.checkpoints[2].id="count"
+        assert(view.validate(legacy)~=nil,"a real duplicate is still refused")
+    end},
 }

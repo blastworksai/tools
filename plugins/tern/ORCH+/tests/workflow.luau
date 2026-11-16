@@ -384,6 +384,16 @@ function W.rule_h(f)
 end
 
 if section == nil or section == "plan_import" then
+	-- Scope globs: unsupported syntax must never widen what a worker may change.
+	local rules = load("workflow_rules")
+	check(rules.path_in_scope("src/**", "src/api/a.luau") and rules.path_in_scope("src/*.luau", "src/a.luau")
+		and rules.path_in_scope("src", "src/a.luau") and not rules.path_in_scope("src/*.luau", "src/secrets.env"),
+		"supported scope globs and literal ancestors still match exactly")
+	check(not rules.path_in_scope("src/{api,ui}/**", "src/secrets.env"), "a brace glob does not widen scope to its literal prefix")
+	check(not rules.path_in_scope("src/[ab]*", "src/secrets.env"), "a character-class glob does not widen scope to its literal prefix")
+	check(not rules.path_in_scope(string.rep("*/", 9) .. "x", "a/b/c/d/e/f/g/h/i/x"), "a glob with more than eight wildcards matches nothing instead of its prefix")
+end
+if section == nil or section == "plan_import" then
 	local importer, codec = load("plan_import"), load("wire/codec")
 	local function task_of(plan, id)
 		for _, cp in plan.checkpoints do for _, t in cp.tasks do if t.id == id then return t end end end

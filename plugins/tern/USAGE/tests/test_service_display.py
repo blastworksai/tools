@@ -119,6 +119,17 @@ class DisplayTests(unittest.TestCase):
         self.store.local_publish("host",value)
         return value
 
+    def test_display_polls_never_retain_the_stores_temporary_aggregate_sessions(self):
+        self.large()
+        first = self.display.page(self.owner, {})
+        self.assertFalse(first["complete"])
+        self.assertEqual(self.store.diagnostics()["counts"]["page_sessions"], 0)
+        # Past the store's own session limit, a session kept per poll would be refused.
+        for _ in range(self.store.settings()["max_page_sessions"] + 3):
+            self.now += 121
+            self.display.page(self.owner, {})
+            self.assertEqual(self.store.diagnostics()["counts"]["page_sessions"], 0)
+
     def test_frozen_multibyte_revision_survives_intervening_publication(self):
         original=self.large()
         first=self.display.page(self.owner,{})

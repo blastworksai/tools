@@ -11,7 +11,7 @@ local function check(value, label)
 end
 
 local function world(preset)
-	local w = { kv = {}, now = 0, seconds = 1000, timers = {}, picks = {}, refreshes = 0, flag_reads_stale = {}, request_reads_nil = {} }
+	local w = { files = {}, kv = {}, now = 0, seconds = 1000, timers = {}, picks = {}, refreshes = 0, flag_reads_stale = {}, request_reads_nil = {} }
 	for key, value in preset or {} do w.kv[key] = value end
 	w.timer_count = 0
 	function w.native_for(name)
@@ -29,6 +29,12 @@ local function world(preset)
 				set = function(key, value) w.kv[key] = value end,
 			},
 			chrome = { refresh = function() w.refreshes += 1 end },
+			plugin = { data = "/data" },
+			fs = {
+				exists = function(path) return w.files[path] ~= nil end,
+				write = function(path, text) w.files[path] = text end,
+				mkdir = function() end,
+			},
 		}
 	end
 	function w.load(name)
@@ -240,6 +246,22 @@ do
 	check(w.kv["status_prompt.v1"] ~= nil and w.kv["status_prompt.v1"].token == flag.token, "host re-asserts a clobbered flag")
 	w.run(20000)
 	check(#w.timers == 0, "the host stops polling after its grace period")
+end
+
+-- 13. A flag lost to a whole-store kv.json write after the host's grace period, then a host restart, never re-asks.
+do
+	local w = world()
+	serve_host(w)
+	local first = w.window("w1", false)
+	w.load("w1").ensure(first, "spawn")
+	w.run(30000)
+	check(#w.picks == 1, "first window asked once")
+	w.kv["status_prompt.v1"] = nil
+	w.kv["status_prompt.v1.request"] = nil
+	w.load("host2").host_serve()
+	w.load("w2").ensure(w.window("w2", false), "spawn")
+	w.run(30000)
+	check(#w.picks == 1 and w.kv["status_prompt.v1"] == nil, "a lost kv flag plus a host restart does not ask again")
 end
 
 -- Each plugin keeps its own flag: two plugins (separate kv stores) each ask once.

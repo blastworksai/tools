@@ -268,4 +268,22 @@ do
 	check(remote.events[#remote.events].readiness.state == "passed" and remote.queued[1].execution_cwd == "/fixture/execution-host/readiness-owned",
 		"attached remote uses the same consent, host-owned checkout and verified landing flow without a desktop filesystem assumption")
 end
+do
+	-- Preparation can fail before any checkout path exists; reporting that must not itself throw.
+	local f = exercise(); f:consent()
+	local operation = assert(f.processes[1])
+	f.data.setup_result = { request_id = operation.request.request_id, ok = false, code = "prepare_failed", message = "no repository" }
+	check(pcall(f.tick, f), "a failed preparation is reported without throwing on the missing checkout path")
+	local result = f.events[#f.events]
+	check(result.readiness.state == "unavailable", "failed preparation persists an unavailable readiness result")
+	f.data.setup_result = { request_id = result.request_id, ok = true }
+	check(pcall(f.tick, f) and f.notices[#f.notices]:find("nil", 1, true) == nil
+		and f.notices[#f.notices]:find("Disposable repository retained", 1, true) == nil, "no checkout path means no retained-repository sentence")
+	local changed = exercise(); changed:consent()
+	local prepare = assert(changed.processes[1])
+	changed.data.installation_defaults.revision += 1
+	changed.data.setup_result = { request_id = prepare.request.request_id, ok = false, code = "prepare_failed", message = "no repository" }
+	check(pcall(changed.tick, changed) and changed.notices[#changed.notices]:find("not attached to newer defaults", 1, true) ~= nil,
+		"a configuration change during failed preparation is reported without throwing")
+end
 return "readiness_ui: " .. tostring(checks) .. " checks"

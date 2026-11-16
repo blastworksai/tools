@@ -72,8 +72,10 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 class SourceIO:
     safe_error_type = SafeError
 
-    def __init__(self, home, env):
+    def __init__(self, home, env, command=None):
         self.home = Path(home).resolve()
+        # The exact provider file SPAWN launches; validated to be this kind's CLI by validate_request.
+        self.command = command
         self.env = dict(env)
         self.roots = [self.home]
         # Only verified profile selectors can add a root.
@@ -178,7 +180,7 @@ class SourceIO:
             if "result" in snapshot:
                 return snapshot["result"]
         try:
-            executable = resolve_executable(argv[0], self.env, self.home)
+            executable = resolve_executable(self.command or argv[0], self.env, self.home)
         except (OSError, ValueError):
             raise SafeError("Source provider CLI is unavailable") from None
         execution_env = self.env

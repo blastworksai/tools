@@ -194,6 +194,15 @@ function M.root_snapshot(): any
 	return { exists = true, text = bytes }
 end
 
+-- True when root names a folder whose workspaces/registry.json this host can read and decode.
+function M.registry_ok(root: string): (boolean, string?)
+	local read_ok, bytes = pcall(tern.fs.read, child_path(root, "workspaces/registry.json"), REGISTRY_MAX_BYTES)
+	if not read_ok then return false, "Cannot read workspaces/registry.json in that folder on this execution host." end
+	local decoded, registry = pcall(tern.json.decode, bytes)
+	if not decoded or M.decode_registry(registry, root) == nil then return false, "That folder has no valid Glitch workspace registry." end
+	return true, nil
+end
+
 -- Root setup uses WORK's existing configuration, preserving any standalone agent.
 -- No root is committed until its real host registry has been read and validated.
 function M.configure_root(value: any, expected: any): (boolean, string?)
@@ -210,10 +219,8 @@ function M.configure_root(value: any, expected: any): (boolean, string?)
 		if valid == nil and err ~= "setup_required" then return false, "Existing WORK configuration needs recovery before changing its folder: " .. tostring(err) end
 		document = decoded
 	end
-	local read_ok, bytes = pcall(tern.fs.read, child_path(root, "workspaces/registry.json"), REGISTRY_MAX_BYTES)
-	if not read_ok then return false, "Cannot read workspaces/registry.json in that folder on this execution host." end
-	local decoded, registry = pcall(tern.json.decode, bytes)
-	if not decoded or M.decode_registry(registry, root) == nil then return false, "That folder has no valid Glitch workspace registry." end
+	local registry_ok, registry_problem = M.registry_ok(root)
+	if not registry_ok then return false, registry_problem end
 	document.glitch_root = root
 	local encoded = tern.json.encode(document)
 	if #encoded > CONFIG_MAX_BYTES then return false, "WORK configuration exceeds its size limit; no file was written." end

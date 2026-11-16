@@ -4,6 +4,7 @@
 local view = require("./lib/plan_view")
 local polling = require("./lib/polling")
 local selection = require("./lib/host_selection")
+local plan_publish = require("./lib/plan_publish")
 local status_prompt = require("./status/status_prompt")
 local KIND = tern.plugin.id .. ".list"
 
@@ -32,7 +33,7 @@ type State = {
     updated: string?,
     terminal: boolean?,
     failures: number?,
-    published: string?,
+    publisher: plan_publish.Publisher,
 }
 local instances: { [number]: State } = {}
 local python = selection.interpreter({
@@ -47,16 +48,8 @@ local function sourceValid(source: any): boolean
         and (source.label == nil or (type(source.label) == "string" and #source.label <= 400))
 end
 -- The window half reads the last plan this panel validated from plugin KV (board sync).
--- A failed read or a closed panel removes it, so a window never syncs a stale success.
-local function planKey(state: State): string return "plan/" .. string.format("%.0f", state.panel) end
-local function publish(state: State, plan: Plan?)
-    local encoded = if plan then tern.json.encode(plan) else nil
-    if encoded == state.published then return end
-    state.published = encoded
-    pcall(function()
-        tern.kv.set(planKey(state), if plan then { plan = plan, rev = tern.now() } else nil)
-    end)
-end
+-- A failed read, a closed panel or a fresh start removes it (lib/plan_publish), so a window never syncs a stale success.
+local function publish(state: State, plan: Plan?) state.publisher.publish(plan) end
 local function live(state: State): boolean
     if state.finished or instances[state.panel] ~= state then publish(state, nil); return false end
     for _, pane in tern.pane.list() do
@@ -159,7 +152,9 @@ end
 
 tern.block.define("list", {
     init = function(cx: BlockCx, args: { string }, saved: any): State
-        local state: State = { panel = cx.pane }
+        local state: State = { panel = cx.pane, publisher = plan_publish.new(tern.kv, tern.json.encode, tern.now, cx.pane) }
+        -- A plan an earlier instance of this panel published must not outlive a reload.
+        state.publisher.clear()
         -- A saved binding can only read the same selected source and stable plan id.
         -- Legacy bare-pane saves/args are deliberately not migrated or followed.
         if type(saved) == "table" and saved.schema == 2 and sourceValid(saved.source) and type(saved.plan_id) == "string" then

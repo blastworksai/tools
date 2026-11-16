@@ -12,6 +12,7 @@ local controller = require("./lib/attach").new({
     plugin = { id = tern.plugin.id },
     now = function(): number return tern.now() end,
     timer = function(ms: number, callback: (WindowCx?) -> ()) return tern.timer(ms, callback) end,
+    bind = function(panel: number, target: number) pcall(tern.kv.set, "target/" .. string.format("%.0f", panel), target) end,
     json = { encode = function(value: any): string return tern.json.encode(value) end },
 })
 
@@ -35,14 +36,13 @@ local function candidates(cx: any): { any }
     return out
 end
 
--- The TODO view panel sharing the target's tab; attach allows one per tab.
-local function viewPanel(cx: any, target: number): number?
-    local owner = cx.session:pane(target)
-    if not owner then return nil end
-    for _, pane in cx.session:panes() do
-        if pane.tab == owner.tab and pane.block == KIND then return pane.pane end
-    end
-    return nil
+-- The TODO view in the target's tab, and whether it serves the target ("match") or another
+-- session of that tab ("other"). The attach controller records the target per panel.
+local function viewPanel(cx: any, target: number): (string, number?)
+    return controller.viewFor(cx, target, function(panel: number): number?
+        local ok, value = pcall(tern.kv.get, "target/" .. string.format("%.0f", panel))
+        return if ok and type(value) == "number" then value else nil
+    end)
 end
 
 local syncStatus: string? = nil
@@ -52,8 +52,9 @@ local busy = false
 
 local function paint(cx: any, pane: number)
     local s = settings.load(tern.kv)
+    local before = settings.load(tern.kv)
     local eligible = settings.eligible(s, candidates(cx))
-    if s.attach and not settings.isEligible(s, eligible, s.attach) then s.attach = nil; settings.save(tern.kv, s) end
+    if s.attach and not settings.isEligible(s, eligible, s.attach) then s.attach = nil; settings.save(tern.kv, s, before) end
     cx.canvas:set(pane, { view = settings.draw(tern.ui, s, eligible, syncStatus) })
 end
 local function settingsPane(cx: any): number?
@@ -102,7 +103,12 @@ local function changed(cx: any, before: any, after: any, act: string)
     end
     if not target then return end
     local mode = settings.mode(after)
-    if (mode == "glitch" or mode == "glitch-sync") and not viewPanel(cx, target.pane) then
+    local view, panel = viewPanel(cx, target.pane)
+    if (mode == "glitch" or mode == "glitch-sync") and view == "other" and panel then
+        -- The tab's plan view belongs to another session. Replace it, never keep showing it.
+        cx.layout:close(panel)
+        tern.timer(300, function(fresh: WindowCx?) if fresh then controller.start(fresh, false, target.pane) end end)
+    elseif (mode == "glitch" or mode == "glitch-sync") and view == "none" then
         controller.start(cx, false, target.pane)
     elseif mode == "native-board" and (act == "attach" or act == "board" or act == "glitch") then
         openBoard(cx, target)
@@ -113,7 +119,7 @@ tern.on("canvas_action", function(ev: any, cx: any): boolean?
     if ev.owner ~= tern.plugin.id or ev.title ~= TITLE then return nil end
     local before = settings.load(tern.kv)
     local after = settings.apply(before, ev.act, ev.value, candidates(cx))
-    settings.save(tern.kv, after)
+    settings.save(tern.kv, after, before)
     if after.sync == false then syncStatus = nil end
     paint(cx, ev.pane)
     changed(cx, before, after, ev.act)
@@ -128,8 +134,10 @@ local function syncTick(cx: any)
     if settings.mode(s) ~= "glitch-sync" or not s.attach then return end
     local target = attached(cx, s)
     if not target then return end
-    local panel = viewPanel(cx, target.pane)
-    local entry = if panel then tern.kv.get("plan/" .. string.format("%.0f", panel)) else nil
+    local view, panel = viewPanel(cx, target.pane)
+    if view == "other" then syncStatus = "This tab's plan view serves another session. Select the session again in TODO Settings."; return end
+    if view ~= "match" or not panel then return end
+    local entry = tern.kv.get("plan/" .. string.format("%.0f", panel))
     if type(entry) ~= "table" or type(entry.rev) ~= "number" or plan_view.validate(entry.plan) ~= nil then return end
     local key = string.format("%.0f", panel) .. ":" .. entry.plan.plan_id
     if lastRev[key] == entry.rev or tern.now() - failedAt < RETRY_MS then return end
@@ -142,14 +150,18 @@ local function syncTick(cx: any)
     end)
     if not prepared then syncStatus = "Could not create the TODO board file."; failedAt = tern.now(); return end
     busy = true
-    board_sync.apply(cx.board, path, entry.plan, function(ok: boolean, problem: string?, count: number)
+    local function stillOn(): boolean
+        local now = settings.load(tern.kv)
+        return settings.mode(now) == "glitch-sync" and now.attach == target.pane
+    end
+    board_sync.apply(cx, path, entry.plan, function(ok: boolean, problem: string?, count: number)
         busy = false
         if ok then
             lastRev[key] = entry.rev; syncStatus = "Board synced · " .. tostring(count) .. " change(s)"
-        else
+        elseif stillOn() then
             failedAt = tern.now(); syncStatus = problem
         end
-    end)
+    end, stillOn)
 end
 local function schedule()
     tern.timer(SYNC_MS, function(cx: WindowCx?)

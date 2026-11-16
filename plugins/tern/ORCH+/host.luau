@@ -881,11 +881,12 @@ local function existing_document(path: string, done: (boolean) -> ())
 		local root = tern.getenv("SystemRoot") or tern.getenv("WINDIR")
 		if not root then done(false); return end
 		argv = { root .. "\\System32\\WindowsPowerShell\\v1.0\\powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
-			"& { param($p) $ErrorActionPreference='Stop'; $i=Get-Item -LiteralPath $p -Force; if($i.PSIsContainer -or $i.LinkType -or [IO.Path]::GetFullPath($p) -cne $i.FullName){exit 1}; if(($i.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0){exit 1}; $i=$i.Directory; while($i){if(($i.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0){exit 1}; $i=$i.Parent}; exit 0 }", path }
+			"$ErrorActionPreference='Stop'; $p=$env:ORCHPLUS_DOCUMENT_PATH; $i=Get-Item -LiteralPath $p -Force; if($i.PSIsContainer -or $i.LinkType -or [IO.Path]::GetFullPath($p) -cne $i.FullName){exit 1}; if(($i.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0){exit 1}; $i=$i.Directory; while($i){if(($i.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0){exit 1}; $i=$i.Parent}; exit 0" }
 	else
 		argv = { "/bin/sh", "-c", "p=$1; [ \"$(find \"$p\" -prune -type f -links 1 -print)\" = \"$p\" ] || exit 1; while [ \"$p\" != / ]; do [ ! -L \"$p\" ] || exit 1; p=${p%/*}; [ -n \"$p\" ] || p=/; done", "orchplus-existing-document", path }
 	end
-	tern.process.run(argv, { timeout_ms = 5000 }, function(result: any) done(result.status == 0 and not result.timed_out) end)
+	tern.process.run(argv, { timeout_ms = 5000, env = if tern.runtime.os == "windows" then { ORCHPLUS_DOCUMENT_PATH = path } else nil },
+		function(result: any) done(result.status == 0 and not result.timed_out) end)
 end
 local function ruling_command(view: any, input: any)
 	local origin = input.origin
@@ -2144,6 +2145,9 @@ local function handle(view: any, ev: any, cx: any)
 			or input.origin.host_pane_id ~= tostring(view.pane) or input.origin.alias_nonce ~= view.alias_nonce
 			or input.orch_session_id ~= view.orch_session_id then return end
 		local operator = ev.act == "dispatch-operator-command"
+		-- Document obligations settle only through the dedicated `ruling-command` route, which reads the
+		-- buffer and disk itself; caller-supplied evidence on this generic route is never trusted.
+		if type(input.command) == "string" and (input.command:sub(1, 7) == "ruling_" or input.command == "associate_document") then return end
 		if operator and not table.find({ "catalog", "queue", "poll", "reply", "retry", "retire", "finish", "rollover", "reconcile_restored", "continue_controller", "continue_worker", "policy", "pause", "resume", "answer", "cancel_gate", "recheck_gate",
 			"cancel_landing", "move_landing", "landing_lost", "reconcile_landing", "capacity", "cancel_work", "recheck_report", "enrol", "readback_publication",
 			"new_project", "project_start", "project_start_retry", "project_associate", "associate_conversation", "detach_conversation", "project_repository", "project_finish", "project_reopen", "delete_history",

@@ -472,7 +472,7 @@ try {
    foreach ($path in [IO.Directory]::EnumerateFileSystemEntries($box)) {
     $leaf=[IO.Path]::GetFileName($path)
     if ($leaf -cin @('reports','replies','acks','watermarks','producer','consumer','staging','capacity.lock')) { SafeDirectory $path }
-    elseif ($leaf -cin @('provision.json','manifest.json')) { $null=Regular $path }
+    elseif ($leaf -cin @('provision.json','manifest.json','checkout-base')) { $null=Regular $path }
     else { Finish 'binding_mismatch' }
    }
   }
@@ -503,6 +503,8 @@ try {
   foreach ($name in @('reports','replies','acks','watermarks')) { [IO.Directory]::Delete((Join-Path $box $name),$false) }
   $manifestPath=Join-Path $box 'manifest.json'
   if (Test-Path -LiteralPath $manifestPath) { $null=Regular $manifestPath; [IO.File]::Delete($manifestPath) }
+  $pinPath=Join-Path $box 'checkout-base'
+  if (Test-Path -LiteralPath $pinPath) { $null=Regular $pinPath; [IO.File]::Delete($pinPath) }
   $null=Regular (Join-Path $box 'provision.json'); [IO.File]::Delete((Join-Path $box 'provision.json'))
   ReleaseCapacity
   [IO.Directory]::Delete($box,$false); Finish 'retired'

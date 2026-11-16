@@ -20,12 +20,37 @@ function settings.normalize(raw: any): any
     return out
 end
 
+-- Storage: one KV key per field ("settings.<field>"), over the legacy whole-object key
+-- "settings" that earlier versions wrote. Two windows changing different fields therefore
+-- never overwrite each other: a save writes only the fields its change touched.
+-- A cleared attach is stored as false (a missing key would fall back to the legacy object).
+local FIELDS = { "glitch", "board", "sync", "attach" }
+local function fieldKey(name: string): string return settings.KEY .. "." .. name end
+
 function settings.load(kv: any): any
     local ok, raw = pcall(kv.get, settings.KEY)
-    return settings.normalize(if ok then raw else nil)
+    local merged = {}
+    if ok and type(raw) == "table" then for key, value in raw do merged[key] = value end end
+    for _, name in FIELDS do
+        local fok, value = pcall(kv.get, fieldKey(name))
+        if fok and value ~= nil then merged[name] = if value == false and name == "attach" then nil else value end
+    end
+    return settings.normalize(merged)
 end
-function settings.save(kv: any, value: any): boolean
-    return (pcall(kv.set, settings.KEY, settings.normalize(value)))
+-- `before` is the settings the change started from. With it, only fields that differ from
+-- `before` are written; without it every field is written.
+function settings.save(kv: any, value: any, before: any?): boolean
+    local after = settings.normalize(value)
+    local base = if before ~= nil then settings.normalize(before) else nil
+    return (pcall(function()
+        for _, name in FIELDS do
+            if base == nil or after[name] ~= base[name] then
+                local stored = after[name]
+                if name == "attach" and stored == nil then stored = false end
+                kv.set(fieldKey(name), stored)
+            end
+        end
+    end))
 end
 
 -- The one source this configuration shows: "glitch-sync" | "glitch" | "native-board" | "none".

@@ -35,7 +35,9 @@ local function fakeBoard()
             for _, c in l.cards do table.insert(cards, { id = c.id, text = c.text, done = c.done, tags = table.clone(c.tags) }) end
             table.insert(out, { id = l.id, title = l.title, complete = false, more = 0, cards = cards }) end
         return ready({ path = "x", lanes = out }) end
-    local function guard() if b.failNext > 0 then b.failNext -= 1; return true end; b.writes += 1; return false end
+    local function guard()
+        if b.onFirstWrite then local hook = b.onFirstWrite; b.onFirstWrite = nil; hook() end
+        if b.failNext > 0 then b.failNext -= 1; return true end; b.writes += 1; return false end
     function b:add_lane(_, o) if guard() then return ready(nil, "boom") end table.insert(self.lanes, { id = newId(), title = o.title, cards = {} }); return ready("l") end
     function b:add(_, c) if guard() then return ready(nil, "boom") end
         local l = lane(c.lane); if not l then return ready(nil, "no lane") end
@@ -59,9 +61,28 @@ end
 
 local function run(b, p)
     local result
-    sync.apply(b, "board.md", p, function(ok, problem, count) result = { ok = ok, problem = problem, count = count } end)
+    sync.apply({ board = b }, "board.md", p, function(ok, problem, count) result = { ok = ok, problem = problem, count = count } end)
     assert(result, "apply must finish synchronously against the fake board")
     return result
+end
+-- A window context that is valid only for the call that made it: once any awaitable of the
+-- board resolves, the original context is dead and only the fresh one handed to next() works.
+local function expiringCx(b)
+    local state = { expired = false }
+    local fresh = { board = {} }
+    local original = { board = {} }
+    for _, name in { "read", "add_lane", "add", "move", "check", "edit", "remove" } do
+        original.board[name] = function(_, ...)
+            if state.expired then error("expired window context") end
+            local pending = b[name](b, ...)
+            return { next = function(_, fn) state.expired = true; pending:next(function(v, e) fn(v, e, fresh) end) end }
+        end
+        fresh.board[name] = function(_, ...)
+            local pending = b[name](b, ...)
+            return { next = function(_, fn) pending:next(function(v, e) fn(v, e, fresh) end) end }
+        end
+    end
+    return original
 end
 local function total(p) return #sync.desired(p) end
 
@@ -172,5 +193,45 @@ return {
     {"initial markdown has the four lanes", function()
         local md = sync.initialMarkdown(plan())
         for _, lane in sync.LANE_ORDER do assert(md:find("## " .. lane, 1, true)) end
+    end},
+    {"every continuation uses the fresh window context, never the expired initiating one", function()
+        local b = fakeBoard()
+        local result
+        sync.apply(expiringCx(b), "board.md", plan(), function(ok, problem, count) result = { ok = ok, problem = problem, count = count } end)
+        assert(result and result.ok, result and result.problem)
+        assert(result.count == 8)
+        for id, n in b.managed() do assert(n == 1, id) end
+    end},
+    {"two windows that read the same board and both add leave one card per id", function()
+        local b = fakeBoard()
+        -- The other window reads the still-empty board and writes everything just before ours does.
+        b.onFirstWrite = function()
+            local other
+            sync.apply({ board = b }, "other-window.md", plan(), function(ok, problem) other = { ok = ok, problem = problem } end)
+            assert(other and other.ok, other and other.problem)
+        end
+        local r = run(b, plan())
+        assert(r.ok, r.problem)
+        local n = 0
+        for id, count in b.managed() do assert(count == 1, "duplicate " .. id); n += 1 end
+        assert(n == total(plan()))
+    end},
+    {"turning sync off stops a pass that is already running", function()
+        local b = fakeBoard()
+        local on = true
+        b.onFirstWrite = function() on = false end
+        local result
+        sync.apply({ board = b }, "board.md", plan(), function(ok, problem, count) result = { ok = ok, problem = problem, count = count } end, function() return on end)
+        assert(result and not result.ok and result.problem:find("turned off", 1, true), result and result.problem)
+        assert(b.writes == 1, b.writes)
+    end},
+    {"sync that is already off never reads the board", function()
+        local b = fakeBoard()
+        local reads = 0
+        local original = b.read
+        function b.read(self, ...) reads += 1; return original(self, ...) end
+        local result
+        sync.apply({ board = b }, "board.md", plan(), function(ok) result = ok end, function() return false end)
+        assert(result == false and reads == 0 and b.writes == 0)
     end},
 }

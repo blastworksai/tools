@@ -37,11 +37,20 @@ local prefs: any = status_prefs.load(kv_env)
 local rendered_ids: { string } = {}
 local pushed: { [number]: string } = {}
 
+-- True once a published snapshot carries SPAWN's roster. A successful display that arrives
+-- before the host has published says nothing about which accounts exist.
+local function roster_known(): boolean
+	for _, published in aggregate.snapshots do
+		if published.roster ~= nil then return true end
+	end
+	return false
+end
+
 -- Reads the shared record, and completes a pending migration once the roster has answered.
 -- Not for formatters: it touches kv.
 local function sync_prefs(model: any)
 	prefs = status_prefs.load(kv_env)
-	if not prefs.migration_complete and phase == "ready" then
+	if not prefs.migration_complete and phase == "ready" and roster_known() then
 		local ids: { string } = {}
 		for _, account in presentation.ordered_accounts(model.accounts) do table.insert(ids, account.id) end
 		local settled = status_prefs.complete_migration(prefs, ids)

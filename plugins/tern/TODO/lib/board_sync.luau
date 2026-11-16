@@ -119,10 +119,17 @@ end
 local RETRIES = 3
 local active: { [any]: boolean } = {}
 
--- Reads the board, applies the operations one at a time, and re-reads when any write fails
--- (native ids are invalid after a reload). Writes to one board never overlap. Never touches
--- the canonical plan. done(ok, problem, operations)
-function sync.apply(board: any, spec: any, plan: any, done: (ok: boolean, problem: string?, count: number) -> ())
+-- Reads the board, applies the operations one at a time, and reads again: when a write fails
+-- (native ids are invalid after a reload), and after every pass that wrote, to verify. The
+-- verify read is what repairs two windows that read the same board and both added the same
+-- cards: each window's last read comes after its own last write, the diff is deterministic
+-- (the first card per id stays, the rest go), so the board converges on one card per id.
+-- Writes to one board never overlap inside this window. Never touches the canonical plan.
+-- `cx` is the window context of the call that started the sync. It is valid for that call only:
+-- every later step runs inside an await callback and uses the fresh context that callback
+-- receives (tern.d.luau Awaitable.next). `enabled` is asked before each read and write, so
+-- turning sync off stops a pass that is already running. done(ok, problem, operations)
+function sync.apply(cx: any, spec: any, plan: any, done: (ok: boolean, problem: string?, count: number) -> (), enabled: (() -> boolean)?)
     if active[spec] then done(false, "A board sync is already running.", 0); return end
     active[spec] = true
     local desired = sync.desired(plan)
@@ -131,32 +138,47 @@ function sync.apply(board: any, spec: any, plan: any, done: (ok: boolean, proble
         active[spec] = nil
         done(ok, problem, total)
     end
-    local function pass(attempt: number)
-        local started, reading = pcall(function() return board:read(spec, { rows = 500 }) end)
+    local function allowed(): boolean
+        if enabled == nil then return true end
+        local ok, value = pcall(enabled)
+        return ok and value == true
+    end
+    local STOPPED = "Board sync was turned off."
+    local function pass(live: any, attempt: number)
+        if not allowed() then finish(false, STOPPED); return end
+        local started, reading = pcall(function() return live.board:read(spec, { rows = 500 }) end)
         if not started then finish(false, "Could not read the board: " .. tostring(reading)); return end
-        reading:next(function(snapshot, err)
+        reading:next(function(snapshot, err, fresh)
+            local now = fresh or live
             if err or type(snapshot) ~= "table" then finish(false, "Could not read the board: " .. tostring(err)); return end
             local ops, why = sync.diff(desired, snapshot)
             if not ops then finish(false, why); return end
-            local function step(index: number)
-                if index > #ops then finish(true, nil); return end
+            if #ops == 0 then finish(true, nil); return end
+            local function step(current: any, index: number)
+                if index > #ops then
+                    if attempt >= RETRIES then finish(false, "The board kept changing while TODO synced it; it will retry."); return end
+                    pass(current, attempt + 1)
+                    return
+                end
+                if not allowed() then finish(false, STOPPED); return end
                 local op = ops[index]
-                local ok, pending = pcall(call, board, spec, op)
-                local function failed(reason: any)
-                    if attempt < RETRIES then pass(attempt + 1)
+                local ok, pending = pcall(call, current.board, spec, op)
+                local function failed(reason: any, after: any)
+                    if attempt < RETRIES then pass(after, attempt + 1)
                     else finish(false, "Board write failed after " .. tostring(RETRIES) .. " reads: " .. tostring(reason)) end
                 end
-                if not ok then failed(pending); return end
-                pending:next(function(result, problem)
-                    if problem or result == false then failed(problem or "refused"); return end
+                if not ok then failed(pending, current); return end
+                pending:next(function(result, problem, fresh2)
+                    local after = fresh2 or current
+                    if problem or result == false then failed(problem or "refused", after); return end
                     total += 1
-                    step(index + 1)
+                    step(after, index + 1)
                 end)
             end
-            step(1)
+            step(now, 1)
         end)
     end
-    pass(1)
+    pass(cx, 1)
 end
 
 return sync

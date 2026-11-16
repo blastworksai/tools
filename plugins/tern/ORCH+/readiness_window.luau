@@ -18,6 +18,10 @@ function M.new(api: any): any
 		local flow = api.flow(cx, source)
 		return flow ~= nil and flow.policy_revision == revision and api.same(flow.policy, expected)
 	end
+	-- The checkout path exists only once preparation succeeded.
+	local function retained(run: any): string
+		return if run.path then " Disposable repository retained at " .. run.path .. "." else ""
+	end
 	local function finish(cx: WindowCx, run: any, state: string, message: string)
 		if runs[run.source] ~= run or run.phase == "finishing" then return end
 		if not api.current(cx, run.source, run.origin) or not policy_current(cx, run.source, run.policy_revision, run.policy) then
@@ -30,7 +34,7 @@ function M.new(api: any): any
 			return
 		else message ..= " Configuration changed; this result was not attached to newer defaults." end
 		runs[run.source] = nil
-		toast(cx, message .. " Disposable repository retained at " .. run.path .. ". Live workers are not silently stopped or retried.")
+		toast(cx, message .. retained(run) .. " Live workers are not silently stopped or retried.")
 	end
 	local function launch(cx: WindowCx, run: any, catalog: any)
 		local record
@@ -119,7 +123,7 @@ function M.new(api: any): any
 				if result and result.request_id == run.result_request then
 					runs[run.source] = nil
 					toast(cx, (if result.ok then run.result_message else "Readiness result was not saved: " .. tostring(result.code))
-						.. " Disposable repository retained at " .. run.path .. ".")
+						.. retained(run))
 				elseif tern.now() - run.finishing_started > 30000 then
 					runs[run.source] = nil
 					toast(cx, "The readiness result could not be confirmed as saved. The outcome is unknown; no exercise or result write was repeated.")

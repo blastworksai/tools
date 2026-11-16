@@ -135,6 +135,8 @@ async def acquire_usage(store, spec):
     if user:
         env = {"PATH": "/usr/local/bin:" + os.defpath, "LANG": "C.UTF-8"}
     request = {"version": 1, "provider": spec["provider"], "kind": spec["kind"]}
+    if spec.get("command"):
+        request["command"] = spec["command"]
     raw = encode({"request": request, "selectors": spec["selectors"]})
     if len(raw) > helper.MAX_REQUEST:
         raise ServiceError("source_profile_invalid")

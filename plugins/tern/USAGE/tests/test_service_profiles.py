@@ -73,6 +73,20 @@ class AcquireUsageTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("sudo", json.dumps(argv))
         self.assertNotIn("HOME", kwargs["env"])
 
+    async def test_the_spawn_executable_rides_in_the_fixed_request_only_when_there_is_one(self):
+        sent = []
+        real = profiles.encode
+        def spy(value):
+            sent.append(value)
+            return real(value)
+        output = json.dumps({"version": 1, **OWNER, "error": "local_login_unavailable"})
+        with patch.object(profiles, "encode", side_effect=spy):
+            await self.acquire(output, value=spec(command="/opt/custom/codex/bin/codex"))
+            await self.acquire(output)
+        requests = [item["request"] for item in sent if isinstance(item, dict) and "request" in item]
+        self.assertEqual(requests[0]["command"], "/opt/custom/codex/bin/codex")
+        self.assertNotIn("command", requests[1])
+
     async def test_cross_user_read_runs_the_verified_bundle_through_noninteractive_sudo(self):
         output = json.dumps({"version": 1, **OWNER, "error": "local_login_unavailable"})
         result, launched = await self.acquire(output, user="source")
