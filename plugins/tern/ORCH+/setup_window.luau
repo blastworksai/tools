@@ -467,7 +467,7 @@ function M.new(api: any): any
 				local controls = { poll_ms = "poll_duration", report_request_ms = "report_duration", stale_ms = "stale_duration",
 					stale_claim_min = "claim_duration", quota_max_age_ms = "quota_age_hours", merge_actor_mode = "merge_actor", release_manager_record = "merge_actor" }
 				if action == "defaults" or action == "instance" then
-					for key, message in policy_validation.policy_errors(next_policy) do
+					for key, message in policy_validation.policy_errors(next_policy, s.defaults.policy) do
 						local control = controls[key] or key
 						local ti, vi = key:match("^template_(%d+)_custom_value_(%d+)$")
 						if ti then

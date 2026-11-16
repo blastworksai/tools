@@ -1,6 +1,9 @@
 -- Board projection: pure desired/diff plus the serialized apply, against a fake board
 -- that can mutate, reload (invalidating native ids) and hold unrelated user cards.
 local sync = require("../lib/board_sync")
+local claim = require("../lib/board_claim")
+local gate = require("../lib/sync_gate")
+local statusLib = require("../lib/sync_status")
 
 local function plan(planId, tweak)
     local p = {
@@ -39,7 +42,9 @@ local function fakeBoard()
                 if left > 0 then left -= 1; table.insert(cards, { id = c.id, text = c.text, done = c.done, tags = table.clone(c.tags) }) end
             end
             table.insert(out, { id = l.id, title = l.title, complete = false, more = #l.cards - #cards, cards = cards }) end
-        return ready({ path = "x", lanes = out }) end
+        local count = 0
+        for _, l in self.lanes do count += #l.cards end
+        return ready({ path = "x", total = count, lanes = out }) end
     local function guard()
         if b.onFirstWrite then local hook = b.onFirstWrite; b.onFirstWrite = nil; hook() end
         if b.failNext > 0 then b.failNext -= 1; return true end; b.writes += 1; return false end
@@ -91,7 +96,110 @@ local function expiringCx(b)
 end
 local function total(p) return #sync.desired(p) end
 
-return {
+
+-- SKILLS-182: two windows and the 500-card read boundary.
+local view = require("../lib/plan_view")
+
+-- A valid nested plan (at most 30 checkpoints, 20 tasks each, 30 items each) with exactly n entities, all pending.
+local function nestedPlan(n)
+    local p = { schema = 2, plan_id = "plan-0123456789ab", title = "Big", checkpoints = {} }
+    local count, cp = 0, 0
+    while count < n and cp < 30 do
+        cp += 1; count += 1
+        local c = { id = "cp" .. cp, text = "Checkpoint " .. cp, state = "pending", tasks = {} }
+        table.insert(p.checkpoints, c)
+        for t = 1, 4 do
+            if count >= n then break end
+            count += 1
+            local task = { id = "cp" .. cp .. "-t" .. t, text = "Task " .. t, state = "pending", items = {} }
+            table.insert(c.tasks, task)
+            for i = 1, 3 do
+                if count >= n then break end
+                count += 1
+                table.insert(task.items, { id = "cp" .. cp .. "-t" .. t .. "-i" .. i, kind = "step", text = "Step " .. i, state = "pending" })
+            end
+        end
+    end
+    return p
+end
+local function cardCount(b) local n = 0; for _, l in b.lanes do n += #l.cards end; return n end
+local function assertOnePerId(b, want)
+    local n = 0
+    for id, count in b.managed() do assert(count == 1, "duplicate " .. id); n += 1 end
+    assert(n == want, n)
+end
+
+-- Awaitables that complete later: a read sees the board when it is issued, a write lands when it completes.
+local function asyncBoard(b, queue)
+    local wrapped = {}
+    for _, name in { "read", "add_lane", "add", "move", "check", "edit", "remove" } do
+        wrapped[name] = function(_, ...)
+            local args = { ... }
+            if name == "read" then
+                local inner = b[name](b, table.unpack(args))
+                return { next = function(_, fn) table.insert(queue, function() inner:next(fn) end) end }
+            end
+            return { next = function(_, fn) table.insert(queue, function() b[name](b, table.unpack(args)):next(fn) end) end }
+        end
+    end
+    return wrapped
+end
+local function drain(queue) for _ = 1, 1000000 do local fn = table.remove(queue, 1); if not fn then return end; fn() end; error("queue never settled") end
+
+-- kv.json as Tern keeps it: every VM caches the whole file and rewrites the whole file, so a VM holding an old
+-- copy drops other VMs' keys. `rewriteStale` is that drop.
+local function harness()
+    local h = { disk = {}, ver = 0, ms = 0, timers = {} }
+    local function clone(t) local out = {}; for k, v in t do out[k] = if type(v) == "table" then table.clone(v) else v end; return out end
+    function h.snapshot() return clone(h.disk) end
+    function h.rewriteStale(old) h.disk = clone(old); h.ver += 1 end
+    function h.peek(key) return h.disk[key] end
+    local function vm()
+        local cache, seen = {}, -1
+        local function load() if seen ~= h.ver then cache = clone(h.disk); seen = h.ver end end
+        return {
+            get = function(key) load(); local v = cache[key]; if type(v) == "table" then return table.clone(v) end; return v end,
+            set = function(key, value) load(); cache[key] = value; h.disk = clone(cache); h.ver += 1; seen = h.ver end,
+        }
+    end
+    function h.env(name, cx)
+        return {
+            kv = vm(), now = function() return h.ms / 1000 end, token = function() return name end,
+            timer = function(ms, fn) table.insert(h.timers, { at = h.ms + ms, fn = function() fn(cx) end }) end,
+        }
+    end
+    function h.run(isDone)
+        for _ = 1, 100000 do
+            if isDone() or #h.timers == 0 then return end
+            local best = 1
+            for i, t in h.timers do if t.at < h.timers[best].at then best = i end end
+            local t = table.remove(h.timers, best)
+            h.ms = math.max(h.ms, t.at)
+            t.fn()
+        end
+        error("harness did not settle")
+    end
+    return h
+end
+
+-- One window's claim-then-sync, as window.lua's syncTick does it.
+local function window(h, board, name, p, results, tracker, crash)
+    local cx = { board = board }
+    local env = h.env(name, cx)
+    claim.acquire(env, cx, "board.md", function(fresh, token, release)
+        tracker.inside += 1; tracker.max = math.max(tracker.max, tracker.inside)
+        if crash then tracker.inside -= 1; results[name] = { ok = false, problem = "crashed" }; return end
+        -- (each real window is its own VM, so each has its own in-window lock; the spec only names it here)
+        sync.apply(fresh, "board.md#" .. name, p, function(ok, problem, count)
+            tracker.inside -= 1
+            release()
+            results[name] = { ok = ok, problem = problem, count = count }
+        end, function() return claim.holds(env, "board.md", token) end)
+    end, function(reason) results[name] = { ok = false, problem = reason } end)
+    return env
+end
+
+local tests = {
     {"projection covers every entity once with its canonical id, kind, parent and state lane", function()
         local d = sync.desired(plan())
         assert(#d == 8, #d)
@@ -221,26 +329,26 @@ return {
         for id, count in b.managed() do assert(count == 1, "duplicate " .. id); n += 1 end
         assert(n == total(plan()))
     end},
-    {"a 300-entity plan raced by two windows (600 cards, past the 500-row read) still converges to one card per id", function()
+    {"a 250-entity plan raced by two windows (500 cards, the whole read) still converges to one card per id", function()
         local function big() return plan(nil, function(p)
             p.checkpoints = {}
-            for i = 1, 300 do table.insert(p.checkpoints, { id = "c" .. i, text = "Checkpoint " .. i, state = "pending" }) end
+            for i = 1, 250 do table.insert(p.checkpoints, { id = "c" .. i, text = "Checkpoint " .. i, state = "pending" }) end
         end) end
         local b = fakeBoard()
         local bp = big()
-        assert(#sync.desired(bp) == 300)
+        assert(#sync.desired(bp) == 250)
         -- both windows read the empty board and each queue every add, interleaved
         for _, d in sync.desired(bp) do
             b:add("x", { lane = d.lane, text = d.text, tags = d.tags }); b:add("x", { lane = d.lane, text = d.text, tags = d.tags })
         end
         local total = 0
         for _, l in b.lanes do total += #l.cards end
-        assert(total == 600, total)
+        assert(total == 500, total)
         local r = run(b, bp)
         assert(r.ok, r.problem)
         local n = 0
         for id, count in b.managed() do assert(count == 1, "duplicate " .. id); n += 1 end
-        assert(n == 300, n)
+        assert(n == 250, n)
     end},
     {"a truncated read never adds or creates lanes, but still removes duplicates it can see", function()
         local d = sync.desired(plan())
@@ -273,3 +381,284 @@ return {
         assert(result == false and reads == 0 and b.writes == 0)
     end},
 }
+
+local extra = {
+    {"the 500-entity fixture is a valid plan", function()
+        local p = nestedPlan(500)
+        assert(view.validate(p) == nil, view.validate(p))
+        assert(#sync.desired(p) == 500)
+    end},
+    {"two windows with no claim racing a 250-entity plan: both copies fit one read, every duplicate is removed", function()
+        local b = fakeBoard()
+        local bp = nestedPlan(250)
+        local other
+        -- The other window read the empty board too; it writes its whole batch just before ours.
+        b.onFirstWrite = function()
+            sync.apply({ board = b }, "other.md", bp, function(ok, problem) other = { ok = ok, problem = problem } end)
+        end
+        local r = run(b, bp)
+        assert(other and other.ok, other and other.problem)
+        assert(r.ok, r.problem)
+        assert(cardCount(b) == 250, cardCount(b))
+        assertOnePerId(b, 250)
+    end},
+    {"a plan over 250 entities is refused visibly, reads nothing and writes nothing", function()
+        assert(sync.MAX_SYNC_ENTITIES == 250)
+        local b = fakeBoard()
+        local reads = 0
+        local original = b.read
+        function b.read(self, ...) reads += 1; return original(self, ...) end
+        local r = run(b, nestedPlan(251))
+        assert(not r.ok and r.problem == sync.TOO_BIG and r.count == 0, r.problem)
+        assert(reads == 0 and b.writes == 0 and cardCount(b) == 0)
+        local big = nestedPlan(500)
+        assert(view.validate(big) == nil, "a 500-entity plan is still valid for viewing")
+        local r500 = run(b, big)
+        assert(not r500.ok and b.writes == 0)
+        assert(run(b, nestedPlan(250)).ok, "250 is the largest syncable plan")
+    end},
+    {"a stale grant lets a second window verify and finish before the first window's pending add lands: the duplicate is removed by the next pass", function()
+        local b, h, q = fakeBoard(), harness(), {}
+        local full, short = nestedPlan(250), nestedPlan(249)
+        assert(run(b, short).ok and cardCount(b) == 249)
+        claim.host_serve(h.env("host"))
+        local results, tracker = {}, { inside = 0, max = 0 }
+        -- A: claims, reads 249, queues the missing add.
+        local ea = window(h, asyncBoard(b, q), "A", full, results, tracker)
+        h.run(function() return #q > 0 end)
+        table.remove(q, 1)() -- A's read completes; its add is queued, not landed
+        assert(#q == 1 and cardCount(b) == 249, "q=" .. #q)
+        -- A stale whole-file rewrite drops A's grant; B is granted the board and reads the same 249 cards.
+        h.rewriteStale({})
+        assert(not claim.holds(ea, "board.md", "A"))
+        window(h, asyncBoard(b, q), "B", full, results, tracker)
+        h.run(function() return #q > 1 end)
+        table.remove(q, 2)() -- B's read completes; B's add is queued behind A's
+        table.remove(q, 2)() -- B's add lands; B issues its verification read
+        assert(cardCount(b) == 250 and #q == 2, cardCount(b))
+        table.remove(q, 2)() -- B verifies 250 and finishes before A's add lands
+        assert(results.B and results.B.ok, results.B and results.B.problem)
+        table.remove(q, 1)() -- A's add lands now: a duplicate
+        assert(cardCount(b) == 251, cardCount(b))
+        drain(q)
+        assert(results.A and not results.A.ok, "A stops at its ownership check without verifying")
+        -- The plan never changes again. B's success is only provisional, so one delayed re-verification still runs.
+        local g, key, rev = gate.new(), "7:" .. full.plan_id, 1
+        local passes = 0
+        local function tick(nowMs)
+            if g.matches(key, rev, nowMs) then return end
+            local gen = g.generation()
+            local r = run(b, full); assert(r.ok, r.problem)
+            passes += 1
+            g.passed(key, rev, gen, r.count, nowMs)
+        end
+        g.passed(key, rev, g.generation(), results.B.count, 1000) -- B cached its success before A's add landed
+        tick(1000 + 30000)
+        assert(passes == 0 and cardCount(b) == 251, "no early re-read")
+        tick(1000 + gate.VERIFY_MS)
+        assert(passes == 1 and cardCount(b) == 250, cardCount(b))
+        assertOnePerId(b, 250)
+        tick(1000 + gate.VERIFY_MS + 1000)
+        assert(passes == 1, "a pass that fixed something arms exactly one more re-verification")
+        tick(1000 + 2 * gate.VERIFY_MS + 1000)
+        assert(passes == 2, "the clean delayed pass runs")
+        for t = 3, 6 do tick(1000 + t * gate.VERIFY_MS) end
+        assert(passes == 2, "a clean pass settles the revision: no periodic loop")
+    end},
+    {"an owner card appended between the read and the verification never costs a managed card or an owner card", function()
+        local b, q = fakeBoard(), {}
+        local p = nestedPlan(250)
+        assert(run(b, p).ok)
+        for i = 1, 249 do b.user("Pending", "mine " .. i) end -- 499 cards: still one whole read
+        local changed = nestedPlan(250)
+        changed.checkpoints[1].state = "done"
+        local removes = 0
+        local originalRemove = b.remove
+        function b.remove(self, ...) removes += 1; return originalRemove(self, ...) end
+        local result
+        sync.apply({ board = asyncBoard(b, q) }, "b-test.md", changed, function(ok, problem) result = { ok = ok, problem = problem } end)
+        table.remove(q, 1)()            -- the first read completes (499 cards)
+        b.user("Pending", "appended 1") -- the owner adds two untagged cards before the verification read
+        b.user("Pending", "appended 2")
+        drain(q)
+        assert(result, "the pass finished")
+        assert(removes == 0, "a removal was issued: " .. removes)
+        assertOnePerId(b, 250)
+        local mine = 0
+        for _, l in b.lanes do for _, c in l.cards do if c.text:sub(1, 8) == "appended" or c.text:sub(1, 5) == "mine " then mine += 1 end end end
+        assert(mine == 251, mine)
+        assert(cardCount(b) == 501, cardCount(b))
+    end},
+    {"managed cards hidden behind the owner's cards in a truncated read: nothing added, nothing removed, a visible refusal", function()
+        local b = fakeBoard()
+        local p = nestedPlan(250)
+        assert(run(b, p).ok)
+        -- 300 owner cards come first in the Pending lane, so a 500-row read cuts the managed cards off.
+        local pending = b.lanes[1]
+        local mine = {}
+        for i = 1, 300 do table.insert(mine, { id = "u" .. i, text = "mine " .. i, done = false, tags = {} }) end
+        for _, c in pending.cards do table.insert(mine, c) end
+        pending.cards = mine
+        local before = cardCount(b)
+        local writes = b.writes
+        local r = run(b, p)
+        assert(not r.ok and r.problem:find("more cards", 1, true), r.problem)
+        assert(cardCount(b) == before and b.writes == writes)
+    end},
+    {"a healthy board past the read limit because of the owner's own cards is never thinned", function()
+        local b = fakeBoard()
+        local p = nestedPlan(250)
+        assert(run(b, p).ok)
+        for i = 1, 251 do b.user("Pending", "mine " .. i) end
+        local before = cardCount(b)
+        local r = run(b, p)
+        assert(not r.ok and r.problem:find("more cards", 1, true))
+        assert(cardCount(b) == before, "no card may be removed from a board that merely holds many cards")
+    end},
+    {"claim: two windows racing a 250-entity plan end with exactly 250 cards, one writer at a time", function()
+        local b, h = fakeBoard(), harness()
+        local bp = nestedPlan(250)
+        claim.host_serve(h.env("host"))
+        local results, tracker = {}, { inside = 0, max = 0 }
+        window(h, b, "A", bp, results, tracker)
+        window(h, b, "B", bp, results, tracker)
+        h.run(function() return results.A and results.B end)
+        assert(results.A and results.A.ok, results.A and results.A.problem)
+        assert(results.B and results.B.ok, results.B and results.B.problem)
+        assert(cardCount(b) == 250, cardCount(b))
+        assert(tracker.max == 1, tracker.max)
+        assertOnePerId(b, 250)
+        assert(results.A.count + results.B.count == 250, "the second window found the board already complete")
+    end},
+    {"claim: a window that died holding the board does not block it past the lease", function()
+        local b, h = fakeBoard(), harness()
+        local bp = nestedPlan(5)
+        claim.host_serve(h.env("host"))
+        local results, tracker = {}, { inside = 0, max = 0 }
+        window(h, b, "dead", bp, results, tracker, true)
+        h.run(function() return results.dead end)
+        for _ = 1, 10 do
+            results.B = nil
+            window(h, b, "B", bp, results, tracker)
+            h.run(function() return results.B end)
+            if results.B and results.B.ok then break end
+            assert(h.ms < claim.LEASE_S * 1000, "still refused after the lease ran out")
+        end
+        assert(results.B and results.B.ok, results.B and results.B.problem)
+        assert(h.ms >= claim.LEASE_S * 1000, h.ms)
+        assert(cardCount(b) == 5)
+    end},
+    {"claim: a window is refused (fail closed) when no host ever answers", function()
+        local b, h = fakeBoard(), harness()
+        local results, tracker = {}, { inside = 0, max = 0 }
+        window(h, b, "A", nestedPlan(5), results, tracker)
+        h.run(function() return results.A end)
+        assert(results.A and not results.A.ok and cardCount(b) == 0)
+    end},
+    {"claim: a holder that lost its grant stops writing", function()
+        local b, h = fakeBoard(), harness()
+        claim.host_serve(h.env("host"))
+        local cx = { board = b }
+        local env = h.env("A", cx)
+        local result
+        claim.acquire(env, cx, "board.md", function(fresh, token)
+            b.onFirstWrite = function() h.rewriteStale({}) end
+            sync.apply(fresh, "board.md#A", plan(), function(ok, problem) result = { ok = ok, problem = problem } end,
+                function() return claim.holds(env, "board.md", token) end)
+        end, function(reason) result = { ok = false, problem = reason } end)
+        h.run(function() return result end)
+        assert(result and not result.ok and b.writes == 1, b.writes)
+    end},
+    {"re-enabling sync forgets the cached revision, so a hand-edited card is repaired", function()
+        local b = fakeBoard()
+        local p = plan()
+        local g = gate.new()
+        local key = "7:" .. p.plan_id
+        local on = { schema = 1, glitch = true, board = true, sync = true, attach = 7 }
+        local off = { schema = 1, glitch = true, board = true, sync = false, attach = 7 }
+        local function tick(rev)
+            if g.matches(key, rev) then return "skipped" end
+            local gen = g.generation()
+            local r = run(b, p); assert(r.ok, r.problem); g.mark(key, rev, gen); return "synced"
+        end
+        assert(tick(1) == "synced" and tick(1) == "skipped")
+        g.settingsChanged(on, off)
+        local d = sync.desired(p)
+        local gone = "todo-id-" .. d[1].id
+        for _, l in b.lanes do
+            for i = #l.cards, 1, -1 do if table.find(l.cards[i].tags, gone) then table.remove(l.cards, i) end end
+        end
+        assert(b.laneOf(d[1].id) == nil)
+        local victim = b.lanes[1].cards[1] or b.lanes[2].cards[1]
+        victim.text = "tampered"
+        g.settingsChanged(off, on)
+        assert(tick(1) == "synced", "same plan revision must still reconcile after sync is turned on")
+        assertOnePerId(b, #d)
+        assert(tick(1) == "skipped")
+    end},
+    {"a pass that was already running when sync was turned off and on cannot re-mark the revision", function()
+        local b, q = fakeBoard(), {}
+        local p = plan()
+        local g = gate.new()
+        local key = "7:" .. p.plan_id
+        local on = { schema = 1, glitch = true, board = true, sync = true, attach = 7 }
+        local off = { schema = 1, glitch = true, board = true, sync = false, attach = 7 }
+        run(b, p)
+        local gen = g.generation()
+        local finished
+        -- the pass is at its final verification read; that completion is delayed
+        sync.apply({ board = asyncBoard(b, q) }, "board.md", p, function(ok) finished = ok end)
+        assert(#q == 1 and finished == nil)
+        g.settingsChanged(on, off)
+        local d = sync.desired(p)
+        local gone = "todo-id-" .. d[1].id
+        for _, l in b.lanes do
+            for i = #l.cards, 1, -1 do if table.find(l.cards[i].tags, gone) then table.remove(l.cards, i) end end
+        end
+        g.settingsChanged(off, on)
+        drain(q)
+        assert(finished == true, "the delayed pass read a snapshot that was correct when it was taken")
+        local marked = g.mark(key, 1, gen)
+        assert(marked == false and not g.matches(key, 1), "the stale completion must not mark the revision")
+    end},
+    {"a sync status change repaints an open Settings pane without reopening it, and never a closed one", function()
+        local timers, painted, open = {}, {}, true
+        local status
+        status = statusLib.new({
+            timer = function(_, fn) table.insert(timers, fn) end,
+            pane = function(_) return if open then 7 else nil end,
+            paint = function(cx, pane) table.insert(painted, { cx = cx, pane = pane, text = status.get() }) end,
+        })
+        local function flush() while #timers > 0 do table.remove(timers, 1)({ fresh = true }) end end
+        -- 251-entity refusal, as the window's sync tick reports it
+        local r = run(fakeBoard(), nestedPlan(251))
+        status.set(r.problem); flush()
+        assert(#painted == 1 and painted[1].pane == 7 and painted[1].text == sync.TOO_BIG and painted[1].cx.fresh)
+        -- a truncated-read error from a real pass, reported from the pass's callback
+        local b = fakeBoard()
+        local p = nestedPlan(250)
+        assert(run(b, p).ok)
+        for i = 1, 251 do b.user("Pending", "mine " .. i) end
+        local t = run(b, p)
+        assert(not t.ok)
+        status.set(t.problem); flush()
+        assert(#painted == 2 and painted[2].text == t.problem and painted[2].text:find("more cards", 1, true))
+        status.set(t.problem); flush()
+        assert(#painted == 2, "the same text does not repaint")
+        open = false
+        status.set("Board synced · 3 change(s)"); flush()
+        assert(#painted == 2, "a closed Settings pane is not painted")
+        status.set(nil); flush()
+        assert(status.get() == nil)
+    end},
+    {"switching the attached session also forgets the cached revision", function()
+        local g = gate.new()
+        local a = { schema = 1, glitch = true, board = true, sync = true, attach = 7 }
+        local c = { schema = 1, glitch = true, board = true, sync = true, attach = 9 }
+        g.mark("k", 1, g.generation())
+        g.settingsChanged(a, a); assert(g.matches("k", 1))
+        g.settingsChanged(a, c); assert(not g.matches("k", 1))
+    end},
+}
+for _, t in extra do table.insert(tests, t) end
+return tests

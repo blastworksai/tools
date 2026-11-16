@@ -4,6 +4,9 @@ local status_prompt = require("./status/status_prompt")
 local settings = require("./lib/settings")
 local board_sync = require("./lib/board_sync")
 local plan_view = require("./lib/plan_view")
+local board_claim = require("./lib/board_claim")
+local sync_gate = require("./lib/sync_gate")
+local sync_status = require("./lib/sync_status")
 local KIND = tern.plugin.id .. ".list"
 local TITLE = "TODO Settings"
 local SYNC_MS, RETRY_MS = 2000, 10000
@@ -45,8 +48,8 @@ local function viewPanel(cx: any, target: number): (string, number?)
     end)
 end
 
-local syncStatus: string? = nil
-local lastRev: { [string]: number } = {}
+local syncStatus: any -- assigned below, once paint and settingsPane exist
+local synced = sync_gate.new()
 local failedAt = -RETRY_MS
 local busy = false
 
@@ -55,7 +58,7 @@ local function paint(cx: any, pane: number)
     local before = settings.load(tern.kv)
     local eligible = settings.eligible(s, candidates(cx))
     if s.attach and not settings.isEligible(s, eligible, s.attach) then s.attach = nil; settings.save(tern.kv, s, before) end
-    cx.canvas:set(pane, { view = settings.draw(tern.ui, s, eligible, syncStatus) })
+    cx.canvas:set(pane, { view = settings.draw(tern.ui, s, eligible, syncStatus.get()) })
 end
 local function settingsPane(cx: any): number?
     for _, info in cx.canvas:list() do
@@ -63,13 +66,18 @@ local function settingsPane(cx: any): number?
     end
     return nil
 end
+syncStatus = sync_status.new({
+    timer = function(ms: number, fn: (any?) -> ()) return tern.timer(ms, fn) end,
+    pane = settingsPane,
+    paint = paint,
+})
 local function openSettings(cx: any)
     local pane = settingsPane(cx)
     if pane then paint(cx, pane); cx.layout:focus(pane); return end
     local s = settings.load(tern.kv)
     local opened, problem = cx.canvas:open({
         title = TITLE,
-        view = settings.draw(tern.ui, s, settings.eligible(s, candidates(cx)), syncStatus),
+        view = settings.draw(tern.ui, s, settings.eligible(s, candidates(cx)), syncStatus.get()),
         about = "TODO settings: which session to attach to, Glitch integration, the board and plan sync. A click changes TODO's own settings only; it never edits a plan.",
         focus = true,
     })
@@ -130,8 +138,9 @@ tern.on("canvas_action", function(ev: any, cx: any): boolean?
     if ev.owner ~= tern.plugin.id or ev.title ~= TITLE then return nil end
     local before = settings.load(tern.kv)
     local after = settings.apply(before, ev.act, ev.value, candidates(cx))
+    synced.settingsChanged(before, after)
     settings.save(tern.kv, after, before)
-    if after.sync == false then syncStatus = nil end
+    if after.sync == false then syncStatus.set(nil) end
     paint(cx, ev.pane)
     changed(cx, before, after, ev.act)
     return true
@@ -146,12 +155,16 @@ local function syncTick(cx: any)
     local target = attached(cx, s)
     if not target then return end
     local view, panel = viewPanel(cx, target.pane)
-    if view == "other" then syncStatus = "This tab's plan view serves another session. Select the session again in TODO Settings."; return end
+    if view == "other" then syncStatus.set("This tab's plan view serves another session. Select the session again in TODO Settings."); return end
     if view ~= "match" or not panel then return end
     local entry = tern.kv.get("plan/" .. string.format("%.0f", panel))
     if type(entry) ~= "table" or type(entry.rev) ~= "number" or plan_view.validate(entry.plan) ~= nil then return end
     local key = string.format("%.0f", panel) .. ":" .. entry.plan.plan_id
-    if lastRev[key] == entry.rev or tern.now() - failedAt < RETRY_MS then return end
+    if synced.matches(key, entry.rev, tern.now()) or tern.now() - failedAt < RETRY_MS then return end
+    if #plan_view.entities(entry.plan) > board_sync.MAX_SYNC_ENTITIES then
+        syncStatus.set(board_sync.TOO_BIG)
+        return
+    end
     local path = board_sync.boardPath(tern.plugin.data, entry.plan.plan_id)
     local prepared = pcall(function()
         if not tern.fs.exists(path) then
@@ -159,20 +172,33 @@ local function syncTick(cx: any)
             tern.fs.write(path, board_sync.initialMarkdown(entry.plan))
         end
     end)
-    if not prepared then syncStatus = "Could not create the TODO board file."; failedAt = tern.now(); return end
+    if not prepared then syncStatus.set("Could not create the TODO board file."); failedAt = tern.now(); return end
     busy = true
+    local gen = synced.generation()
     local function stillOn(): boolean
         local now = settings.load(tern.kv)
         return settings.mode(now) == "glitch-sync" and now.attach == target.pane
     end
-    board_sync.apply(cx, path, entry.plan, function(ok: boolean, problem: string?, count: number)
+    local env = {
+        kv = tern.kv, now = os.time, timer = function(ms: number, fn: (any?) -> ()) return tern.timer(ms, fn) end,
+        token = function(): string return string.format("%.0f-%.0f", tern.now(), math.random(1, 2147483646)) end,
+    }
+    -- The board is written by one window at a time (lib/board_claim, granted by the host half).
+    board_claim.acquire(env, cx, path, function(fresh: any, token: string, release: () -> ())
+        local function owned(): boolean return stillOn() and board_claim.holds(env, path, token) end
+        board_sync.apply(fresh, path, entry.plan, function(ok: boolean, problem: string?, count: number)
+            release()
+            busy = false
+            if ok then
+                synced.passed(key, entry.rev, gen, count, tern.now()); syncStatus.set("Board synced · " .. tostring(count) .. " change(s)")
+            elseif stillOn() then
+                failedAt = tern.now(); syncStatus.set(problem)
+            end
+        end, owned)
+    end, function(reason: string)
         busy = false
-        if ok then
-            lastRev[key] = entry.rev; syncStatus = "Board synced · " .. tostring(count) .. " change(s)"
-        elseif stillOn() then
-            failedAt = tern.now(); syncStatus = problem
-        end
-    end, stillOn)
+        if stillOn() then failedAt = tern.now(); syncStatus.set(reason) end
+    end)
 end
 local function schedule()
     tern.timer(SYNC_MS, function(cx: WindowCx?)

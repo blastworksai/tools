@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.3
+
+- The status-bar prompt never re-grants a released question: a released token is recorded in its own file a stale settings write cannot undo, and a release written after the host stopped polling is still honoured (SKILLS-185).
+
 ## 0.6.2
 
 - **Start an agent** shows Tern's own provider icon on every agent row, the way USAGE does. The page is now SPAWN's own layout beside the same page navigation, because Tern 0.9.22 settings rows have no icon slot: a heading, the lead, one bordered card per agent (icon and bold "provider — label", the command line underneath, **Spawn** at the right), Refresh and Advanced cards under Options, and Close at the top right. A disabled or review-gated agent shows its reason next to its name. Spawn clicks send the same `launch:<id>` action as before. An unknown provider shows a generic mark. Every other page stays on the settings layout.

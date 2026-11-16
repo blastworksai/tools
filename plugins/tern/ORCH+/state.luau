@@ -263,7 +263,7 @@ local function apply_setup(registry: any, event: any, clock: any?): (any?, any)
 				return nil, response(false, "invalid_defaults", "Preferred agent selections conflict with the reusable agent references. Reload settings and save one consistent choice.")
 			end
 		end
-		if not dispatch.valid_policy(next_defaults.policy) or not valid_defaults(next_defaults) then return nil, response(false, "invalid_defaults", "Installation defaults have invalid fields or bounds.") end
+		if not dispatch.valid_policy(next_defaults.policy, nil, defaults.policy) or not valid_defaults(next_defaults) then return nil, response(false, "invalid_defaults", "Installation defaults have invalid fields or bounds.") end
 		if equal(next_defaults, defaults) then return registry, response(true, "no_progress", "Installation defaults are unchanged.", { config_revision = defaults.revision, revision = registry.revision }) end
 	else
 		if (event.state == nil) == (event.readiness == nil) then

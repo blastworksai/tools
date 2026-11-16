@@ -10,9 +10,13 @@ Coordinate several projects, plans and agent conversations in [Tern](https://doc
 
 The default is **this machine, your current OS account**. Local setup needs no SSH connection, host chooser, sudo or extra service. Agent CLIs must already be installed and authenticated, with the permissions you intend to give them.
 
+![ORCH+ and SPAWN on one machine: the Tern window, the ORCH+, SPAWN and USAGE host plugins, the file channel, the agent mailboxes and each plugin's stores](assets/diagrams/orchplus-one-machine.png)
+
 For remote work, use Tern's existing connection to that host and open ORCH+ there. The same interface and pane-free connection are used; agents, saved configurations and mailboxes remain on the execution host. There is no separate ORCH+ SSH setup, parked transport pane, transport tab or background product daemon.
 
 This is not cross-host federation: an orchestration coordinates work on one execution host. Standalone SPAWN SSH-command records remain separate from managed orchestration.
+
+![ORCH+ and SPAWN with two clients and one execution host: both Tern windows connect to the host daemon, where the host plugins, agent processes, mailboxes and plugin state live](assets/diagrams/orchplus-two-clients-one-host.png)
 
 ## Requirements
 

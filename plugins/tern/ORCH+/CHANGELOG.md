@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.2
+
+- A saved store whose board path is longer than 512 bytes loads again; the 512-byte limit applies only when the board path is changed, so other settings still save (SKILLS-181).
+- After USAGE restarts between pages, the agent picker acknowledges the restarted helper's reply, so the next usage read is accepted (SKILLS-181).
+- The status-bar prompt never re-grants a released question: a released token is recorded in its own file a stale settings write cannot undo, and a release written after the host stopped polling is still honoured (SKILLS-185).
+
 ## 0.6.1
 
 - The status-bar prompt follows Tern 0.9.22's widget bar: it offers to place the **Plugin segments** widget (preference `widgets`, id `status`) instead of reading the retired `status_bar` preference, which raised "Unknown preference" and marked the prompt as asked. Installs that hit that error are asked once more.

@@ -115,7 +115,9 @@ function config.template_errors(t: any): any
 	return errors
 end
 -- The reducer and forms share this field-level authority; list normalization belongs at input.
-function M.policy_errors(p: any): any
+-- `previous` is the stored policy a save replaces; restore/rehydrate passes none. The 512-byte board_path limit applies only when a
+-- save changes board_path, so a longer path stored under the earlier 4096-byte limit never blocks an unrelated save.
+function M.policy_errors(p: any, previous: any?): any
 	local errors = {}
 	if type(p) ~= "table" or p == tern.json.null then return { _policy = "Reopen settings to restore a complete settings form." } end
 	local function require_field(key: string, valid: boolean, help: string)
@@ -160,7 +162,7 @@ function M.policy_errors(p: any): any
 		errors.require_other_family = "Enable code review first, or turn review by another provider Off."
 	end
 	for _, key in { "board_path", "inbox_folder" } do
-		local maximum = 512 -- board_path matches protocol.BOARD_SETTING_PATH_BYTES, the limit board opening enforces
+		local maximum = if key == "board_path" and type(previous) == "table" and p.board_path ~= previous.board_path then protocol.BOARD_SETTING_PATH_BYTES else 4096 -- edits match the limit board opening enforces; a store saved under the earlier 4096 limit must still restore
 		require_field(key, p[key] == "" or config.absolute(p[key], maximum) or config.relative(p[key], maximum),
 			"Leave blank or choose a path of at most " .. tostring(maximum) .. " bytes, without parent-directory (..) segments.")
 	end

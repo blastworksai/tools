@@ -1,7 +1,7 @@
 schema = 1
 id = "orchplus"
 name = "ORCH+"
-version = "0.6.1"
+version = "0.6.2"
 description = "Conversation-first orchestration: native agents, adjacent project work, explicit START, account-aware routing, review and durable recovery."
 icon = "flow"
 host = "host.luau"

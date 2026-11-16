@@ -11,6 +11,12 @@ local sync = {}
 
 sync.LANES = { pending = "Pending", active = "Active", blocked = "Blocked", done = "Done" }
 sync.LANE_ORDER = { "Pending", "Active", "Blocked", "Done" }
+-- A plan syncs to a board only up to this many managed entities (checkpoints, tasks and items together). Tern's
+-- board read returns at most 500 cards and cannot page, so two complete copies of a plan written by two windows
+-- must still fit in one read: then every duplicate is visible and the ordinary repair removes it. Viewing a plan
+-- is bounded by view.MAX_ENTITIES (500) and is not affected.
+sync.MAX_SYNC_ENTITIES = 250
+sync.TOO_BIG = "This plan has more than 250 checkpoints, tasks and steps, so TODO will not sync it to a board. Viewing it still works."
 local ID_TAG = "todo-id-"
 local KIND_LABEL = { checkpoint = "Checkpoint", task = "Task", file = "File", step = "Step", validation = "Check" }
 
@@ -123,6 +129,7 @@ local function call(board: any, spec: any, op: any): any
 end
 
 local RETRIES = 3
+local READ_ROWS = 500
 local MAX_SHRINK_PASSES = 8 -- passes that only shrink a truncated board; each one removed or fixed cards
 local active: { [any]: boolean } = {}
 
@@ -136,8 +143,10 @@ local active: { [any]: boolean } = {}
 -- every later step runs inside an await callback and uses the fresh context that callback
 -- receives (tern.d.luau Awaitable.next). `enabled` is asked before each read and write, so
 -- turning sync off stops a pass that is already running. done(ok, problem, operations)
+-- Nothing is read or written for a plan over sync.MAX_SYNC_ENTITIES.
 function sync.apply(cx: any, spec: any, plan: any, done: (ok: boolean, problem: string?, count: number) -> (), enabled: (() -> boolean)?)
     local shrinks = 0
+    if #view.entities(plan) > sync.MAX_SYNC_ENTITIES then done(false, sync.TOO_BIG, 0); return end
     if active[spec] then done(false, "A board sync is already running.", 0); return end
     active[spec] = true
     local desired = sync.desired(plan)
@@ -154,7 +163,7 @@ function sync.apply(cx: any, spec: any, plan: any, done: (ok: boolean, problem: 
     local STOPPED = "Board sync was turned off."
     local function pass(live: any, attempt: number)
         if not allowed() then finish(false, STOPPED); return end
-        local started, reading = pcall(function() return live.board:read(spec, { rows = 500 }) end)
+        local started, reading = pcall(function() return live.board:read(spec, { rows = READ_ROWS }) end)
         if not started then finish(false, "Could not read the board: " .. tostring(reading)); return end
         reading:next(function(snapshot, err, fresh)
             local now = fresh or live
