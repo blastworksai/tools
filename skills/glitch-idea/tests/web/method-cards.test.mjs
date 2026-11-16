@@ -97,9 +97,9 @@ test('the BMAD card carries the approved wording', () => {
   const body = draw();
   const card = body.all().find(node => node.id === 'method-choice-bmad');
   assert.equal(card.children[0].text(), 'BMAD (Roles and Stories)');
-  assert.equal(card.children[1].text(), 'Fix a written brief, requirements and architecture first; then build story by story.');
+  assert.equal(card.children[1].text(), 'Fix a written brief, requirements and architecture first; then build story by story. Best for big builds (a project or an epic). Smaller work usually goes faster with Full Plan Up Front.');
   const more = body.all().find(node => node.id === 'method-more-bmad').text();
-  for (const line of ['a written brief, requirements and architecture before any building', 'building each story and checking it against those documents', "larger work where several roles' views must agree before code"]) assert.ok(more.includes(line), line);
+  for (const line of ['a written brief, requirements and architecture before any building', 'building each story and checking it against those documents', "big builds (a project or an epic) where several roles' views must agree before code", 'smaller work usually goes faster with Full Plan Up Front']) assert.ok(more.includes(line), line);
 });
 
 test('a saved retired method shows its old label read-only beside the four cards', () => {
