@@ -105,9 +105,43 @@ test('typed text is never replaced, also on a later state refresh', async () => 
   }, {stateExtra: {session_workspace: mine}});
 });
 
-test('an existing idea is never prefilled', async () => {
+const ID = 'idea_' + '1'.repeat(32);
+const saved = {name: 'Saved Site', path: '/work/saved', confirmed: true};
+
+// The reported shape (SKILLS-168, Kimi on kimibwai 16 Nov 2026): the agent saves the words with `capture`
+// first, then opens that idea by id; the service hands Capture a draft holding only raw_text.
+test('an idea captured in the terminal, with no workspace yet, gets the prefill', async () => {
+  await app(async h => {
+    await open(h);
+    assert.deepEqual(fields(h), ['Default Site', '/work/default']);
+    assert.equal(h.get('idea-text').value, 'from the terminal');
+    assert.equal(h.flow.buffers.capture.workspace.confirmed, false);
+    assert.equal(h.flow.dirty.size, 0);
+  }, {stateExtra: {idea_id: ID, drafts: {capture: {raw_text: 'from the terminal'}}, default_workspace: dflt}});
+  await app(async h => { await open(h); assert.deepEqual(fields(h), ['Session Site', '/work/session']); },
+    {stateExtra: {idea_id: ID, drafts: {capture: {raw_text: 'from the terminal'}}, session_workspace: mine, default_workspace: dflt}});
+});
+
+test('the terminal-captured prefill survives a state refresh, and a cleared field is not refilled', async () => {
+  await app(async h => {
+    await open(h);
+    h.flow.load(structuredClone(h.state), true); await h.settle();  // a refresh reseeds Capture from the words-only draft
+    assert.deepEqual(fields(h), ['Default Site', '/work/default']);
+    h.get('workspace-name').value = ''; await h.get('workspace-name').listeners.input({target: h.get('workspace-name')});
+    h.get('workspace-path').value = ''; await h.get('workspace-path').listeners.input({target: h.get('workspace-path')}); await h.settle();
+    h.flow.onChange(); await h.settle();
+    assert.deepEqual(fields(h), ['', '']);
+  }, {stateExtra: {idea_id: ID, drafts: {capture: {raw_text: 'from the terminal'}}, default_workspace: dflt}});
+});
+
+test('an idea whose Capture already holds a workspace is never prefilled', async () => {
+  await app(async h => { await open(h); assert.deepEqual(fields(h), ['Saved Site', '/work/saved']); },
+    {stateExtra: {idea_id: ID, accepted: {capture: {raw_text: 'x', workspace: saved}}, session_workspace: mine, default_workspace: dflt}});
+  await app(async h => { await open(h); assert.deepEqual(fields(h), ['Saved Site', '/work/saved']); },
+    {stateExtra: {idea_id: ID, drafts: {capture: {raw_text: 'x', workspace: saved}}, session_workspace: mine, default_workspace: dflt}});
+  // A saved workspace left empty on purpose stays empty: the key is there, so it is the operator's.
   await app(async h => { await open(h); assert.deepEqual(fields(h), ['', '']); },
-    {stateExtra: {idea_id: 'idea_' + '1'.repeat(32), session_workspace: mine, default_workspace: dflt}});
+    {stateExtra: {idea_id: ID, drafts: {capture: {raw_text: 'x', workspace: {name: '', path: '', confirmed: false}}}, session_workspace: mine, default_workspace: dflt}});
 });
 
 test('a state without the session_workspace key (older service) loads and falls back to the default', async () => {

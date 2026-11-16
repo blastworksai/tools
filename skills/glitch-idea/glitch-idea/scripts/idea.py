@@ -87,6 +87,7 @@ def parser():
             # Both or neither: this one new session's Capture prefill (never a move).
             p.add_argument('--workspace-name')
             p.add_argument('--workspace-path')
+            p.add_argument('--follow')  # run the events loop at once after the open, one result per line in this file
         if name == 'browser-open':
             p.add_argument('--browser',choices=('link','orca','system','tern'))
             p.add_argument('--orca-worktree')
@@ -117,6 +118,7 @@ def parser():
         if name=='events':
             p.add_argument('--after',type=int,default=0)
             p.add_argument('--timeout',type=float,default=25)
+            p.add_argument('--follow')  # wait again by itself until a request, a stop or a pause; one line per result
         if name in ('respond','fill'):
             p.add_argument('--request',required=True)
             p.add_argument('--payload',required=True)
@@ -355,6 +357,60 @@ def _default_runtime_root():
         return home_default,None
 
 
+# --follow: the helper itself runs the events loop right after the open (or from a cursor), so a slow agent
+# never leaves a gap in which the 35-second lease lapses, and no agent writes a loop script of its own.
+FOLLOW_RETRY=frozenset(('agent_transport_timeout','busy'))  # a late or locked answer is not a stop: same cursor again
+FOLLOW_RETRIES=3  # consecutive ones; then it is reported like any other refusal
+
+
+def _follow_file(path,runtime=None):
+    """Append-only descriptor for FILE in an existing folder only this account can open (0700).
+    FILE is created 0600 and never followed; the runtime folder itself is refused (the service checks its names)."""
+    require(type(path) is str and os.path.isabs(path) and Path(path).name not in ('','.','..'),
+            '--follow needs an absolute file path','usage')
+    target=Path(path)
+    if runtime is not None:
+        home=os.path.realpath(str(runtime)); folder=os.path.realpath(str(target.parent))
+        require(folder!=home and not folder.startswith(home.rstrip(os.sep)+os.sep),
+                'The --follow file must not sit in the runtime folder','usage')
+    refused=lambda: IdeaError('follow_not_private','The --follow file must sit in an existing folder only this account can open (mode 0700)')
+    if os.name!='posix':
+        try: return os.open(path,os.O_WRONLY|os.O_CREAT|os.O_APPEND,0o600)
+        except OSError: raise refused() from None
+    from idea_runtime import RuntimeError as OwnerError,_open_chain
+    try: parent=_open_chain(target.parent,create=False,private_leaf=True)
+    except (OwnerError,OSError): raise refused() from None
+    try: fd=os.open(target.name,os.O_WRONLY|os.O_CREAT|os.O_APPEND|os.O_NOFOLLOW|os.O_CLOEXEC,0o600,dir_fd=parent)
+    except OSError: raise refused() from None
+    finally: os.close(parent)
+    info=os.fstat(fd)
+    if not (stat.S_ISREG(info.st_mode) and info.st_uid==os.getuid() and info.st_nlink==1 and not stat.S_IMODE(info.st_mode)&0o077):
+        os.close(fd); raise refused()
+    return fd
+
+
+def _follow_line(fd,value):
+    os.write(fd,(_json.dumps(value,sort_keys=True,separators=(',',':'))+'\n').encode())
+
+
+def _follow(fd,client,after,timeout,refusal):
+    """One wait after another from cursor `after`, each result one line in the file. Returns the last result:
+    a delivered request, a paused or disconnected status, or a refusal (as an error result)."""
+    cursor,late=after,0
+    while True:
+        try: value=client.events(cursor,timeout)
+        except refusal as exc:
+            result=dict(ok=False,error=dict(code=exc.code,message=_shown(exc)))
+            _follow_line(fd,result)
+            late=late+1 if exc.code in FOLLOW_RETRY else FOLLOW_RETRIES
+            if late<FOLLOW_RETRIES: continue
+            return result
+        late=0
+        _follow_line(fd,value)
+        if value['events'] or value['agent_status']!='connected': return value
+        cursor=value['sequence']
+
+
 def _launcher_paths(args):
     """Store and runtime root exactly as the launcher resolves them (flag, then config, then the default)."""
     value,base,skill_dir,installed,argv,timeout=_configuration_source()
@@ -533,28 +589,16 @@ def run_launcher(args):
                 require(args.orca_worktree is not None and args.orca_terminal is not None,
                         'Orca requires originating worktree and terminal','origin_missing')
                 orcabinding=OrcaBinding(*selectors)
+        follow=getattr(args,'follow',None)
+        if follow is not None:
+            # Orca keeps its own loop (it re-pairs after each wait); a reconnect opens no new lease.
+            require(reconnect is None and getattr(args,'browser',None)!='orca',
+                    '--follow goes with a new or resumed session, not --reconnect or Orca mode','usage')
         store,runtime,config,executable=launcher_configuration(args)
-        if args.command=='serve':
-            try: serve(store,runtime,config)
-            except KeyboardInterrupt: pass  # serve's finally drains owned work.
-            return dict(ok=True,code='stopped',**({'runtime_root_fallback':args.runtime_root_fallback} if args.runtime_root_fallback else {}))
-        options=dict(binding_id=args.resume,selected_idea_id=args.idea_id,runtime_python=executable,
-                     readiness_timeout=args.readiness_timeout)
-        if prefill is not None: options['session_workspace']=prefill  # only when given: other calls stay as they were
-        # Keep released open_session's five-second mutation timeout; probes remain
-        # <=1s within readiness budget. Never retry an ambiguous NEW here.
-        if args.command=='session-open': result=open_session(store,runtime,config,**options)
-        elif reconnect is not None:
-            result=reconnect_browser_session(store,runtime,config,binding_id=reconnect,orcabinding=orcabinding,
-                                             runtime_python=executable,readiness_timeout=args.readiness_timeout)
-        elif args.browser=='tern':
-            import idea_tern
-            paths,version=idea_tern.pane_terminals()  # the ancestor road first; else the account's agent pane
-            terminal=(paths[0] if version==1 else paths) if paths else None  # one path stays a string, as before
-            result=idea_tern.open_tern_session(store,runtime,config,terminal=terminal,version=version,**options)
-        else: result=open_browser_session(store,runtime,config,mode=args.browser,orcabinding=orcabinding,**options)
-        if args.runtime_root_fallback: result=dict(result,runtime_root_fallback=args.runtime_root_fallback)
-        return dict(ok=True,**result)
+        follow_fd=_follow_file(follow,runtime) if follow is not None else None  # refused before any session exists
+        try: return _launch(args,store,runtime,config,executable,prefill,orcabinding,reconnect,follow_fd)
+        finally:
+            if follow_fd is not None: os.close(follow_fd)
     except (LaunchError,NativeError,RuntimeError,BridgeError,IdeaError) as exc:
         result=dict(ok=False,error=dict(code=exc.code,message=_shown(exc)),
                     **_safe_launch_details(getattr(exc,'details',{})))
@@ -563,6 +607,51 @@ def run_launcher(args):
         return result
     except Exception:
         return dict(ok=False,error=dict(code='launcher_failed',message='launcher_failed'))
+
+
+def _launch(args,store,runtime,config,executable,prefill,orcabinding,reconnect,follow_fd):
+    from idea_launch import open_browser_session, open_session, reconnect_browser_session, serve
+    if args.command=='serve':
+        try: serve(store,runtime,config)
+        except KeyboardInterrupt: pass  # serve's finally drains owned work.
+        return dict(ok=True,code='stopped',**({'runtime_root_fallback':args.runtime_root_fallback} if args.runtime_root_fallback else {}))
+    options=dict(binding_id=args.resume,selected_idea_id=args.idea_id,runtime_python=executable,
+                 readiness_timeout=args.readiness_timeout)
+    if prefill is not None: options['session_workspace']=prefill  # only when given: other calls stay as they were
+    # Keep released open_session's five-second mutation timeout; probes remain
+    # <=1s within readiness budget. Never retry an ambiguous NEW here.
+    if args.command=='session-open': result=open_session(store,runtime,config,**options)
+    elif reconnect is not None:
+        result=reconnect_browser_session(store,runtime,config,binding_id=reconnect,orcabinding=orcabinding,
+                                         runtime_python=executable,readiness_timeout=args.readiness_timeout)
+    elif args.browser=='tern':
+        import idea_tern
+        paths,version=idea_tern.pane_terminals()  # the ancestor road first; else the account's agent pane
+        terminal=(paths[0] if version==1 else paths) if paths else None  # one path stays a string, as before
+        result=idea_tern.open_tern_session(store,runtime,config,terminal=terminal,version=version,**options)
+    else: result=open_browser_session(store,runtime,config,mode=args.browser,orcabinding=orcabinding,**options)
+    if args.runtime_root_fallback: result=dict(result,runtime_root_fallback=args.runtime_root_fallback)
+    result=dict(ok=True,**result)
+    if follow_fd is None: return result
+    # The open is the file's first line (the agent reads it at once: the session, and in link mode the link);
+    # the wait loop starts in this same process, so no turn of the agent's sits between the open and the first wait.
+    _follow_line(follow_fd,result)
+    return dict(result,follow=_follow_session(follow_fd,store,runtime,result['session_id'],None,0,25))
+
+
+def _follow_session(fd,store,runtime,session,generation,after,timeout):
+    """The follow loop for one session; any failure becomes the loop's last line and its result, never a raise."""
+    try:
+        from idea_agent_client import AgentClient, AgentClientError
+        from idea_runtime import Runtime, RuntimeError
+        from idea_bridge import BridgeError
+        client=AgentClient(Runtime(store,runtime),session,expected_generation=generation,timeout=5)
+        return _follow(fd,client,after,timeout,(AgentClientError,RuntimeError,BridgeError,IdeaError))
+    except Exception:
+        result=dict(ok=False,error=dict(code='agent_failed',message='agent_failed'))
+        try: _follow_line(fd,result)
+        except OSError: pass
+        return result
 
 
 def run_sessions(args):
@@ -650,6 +739,11 @@ def run_agent(args):
             asset=dict(idea_id=args.idea,revision=args.revision,request_id=args.request,
                        name=Path(args.file).name,mime=mime,data=read_bytes(args.file,limit=MAX_FILE))
         store,runtime,_,_=launcher_configuration(args)
+        follow=getattr(args,'follow',None)
+        if follow is not None:
+            fd=_follow_file(follow,runtime)
+            try: return _follow_session(fd,store,runtime,args.session,args.generation,args.after,args.timeout)
+            finally: os.close(fd)
         # The full 5 s control budget: an owner busy finishing the browser's own write (the page
         # saves each terminal fill at once) is live, and must not read as owner_unavailable.
         client=AgentClient(Runtime(store,runtime),args.session,expected_generation=args.generation,timeout=5)

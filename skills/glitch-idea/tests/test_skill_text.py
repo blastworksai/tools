@@ -316,6 +316,19 @@ class AgentProtocolTextTests(unittest.TestCase):
             self.assertRegex(body, r"(?i)the loop writes its file in a folder under this account's home that only this account can read.{0,20}mode 0700.{0,20}never a shared temp folder.{0,40}never the runtime folder")
             self.assertNotIn('/tmp', text)
 
+    def test_the_helper_runs_the_events_loop(self):
+        """SKILLS-168: a slow agent let the lease lapse between the open and its own loop; the helper now runs it."""
+        skill, commands = flat(SKILL), flat(COMMANDS)
+        self.assertRegex(skill, r"(?i)\*\*Launch\.\*\* Run `browser-open` with `--follow <file>` in the background.{0,200}starts `events --after 0` at once in the same process")
+        self.assertRegex(skill, r"(?i)that loop is the helper's own: launch with `--follow <file>`.{0,300}never write a loop script of your own")
+        self.assertRegex(skill, r"(?i)on delivery, restart the loop at once.{0,80}`events --session <id> --after <sequence> --follow <file>`")
+        self.assertRegex(commands, r"(?i)`session-open`, `browser-open` and `events` take `--follow FILE`")
+        self.assertRegex(commands, r"(?i)`agent_transport_timeout` and `busy` are waited again from the same cursor, up to three in a row")
+        self.assertRegex(commands, r"(?i)refused before a session opens or the owner is contacted \(`follow_not_private`")
+        self.assertRegex(commands, r"(?i)in Orca mode `--follow` is `usage`, as it is with `--reconnect`")
+        for body in (skill, commands):
+            self.assertNotRegex(body, r"(?i)after a successful `browser-open`, set `idea_session`")
+
     def test_runtime_home_fallback_is_documented(self):
         """SKILLS-168: the third runtime road and its reason value, and agents never improvise a folder."""
         commands = flat(COMMANDS)
