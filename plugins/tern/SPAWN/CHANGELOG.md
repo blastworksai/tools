@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.5
+
+- **Guided setup is one flow with one approval.** On Setup, **Guided setup** is now a heading with helper text, not a button. Its device choices (**Single device** by default, or **Multi device**) and **Find execution machine(s)** are shown by default and indented beneath it; discovery is grey and disabled while Single device is selected. Exactly one action follows, **Start Guided setup — may use model credits**, and Single device needs no discovery step.
+- After the helper submits its run-bound result, SPAWN saves, prepares and verifies the agents automatically and shows progress, specific failures and the final result in its own pane. The floating "Review the complete submitted configuration" picker, **Save and prepare these agents** and **Save settings only** are gone. The exact run/result binding, digest fences, once-only effects and unresolved-outcome handling are unchanged, and only what the helper's approval disclosed runs: optional provider-backed readiness tests stay separate and are never started by this flow.
+- Preparation follows install order. When ORCH+ is installed after SPAWN and saved agents still need preparation, Setup offers one **Prepare agents for ORCH+** action for the missing work only (valid preparation is reused); when all agents are prepared it shows that state with no button. Per-agent inspection and re-preparation moved under **Advanced**.
+- The "Submitted setup result ready for review" lead is replaced by a short "received" lead that clears once setup completes.
+
 ## 0.6.4
 
 - The **Start an agent** title is plain bold text instead of a Markdown heading, which some Tern builds (seen on Windows) drew as the raw "# Start an agent".

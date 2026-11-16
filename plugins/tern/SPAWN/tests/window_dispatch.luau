@@ -1380,6 +1380,7 @@ if section==nil or section=='window' then
      world.result_read_limit=opts.max_chars
      local result=node('spawn-setup-result','spawn.setup.result',world.pending)
      if world.clipped_result then result.more=1 end
+     if world.after_result_read then local hook=world.after_result_read;world.after_result_read=nil;hook() end
      return result
     end
     return nil
@@ -1747,10 +1748,11 @@ if section==nil or section=='window' then
   world.job.pending_bytes=#world.pending;world.job.pending_digest=load_pure('wire/codec').sha256(world.pending);world.job.setup_consumed=false
  end
  local review_serial=0
- local function review(world,view,pane)
+ local function review(world,view,pane,before_round)
   world.focus=pane -- A real native review click focuses that exact Config.
   review_serial+=1
   table.insert(world.blocks[pane].intents,intent('setup-review-'..review_serial,'result',world.authority.config_revision))
+  if before_round then before_round() end
   view.round(4)
  end
  local native,setupView,setupPane=setup_world()
@@ -1764,25 +1766,20 @@ if section==nil or section=='window' then
  review(native,reloadView,setupPane)
  check(#reloadView.picks==0 and native.imports==nil,'finished/idle native agent with no explicit submission produces no review or import')
  submit(native);review(native,reloadView,setupPane)
- check(#reloadView.picks==1 and native.imports==nil and native.starts==1,'explicit immutable host submission opens readable review without importing or launching')
- local pendingPick=reloadView.picks[#reloadView.picks]
- local row=pendingPick.spec.items[1]
- check(row.action=='record' and row.detail:find('ordinary-cli',1,true)~=nil,'native review exposes validated record fields rather than a raw result document')
- reloadView.choose('import');reloadView.round(4)
+ check(#reloadView.picks==0 and native.imports==1 and native.starts==1,'explicit immutable host submission is saved automatically with no review popup and no launch (the helper held the one approval)')
+ reloadView.round(4)
  check(native.imports==1 and #native.authority.records==1 and native.authority.records[1].id=='reviewed' and native.starts==1,'explicit Import reviewed records saves only reviewed records and causes no launch')
  check(native.receipts==nil,'durable writer receipt reaches the UI without billing an extra setup-helper model turn')
  local importRequest=native.requests[#native.requests]
  check(importRequest.op=='import_records' and importRequest.data.records==nil and importRequest.data.confirmed==true and #importRequest.acknowledged_requests==1,'import consumes authority-held bytes and acknowledges the preceding durable reply')
- local importedChoice=nil
- for _,item in pendingPick.spec.items do if item.action=='import' then importedChoice=item;break end end
- pendingPick.fn(assert(importedChoice),nil,reloadView.cx);reloadView.round(3)
- check(native.imports==1 and native.starts==1,'reused confirmation cannot import twice or launch')
+ review(native,reloadView,setupPane);reloadView.round(3)
+ check(native.imports==1 and native.starts==1,'a repeated result click cannot import twice or launch')
  local postImport=window(native);postImport.round(3);review(native,postImport,setupPane)
  do
   local remote=new_world({});remote.setup_enabled=true;remote.default_command='native-default';remote.cwd='\\fixture'
   local pane=add_block(remote);local view=window(remote);view.approve_setup(pane);view.round(16)
   check(remote.starts==1 and remote.started.cwd=='/fixture','a Windows desktop starts setup in the actual POSIX execution-host folder, not its displayed path')
-  remote.agents[901].cwd='\\fixture';submit(remote);review(remote,view,pane);view.choose('import');view.round(4)
+  remote.agents[901].cwd='\\fixture';submit(remote);review(remote,view,pane);view.round(4)
   check(remote.imports==1 and remote.starts==1,'desktop-formatted remote agent folders do not strand a host-bound proposal or repeat startup')
   local absent=new_world({});absent.setup_enabled=true;absent.default_command='native-default';absent.host_cwd=false
   local missingPane=add_block(absent);local missingView=window(absent);missingView.approve_setup(missingPane);missingView.round(5)
@@ -1790,20 +1787,23 @@ if section==nil or section=='window' then
  end
  do
   local combined,combinedView,combinedPane=setup_world();submit(combined);review(combined,combinedView,combinedPane)
-  check(combined.preparation_calls==nil and combined.imports==nil,'merely showing combined final approval does not save, prepare or spend model credits')
-  combinedView.choose('prepare');combinedView.round(4)
+  combinedView.round(4)
   local approvedRequest=combined.requests[#combined.requests]
   check(combined.imports==1 and combined.preparation_calls==1 and approvedRequest.data.preparation~=nil and combined.preparation_input.reviewed.import_request_id==approvedRequest.request_id,'one final native decision persists exact consent with the reviewed save, then starts preparation without another click')
   check(combined.starts==1 and combined.receipts==nil and combined.preparation.status=='preparing','saved settings alone do not report preparation success or cause an extra setup-helper model turn')
-  local changed,changedView,changedPane=setup_world();submit(changed);review(changed,changedView,changedPane)
-  changedView.choose('prepare');changedView.cx.window_key=function()return 'different-native-window'end;changedView.round(4)
+  local changed,changedView,changedPane=setup_world();submit(changed)
+  review(changed,changedView,changedPane,function()changedView.cx.window_key=function()return 'different-native-window'end end)
   check(changed.preparation_calls==nil and changed.starts==1,'post-click native window change never retargets the captured preparation or model consent')
  end
  check(native.imports==1 and native.starts==1,'post-import reload and acknowledged review intent have no effects')
- local cancelled,cancelView,cancelPane=setup_world();submit(cancelled);review(cancelled,cancelView,cancelPane)
- cancelView.choose('discard');cancelView.choose('cancel');cancelView.round(2)
+ local cancelled,cancelView,cancelPane=setup_world();submit(cancelled)
+ local cancelIntent=intent('discard-cancelled-1','discard',cancelled.authority.config_revision,cancelled.job.id)
+ cancelIntent.native_window='win';table.insert(cancelled.blocks[cancelPane].intents,cancelIntent)
+ cancelView.round(4);cancelView.choose('cancel');cancelView.round(2)
  check(cancelled.discards==nil and cancelled.imports==nil and not cancelled.job.setup_consumed and cancelled.starts==1,'cancelling the explicit discard decision preserves the pending proposal and helper')
- review(cancelled,cancelView,cancelPane);cancelView.choose('discard');cancelView.choose('discard');cancelView.round(4)
+ local discardAgain=intent('discard-cancelled-2','discard',cancelled.authority.config_revision,cancelled.job.id)
+ discardAgain.native_window='win';table.insert(cancelled.blocks[cancelPane].intents,discardAgain)
+ cancelView.round(4);cancelView.choose('discard');cancelView.round(4)
  check(cancelled.discards==1 and cancelled.imports==nil and cancelled.job.setup_discarded==true and #cancelled.authority.records==0 and cancelled.starts==1,'native discard confirms only the exact pending proposal without importing, launching or closing its helper')
  local closed,closedView,closedPane=setup_world();submit(closed)
  closed.agents[901]=nil;closedView.handlers.pane_closed({pane=901},closedView.cx)
@@ -1812,8 +1812,8 @@ if section==nil or section=='window' then
  closedView.round(4);closedView.choose('discard');closedView.round(4)
  check(closed.discards==1 and closed.imports==nil and closed.job.setup_consumed and closed.starts==1,'panel discard remains available after the helper closes rather than requiring the unavailable automatic-import source')
  for _,mutation in ipairs({'default','revision','sequence','native-pane','sdk-pane','run','binding','attempt-sequence','bytes','consumed','duplicate','closed','config-block','other-window','delivery-error'})do
-  local world,view,pane=setup_world();submit(world);review(world,view,pane)
-  check(#view.picks==1,'fixture reaches native result review before mutation: '..mutation)
+  local world,view,pane=setup_world();submit(world)
+  local function mutate()
   if mutation=='default' then world.default_command='different-default'
   elseif mutation=='revision' then world.authority.config_revision+=1
   elseif mutation=='sequence' then world.authority.request_sequences[world.job.observer_id]+=1
@@ -1821,7 +1821,8 @@ if section==nil or section=='window' then
   elseif mutation=='sdk-pane' then world.job.setup.agent_pane=902
   elseif mutation=='run' then world.job.setup_run_id='different-run'
   elseif mutation=='binding' then world.job.setup.binding='different-binding'
-  elseif mutation=='attempt-sequence' then world.attempt.sequence+=1
+  -- Changes only after the result was read and reviewed, so the commit's exact-source fence must catch it.
+  elseif mutation=='attempt-sequence' then world.after_result_read=function()world.attempt.sequence+=1 end
   elseif mutation=='bytes' then world.pending=world.pending:gsub('ordinary%-cli','differentcli')
   elseif mutation=='consumed' then world.job.setup_consumed=true
   elseif mutation=='duplicate' then world.duplicate_agent=true
@@ -1829,12 +1830,14 @@ if section==nil or section=='window' then
   elseif mutation=='config-block' then world.blocks[pane]=nil
   elseif mutation=='other-window' then view.cx.window_key=function()return 'another-window'end
   elseif mutation=='delivery-error' then world.agents[901].delivery_error='native delivery failed'end
-  view.choose('import');view.round(4)
-  check(world.imports==nil and #world.authority.records==0 and world.starts==1 and #world.requests==4,'confirmation rechecks changed source before any import request: '..mutation)
+  end
+  -- The helper's approval is the only one: a changed source is refused before the automatic save.
+  review(world,view,pane,mutate)
+  check(#view.picks==0 and world.imports==nil and #world.authority.records==0 and world.starts==1 and #world.requests==4,'automatic save rechecks a changed source before any import request: '..mutation)
  end
  local automatic,automaticView,automaticPane=setup_world();submit(automatic)
  automatic.focus=901;automaticView.round(4)
- check(#automaticView.picks==1 and automatic.selections==1 and automatic.blocks[automaticPane].selected==automatic.job.id and automatic.imports==nil,'a submitted result is automatically offered only through its live initiating Config while its own helper is focused')
+ check(#automaticView.picks==0 and automatic.selections==1 and automatic.blocks[automaticPane].selected==automatic.job.id and automatic.imports==1,'a submitted result is saved automatically only through its live initiating Config while its own helper is focused')
  local background,backgroundView,backgroundPane=setup_world();submit(background)
  background.focus=add_block(background);backgroundView.round(4)
  check(#backgroundView.picks==0 and background.selections==nil and background.imports==nil,'another focused Config cannot awaken automatic review of a background setup result')
@@ -1849,8 +1852,8 @@ if section==nil or section=='window' then
  maximum.pending..=string.rep(' ',120000-#maximum.pending)
  maximum.job.pending_bytes=#maximum.pending;maximum.job.pending_digest=load_pure('wire/codec').sha256(maximum.pending)
  review(maximum,maximumView,maximumPane)
- check(#maximumView.picks==1 and maximum.result_read_limit>120000 and maximum.imports==nil,'complete 120000-byte result retains independent native framing headroom and opens review without import')
- maximumView.choose('import');maximumView.round(4)
+ check(#maximumView.picks==0 and maximum.result_read_limit>120000,'complete 120000-byte result retains independent native framing headroom and needs no review popup')
+ maximumView.round(4)
  check(maximum.imports==1 and maximum.starts==1,'exact-limit complete result imports once without a second native launch')
  local oversized,oversizedView,oversizedPane=setup_world();submit(oversized)
  oversized.pending..=string.rep(' ',120001-#oversized.pending)
@@ -1862,7 +1865,7 @@ if section==nil or section=='window' then
  review(delayed,delayedView,delayedPane)
  check(#delayedView.picks==0 and delayed.selections==1 and delayed.starts==1,'asynchronous host selection is observed without resending the action or native start')
  delayed.blocks[delayedPane].selected=delayed.blocks[delayedPane].awaiting_selection;delayedView.round(3)
- check(#delayedView.picks==1 and delayed.selections==1 and delayed.imports==nil,'fresh result bytes become reviewable after the host finishes selection')
+ check(#delayedView.picks==0 and delayed.selections==1 and delayed.imports==1,'fresh result bytes are saved automatically after the host finishes selection')
  local nullResult,nullView,nullPane=setup_world();submit(nullResult)
  nullResult.pending=nullResult.pending:sub(1,-2)..',"unexpected":null}'
  nullResult.job.pending_bytes=#nullResult.pending;nullResult.job.pending_digest=load_pure('wire/codec').sha256(nullResult.pending)

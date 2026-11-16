@@ -1,0 +1,6 @@
+carly lua "local root = assert(tern.getenv('SPAWN_PACKAGE_DIR'), 'set SPAWN_PACKAGE_DIR'); return assert(loadstring(tern.fs.read(root..'/tests/run.luau'), 'spawn-guided'))(root, 'setup_review')"
+carly ok
+carly last "PASS setup_review"
+carly lua "local root = assert(tern.getenv('SPAWN_PACKAGE_DIR'), 'set SPAWN_PACKAGE_DIR'); return assert(loadstring(tern.fs.read(root..'/tests/run.luau'), 'spawn-guided'))(root, 'guided_setup')"
+carly ok
+carly last "PASS guided_setup"

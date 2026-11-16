@@ -389,4 +389,24 @@ do
 	check(equal(alias.fresh_arguments, interactive.fresh_arguments) and alias.task_argument_index == interactive.task_argument_index,
 		"a declared short-and-long option row supports the same named interactive input contract")
 end
+-- SKILLS-194: the helper's approval is the only approval. The pure plan decides
+-- what SPAWN does automatically once a bound result is submitted.
+do
+	local terminal_a, terminal_b = record("term-a"), record("term-b")
+	local plan = Review.automatic_plan(accepted(native(result({ terminal_a, terminal_b }))).records)
+	check(type(plan) == "table" and plan.action == "prepare" and plan.enabled == 2 and #plan.native == 0 and plan.reason == nil,
+		"an approved terminal roster is saved and prepared automatically with no model-credit scope")
+	local omp = record("omp-a"); omp.provider = "OMP"; omp.backend = "native-agent"; omp.command = "omp"; omp.prompt = "Begin."
+	local native_plan = Review.automatic_plan(accepted(native(result({ terminal_a, omp }))).records)
+	check(native_plan.action == "prepare" and native_plan.enabled == 2 and #native_plan.native == 1 and native_plan.native[1]:find("OMP", 1, true) ~= nil,
+		"native accounts are named so the toast repeats the scope the helper disclosed")
+	local disabled = record("off"); disabled.enabled = false
+	local none = Review.automatic_plan(accepted(native(result({ disabled }))).records)
+	check(none.action == "save_only" and none.enabled == 0 and type(none.reason) == "string", "a roster with nothing enabled is saved without preparation and says why")
+	local ssh = record("remote"); ssh.backend = "ssh-command"; ssh.host = "example.test"; ssh.user = "u"
+	local remote = Review.automatic_plan(accepted(native(result({ terminal_a, ssh }))).records)
+	check(remote.action == "save_only" and remote.reason:find("review", 1, true) ~= nil,
+		"an SSH route is saved, never prepared automatically, and the reason names the review it needs")
+	check(Review.automatic_plan({}).action == "save_only", "an empty roster never prepares")
+end
 return "PASS setup_review " .. tostring(checks)

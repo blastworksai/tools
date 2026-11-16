@@ -88,4 +88,28 @@ function Review.prepare(decoded_result: any, expected_run_id: any): (any?, strin
 	return { setup_run_id = decoded_result.setup_run_id, records = records, rows = rows }, nil
 end
 
+-- The helper's approval names the exact roster and its checks, so SPAWN saves and
+-- prepares automatically after a bound submission. This pure plan only decides
+-- WHAT the automatic flow may do; it never approves a paid check the roster does
+-- not declare, and optional provider readiness exercises are never part of it.
+function Review.automatic_plan(records: any): any
+	local enabled, native = 0, {}
+	local blocked: string? = nil
+	for _, record in ipairs(if type(records) == "table" then records else {}) do
+		if record.enabled then
+			enabled += 1
+			if record.review_required or record.backend == "ssh-command" then
+				blocked = "An agent needs its launch settings or execution route reviewed before it can be prepared"
+			end
+			if record.backend == "native-agent" then
+				table.insert(native, tostring(record.provider) .. " — " .. tostring(record.account_label)
+					.. " (model: " .. tostring(record.model or "saved CLI settings/default") .. ")")
+			end
+		end
+	end
+	if enabled == 0 then return { action = "save_only", enabled = 0, native = {}, reason = "No enabled agents to prepare" } end
+	if blocked ~= nil then return { action = "save_only", enabled = enabled, native = native, reason = blocked } end
+	return { action = "prepare", enabled = enabled, native = native, reason = nil }
+end
+
 return Review

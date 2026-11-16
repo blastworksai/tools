@@ -1349,97 +1349,79 @@ local function pending_setup(cx: any, run: any, value: any?, reviewed: any?): (a
 end
 local discard_setup_result
 local route_hooks: any
-type SetupReviewItem =
-	{ action: "record", label: string, detail: string, row: { id: string, label: string, fields: { { label: string, value: string } } } }
-	| { action: "import" | "prepare", label: string, detail: string }
-	| { action: "cancel", label: string }
-	| { action: "discard", label: string, detail: string }
-
-local function review_setup(cx: any, run: any, pending: any)
+-- One approval: the Guided setup helper already showed the exact roster and its
+-- checks. After a bound submission SPAWN saves, prepares and verifies by itself.
+-- The exact run/result binding, the digest fences and the once-only effects are the
+-- same ones the former review picker relied on; only the extra click is gone.
+local function commit_setup(cx: any, run: any, pending: any, action: string, plan: any)
 	ManagedRoute = ManagedRoute or require("./managed_route_window")
-	run.reviewing = true
-	local items: { SetupReviewItem } = {}
-	for _, row in pending.review.rows do
-		local fields = {}
-		for _, field in row.fields do table.insert(fields, field.label .. ": " .. field.value) end
-		table.insert(items, { label = row.label, detail = table.concat(fields, "\n"), action = "record", row = row })
-	end
-	local prepare_allowed,native_names=true,{}
-	local enabled_count=0
-	for _,record in ipairs(pending.review.records) do
-		if record.enabled then
-			enabled_count+=1
-			if record.review_required or record.backend=="ssh-command" then prepare_allowed=false end
-			if record.backend=="native-agent" then table.insert(native_names,record.provider.." — "..record.account_label.." (model: "..tostring(record.model or "saved CLI settings/default")..(if record.profile then "; profile: "..record.profile else "").."; arguments: "..Config.render_arguments(record.fresh_arguments or record.arguments or {})..")") end
+	local captured
+	if action == "prepare" then
+		local latest, why = snapshot(cx, run.origin)
+		local exact, source_error
+		if latest then exact, source_error = pending_setup(cx, run, latest, pending) else source_error = why end
+		if not exact then run.reviewing = false; fail(cx, source_error or "The exact approved setup changed; save and preparation were not accepted."); return end
+		-- Preparation is automatic, but never at the price of losing the approved roster:
+		-- if it cannot be captured, the exact result is still saved and the cause is named.
+		local skip_preparation: string? = nil
+		if type(latest.setup) ~= "table" then skip_preparation = "The preparation state is unavailable" end
+		local added = false
+		for _, record in ipairs(pending.review.records) do
+			local found = false
+			for _, saved in ipairs(latest.records) do if saved.id == record.id then found = true; break end end
+			if not found then added = true end
+		end
+		if skip_preparation == nil then
+			local begin_required = latest.setup.state == "not_started" or latest.setup.state == "dismissed"
+			local capture_error
+			captured, capture_error = ManagedRoute.capture_reviewed(cx, run.origin.pane, run.bootstrap.host_config_pane, pending.review.records, latest.config_revision + (if added then 1 else 0), begin_required, route_hooks)
+			if not captured then skip_preparation = tostring(capture_error) end
+		end
+		if skip_preparation ~= nil then
+			plan = { action = "save_only", enabled = plan.enabled, native = plan.native, reason = "Preparation could not start: " .. skip_preparation }
+			cx:toast("error", "SPAWN", "Preparation did not start (" .. skip_preparation .. "). Saving your approved agents anyway; use Prepare agents for ORCH+ afterwards.")
 		end
 	end
-	if prepare_allowed and enabled_count>0 then
-		table.insert(items,{label=if #native_names>0 then "Save and prepare — uses model credits" else "Save and prepare these agents",action="prepare",detail="Approve the exact settings above and prepare "..tostring(enabled_count).." enabled accounts. Account/resource checks, offline terminal verification, owned cleanup and final save/readback run automatically. Disabled agents stay unchanged. No orchestration task starts."..(if #native_names>0 then " One harmless native model message each for: "..table.concat(native_names,", ")..". Uses the selected permissions; may cost credits and is not a sandbox. No extra setup-helper message is sent." else " No provider/model task is launched.")})
-	end
-	table.insert(items, { label = "Save settings only", detail = "Save the exact settings above without preparing resources or starting checks. ORCH+ preparation remains incomplete.", action = "import" })
-	table.insert(items, { label = "Discard this setup result", detail = "Consume only this exact pending submission; import nothing and preserve other history", action = "discard" })
-	table.insert(items, { label = "Cancel without saving", action = "cancel" })
-	cx:pick({ items = items, placeholder = "Review the complete submitted configuration" }):next(function(item: SetupReviewItem?, pick_error: string?, fresh)
-		if fresh == nil then return end
-		run.reviewing = false
-		if pick_error ~= nil then fail(fresh, pick_error); return end
-		if item == nil or item.action == "cancel" then return end
-		if item.action=="discard" then discard_setup_result(fresh,run.origin.pane,run.job_id);return end
-		if item.action == "record" then
-			local fields = {}
-			for _, field in item.row.fields do table.insert(fields, { label = field.label, detail = field.value }) end
-			fresh:pick({ items = fields, placeholder = item.label }):next(function(_, field_error, next_cx)
-				if next_cx == nil then return end
-				if field_error ~= nil then fail(next_cx, field_error); return end
-				review_setup(next_cx, run, pending)
-			end)
+	local import_data = { setup_run_id = run.id, attempt_id = run.job_id, pending_digest = pending.digest, confirmed = true, preparation = if captured then ManagedRoute.reviewed_payload(captured) else nil }
+	request(cx, run.origin, "import_records", import_data, function(import_cx, reply, import_error)
+		if import_error ~= nil then
+			ManagedRoute.cancel_reviewed(captured)
+			run.reviewing = false
+			fail(import_cx, "SPAWN setup save was not confirmed: " .. tostring(import_error) .. ". Inspect the saved roster in the right-hand SPAWN pane first. Resolve conflicting saved IDs in Agent settings, or explicitly Discard this setup result in Advanced to approve a fresh run. Do not claim success, resubmit or repeat blindly.")
 			return
 		end
-		if item.action ~= "import" and item.action~="prepare" then return end
-		local captured
-		if item.action=="prepare" then
-			local latest,why=snapshot(fresh,run.origin)
-			local exact,source_error
-			if latest then exact,source_error=pending_setup(fresh,run,latest,pending) else source_error=why end
-			if not exact then fail(fresh,source_error or "The exact reviewed setup changed; save and preparation were not accepted.");return end
-			if type(latest.setup)~="table" then fail(fresh,"The preparation state is unavailable; save settings only or reopen the original SPAWN setup.");return end
-			local added=false
-			for _,record in ipairs(pending.review.records) do
-				local found=false;for _,saved in ipairs(latest.records) do if saved.id==record.id then found=true;break end end
-				if not found then added=true end
-			end
-			local begin_required=latest.setup.state=="not_started" or latest.setup.state=="dismissed"
-			local capture_error
-			captured,capture_error=ManagedRoute.capture_reviewed(fresh,run.origin.pane,run.bootstrap.host_config_pane,pending.review.records,latest.config_revision+(if added then 1 else 0),begin_required,route_hooks)
-			if not captured then fail(fresh,capture_error);return end
+		if type(reply.result) ~= "table" or not integer(reply.result.imported) then ManagedRoute.cancel_reviewed(captured); run.reviewing = false; fail(import_cx, "Import acknowledgment is invalid; inspect Config before repeating it"); return end
+		run.imported = true
+		run.reviewing = false
+		save_observer(import_cx)
+		import_cx:toast(if captured then "info" else "success", "SPAWN", if captured then "Agents saved. Required preparation is starting; progress shows in SPAWN." else "Agents saved — " .. tostring(reply.result.imported) .. " approved agents. " .. tostring(plan.reason or "") .. ". Prepare them for ORCH+ in SPAWN to finish setup.")
+		local navigated, navigation_error = pcall(function() import_cx.session:event(run.origin.pane, { ev = "action", id = "main", act = "page", value = "managed" }) end)
+		if not navigated then fail(import_cx, "Agents are saved. Open SPAWN Setup to prepare them for ORCH+: " .. tostring(navigation_error)) end
+		if captured then
+			if reply.config_revision ~= captured.manifest.revision then ManagedRoute.cancel_reviewed(captured); fail(import_cx, "Agents were saved, but their revision differs from the approved preparation. No model check was started."); return end
+			local started, why = ManagedRoute.start_reviewed(import_cx, captured, { setup_run_id = run.id, attempt_id = run.job_id, pending_digest = pending.digest, import_request_id = reply.request_id }, route_hooks)
+			if not started then fail(import_cx, why) end
+			return
 		end
-		local import_data={setup_run_id=run.id,attempt_id=run.job_id,pending_digest=pending.digest,confirmed=true,preparation=if captured then ManagedRoute.reviewed_payload(captured) else nil}
-		request(fresh, run.origin, "import_records", import_data, function(import_cx, reply, import_error)
-			if import_error ~= nil then
-				ManagedRoute.cancel_reviewed(captured)
-				local message="SPAWN setup save was not confirmed: "..tostring(import_error)..". Inspect the saved roster in the right-hand SPAWN pane first. Resolve conflicting saved IDs in Agent settings, or explicitly choose Discard this setup result to approve a fresh run. Do not claim success, resubmit or repeat Import blindly."
-				fail(import_cx,message)
-				return
-			end
-			if type(reply.result) ~= "table" or not integer(reply.result.imported) then ManagedRoute.cancel_reviewed(captured);fail(import_cx, "Import acknowledgment is invalid; inspect Config before repeating it"); return end
-			run.imported = true
-			save_observer(import_cx)
-			import_cx:toast(if captured then "info" else "success", "SPAWN", if captured then "Agents saved. Required preparation is starting; setup is not yet complete." else "Agents saved — " .. tostring(reply.result.imported) .. " reviewed agents. Prepare them for ORCH+ in SPAWN to finish setup.")
-			local navigated,navigation_error=pcall(function()import_cx.session:event(run.origin.pane,{ev="action",id="main",act="page",value="managed"})end)
-			if not navigated then fail(import_cx,"Agents are saved. Open SPAWN Setup to prepare them for ORCH+: "..tostring(navigation_error)) end
-			if captured then
-				if reply.config_revision~=captured.manifest.revision then ManagedRoute.cancel_reviewed(captured);fail(import_cx,"Agents were saved, but their revision differs from the approved preparation. No model check was started.");return end
-				local started,why=ManagedRoute.start_reviewed(import_cx,captured,{setup_run_id=run.id,attempt_id=run.job_id,pending_digest=pending.digest,import_request_id=reply.request_id},route_hooks)
-				if not started then fail(import_cx,why) end
-				return
-			end
-		end, function(check_cx, value)
-			-- Runs immediately before the durable request, even if the queue waited.
-			local current, why = pending_setup(check_cx, run, value, pending)
-			if current == nil then ManagedRoute.cancel_reviewed(captured);return why end
-			return nil
-		end)
+	end, function(check_cx, value)
+		-- Runs immediately before the durable request, even if the queue waited.
+		local current, why = pending_setup(check_cx, run, value, pending)
+		if current == nil then ManagedRoute.cancel_reviewed(captured); run.reviewing = false; return why end
+		return nil
 	end)
+end
+local function review_setup(cx: any, run: any, pending: any)
+	local Review = require("./setup_review")
+	run.reviewing = true
+	local plan = Review.automatic_plan(pending.review.records)
+	if plan.action == "prepare" then
+		local scope = ""
+		if #plan.native > 0 then scope = " The helper's approval disclosed one harmless model message each for: " .. table.concat(plan.native, ", ") .. ". May cost credits; not a sandbox." end
+		cx:toast("info", "SPAWN", "Saving " .. tostring(plan.enabled) .. " approved agents, then preparing and verifying them. No further click is needed." .. scope)
+	else
+		cx:toast("info", "SPAWN", "Saving your approved agents without preparation: " .. tostring(plan.reason) .. ".")
+	end
+	commit_setup(cx, run, pending, plan.action, plan)
 end
 collect_setup = function(cx: any)
 	local run = setup
@@ -1565,7 +1547,18 @@ local function start_setup(cx: any,target: number?)
 	local ok,topology=pcall(tern.json.decode,bytes or "")
 	if not ok or type(topology)~="table" or topology.window~=cx:window_key() then fail(cx,"Choose the device setup in SPAWN before starting Guided setup.");return end
 	local SetupDiscovery = require("./setup_discovery")
-	local selected,why=SetupDiscovery.primary(topology.observation,topology.selected,topology.mode)
+	-- Single device (the default) needs no discovery step: it is this execution machine.
+	local single_current=topology.mode=="single" and topology.observation==nil
+	local selected,why
+	if single_current then
+		local ok_hosts,own_hosts,own_current=pcall(function()return cx.hosts:list(),cx.hosts:current()end)
+		local found,found_error
+		if ok_hosts then found,found_error=SetupDiscovery.devices(own_hosts,own_current) end
+		if found then selected,why=SetupDiscovery.primary(found,found.current,"single") else why=found_error or "Tern device discovery is unavailable. Attach the execution machine in Tern, then start Guided setup again." end
+		if selected and selected.id~=origin.host then selected=nil;why="Single device setup runs on this execution machine. Choose Multi device to use another." end
+	else
+		selected,why=SetupDiscovery.primary(topology.observation,topology.selected,topology.mode)
+	end
 	if not selected then fail(cx,why);return end
 	local listed,hosts,current=pcall(function()return cx.hosts:list(),cx.hosts:current()end)
 	local discovered,discovery_error
