@@ -66,13 +66,16 @@ local function render()
 	-- Until the companion has answered, an empty model says nothing about SPAWN.
 	local known = hold == nil and (#model.accounts > 0 or phase == "ready")
 	status_segments, rendered_ids = presentation.segments(model, if known then prefs else nil)
-	-- A hold or a missing setup is actionable and always shown; the rest only when the owner
-	-- turned the usage statistics on, so the default bar stays a lone launcher.
-	if hold ~= nil then
+	-- Every segment beyond the launcher, a platform hold and a missing setup included, is shown
+	-- only when the owner turned the bar statistics on, so the default bar stays a lone
+	-- launcher. Diagnostics and Setup always list the hold and the missing setup.
+	if not prefs.enabled then
+		-- launcher only
+	elseif hold ~= nil then
 		table.insert(status_segments, { text = "USAGE hold · " .. hold, icon = "gauge", tone = "warning", command = DIAGNOSTICS })
 	elseif phase == "setup_required" then
 		table.insert(status_segments, { text = "USAGE setup required", icon = "gauge", tone = "muted", command = DIAGNOSTICS })
-	elseif prefs.enabled then
+	else
 		if phase ~= "ready" then
 			table.insert(status_segments, { text = if phase == "loading" then "USAGE loading" else "USAGE unavailable · last known",
 				icon = "gauge", tone = "muted", command = DIAGNOSTICS })

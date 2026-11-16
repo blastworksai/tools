@@ -139,7 +139,7 @@ USAGE has no Files pane button. Its buttons live in Tern's status bar:
 - Clicking an account segment opens that account's detail pane, which shows its reset time and countdown. Tern's status segments have no tooltip, width or height API, so nothing more is claimed on hover. If the segment cannot be clicked, use the **USAGE Account N** commands in the Command Palette.
 - A selection is stored under the SPAWN scope and account id, so a rename keeps it. A removed account draws nothing and no row is invented; its tick is kept in case it returns. The checkboxes are checked against the current account list each time, so a stale one cannot change anything.
 - Fresh install: master Off, nothing ticked, so the bar shows only the launcher. Upgrade or reinstall with retained USAGE data: master On, with exactly the accounts the old first-three summary showed (provider order), chosen once when the first account list arrives. Whether an install is fresh or retained is decided at its first start, before the companion creates any data.
-- Setup, loading and platform-hold notices stay in the bar when they need action; loading, partial and refresh progress appear only while the master is On.
+- With the master Off (the default on a fresh install) the bar shows only the **USAGE** launcher. The setup-required, platform-hold, loading, partial and refresh-progress notices appear only while the master is On. **USAGE Diagnostics** and **USAGE Setup** always list the platform hold and the missing setup, whatever the master says.
 
 ### Layouts
 
@@ -277,8 +277,8 @@ A binding ends by itself, and must be confirmed again, when you edit that SPAWN 
 | --- | --- |
 | "0 accounts" or "Define accounts in SPAWN" | Install SPAWN on this machine, define accounts and open SPAWN's Config once. USAGE reads SPAWN's saved roster, not open panes. |
 | "headless usage reads are off" | **USAGE Setup › Allow headless usage reads**. |
-| "USAGE setup is required" | **USAGE Setup › Install private dependencies**. It needs Python 3.11+ and access to PyPI once. In a window attached to a remote host, the row is **Install private dependencies on <host>**, and Python and PyPI access are needed on that host. |
-| **PLATFORM HOLD**, "macOS not qualified" or "Windows not qualified" | Real platform acceptance has not passed. Account readings and healthy summaries are intentionally withheld. Open **USAGE Setup › PLATFORM HOLD** or **USAGE Diagnostics** for the platform checklist. Do not treat catalog **ready** as support. |
+| "USAGE setup is required" | The status bar shows this only while bar statistics are On; **USAGE Diagnostics** and **USAGE Setup** always show it. **USAGE Setup › Install private dependencies**. It needs Python 3.11+ and access to PyPI once. In a window attached to a remote host, the row is **Install private dependencies on <host>**, and Python and PyPI access are needed on that host. |
+| **PLATFORM HOLD**, "macOS not qualified" or "Windows not qualified" | Real platform acceptance has not passed. Account readings and healthy summaries are intentionally withheld. The status bar shows this only while bar statistics are On; **USAGE Diagnostics** always shows it. Open **USAGE Setup › PLATFORM HOLD** or **USAGE Diagnostics** for the platform checklist. Do not treat catalog **ready** as support. |
 | "USAGE is not ready on host <name>" | Install USAGE on that host (the [Install](#install) steps, run there) and reload it. Setup in an attached window configures the host's USAGE; it can't install the plugin. |
 | "usage credentials unavailable on source" | Sign in once with the provider's own CLI as the OS user SPAWN uses, then refresh. An env-token or API-key setup can work interactively without a saved subscription login. On macOS, open Claude Code with the SPAWN-selected config directory and unlock/sign in through Keychain yourself; USAGE never unlocks Keychain or changes its ACL. |
 | Provider CLI unavailable / provider quota unavailable | Install and sign in to the provider's own CLI as the same OS user. On macOS, GUI discovery includes `/opt/homebrew/bin` and `/usr/local/bin`; on Windows it includes the resolved per-user `npm` directory and prefers a native `.exe` before `.cmd`/`.bat`. An absolute executable path in SPAWN avoids GUI PATH ambiguity. Refresh after correcting it. |
@@ -304,7 +304,7 @@ A binding ends by itself, and must be confirmed again, when you edit that SPAWN 
 - Usage is read from each provider's current CLI or endpoint. A provider can change its output; USAGE then reports "could not parse" rather than guessing.
 - A SPAWN account that runs over SSH is shown but never read from this machine.
 - Accounts on another machine show up only when that machine runs USAGE and shares with this one, or when your window is attached to that machine's Tern host.
-- In a window attached to a remote host, the status-bar selection and USAGE Diagnostics still describe the window's own machine. USAGE blocks opened in the attached session describe the host. The **USAGE Refresh** command needs one of those blocks open to reach the host.
+- In a window attached to a remote host, the status bar and USAGE Diagnostics describe the window's own machine (its platform hold and setup included). USAGE panes opened in the attached session describe the host. The **USAGE Refresh** command needs one of those blocks open to reach the host.
 - Codex readings without an email (rare) are shown without an account identity and are not merged with other rows.
 - USAGE needs Python and a one-time dependency download. It does not install Python for you.
 
