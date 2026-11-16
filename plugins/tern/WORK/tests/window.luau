@@ -532,4 +532,78 @@ check(writes == protected_writes + 1 and state.setup == nil and saved.glitch_roo
 for index, argument in ipairs(literal_arguments) do
 	check(saved.agent.argv[index] == argument, "Setup preserves escaped literal argument content")
 end
+
+-- SKILLS-193: Setup wording, labels, hints and calm first-run message.
+local function setup_encoded(): string
+	return tern.json.encode(panel.view(state, block_cx).main)
+end
+local function has(encoded: string, needle: string): boolean
+	return string.find(encoded, needle, 1, true) ~= nil
+end
+local function reopen_fresh()
+	files[path] = nil
+	catalog.root, catalog.agent = nil, nil
+	state.catalog.root, state.catalog.agent = nil, nil
+	state.setup = nil
+	state.attempted = nil
+	state.notice = nil
+	panel.view(state, block_cx)
+	action(panel, state, "setup-open", block_cx)
+end
+reopen_fresh()
+local fresh = setup_encoded()
+check(has(fresh, '"ACP - Recommended"'), "SKILLS-193 item 1: ACP label is exact")
+check(has(fresh, '"CLI - Manual Paste Req."'), "SKILLS-193 item 1: CLI label is exact")
+check(not has(fresh, "native ready signal") and not has(fresh, "clipboard fallback"), "SKILLS-193 item 1: old kind labels are gone")
+
+-- item 2: untouched Setup is calm; a failed attempt shows the red error
+state.notice = "setup_required: Glitch folder not configured. Set glitch_root and an ACP or CLI agent argv in " .. path .. " on this host, then Refresh."
+local calm = setup_encoded()
+check(not has(calm, "setup_required") and not has(calm, "Glitch folder not configured"), "SKILLS-193 item 2: untouched Setup hides the red setup_required line")
+check(has(calm, "Choose a Glitch folder and an agent below, then select Save Setup."), "SKILLS-193 item 2: untouched Setup shows the calm instruction")
+action(panel, state, "setup-save", block_cx)
+local failed = setup_encoded()
+check(state.setup ~= nil and state.setup.hold ~= nil and has(failed, "Enter the absolute Glitch folder on this host in Glitch root."), "SKILLS-193 item 2: failed save keeps its error")
+check(has(failed, "setup_required: Glitch folder not configured") and not has(failed, "Choose a Glitch folder and an agent below"), "SKILLS-193 item 2: after an attempted save the red notice returns and the calm line goes")
+reopen_fresh()
+state.notice = "setup_required: Glitch folder not configured."
+action(panel, state, "refresh", block_cx)
+check(state.attempted == true, "SKILLS-193 item 2: a refresh counts as an attempt")
+
+-- item 3: argv row labels and the add button
+reopen_fresh()
+local rows = setup_encoded()
+check(has(rows, '"Command"') and has(rows, '"Option 1"') and not has(rows, '"Option 2"'), "SKILLS-193 item 3: row 1 is Command, row 2 is Option 1")
+check(has(rows, '"Add option"') and not has(rows, "Add argument"), "SKILLS-193 item 3: add button reads Add option")
+action(panel, state, "setup-add", block_cx)
+check(has(setup_encoded(), '"Option 2"'), "SKILLS-193 item 3: a third row is Option 2")
+
+-- item 4: hint only while rows equal the kind's defaults
+reopen_fresh()
+check(has(setup_encoded(), "Starts Tern's own agent pane."), "SKILLS-193 item 4: ACP default shows its hint")
+panel.event(state, { ev = "change", id = "main.setup-kind", value = "cli" }, block_cx)
+local cli_hint = setup_encoded()
+check(has(cli_hint, "Starts Claude Code in a terminal.") and not has(cli_hint, "Starts Tern's own agent pane."), "SKILLS-193 item 4: CLI default shows its hint")
+panel.event(state, { ev = "focus", id = "main.setup-arg-1" }, block_cx)
+panel.key(state, { name = "paste", text = "x", ctrl = false, alt = false, meta = false }, block_cx)
+local edited_hint = setup_encoded()
+check(not has(edited_hint, "Starts Claude Code in a terminal.") and not has(edited_hint, "Starts Tern's own agent pane."), "SKILLS-193 item 4: an edited command hides the hint")
+panel.event(state, { ev = "change", id = "main.setup-kind", value = "acp" }, block_cx)
+action(panel, state, "setup-add", block_cx)
+check(not has(setup_encoded(), "Starts Tern's own agent pane."), "SKILLS-193 item 4: an added option hides the hint")
+
+-- item 5: Glitch root placeholder
+reopen_fresh()
+local placeholder = nil
+walk(panel.view(state, block_cx).main, function(node: any)
+	if type(node.p) == "table" and type(node.p.key) == "string" and string.match(node.p.key, "setup%-root$") ~= nil then placeholder = node.p.placeholder end
+end)
+check(placeholder == "Your Glitch folder, e.g. /opt/glitch or C:\\Users\\you\\Glitch", "SKILLS-193 item 5: root placeholder is exact: " .. tostring(placeholder))
+
+-- item 6: intro line and removed recovery line
+reopen_fresh()
+local intro = setup_encoded()
+check(has(intro, "Choose which agent opens when you click Work On."), "SKILLS-193 item 6: new intro line")
+check(not has(intro, "Configure the agent on this execution host"), "SKILLS-193 item 6: old intro line is gone")
+check(not has(intro, "recovery only") and not has(intro, "Setup checks for external edits") and not has(intro, "config.json"), "SKILLS-193 item 6: config.json line is removed from the screen")
 return true

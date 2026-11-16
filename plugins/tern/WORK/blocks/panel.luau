@@ -32,6 +32,7 @@ type State = {
 	actions: { [string]: any },
 	next_action: number,
 	orchestration: any?,
+	attempted: boolean?,
 }
 
 local function config_path(): string
@@ -196,16 +197,25 @@ local function utf16_length(value: string): number
 	return length
 end
 
+local function at_defaults(setup: Setup): boolean
+	local defaults = default_argv(setup.kind)
+	if #setup.args ~= #defaults then return false end
+	for index, argument in ipairs(setup.args) do
+		if argument.text ~= defaults[index] then return false end
+	end
+	return true
+end
+
 local function setup_view(state: State, setup: Setup): any
 	local rows = {
 		ui.text({ ui.span("WORK Setup", "title") }),
-		ui.text({ ui.span("Configure the agent on this execution host. ACP receives a native queued prompt; CLI requires manual paste.", "muted") }),
+		ui.text({ ui.span("Choose which agent opens when you click Work On.", "muted") }),
 		ui.node("field", { label = if setup.root_readonly then "Glitch root (preserved)" else "Glitch root" }, {
 			ui.node("input", {
 				key = "setup-root",
 				text = setup.root,
 				cursor = utf16_length(string.sub(setup.root, 1, setup.root_cursor)),
-				placeholder = "Absolute Glitch folder on this host",
+				placeholder = "Your Glitch folder, e.g. /opt/glitch or C:\\Users\\you\\Glitch",
 				aria = "Glitch root on the execution host",
 				readonly = setup.root_readonly,
 				mono = true,
@@ -216,22 +226,24 @@ local function setup_view(state: State, setup: Setup): any
 				key = "setup-kind",
 				value = setup.kind,
 				options = {
-					{ value = "acp", label = "ACP — native ready signal" },
-					{ value = "cli", label = "CLI — clipboard fallback" },
+					{ value = "acp", label = "ACP - Recommended" },
+					{ value = "cli", label = "CLI - Manual Paste Req." },
 				},
 			}),
 		}),
 	}
-	for _, argument in ipairs(setup.args) do
+	for position, argument in ipairs(setup.args) do
 		local remove_token = action(state, "setup-remove", argument.id)
 		table.insert(rows, ui.node("row", { key = "setup-arg-row:" .. argument.id }, {
-			ui.node("input", {
-				key = "setup-arg-" .. argument.id,
-				text = argument.text,
-				cursor = utf16_length(string.sub(argument.text, 1, argument.cursor)),
-				placeholder = if argument.id == 1 then "Executable on the WORK host" else "Argument",
-				aria = "Agent argument " .. argument.id,
-				grow = 1,
+			ui.node("field", { label = if position == 1 then "Command" else "Option " .. (position - 1), grow = 1 }, {
+				ui.node("input", {
+					key = "setup-arg-" .. argument.id,
+					text = argument.text,
+					cursor = utf16_length(string.sub(argument.text, 1, argument.cursor)),
+					placeholder = if position == 1 then "Executable on the WORK host" else "Argument",
+					aria = "Agent argument " .. argument.id,
+					grow = 1,
+				}),
 			}),
 			ui.button("Remove", {
 				key = "setup-remove-" .. argument.id,
@@ -241,12 +253,14 @@ local function setup_view(state: State, setup: Setup): any
 			}),
 		}))
 	end
+	if at_defaults(setup) then
+		table.insert(rows, ui.text({ ui.span(if setup.kind == "acp" then "Starts Tern's own agent pane." else "Starts Claude Code in a terminal.", "muted") }))
+	end
 	table.insert(rows, ui.row({
-		ui.button("Add argument", { actions = { click = "setup-add=" .. action(state, "setup-add", nil) } }),
+		ui.button("Add option", { actions = { click = "setup-add=" .. action(state, "setup-add", nil) } }),
 		ui.button("Save Setup", { variant = "primary", actions = { click = "setup-save=" .. action(state, "setup-save", nil) } }),
 		ui.button("Cancel", { actions = { click = "setup-cancel=" .. action(state, "setup-cancel", nil) } }),
 	}))
-	table.insert(rows, ui.text({ ui.span("Setup checks for external edits and verifies the saved configuration. JSON at " .. config_path() .. " is recovery only.", "muted") }))
 	if setup.hold ~= nil then table.insert(rows, ui.text({ ui.span(setup.hold, "error") })) end
 	return ui.col(rows)
 end
@@ -278,7 +292,13 @@ local function view(state: State): any
 			for _, item in ipairs(state.catalog.items) do table.insert(rows, plan_row(state, item, agent)) end
 		end
 	end
-	if state.notice ~= nil then table.insert(rows, ui.text({ ui.span(state.notice, "error") })) end
+	if state.notice ~= nil then
+		if state.setup ~= nil and not state.attempted and string.match(state.notice, "^setup_required") ~= nil then
+			table.insert(rows, ui.text({ ui.span("Choose a Glitch folder and an agent below, then select Save Setup.", "muted") }))
+		else
+			table.insert(rows, ui.text({ ui.span(state.notice, "error") }))
+		end
+	end
 	if state.roster ~= nil and state.roster.problem ~= nil then
 		table.insert(rows, ui.text({ ui.span(state.roster.problem, "muted") }))
 	end
@@ -316,6 +336,7 @@ end
 local function save_setup(state: State)
 	local setup = state.setup
 	if setup == nil then return end
+	state.attempted = true
 	local current = read_snapshot()
 	if current.error ~= nil then hold(setup, current.error); return end
 	if current.exists ~= setup.expected.exists or (current.exists and current.text ~= setup.expected.text) then
@@ -450,7 +471,7 @@ local function on_event(state: State, event: any, cx: any)
 	if event.ev ~= "action" or event.act == nil or type(event.value) ~= "string" then return end
 	local entry = state.actions[event.value]
 	if entry == nil or entry.kind ~= event.act then return end
-	if entry.kind == "refresh" then refresh(state, state.setup ~= nil); return end
+	if entry.kind == "refresh" then state.attempted = true; refresh(state, state.setup ~= nil); return end
 	if entry.kind == "setup-open" then state.setup = new_setup(state.catalog); return end
 	if entry.kind == "setup-cancel" then state.setup = if needs_setup(state.catalog, state.notice) then state.setup else nil; return end
 	if entry.kind == "setup-add" and setup ~= nil then
