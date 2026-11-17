@@ -29,7 +29,9 @@ type State = {
     discover_pid: number?,
     discover_birth: string?,
     patient: boolean?,
-    patientAt: number?,
+    leases: { [string]: number }?,
+    hadWait: boolean?,
+    dormant: boolean?,
     discovery_label: string?,
     finished: boolean?,
     reading: boolean?,
@@ -107,13 +109,19 @@ local function refresh(state: State, cx: BlockCx)
             end
             -- Sync on and this view serves the attached session: wait for the plan instead of closing. The window says
             -- so by event (it holds the settings and the binding; this machine's plugin store is not the window's).
-            local outcome = selection.discoveryStep(result.status, decoded, envelope, selection.patience(state, tern.now()))
+            local outcome = selection.discoveryStep(result.status, decoded, envelope, selection.patience(state, tern.now()), state.hadWait)
             if outcome.action == "wait" then
                 state.plan = nil; publish(state, nil); state.error = outcome.message; state.failures = 0
                 -- Persist the waiting view (selection.saveState) so a plugin reload resumes it.
                 if not state.waitSaved then state.waitSaved = pcall(function() cx:save() end) end
                 redraw(state, cx)
                 tern.timer(selection.WAIT_MS, function() refresh(state, cx) end)
+                return
+            end
+            if outcome.action == "dormant" then
+                -- No window asked recently: keep the binding and the open view, stop polling, say so; a renewal resumes (event).
+                state.plan = nil; publish(state, nil); state.error = outcome.message; state.failures = 0; state.dormant = true
+                redraw(state, cx)
                 return
             end
             if outcome.action == "none" then
@@ -179,13 +187,13 @@ tern.block.define("list", {
         state.publisher.clear()
         -- A saved binding can only read the same selected source and stable plan id.
         -- Legacy bare-pane saves/args are deliberately not migrated or followed.
-        local restored = selection.restoreState(saved, sourceValid)
+        local restored = selection.restoreState(saved, sourceValid, tern.now())
         if restored.source then
             state.source = restored.source; state.plan_id = restored.plan_id; state.bindingSaved = true
         elseif restored.discover_pid then
             -- Only a view that waits for a plan is saved with a session, so it was patient; the window says otherwise by event.
             state.discover_pid = restored.discover_pid; state.discover_birth = restored.discover_birth
-            state.discovery_label = restored.discovery_label; state.waitSaved = true; state.patient = true; state.patientAt = tern.now()
+            state.discovery_label = restored.discovery_label; state.waitSaved = true; state.leases = restored.leases; state.hadWait = true
         elseif saved == nil and type(args[1]) == "string" then
             local ok, source = pcall(tern.json.decode, args[1])
             if ok and type(source) == "table" and source.mode == "selected" and type(source.request) == "string" and #source.request <= 128 and type(source.label) == "string" and #source.label <= 400 then
@@ -219,11 +227,14 @@ tern.block.define("list", {
     end,
     event = function(state: State, event: UiEvent, cx: BlockCx)
         -- The window tells this view whether to keep waiting for a plan; it is shown back in the plan-sync node.
-        local wait = selection.waitRequest(event)
-        if wait ~= nil then
+        local lease = selection.waitLease(event)
+        if lease ~= nil then
             if live(state) then
-                local changed = state.patient ~= wait
-                state.patient = wait; state.patientAt = tern.now()
+                local changed = selection.applyLease(state, lease, tern.now())
+                if lease.on and state.dormant then
+                    state.dormant = false; state.error = selection.WAITING; changed = true
+                    tern.timer(1, function() refresh(state, cx) end)
+                end
                 if changed then redraw(state, cx) end
             end
             return

@@ -15,8 +15,11 @@ local TITLE = "TODO Settings"
 local SYNC_MS, RETRY_MS = 2000, 10000
 
 -- Every view this window asked to wait is tracked, so a move of the attachment, sync Off or a closed session revokes it.
+-- This window's own requester id (random, once per load): a host keeps one lease per requester, so this window's revoke
+-- never cancels another window's renewal. Tern gives an event no sender identity to use instead.
+local requester = string.format("%x-%x", math.floor(tern.now()) % 0x7fffffff, math.random(1, 0x7fffffff))
 local function sendWait(cx: any, panel: number, on: boolean)
-    pcall(function() cx.session:event(panel, { ev = "action", id = "main", act = "sync-wait", value = if on then "on" else "off" }) end)
+    pcall(function() cx.session:event(panel, { ev = "action", id = "main", act = "sync-wait", value = (if on then "on:" else "off:") .. requester }) end)
 end
 local waitCx: any = nil
 local waits = wait_requests.new(function(panel: number, on: boolean) if waitCx then sendWait(waitCx, panel, on) end end)

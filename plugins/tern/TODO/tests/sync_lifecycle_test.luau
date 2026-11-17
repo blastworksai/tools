@@ -184,7 +184,7 @@ return {
         -- The host never reads the plugin store: its view waits only because the window's event said so.
         local view = { patient = false }
         local now = 1000
-        local waits = wait_requests.new(function(panel, on) view.patient = selection.waitRequest({ ev = "action", id = "main", act = "sync-wait", value = if on then "on" else "off" }); view.patientAt = now end)
+        local waits = wait_requests.new(function(panel, on) selection.applyLease(view, selection.waitLease({ ev = "action", id = "main", act = "sync-wait", value = if on then "on:w1" else "off:w1" }), now) end)
         local function patient() return selection.patience(view, now) end
         assert(not patient(), "a view that was never told to wait must not wait")
         waits.sync(77)
@@ -282,9 +282,9 @@ return {
     end},
     {"switching the attachment revokes the wait on the previous view, and its host stops discovery", function()
         -- Two views, each with its own host state; events are the only road from window to host.
-        local hosts, now, discoveries = { [10] = { patient = false }, [20] = { patient = false } }, 1000, { [10] = 0, [20] = 0 }
+        local hosts, now, discoveries = { [10] = {}, [20] = {} }, 1000, { [10] = 0, [20] = 0 }
         local waits = wait_requests.new(function(panel, on)
-            local h = hosts[panel]; h.patient = selection.waitRequest({ ev = "action", id = "main", act = "sync-wait", value = if on then "on" else "off" }); h.patientAt = now
+            selection.applyLease(hosts[panel], selection.waitLease({ ev = "action", id = "main", act = "sync-wait", value = if on then "on:w1" else "off:w1" }), now)
         end)
         local none = { ok = true, state = "none" }
         local function hostTick(panel)
@@ -293,7 +293,7 @@ return {
         waits.sync(10) -- session A, sync On
         hostTick(10); assert(discoveries[10] == 1)
         waits.sync(20) -- another tab selects session B: the window now wants B's view only
-        assert(hosts[10].patient == false and hosts[20].patient == true)
+        assert(not selection.patience(hosts[10], now) and selection.patience(hosts[20], now))
         for _ = 1, 3 do now += 2000; waits.sync(20); hostTick(10); hostTick(20) end
         assert(discoveries[10] == 1, "A kept polling after the switch: " .. discoveries[10])
         assert(discoveries[20] == 3)
@@ -311,17 +311,64 @@ return {
         waits.sync(11); waits.revokeAll() -- attachment became nil / window teardown
         assert(log[#log] == "11:off" and #waits.asked() == 0, table.concat(log, ","))
     end},
-    {"a host whose window stops renewing drops patience after 15 s, so it never polls forever", function()
-        local view = { patient = true, patientAt = 1000 }
+    {"a host whose window stops renewing drops patience after 15 s, and the view goes dormant, never closed", function()
+        local view = { leases = { w1 = 1000 }, hadWait = true }
         assert(selection.PATIENCE_MS == 15000)
         assert(selection.patience(view, 1000 + 15000))
-        assert(not selection.patience(view, 1000 + 15001) and view.patient == false)
+        assert(not selection.patience(view, 1000 + 15001) and next(view.leases) == nil)
         local none = { ok = true, state = "none" }
-        assert(selection.discoveryStep(0, true, none, selection.patience(view, 99999)).action == "none")
-        local unstamped = { patient = true } -- a patient flag with no stamp is not trusted
-        assert(not selection.patience(unstamped, 5))
-        local renewed = { patient = true, patientAt = 1000 }
-        renewed.patientAt = 14000 -- the window renewed
-        assert(selection.patience(renewed, 20000))
+        local step = selection.discoveryStep(0, true, none, selection.patience(view, 99999), view.hadWait)
+        assert(step.action == "dormant", step.action)
+        assert(selection.discoveryStep(0, true, none, false, false).action == "none", "a view that never waited still closes")
+        assert(not selection.patience({ leases = { w1 = "x" } }, 5), "an unstamped lease is not trusted")
+        selection.applyLease(view, { on = true, rid = "w1" }, 100000) -- the window renewed
+        assert(selection.patience(view, 100000 + 14000))
+        assert(selection.discoveryStep(0, true, none, true, true).action == "wait")
+        -- a renewal reactivates, and a plan published meanwhile is then found
+        local published = { ok = true, state = "active", source = { path = "/p.md", plan_id = "plan-abc", publication = { k = 1 } } }
+        assert(selection.discoveryStep(0, true, published, selection.patience(view, 100000), true).action == "active")
+    end},
+    {"two requesters: one window's revoke leaves the other's renewed wait alive; both revoked is dormant", function()
+        local view, now = {}, 1000
+        local on = function(rid) return selection.waitLease({ ev = "action", id = "main", act = "sync-wait", value = "on:" .. rid }) end
+        local off = function(rid) return selection.waitLease({ ev = "action", id = "main", act = "sync-wait", value = "off:" .. rid }) end
+        local none = { ok = true, state = "none" }
+        selection.applyLease(view, on("aaa"), now); selection.applyLease(view, on("bbb"), now)
+        now += 2000
+        selection.applyLease(view, on("aaa"), now) -- A renews
+        selection.applyLease(view, off("bbb"), now) -- B revokes
+        assert(selection.patience(view, now))
+        assert(selection.discoveryStep(0, true, none, selection.patience(view, now), true).action == "wait")
+        now += 6000
+        selection.applyLease(view, on("aaa"), now)
+        assert(selection.patience(view, now))
+        selection.applyLease(view, off("aaa"), now)
+        assert(not selection.patience(view, now))
+        assert(selection.discoveryStep(0, true, none, selection.patience(view, now), view.hadWait).action == "dormant")
+        assert(selection.applyLease(view, on("bbb"), now), "a renewal after dormancy changes patience")
+        assert(selection.patience(view, now))
+        assert(selection.waitLease({ ev = "action", id = "main", act = "sync-wait", value = "on:bad id!" }) == nil)
+        assert(selection.waitLease({ ev = "action", id = "main", act = "sync-wait", value = "on" }).rid == "legacy")
+    end},
+    {"the lease map is bounded; the oldest lease is dropped first", function()
+        local view = {}
+        for i = 1, 20 do selection.applyLease(view, { on = true, rid = "r" .. i }, 1000 + i) end
+        local n = 0
+        for _ in view.leases do n += 1 end
+        assert(selection.MAX_LEASES == 16 and n == 16, n)
+        assert(view.leases.r1 == nil and view.leases.r4 == nil and view.leases.r5 ~= nil and view.leases.r20 ~= nil)
+        local saved = selection.saveState({ discover_pid = 9, discover_birth = "b", leases = view.leases })
+        assert(#saved.leases == 16)
+    end},
+    {"a restored waiting view restores its leases fresh and stays patient, then lapses to dormant", function()
+        local valid = function() return false end
+        local saved = selection.saveState({ discover_pid = 4242, discover_birth = "linux:boot:111", discovery_label = "L", leases = { aaa = 1, bbb = 2 } })
+        local r = selection.restoreState(saved, valid, 50000)
+        assert(r.hadWait == true and r.leases.aaa == 50000 and r.leases.bbb == 50000)
+        assert(selection.patience(r, 50000 + 15000) and not selection.patience(r, 50000 + 15001))
+        local none = selection.restoreState({ schema = 2, discover_pid = 4242, birth = "b" }, valid, 7000)
+        assert(selection.patience(none, 7000) and none.hadWait == true, "a save with no leases restarts one anonymous lease")
+        local bad = selection.restoreState({ schema = 2, discover_pid = 4242, birth = "b", leases = { "ok-1", "bad id", 5 } }, valid, 1)
+        assert(bad.leases["ok-1"] == 1 and bad.leases["bad id"] == nil)
     end},
 }
