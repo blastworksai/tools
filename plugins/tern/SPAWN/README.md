@@ -214,6 +214,7 @@ The host-owned launch state has a 120,000-byte ceiling (about 1.6 KB per launch)
 - A provider tab shows its icon while the provider is running; after it exits, the tab shows the shell icon again.
 - Native OMP needs a non-empty startup prompt; Tern's start API rejects blank ones ([tern-sdk#213](https://github.com/stencil-hq/tern-sdk/issues/213)).
 - Host restarts are recognised only on hosts whose daemon identity can be read (Linux). On other hosts the restart epoch is unverifiable, so only the pane rule applies: a launch settles when its pane is gone.
+- Model and effort need a command without backslashes: a Windows-style path such as `C:\Tools\claude.exe` reads two ways and is refused with them; use a launcher on PATH (for example `claude`) and put options in Arguments. Records without model or effort are unaffected.
 - `Running` means the process is alive. It does not prove the provider is signed in or its model is ready.
 
 ## Managed dispatch bridge (for ORCH+)

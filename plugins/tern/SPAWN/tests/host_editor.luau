@@ -488,6 +488,11 @@ do
  check(A.edit(state.binding,snapshot().config_revision,'replace-records',{records=with_review}),'review-required conflict fixture saved');refresh()
  definition.event(state,{ev='action',act='approve:selconf@'..state.snapshot.config_revision},cx)
  check(saved_record('selconf').review_required==true and state.notice:find('Remove one',1,true)~=nil,'Approve refuses a record that carries a duplicate flag: '..tostring(state.notice))
+ -- a backslash path whose two readings name different programs is refused on the host-editor save and approval road
+ local mismatch=clone(approve);mismatch.arguments={};mismatch.command='/tmp/codex\\claude.exe'
+ local with_mismatch=clone(snapshot().records);for index,item in ipairs(with_mismatch) do if item.id=='selconf' then with_mismatch[index]=mismatch end end
+ check(not A.edit(state.binding,snapshot().config_revision,'replace-records',{records=with_mismatch}),'host save/approval refuses /tmp/codex\\claude.exe under selectors')
+ check(saved_record('selconf').command=='claude','refused mismatch leaves the saved record exact')
  -- manual Setup JSON import refuses a new conflicting record at review
  local bad=record('selbad');bad.provider='claude';bad.command='claude';bad.account_label='Bad';bad.arguments={'--model','opus'};bad.model='sonnet';bad.model_selector=true
  definition.event(state,{ev='action',act='advanced-open'},cx)

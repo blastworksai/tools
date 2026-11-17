@@ -351,7 +351,7 @@ function Config.command_words(command: string, shell: string): ({string}?, strin
 	end
 	return Config.parse_arguments(command)
 end
-local AMBIGUOUS_COMMAND = "This command can be read two ways: as a Windows path and as shell words, and they name different programs or arguments. Remove the backslash, or put only the executable here and the options in Arguments."
+local AMBIGUOUS_COMMAND = "This command can be read two ways: as a Windows path and as shell words, and they name different programs or arguments. Remove the backslash, or put only the executable here and the options in Arguments. Model and effort need a command without backslashes; on Windows, use a launcher on PATH (e.g. claude) and put options in Arguments."
 local function same_words(left: {string}, right: {string}): boolean
 	if #left ~= #right then return false end
 	for index, word in ipairs(left) do
@@ -361,15 +361,14 @@ local function same_words(left: {string}, right: {string}): boolean
 end
 -- Both readings of a local command that selectors will be added to. Execution parses by the observed shell,
 -- which validation cannot know, so validation never picks one: it returns the words only when every reading
--- that can apply agrees, else nil and a refusal. A bare Windows path (one word, no arguments in either reading)
--- agrees: the shell reading adds no argument and no wrapper, so only the executable's spelling differs.
+-- that can apply agrees (byte-identical word lists), else nil and a refusal. There is no one-word exception:
+-- a backslash path can name a different program under each reading.
 local function selector_words(command: string): ({string}?, boolean)
 	local posix = Config.parse_arguments(command)
 	if not command:find("\\", 1, true) then return posix, false end
 	local windows = Config.command_words(command, "powershell")
 	if windows == nil then return posix, false end
 	if posix ~= nil and same_words(windows, posix) then return windows, false end
-	if posix ~= nil and #posix == 1 and #windows == 1 then return windows, false end
 	return nil, true
 end
 -- The launches a record can make: ordinary (command + arguments) and fresh. The second result is true when

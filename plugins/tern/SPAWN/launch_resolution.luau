@@ -33,12 +33,13 @@ end
 -- Model and effort flags come from the record's fields through one capability table.
 -- A record with neither field keeps its argv exactly. The flags go at the task slot (or the
 -- end), after any sudo wrapper, and move the slot so the task text still lands where it was set.
-local function derive(record: any, executable: string, argv: { string }, slot: number?): ({ string }, number?)
-	if not Config.selectors_active(record) then return argv, slot end
+local function derive(record: any, executable: string, argv: { string }, slot: number?): ({ string }, number?, string?)
+	if not Config.selectors_active(record) then return argv, slot, nil end
 	-- The CLI is the program this launch actually runs (a literal sudo is unwrapped), never the label.
 	local program, first = Config.program_of(executable, argv)
 	local key = Selectors.program_key(program)
-	if key == nil then return argv, slot end
+	-- A requested model or effort is never dropped silently: an unknown program refuses.
+	if key == nil then return argv, slot, "Model and effort need a known CLI (claude, codex, kimi, grok, agy, muse or omp). This launch runs " .. tostring(program or executable) .. "; clear model and effort, or run a known CLI." end
 	-- A flag the saved arguments already carry in the program's option region wins: never a second copy.
 	local region = Selectors.region(argv, first)
 	local model = if record.model_selector == true then record.model else nil
@@ -46,13 +47,15 @@ local function derive(record: any, executable: string, argv: { string }, slot: n
 	if model ~= nil and Selectors.duplicate(key, region, model, nil) then model = nil end
 	if effort ~= nil and Selectors.duplicate(key, region, nil, effort) then effort = nil end
 	local flags = Selectors.flags(key, model, effort)
-	if #flags == 0 then return argv, slot end
-	return Selectors.apply(argv, flags, slot, first)
+	if #flags == 0 then return argv, slot, nil end
+	local applied, moved = Selectors.apply(argv, flags, slot, first)
+	return applied, moved, nil
 end
 -- Fresh terminal argv with the derived flags and the matching task slot, for callers that
 -- insert the task themselves and compare what actually started.
 function Resolution.fresh_argv(record: any): ({ string }, number?)
-	return derive(record, record.fresh_executable or "", table.clone(record.fresh_arguments or {}), if record.backend == "native-agent" then nil else record.task_argument_index)
+	local argv, slot = derive(record, record.fresh_executable or "", table.clone(record.fresh_arguments or {}), if record.backend == "native-agent" then nil else record.task_argument_index)
+	return argv, slot
 end
 function Resolution.resolve(source: any, mode: string, shell: string): (any?, string?)
 	if mode ~= "ordinary" and mode ~= "fresh" then return nil, "Choose ordinary or fresh launch resolution explicitly" end
@@ -64,7 +67,9 @@ function Resolution.resolve(source: any, mode: string, shell: string): (any?, st
 		if not Resolution.fresh_available(record) then return nil, "No explicit fresh executable/argv contract for this record" end
 		if record.fresh_native_default then executable, argv = "omp", {} else executable, argv = record.fresh_executable, table.clone(record.fresh_arguments) end
 		if record.backend ~= "native-agent" then slot = record.task_argument_index end
-		argv, slot = derive(record, executable, argv, slot)
+		local derive_error
+		argv, slot, derive_error = derive(record, executable, argv, slot)
+		if derive_error ~= nil then return nil, derive_error end
 	else
 		if not nonblank(record.command) then return nil, "Review this account's launch command" end
 		local words, parse_error = Config.command_words(record.command, if record.backend == "ssh-command" then "posix" else shell)
@@ -72,7 +77,9 @@ function Resolution.resolve(source: any, mode: string, shell: string): (any?, st
 		executable = table.remove(words, 1)
 		argv = words
 		for _, argument in ipairs(record.arguments) do table.insert(argv, argument) end
-		argv = derive(record, executable, argv, nil)
+		local derive_error
+		argv, _, derive_error = derive(record, executable, argv, nil)
+		if derive_error ~= nil then return nil, derive_error end
 	end
 	return { record = record, executable = executable, arguments = argv, task_argument_index = slot }, nil
 end

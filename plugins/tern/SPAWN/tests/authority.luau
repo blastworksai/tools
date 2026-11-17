@@ -1113,7 +1113,7 @@ sections.stale_config = function()
 	local clash_reply = submit(authority, binding, request(binding, "importer", 5, after.config_revision, "import_records", { setup_run_id = "clash-setup", records = { clash }, manual = true, confirmed = true }))
 	check(not clash_reply.ok, "import of a new record whose flag is also in its arguments is refused")
 	same(snapshot(authority, binding).records, after.records, "refused selector conflict leaves the roster exact")
-	for index, command in ipairs({ "sudo -i -u other -- claude --add-dir /tmp/work\\ dir/claude.exe", "claude --model opus --add-dir /tmp/work\\ dir/claude.exe" }) do
+	for index, command in ipairs({ "sudo -i -u other -- claude --add-dir /tmp/work\\ dir/claude.exe", "claude --model opus --add-dir /tmp/work\\ dir/claude.exe", "/tmp/codex\\claude.exe" }) do
 		local ambiguous = record("ambiguous" .. index, { provider = "claude", command = command, model = "sonnet", model_selector = true })
 		local admitted = authority.request(binding, request(binding, "importer", 6, after.config_revision, "import_records", { setup_run_id = "ambiguous-setup" .. index, records = { ambiguous }, manual = true, confirmed = true }, { "importer/5" }), setup_context(binding))
 		check(not admitted, "import refuses a command that reads two ways under selectors: " .. command)

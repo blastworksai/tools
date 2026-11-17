@@ -685,7 +685,7 @@ do
  check(Config.selector_error(changed_model,held)~=nil,"changing the selector is a changed contract")
 
  -- one command reading for validation and launch
- check(Config.selector_error(record({provider="claude",command="C:\\Tools\\claude.exe",model_selector=true,model="sonnet"}))==nil,"a Windows executable path is identified as claude")
+ check(Config.selector_error(record({provider="claude",command="C:\\Tools\\claude.exe",model_selector=true,model="sonnet"}))~=nil,"a Windows path with a backslash cannot carry selectors (readings differ)")
  check(Config.record_cli(record({provider="claude",command="C:\\Tools\\claude.exe"}))=="claude","record_cli reads the Windows path literally")
  check(Config.selector_error(record({provider="claude",command="C:\\Tools\\claude.exe",arguments={"--model","a"},model_selector=true,model="sonnet"}))~=nil,"a Windows path launch still refuses a duplicate flag")
  -- login sudo passes the command through a second shell
@@ -706,7 +706,20 @@ do
  check(Config.validate_record(dup)==nil,"validate_record refuses the ambiguous duplicate command")
  check(Executor.render(dup,"/bin/bash","linux")==nil,"ordinary launch rendering refuses the ambiguous duplicate command")
  check(Config.validate_record(record({provider="claude",command="claude --add-dir /tmp/work\\ dir/claude.exe"}))~=nil,"without selectors the same command still validates")
- check(Config.validate_record(record({provider="claude",command="C:\\Tools\\claude.exe",model_selector=true,model="sonnet"}))~=nil,"a bare Windows path still validates with selectors")
+ check(Config.validate_record(record({provider="claude",command="C:\\Tools\\claude.exe",model_selector=true,model="sonnet"}))==nil,"a bare Windows path is refused with selectors (intended 0.7.0 change)")
+ check(Config.validate_record(record({provider="claude",command="C:\\Tools\\claude.exe"}))~=nil,"a bare Windows path without selectors is unchanged")
+ local mismatch=record({provider="claude",command="/tmp/codex\\claude.exe",model_selector=true,model="sonnet",effort="high"})
+ local mismatch_why=Config.selector_error(mismatch)
+ check(mismatch_why~=nil and mismatch_why:find("read two ways",1,true)~=nil,"one-word backslash path with different readings is refused: "..tostring(mismatch_why))
+ check(Config.validate_record(mismatch)==nil,"validate_record refuses /tmp/codex\\claude.exe under selectors")
+ check(Executor.render(mismatch,"/bin/bash","linux")==nil,"Executor.render refuses /tmp/codex\\claude.exe under selectors")
+ -- launch time: selectors never silently dropped on an unknown CLI (a record that bypassed validation)
+ local unknown=record({provider="claude",command="/tmp/codexclaude.exe",model_selector=true,model="sonnet"})
+ local real_validate=Config.validate_record
+ Config.validate_record=function(source) return source end -- bypass validation to reach the launch-time guard
+ local resolved,resolve_why=Resolution.resolve(unknown,"ordinary","posix")
+ Config.validate_record=real_validate
+ check(resolved==nil and resolve_why~=nil,"launch resolution refuses selectors on an unknown CLI: "..tostring(resolve_why))
 
 end
 
