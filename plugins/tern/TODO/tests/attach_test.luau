@@ -51,6 +51,17 @@ return {
         assert(#f.events==1 and f.events[1].pane==11,"confirmation never fired from Settings")
         assert(f.bound and f.bound.panel==11 and f.bound.target==10)
     end},
+    {"the view is told by event, just before the host resolves the split, whether to wait for a plan",function()
+        local f=fixture()
+        local order={}
+        local api={bind=function() table.insert(order,"bind") end,configure=function(cx,panel,target) table.insert(order,"configure:"..panel..":"..target) end,
+            plugin={id="todo"},json=tern.json,now=function()return 1 end,timer=function(_,fn)table.insert(f.timers,fn)end}
+        local controller=attach.new(api)
+        local original=f.cx.session.event
+        function f.cx.session:event(pane,event) table.insert(order,"event:"..event.act); original(self,pane,event) end
+        controller.start(f.cx,false,10);f.timers[1](f.cx)
+        assert(table.concat(order,",")=="bind,configure:11:10,event:confirm-selection",table.concat(order,","))
+    end},
     {"viewFor tells a view of this session from a view of another session in the same tab",function()
         local f=fixture()
         assert(f.controller.viewFor(f.cx,10,function() return nil end)=="none")

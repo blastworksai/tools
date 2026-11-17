@@ -520,11 +520,15 @@ def publish(path, read_plan, agent_pid):
     return {'ok':True,'state':record['state'],'publication':{'owner':identity,'pid':anchors[0]['pid'],'birth':anchors[0]['birth'],'parent_pid':anchors[-2]['pid'],'parent_birth':anchors[-2]['birth']}}
 
 
-def discover(parent):
+def discover(parent, parent_birth=None, with_identity=False):
     parent=int(parent);native=process(parent)
+    # A saved view names the process by PID and birth: a reused PID is another process and ends the wait.
+    if parent_birth is not None and native['birth']!=parent_birth:
+        raise ProcessEnded('the selected session has ended or changed')
+    extra={'parent_birth':native['birth']} if with_identity else {}
     base=root(); candidates=[]
     try: base.stat()
-    except FileNotFoundError: return {'ok':True,'state':'none'}
+    except FileNotFoundError: return {'ok':True,'state':'none',**extra}
     for folder in base.glob(PREFIX+'*'):
         identity=folder.name[len(PREFIX):]
         if not identity or len(identity)>100 or any(c not in '0123456789S-' for c in identity): continue
@@ -544,8 +548,8 @@ def discover(parent):
         except FileNotFoundError: continue
         if _valid(record,parent): candidates.append(record)
     if len(candidates)>1: raise ValueError('multiple live agent publications match this session')
-    if not candidates or candidates[0]['state']=='none': return {'ok':True,'state':'none'}
-    return {'ok':True,'state':'active','source':_source(candidates[0])}
+    if not candidates or candidates[0]['state']=='none': return {'ok':True,'state':'none',**extra}
+    return {'ok':True,'state':'active','source':_source(candidates[0]),**extra}
 
 
 def read_binding(source, read_plan):

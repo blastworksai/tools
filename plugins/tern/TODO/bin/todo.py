@@ -178,6 +178,8 @@ def main(argv=None):
         commands.add_parser('ancestry', help='show native caller process facts so the agent can identify its own durable process')
         discover = commands.add_parser('discover', help='resolve a publication on this native execution host')
         discover.add_argument('--parent-pid', required=True, type=int)
+        discover.add_argument('--parent-birth', help='the process birth this view saw; a different birth ends the wait')
+        discover.add_argument('--with-identity', action='store_true', help='also report the process birth')
         published = commands.add_parser('published', help='read only the plan of an already-bound publishing process')
         published.add_argument('--binding', required=True)
         template = commands.add_parser('template', help='print a block for the agent to place in its approved plan; never writes it')
@@ -194,7 +196,7 @@ def main(argv=None):
             elif args.command=='ancestry':
                 from process_identity import ancestors
                 result={'ok':True,'ancestors':ancestors(os.getppid())}
-            elif args.command=='discover': result=publication.discover(args.parent_pid)
+            elif args.command=='discover': result=publication.discover(args.parent_pid,args.parent_birth,args.with_identity)
             else: result=publication.read_binding(json.loads(args.binding),read_plan)
             print(json.dumps(result,ensure_ascii=True,separators=(',',':')))
         elif args.command == 'template':

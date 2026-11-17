@@ -11,6 +11,9 @@ export type AttachApi = {
     json: { encode: (value: any) -> string },
     -- Called once the view panel exists, so the window can remember which session it serves.
     bind: ((panel: number, target: number) -> ())?,
+    -- Called just before the host is asked to resolve the split: tells the view (a plain event, so it works whichever
+    -- machine the session runs on) whether to keep waiting for a plan that is not published yet.
+    configure: ((cx: WindowCx, panel: number, target: number) -> ())?,
 }
 export type Controller = {
     viewFor: (cx: WindowCx, target: number, boundTo: (panel: number) -> number?) -> (string, number?),
@@ -79,6 +82,7 @@ function attach.new(api: AttachApi): Controller
             end
             local layout = fresh.session:layout(origin.tab)
             if own and layout and fresh.session:focused() == target and binding.windowPair(layout.root, target, panel) then
+                if api.configure then api.configure(fresh, panel, target) end
                 fresh.session:event(panel, { ev = "action", id = "main", act = "confirm-selection", value = request })
             elseif api.now() < deadline then api.timer(100, confirm)
             else

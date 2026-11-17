@@ -164,4 +164,24 @@ return {
         legacy.checkpoints[2].id="count"
         assert(view.validate(legacy)~=nil,"a real duplicate is still refused")
     end},
+    {"every state of the view carries the one hidden plan-sync node, and only when asked",function()
+        local function nodes(card)
+            local found={}
+            local function visit(n) if type(n)=="table" then if n.p and n.p.key=="plan-sync" then table.insert(found,n) end for _,c in n.children or {} do visit(c) end end end
+            visit(card.main)
+            return found
+        end
+        local p=detailed()
+        local simple={schema=1,plan_id="plan-0123456789ab",title="S",current=nil,checkpoints={{id="a",text="A",state="pending"}}}
+        for _,card in {
+            view.draw(ui,p,"src",nil,"now","TEXT"),
+            view.draw(ui,simple,"src",nil,"now","TEXT"),
+            view.draw(ui,nil,"src",nil,nil,"TEXT"),
+            view.draw(ui,nil,"src","broken",nil,"TEXT"),
+        } do
+            local found=nodes(card)
+            assert(#found==1 and found[1].text=="TEXT" and found[1].p.role=="todo.plan" and found[1].p.hidden==true)
+        end
+        assert(#nodes(view.draw(ui,p,"src",nil,"now"))==0)
+    end},
 }

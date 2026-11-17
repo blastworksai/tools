@@ -82,7 +82,11 @@ function settings.hiddenCount(s: any, candidates: { any }): number
     for _, c in candidates do if c.live then live += 1 end end
     return live - #settings.eligible(s, candidates)
 end
-settings.OTHER_HOST = "This session runs on another host. Its plan is published into that host's own plugin store, and board sync reads this window's store, so no board is made for it today."
+-- Multi-device: the window reads a remote session's plan through the plan view's own pane (lib/plan_read). When it
+-- cannot, the one honest thing to say is the limit.
+settings.REMOTE_ONLY = "Board sync for this session works only when the session runs on this window's machine."
+settings.TOO_LARGE = "This plan is too large to sync to the board."
+settings.REMOTE_TOO_LARGE = "This plan is too large to read from another machine. " .. settings.REMOTE_ONLY
 settings.NO_VIEW = "No plan view is open for this session. Pick the session again under Attach to to open it."
 -- Should a plan view that finds no published plan keep waiting (instead of closing with a notice)?
 -- Only when sync is on and this view serves the attached session: the plan may be published later, and the
@@ -91,14 +95,16 @@ function settings.waitsForPublication(s: any, bound: any): boolean
     return settings.mode(s) == "glitch-sync" and type(bound) == "number" and s.attach == bound
 end
 -- Why sync is not producing a board right now, in plain words; nil when nothing blocks it.
--- target: the attached candidate (or nil); view: "none" | "match" | "other"; planSeen: this window holds a valid plan.
-function settings.syncBlocker(s: any, target: any, view: string, planSeen: boolean): string?
+-- target: the attached candidate (or nil); view: "none" | "match" | "other"; planSeen: this window holds a valid plan;
+-- why: with no plan, "too_large" (the view's plan passes the node cap) or "unreadable" (the view's node could not be read).
+function settings.syncBlocker(s: any, target: any, view: string, planSeen: boolean, why: string?): string?
     if not s.attach then return "Sync is on. Pick a session under Attach to; its plan goes to the board." end
     if not target then return "The attached session is no longer open. Pick another under Attach to." end
     if view == "other" then return "This tab's plan view serves another session. Select the session again in TODO Settings." end
     if view ~= "match" then return settings.NO_VIEW end
     if not planSeen then
-        if target.remote then return settings.OTHER_HOST end
+        if why == "too_large" then return if target.remote then settings.REMOTE_TOO_LARGE else settings.TOO_LARGE end
+        if why == "unreadable" and target.remote then return settings.REMOTE_ONLY end
         return "Waiting for this session to publish a plan (/glitch-plan)."
     end
     return nil

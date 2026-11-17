@@ -223,6 +223,29 @@ class ProcessIdentityContract(unittest.TestCase):
         self.assertIs(envelope.get('terminal'), True)
         self.assertIn('ended', envelope.get('error', ''))
 
+    def test_discover_binds_a_saved_wait_to_the_process_birth_it_saw(self):
+        child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])
+        self.addCleanup(child.wait)
+        self.addCleanup(child.kill)
+        with tempfile.TemporaryDirectory(prefix='todo-birth-') as scratch:
+            env = dict(os.environ, TODO_PUBLICATION_ROOT=str(Path(scratch)/'metadata'))
+            def run(*extra):
+                result = subprocess.run([sys.executable, '-I', str(READER), 'discover', '--parent-pid', str(child.pid), *extra],
+                                        capture_output=True, text=True, timeout=6, env=env)
+                return result.returncode, json.loads(result.stdout)
+            # Without the flag the answer is byte-for-byte what it was.
+            self.assertEqual(run(), (0, {'ok': True, 'state': 'none'}))
+            code, first = run('--with-identity')
+            birth = first['parent_birth']
+            self.assertEqual((code, first['state'], birth), (0, 'none', process_identity.process(child.pid)['birth']))
+            # The same process still answers; a PID that now names another process ends the wait.
+            self.assertEqual(run('--with-identity', '--parent-birth', birth)[1]['state'], 'none')
+            code, reused = run('--with-identity', '--parent-birth', birth+'x')
+            self.assertEqual(code, 1)
+            self.assertIs(reused.get('ok'), False)
+            self.assertIs(reused.get('terminal'), True)
+            self.assertIn('ended or changed', reused.get('error', ''))
+
     def test_linux_permission_failure_remains_an_access_error(self):
         with patch('process_identity.sys.platform', 'linux'), \
                 patch('process_identity.Path.read_text', side_effect=PermissionError(13, 'inspection denied')):

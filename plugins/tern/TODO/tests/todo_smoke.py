@@ -216,7 +216,7 @@ tern.timer(100, captureFixtureState)
             else:
                 evidence['visual_qualification']='Native module/controller contracts only; no window or live agent queried.'
             evidence['runtime']=command('--version').strip()
-            evidence['source_hashes']={name:hashlib.sha256((ROOT/name).read_bytes()).hexdigest() for name in ['host.luau','window.luau','lib/plan_view.luau','lib/polling.luau','lib/attach.luau','lib/selected_binding.luau','lib/host_selection.luau','lib/native_cli.luau','lib/settings.luau','lib/board_sync.luau','lib/plan_publish.luau','bin/todo.py','bin/publication.py','bin/process_identity.py']}
+            evidence['source_hashes']={name:hashlib.sha256((ROOT/name).read_bytes()).hexdigest() for name in ['host.luau','window.luau','lib/plan_view.luau','lib/polling.luau','lib/attach.luau','lib/selected_binding.luau','lib/host_selection.luau','lib/native_cli.luau','lib/settings.luau','lib/board_sync.luau','lib/plan_publish.luau','lib/plan_read.luau','lib/sync_pane.luau','lib/sync_status.luau','bin/todo.py','bin/publication.py','bin/process_identity.py']}
             evidence['passed']=True
         except Exception as error:
             evidence['passed']=False;evidence['error']=str(error)

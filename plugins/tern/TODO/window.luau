@@ -8,6 +8,7 @@ local board_claim = require("./lib/board_claim")
 local sync_gate = require("./lib/sync_gate")
 local sync_status = require("./lib/sync_status")
 local sync_pane = require("./lib/sync_pane")
+local plan_read = require("./lib/plan_read")
 local KIND = tern.plugin.id .. ".list"
 local TITLE = "TODO Settings"
 local SYNC_MS, RETRY_MS = 2000, 10000
@@ -16,7 +17,14 @@ local controller = require("./lib/attach").new({
     plugin = { id = tern.plugin.id },
     now = function(): number return tern.now() end,
     timer = function(ms: number, callback: (WindowCx?) -> ()) return tern.timer(ms, callback) end,
+    -- The window remembers which session each view serves; both halves of this binding live in this window's own store.
     bind = function(panel: number, target: number) pcall(tern.kv.set, "target/" .. string.format("%.0f", panel), target) end,
+    -- The view's host may run on another machine: it is told by event, never through this machine's plugin store.
+    configure = function(cx: WindowCx, panel: number, target: number)
+        if settings.waitsForPublication(settings.load(tern.kv), target) then
+            pcall(function() cx.session:event(panel, { ev = "action", id = "main", act = "sync-wait", value = "on" }) end)
+        end
+    end,
     json = { encode = function(value: any): string return tern.json.encode(value) end },
 })
 
@@ -63,6 +71,7 @@ local function paint(cx: any, pane: number)
     local eligible = settings.eligible(s, cands)
     if s.attach and not settings.isEligible(s, eligible, s.attach) then s.attach = nil; settings.save(tern.kv, s, before) end
     cx.canvas:set(pane, { view = settings.draw(tern.ui, s, eligible, syncStatus.get(), drawExtra(s, cands)) })
+    syncStatus.drawn()
 end
 local function settingsPane(cx: any): number?
     for _, info in cx.canvas:list() do
@@ -74,10 +83,12 @@ syncStatus = sync_status.new({
     timer = function(ms: number, fn: (any?) -> ()) return tern.timer(ms, fn) end,
     pane = settingsPane,
     paint = paint,
+    -- Everything the pane draws besides the status text: a repaint is due whenever this or the status changes.
+    key = function(): string return boardMemo.renderKey(settings.load(tern.kv)) end,
 })
 -- The board this window last synced, shown only while its session is still attached; one key (the attachment)
 -- keeps it, the revision gate and the repaint in step (lib/sync_pane).
-boardMemo = sync_pane.new({ gate = synced, repaint = function() syncStatus.repaint() end })
+boardMemo = sync_pane.new({ gate = synced, repaint = function() syncStatus.check() end, clear = function() syncStatus.set(nil) end })
 local function openSettings(cx: any)
     local pane = settingsPane(cx)
     if pane then paint(cx, pane); cx.layout:focus(pane); return end
@@ -89,7 +100,7 @@ local function openSettings(cx: any)
         about = "TODO settings: which session to attach to, Glitch integration, the board and plan sync. A click changes TODO's own settings only; it never edits a plan.",
         focus = true,
     })
-    if not opened then cx:toast("error", "Could not open TODO Settings.", problem) end
+    if opened then syncStatus.drawn() else cx:toast("error", "Could not open TODO Settings.", problem) end
 end
 
 -- Native board: open or select Tern's ordinary board in the attached pane's folder.
@@ -159,20 +170,30 @@ tern.on("canvas_action", function(ev: any, cx: any): boolean?
     return true
 end)
 
--- Glitch -> Tern board sync, one way. Reads the plan the TODO view already validated
--- (published through plugin KV by host.luau); never reads or writes the canonical plan.
+-- Glitch -> Tern board sync, one way. Reads the plan the TODO view validated, from the view's own hidden node
+-- (lib/plan_read), so a session on another machine works like a local one; never reads or writes the canonical plan.
+local function sendWait(cx: any, panel: number, on: boolean)
+    pcall(function() cx.session:event(panel, { ev = "action", id = "main", act = "sync-wait", value = if on then "on" else "off" }) end)
+end
 local function syncTick(cx: any)
-    if busy then return end
     local s = settings.load(tern.kv)
-    if settings.mode(s) ~= "glitch-sync" then return end
     local target = attached(cx, s)
-    boardMemo.observe(s, target)
+    -- Before any early return (sync turned off elsewhere, a pass still running): derive what is shown from the
+    -- settings as they are now, and repaint when what is drawn differs.
+    local on = boardMemo.start(s, target)
     local view, panel = "none", nil
     if target then view, panel = viewPanel(cx, target.pane) end
-    local entry: any = nil
-    if view == "match" and panel then entry = tern.kv.get("plan/" .. string.format("%.0f", panel)) end
+    local read: any = nil
+    if panel and view ~= "none" then
+        read = plan_read.plan(cx, panel, KIND, function(text: string): any return tern.json.decode(text) end)
+        -- The view's host may be on another machine: it keeps waiting for a plan only while this window says so.
+        local desired = on and view == "match"
+        if read.wait ~= nil and read.wait ~= desired then sendWait(cx, panel, desired) end
+    end
+    if not on or busy then return end
+    local entry: any = if read and read.kind == "entry" then read.entry else nil
     -- Never silent: say what is missing instead of leaving the pane as it was.
-    local verdict, detail = boardMemo.decide(s, target, view, panel, entry, tern.now(), tern.now() - failedAt < RETRY_MS)
+    local verdict, detail = boardMemo.decide(s, target, view, panel, read, tern.now(), tern.now() - failedAt < RETRY_MS)
     if verdict == "blocked" then syncStatus.set(detail); return end
     if verdict == "skip" then return end
     local key = detail :: string

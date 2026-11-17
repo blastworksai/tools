@@ -255,8 +255,10 @@ end
 -- coming back with nothing to read while the window still believes it serves the session.
 function selection.saveState(state: any): any
     if state.source and state.plan_id then return { schema = 2, source = state.source, plan_id = state.plan_id } end
-    if type(state.discover_pid) == "number" then
-        return { schema = 2, discover_pid = state.discover_pid, label = state.discovery_label }
+    -- The PID alone is not an identity: it may name another process after a restart. Save the process birth the
+    -- helper reported with it; without one nothing is saved, because nothing could be re-validated.
+    if type(state.discover_pid) == "number" and type(state.discover_birth) == "string" then
+        return { schema = 2, discover_pid = state.discover_pid, birth = state.discover_birth, label = state.discovery_label }
     end
     return { schema = 2 }
 end
@@ -267,10 +269,18 @@ function selection.restoreState(saved: any, sourceValid: (any) -> boolean): any
         return { source = saved.source, plan_id = saved.plan_id, bindingSaved = true }
     end
     if type(saved.discover_pid) == "number" and saved.discover_pid > 0 and saved.discover_pid % 1 == 0
+        and type(saved.birth) == "string" and #saved.birth >= 1 and #saved.birth <= 160
         and (saved.label == nil or (type(saved.label) == "string" and #saved.label <= 400)) then
-        return { discover_pid = saved.discover_pid, discovery_label = saved.label }
+        return { discover_pid = saved.discover_pid, discover_birth = saved.birth, discovery_label = saved.label }
     end
     return {}
+end
+-- The window's wait-for-a-plan request to a plan view: true / false, or nil for any other event.
+function selection.waitRequest(event: any): boolean?
+    if type(event) ~= "table" or event.ev ~= "action" or event.id ~= "main" or event.act ~= "sync-wait" then return nil end
+    if event.value == "on" then return true end
+    if event.value == "off" then return false end
+    return nil
 end
 -- Has this view anything to read? (A view with neither a source nor a session to discover just shows its notice.)
 function selection.hasWork(state: any): boolean

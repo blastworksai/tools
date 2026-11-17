@@ -7,7 +7,6 @@ local selection = require("./lib/host_selection")
 local plan_publish = require("./lib/plan_publish")
 local status_prompt = require("./status/status_prompt")
 local board_claim = require("./lib/board_claim")
-local settings = require("./lib/settings")
 local KIND = tern.plugin.id .. ".list"
 
 type Source = {
@@ -28,6 +27,8 @@ type State = {
     selection: Selection?,
     selectionStarted: boolean?,
     discover_pid: number?,
+    discover_birth: string?,
+    patient: boolean?,
     discovery_label: string?,
     finished: boolean?,
     reading: boolean?,
@@ -50,8 +51,9 @@ local function sourceValid(source: any): boolean
         and (source.ssh == nil or (type(source.ssh) == "string" and source.ssh ~= ""))
         and (source.label == nil or (type(source.label) == "string" and #source.label <= 400))
 end
--- The window half reads the last plan this panel validated from plugin KV (board sync).
--- A failed read, a closed panel or a fresh start removes it (lib/plan_publish), so a window never syncs a stale success.
+-- The window half reads the last plan this panel validated from this view's own hidden node (board sync), through
+-- the pane surface, so it works whichever machine the session runs on (lib/plan_publish, lib/plan_read).
+-- A failed read, a closed panel or a fresh start removes it, so a window never syncs a stale success.
 local function publish(state: State, plan: Plan?) state.publisher.publish(plan) end
 local function live(state: State): boolean
     if state.finished or instances[state.panel] ~= state then publish(state, nil); return false end
@@ -67,7 +69,10 @@ local function redraw(state: State, cx: BlockCx)
 end
 local function helperArguments(state: State, helper: string): { string }
     if state.discover_pid then
-        return { "-I", helper, "discover", "--parent-pid", tostring(state.discover_pid) }
+        local arguments = { "-I", helper, "discover", "--parent-pid", tostring(state.discover_pid), "--with-identity" }
+        -- The process this view first saw: a PID reused by another process ends the wait instead of being followed.
+        if state.discover_birth then table.insert(arguments, "--parent-birth"); table.insert(arguments, state.discover_birth) end
+        return arguments
     end
     local source = state.source
     if source == nil then return {} end
@@ -96,10 +101,12 @@ local function refresh(state: State, cx: BlockCx)
         end
         local decoded, envelope = pcall(tern.json.decode, result.stdout or "")
         if state.discover_pid then
-            -- Sync on and this view serves the attached session: wait for the plan instead of closing.
-            local okBound, bound = pcall(tern.kv.get, "target/" .. string.format("%.0f", state.panel))
-            local patient = settings.waitsForPublication(settings.load(tern.kv), if okBound then bound else nil)
-            local outcome = selection.discoveryStep(result.status, decoded, envelope, patient)
+            if decoded and type(envelope) == "table" and type(envelope.parent_birth) == "string" and state.discover_birth == nil then
+                state.discover_birth = envelope.parent_birth
+            end
+            -- Sync on and this view serves the attached session: wait for the plan instead of closing. The window says
+            -- so by event (it holds the settings and the binding; this machine's plugin store is not the window's).
+            local outcome = selection.discoveryStep(result.status, decoded, envelope, state.patient == true)
             if outcome.action == "wait" then
                 state.plan = nil; publish(state, nil); state.error = outcome.message; state.failures = 0
                 -- Persist the waiting view (selection.saveState) so a plugin reload resumes it.
@@ -166,7 +173,7 @@ end
 
 tern.block.define("list", {
     init = function(cx: BlockCx, args: { string }, saved: any): State
-        local state: State = { panel = cx.pane, publisher = plan_publish.new(tern.kv, tern.json.encode, tern.now, cx.pane) }
+        local state: State = { panel = cx.pane, publisher = plan_publish.new(tern.json.encode, tern.now) }
         -- A plan an earlier instance of this panel published must not outlive a reload.
         state.publisher.clear()
         -- A saved binding can only read the same selected source and stable plan id.
@@ -175,7 +182,9 @@ tern.block.define("list", {
         if restored.source then
             state.source = restored.source; state.plan_id = restored.plan_id; state.bindingSaved = true
         elseif restored.discover_pid then
-            state.discover_pid = restored.discover_pid; state.discovery_label = restored.discovery_label; state.waitSaved = true
+            -- Only a view that waits for a plan is saved with a session, so it was patient; the window says otherwise by event.
+            state.discover_pid = restored.discover_pid; state.discover_birth = restored.discover_birth
+            state.discovery_label = restored.discovery_label; state.waitSaved = true; state.patient = true
         elseif saved == nil and type(args[1]) == "string" then
             local ok, source = pcall(tern.json.decode, args[1])
             if ok and type(source) == "table" and source.mode == "selected" and type(source.request) == "string" and #source.request <= 128 and type(source.label) == "string" and #source.label <= 400 then
@@ -201,13 +210,19 @@ tern.block.define("list", {
     view = function(state: State, _cx: BlockCx): BlockView
         local selected = state.source
         local source = if selected then (if selected.label then selected.label .. ": " elseif selected.ssh then "SSH " .. selected.ssh .. ": " else "Local: ") .. selected.path else ""
-        return view.draw(tern.ui, state.plan, source, state.error, state.updated)
+        return view.draw(tern.ui, state.plan, source, state.error, state.updated, state.publisher.payload(state.patient == true))
     end,
     title = function(state: State): string return if state.plan then state.plan.title else "TODO" end,
     save = function(state: State): any
         return selection.saveState(state)
     end,
     event = function(state: State, event: UiEvent, cx: BlockCx)
+        -- The window tells this view whether to keep waiting for a plan; it is shown back in the plan-sync node.
+        local wait = selection.waitRequest(event)
+        if wait ~= nil then
+            if live(state) and state.patient ~= wait then state.patient = wait; redraw(state, cx) end
+            return
+        end
         local selected = state.selection
         if not selected or state.selectionStarted or not live(state) or event.ev ~= "action" or event.id ~= "main" or event.act ~= "confirm-selection" or event.value ~= selected.request then return end
         state.selectionStarted = true

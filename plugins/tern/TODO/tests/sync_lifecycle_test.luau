@@ -26,44 +26,53 @@ local function pane(kv, memo)
     memo.observe(s, if s.attach then true else nil)
     return table.concat(flat(settings.draw(ui, s, settings.eligible(s, cands), nil, memo.extra(s, cands))), "\n")
 end
--- A bare memo wired the way window.luau wires it (gate + repaint request).
-local function newMemo() return sync_pane.new({ gate = sync_gate.new(), repaint = function() end }) end
+-- A bare memo wired the way window.luau wires it (gate + repaint request + status clear).
+local function newMemo() return sync_pane.new({ gate = sync_gate.new(), repaint = function() end, clear = function() end }) end
 local function change(kv, act, value)
     local before = settings.load(kv)
     settings.save(kv, settings.apply(before, act, value, cands), before)
 end
 
 -- A window as window.luau builds it: the real status line (zero-delay repaint timers), memo and gate, a pane that
--- draws from them, and `tick` running the same observe -> decide -> succeeded path as syncTick.
+-- draws from them, and `tick` running the same start -> decide -> succeeded path as syncTick. `async = true` leaves a
+-- pass pending (as the real board claim and read are) until `finish`, so a repaint can run before it completes.
 local function windowFixture(kv)
-    local f = { timers = {}, paints = 0, shown = "" }
+    local f = { timers = {}, paints = 0, shown = "", async = false }
     f.gate = sync_gate.new()
+    f.memo = sync_pane.new({ gate = f.gate, repaint = function() f.status.check() end, clear = function() f.status.set(nil) end })
     f.status = sync_status.new({
         timer = function(_ms, fn) table.insert(f.timers, fn) end,
         pane = function(_cx) return 9 end,
-        paint = function(_cx, _pane) f.paints += 1; f.draw() end,
+        paint = function(_cx, _pane) f.paints += 1; f.draw(); f.status.drawn() end,
+        key = function() return f.memo.renderKey(settings.load(kv)) end,
     })
-    f.memo = sync_pane.new({ gate = f.gate, repaint = function() f.status.repaint() end })
     function f.draw()
         local s = settings.load(kv)
         f.shown = table.concat(flat(settings.draw(ui, s, settings.eligible(s, cands), f.status.get(), f.memo.extra(s, cands))), "\n")
     end
     function f.flush() local queued = f.timers; f.timers = {}; for _, fn in queued do fn({}) end end
     f.syncs = 0
-    -- session -> { panel, entry } for sessions whose view is open; a session missing from it has no view.
+    function f.finish()
+        local p = f.pending; f.pending = nil; f.busy = false
+        f.memo.succeeded(p.attach, p.key, p.rev, p.gen, 0, p.now, p.title, "/boards/" .. p.title .. ".md")
+        f.status.set("Board \"" .. p.title .. "\" synced \xc2\xb7 0 change(s)")
+    end
+    -- session -> { panel, entry | read, title } for sessions whose view is open; a session missing from it has no view.
     function f.tick(views, now)
         local s = settings.load(kv)
-        if settings.mode(s) ~= "glitch-sync" then return end
         local target
         for _, c in settings.eligible(s, cands) do if c.pane == s.attach then target = c end end
-        f.memo.observe(s, target)
+        local on = f.memo.start(s, target) -- before every early return, as syncTick does
+        if not on or f.busy then return end
         local v = target and views[target.pane]
-        local verdict, detail = f.memo.decide(s, target, if v then "match" else "none", if v then v.panel else nil, if v then v.entry else nil, now, false)
+        local read = if v then (v.read or (if v.entry then { kind = "entry", entry = v.entry } else { kind = "waiting" })) else nil
+        local verdict, detail = f.memo.decide(s, target, if v then "match" else "none", if v then v.panel else nil, read, now, false)
         if verdict == "blocked" then f.status.set(detail); return end
         if verdict == "skip" then return end
         f.syncs += 1
-        f.memo.succeeded(target.pane, detail, v.entry.rev, f.gate.generation(), 0, now, v.title, "/boards/" .. v.title .. ".md")
-        f.status.set("Board \"" .. v.title .. "\" synced · 0 change(s)")
+        f.pending = { attach = target.pane, key = detail, rev = v.entry.rev, gen = f.gate.generation(), now = now, title = v.title }
+        f.busy = true
+        if not f.async then f.finish() end
     end
     return f
 end
@@ -124,7 +133,7 @@ return {
     end},
     {"a view saved while it waits for a plan resumes waiting after a reload", function()
         local valid = function(src) return type(src) == "table" and type(src.path) == "string" end
-        local waiting = { discover_pid = 4242, discovery_label = "Local · host" }
+        local waiting = { discover_pid = 4242, discover_birth = "linux:boot:1", discovery_label = "Local · host" }
         local saved = selection.saveState(waiting)
         assert(saved.schema == 2 and saved.discover_pid == 4242 and saved.label == "Local · host")
         local restored = selection.restoreState(saved, valid)
@@ -135,8 +144,8 @@ return {
         -- a plan found later saves its source, which wins over the waiting record
         local found = selection.restoreState(selection.saveState({ source = { path = "/p.md" }, plan_id = "plan-abc", discover_pid = 4242 }), valid)
         assert(found.source and found.plan_id == "plan-abc" and found.discover_pid == nil)
-        for _, bad in { { schema = 2, discover_pid = -1 }, { schema = 2, discover_pid = 1.5 }, { schema = 2, discover_pid = "9" },
-            { schema = 2, discover_pid = 5, label = 7 }, { schema = 1, discover_pid = 5 } } do
+        for _, bad in { { schema = 2, discover_pid = -1, birth = "b" }, { schema = 2, discover_pid = 1.5, birth = "b" }, { schema = 2, discover_pid = "9", birth = "b" },
+            { schema = 2, discover_pid = 5, birth = "b", label = 7 }, { schema = 1, discover_pid = 5, birth = "b" } } do
             assert(not selection.hasWork(selection.restoreState(bad, valid)), "an unusable save must restore nothing")
         end
     end},
@@ -199,5 +208,69 @@ return {
         local s = { glitch = true, sync = true, board = true, attach = 1 }
         local msg = settings.syncBlocker(s, cand(1, false), "none", false)
         assert(msg:find("Pick the session again under Attach to", 1, true), msg)
+    end},
+    {"an async pass whose status text repeats still repaints the restored board (repaint ran before it finished)", function()
+        local kv = sharedKv()
+        change(kv, "glitch", "on"); change(kv, "sync", "on"); change(kv, "attach", "1")
+        local a = windowFixture(kv)
+        local x = { panel = 10, entry = { rev = 1, plan = planOf("plan-0123456789ab") }, title = "Plan X" }
+        a.tick({ [1] = x }, 1000); a.flush(); a.draw()
+        assert(a.shown:find("Open board", 1, true) and a.status.get():find("synced", 1, true), a.shown)
+        -- another window's work makes this one forget its board while the success text stays on screen
+        a.memo.forget(); a.status.check(); a.flush()
+        assert(not a.shown:find("Open board", 1, true), "the forgotten board was not repainted away")
+        local same = a.status.get()
+        -- the pass runs again, asynchronously: the repaint happens BEFORE it completes
+        a.gate.reset(); a.async = true
+        a.tick({ [1] = x }, 2000)
+        a.flush()
+        assert(a.pending and not a.shown:find("Open board", 1, true))
+        a.finish() -- records the board; the status text is identical to the one already shown
+        assert(a.status.get() == same, "the test needs an identical success text")
+        a.flush()
+        assert(a.shown:find("Board: Plan X", 1, true) and a.shown:find("Open board", 1, true), "restored board stayed invisible: " .. a.shown)
+    end},
+    {"another window turning sync Off clears the board and the success line here at the next tick, even mid-pass", function()
+        local kv = sharedKv()
+        change(kv, "glitch", "on"); change(kv, "sync", "on"); change(kv, "attach", "1")
+        local a = windowFixture(kv)
+        local x = { panel = 10, entry = { rev = 1, plan = planOf("plan-0123456789ab") }, title = "Plan X" }
+        a.tick({ [1] = x }, 1000); a.flush(); a.draw()
+        assert(a.shown:find("Open board", 1, true) and a.shown:find("synced", 1, true))
+        change(kv, "sync", "off") -- window B
+        a.tick({ [1] = x }, 2000); a.flush()
+        assert(not a.shown:find("Open board", 1, true) and not a.shown:find("synced", 1, true) and not a.shown:find("Plan X", 1, true), a.shown)
+        assert(a.status.get() == nil)
+        -- turning it on again repeats the pass: nothing remembered from before survives
+        change(kv, "sync", "on")
+        local before = a.syncs
+        a.tick({ [1] = x }, 2500)
+        assert(a.syncs == before + 1, "the revision gate still matched after sync was off")
+        -- and with a pass still running (busy returns early too)
+        a.async = true; a.gate.reset(); a.tick({ [1] = x }, 3000)
+        assert(a.busy)
+        change(kv, "sync", "off")
+        a.tick({ [1] = x }, 4000); a.flush()
+        assert(not a.shown:find("Open board", 1, true) and a.status.get() == nil, a.shown)
+    end},
+    {"a restored waiting view is bound to the process it saw: the saved birth is required and a reused PID has another birth", function()
+        local valid = function(src) return type(src) == "table" and type(src.path) == "string" end
+        local saved = selection.saveState({ discover_pid = 4242, discover_birth = "linux:boot:111", discovery_label = "L" })
+        assert(saved.discover_pid == 4242 and saved.birth == "linux:boot:111")
+        local restored = selection.restoreState(saved, valid)
+        assert(restored.discover_pid == 4242 and restored.discover_birth == "linux:boot:111")
+        assert(selection.saveState({ discover_pid = 4242 }).discover_pid == nil, "a PID without its process birth must not be saved")
+        for _, bad in { { schema = 2, discover_pid = 4242 }, { schema = 2, discover_pid = 4242, birth = 7 }, { schema = 2, discover_pid = 4242, birth = "" },
+            { schema = 2, discover_pid = 4242, birth = string.rep("b", 161) } } do
+            assert(not selection.hasWork(selection.restoreState(bad, valid)), "an unbound waiting save must restore nothing")
+        end
+    end},
+    {"the wait request is only the window's sync-wait action, with on or off", function()
+        assert(selection.waitRequest({ ev = "action", id = "main", act = "sync-wait", value = "on" }) == true)
+        assert(selection.waitRequest({ ev = "action", id = "main", act = "sync-wait", value = "off" }) == false)
+        for _, bad in { { ev = "action", id = "main", act = "sync-wait", value = "yes" }, { ev = "action", id = "main", act = "confirm-selection", value = "on" },
+            { ev = "action", id = "other", act = "sync-wait", value = "on" }, { ev = "key", id = "main", act = "sync-wait", value = "on" } } do
+            assert(selection.waitRequest(bad) == nil)
+        end
     end},
 }

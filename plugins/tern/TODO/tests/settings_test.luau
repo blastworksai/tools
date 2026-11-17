@@ -127,8 +127,12 @@ return {
         local local1, remote2 = cand(1, false), cand(2, true)
         assert(settings.syncBlocker(s, local1, "none", false):find("plan view", 1, true))
         assert(settings.syncBlocker(s, local1, "match", false):find("/glitch-plan", 1, true))
-        local r = settings.syncBlocker(s, remote2, "match", false)
-        assert(r:find("another host", 1, true) and r:find("own plugin store", 1, true) and not r:find("never", 1, true), r)
+        -- A remote session waits like a local one; only a view that cannot be read says the limit.
+        assert(settings.syncBlocker(s, remote2, "match", false):find("/glitch-plan", 1, true))
+        assert(settings.syncBlocker(s, remote2, "match", false, "unreadable") == settings.REMOTE_ONLY)
+        assert(settings.syncBlocker(s, local1, "match", false, "unreadable"):find("/glitch-plan", 1, true), "a local session never gets the remote limit")
+        assert(settings.syncBlocker(s, local1, "match", false, "too_large") == settings.TOO_LARGE)
+        assert(settings.syncBlocker(s, remote2, "match", false, "too_large") == settings.REMOTE_TOO_LARGE)
         assert(settings.syncBlocker(s, local1, "match", true) == nil)
     end},
 }
