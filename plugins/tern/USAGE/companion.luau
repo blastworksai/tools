@@ -18,7 +18,7 @@ local MESSAGES: { [string]: string } = {
 	spawn_failed = "The local USAGE launcher could not start.",
 	decode_failed = "The local USAGE launcher returned an invalid response.",
 	response_too_large = "The local USAGE response exceeds its size limit.",
-	python_required = "Python 3.11 or newer was not found; install it (python.org or Homebrew), then open USAGE Setup.",
+	python_required = "Python 3.11 or newer was not found.",
 	unsupported_platform = "The USAGE companion is unavailable on this platform.",
 	configuration_unavailable = "USAGE could not read its interpreter configuration.",
 	-- Companion service errors.
@@ -105,9 +105,18 @@ local closed = false
 local bootstrapNote: Failure? = nil
 local autoInstallTried = false
 
+-- The install road differs by operating system, so the one sentence after the fixed text does too.
+local PYTHON_ROAD: { [string]: string } = {
+	windows = " Install it from python.org, then open USAGE Setup.",
+	macos = " Install it from python.org or with Homebrew, then open USAGE Setup.",
+	linux = " Install it with venv support using your distribution's package manager, then open USAGE Setup.",
+}
+
 local function failure(code: string): Failure
 	local known = if MESSAGES[code] ~= nil then code else "internal_error"
-	return { code = known, message = MESSAGES[known] }
+	local message = MESSAGES[known]
+	if known == "python_required" then message ..= PYTHON_ROAD[tern.runtime.os] or " Open USAGE Setup." end
+	return { code = known, message = message }
 end
 
 local function validPin(value: any): boolean

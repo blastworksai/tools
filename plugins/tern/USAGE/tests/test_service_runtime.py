@@ -274,6 +274,25 @@ class RuntimeBoundaryTests(unittest.TestCase):
                 runtime._stage_environment(self.root, release, stamp, True)
         self.assertEqual(caught.exception.state, "dependency_install_failed")
 
+    def test_a_refused_cleanup_after_a_refused_release_write_keeps_the_primary_error(self):
+        private_directory(self.root)
+        stamp = runtime.source_stamp()
+        real_rmtree = shutil.rmtree
+
+        def refuse_write(path, content):
+            raise runtime.RuntimeFailure("setup_required", "release_write_refused")
+
+        def refuse_cleanup(path, *args, **kwargs):
+            if not kwargs.get("ignore_errors") and kwargs.get("onerror") is None and kwargs.get("onexc") is None:
+                raise PermissionError(13, "Access is denied")
+            return real_rmtree(path, *args, **kwargs)
+
+        with patch.object(runtime, "write_private", side_effect=refuse_write), \
+                patch.object(runtime.shutil, "rmtree", side_effect=refuse_cleanup):
+            with self.assertRaises(runtime.RuntimeFailure) as caught:
+                runtime._stage_release(self.root, runtime._sources(PACKAGE), stamp)
+        self.assertEqual(caught.exception.state, "release_write_refused")
+
     def test_no_console_detached_spawn_options_on_current_platform(self):
         options = runtime.detached_options()
         self.assertTrue(options["close_fds"])

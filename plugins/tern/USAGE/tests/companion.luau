@@ -474,6 +474,9 @@ test("Windows Store python stubs and missing interpreters end in python_required
 	end
 	f.advance(0)
 	oneError(calls, "python_required")
+	local text = calls[1].err.message
+	assert(text:find("Python 3.11 or newer was not found.", 1, true) and text:find("Install it from python.org, then open USAGE Setup.", 1, true))
+	assert(not text:find("Homebrew", 1, true))
 end)
 
 test("macOS also tries the python.org framework install", function()
@@ -498,7 +501,21 @@ test("macOS never probes bare python3 (Apple's shim opens an installer dialog); 
 	f.advance(0)
 	assert(#f.processes == 3)
 	oneError(calls, "python_required")
-	assert(calls[1].err.message:find("install it", 1, true) and calls[1].err.message:find("USAGE Setup", 1, true))
+	assert(calls[1].err.message:find("Python 3.11 or newer was not found.", 1, true))
+	assert(calls[1].err.message:find("Install it from python.org or with Homebrew, then open USAGE Setup.", 1, true))
+end)
+
+test("Linux python_required names the distribution package manager and venv support", function()
+	local f = fixture({ os = "linux" })
+	local calls, done = recorder()
+	f.bridge.request("inventory", {}, done)
+	for index = 1, 8 do
+		if f.processes[index] ~= nil then f.raw(index, "", 1) end
+	end
+	f.advance(0)
+	oneError(calls, "python_required")
+	assert(calls[1].err.message:find("Python 3.11 or newer was not found.", 1, true))
+	assert(calls[1].err.message:find("Install it with venv support using your distribution's package manager, then open USAGE Setup.", 1, true))
 end)
 
 test("configured executable is validated without default fallback", function()

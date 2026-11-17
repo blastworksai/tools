@@ -239,8 +239,12 @@ def _stage_release(root: Path, files: dict[str, bytes], stamp: dict) -> Path:
         os.replace(staging, destination)
         return destination
     finally:
-        if staging.exists():
-            shutil.rmtree(staging)
+        # Best effort: a refused cleanup must never replace the primary error.
+        try:
+            if staging.exists():
+                shutil.rmtree(staging)
+        except OSError:
+            pass
 
 
 def _python(environment: Path) -> Path:
