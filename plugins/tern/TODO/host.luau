@@ -29,6 +29,7 @@ type State = {
     discover_pid: number?,
     discover_birth: string?,
     patient: boolean?,
+    patientAt: number?,
     discovery_label: string?,
     finished: boolean?,
     reading: boolean?,
@@ -106,7 +107,7 @@ local function refresh(state: State, cx: BlockCx)
             end
             -- Sync on and this view serves the attached session: wait for the plan instead of closing. The window says
             -- so by event (it holds the settings and the binding; this machine's plugin store is not the window's).
-            local outcome = selection.discoveryStep(result.status, decoded, envelope, state.patient == true)
+            local outcome = selection.discoveryStep(result.status, decoded, envelope, selection.patience(state, tern.now()))
             if outcome.action == "wait" then
                 state.plan = nil; publish(state, nil); state.error = outcome.message; state.failures = 0
                 -- Persist the waiting view (selection.saveState) so a plugin reload resumes it.
@@ -184,7 +185,7 @@ tern.block.define("list", {
         elseif restored.discover_pid then
             -- Only a view that waits for a plan is saved with a session, so it was patient; the window says otherwise by event.
             state.discover_pid = restored.discover_pid; state.discover_birth = restored.discover_birth
-            state.discovery_label = restored.discovery_label; state.waitSaved = true; state.patient = true
+            state.discovery_label = restored.discovery_label; state.waitSaved = true; state.patient = true; state.patientAt = tern.now()
         elseif saved == nil and type(args[1]) == "string" then
             local ok, source = pcall(tern.json.decode, args[1])
             if ok and type(source) == "table" and source.mode == "selected" and type(source.request) == "string" and #source.request <= 128 and type(source.label) == "string" and #source.label <= 400 then
@@ -210,7 +211,7 @@ tern.block.define("list", {
     view = function(state: State, _cx: BlockCx): BlockView
         local selected = state.source
         local source = if selected then (if selected.label then selected.label .. ": " elseif selected.ssh then "SSH " .. selected.ssh .. ": " else "Local: ") .. selected.path else ""
-        return view.draw(tern.ui, state.plan, source, state.error, state.updated, state.publisher.payload(state.patient == true))
+        return view.draw(tern.ui, state.plan, source, state.error, state.updated, state.publisher.payload(selection.patience(state, tern.now())))
     end,
     title = function(state: State): string return if state.plan then state.plan.title else "TODO" end,
     save = function(state: State): any
@@ -220,7 +221,11 @@ tern.block.define("list", {
         -- The window tells this view whether to keep waiting for a plan; it is shown back in the plan-sync node.
         local wait = selection.waitRequest(event)
         if wait ~= nil then
-            if live(state) and state.patient ~= wait then state.patient = wait; redraw(state, cx) end
+            if live(state) then
+                local changed = state.patient ~= wait
+                state.patient = wait; state.patientAt = tern.now()
+                if changed then redraw(state, cx) end
+            end
             return
         end
         local selected = state.selection

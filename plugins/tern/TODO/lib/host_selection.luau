@@ -245,6 +245,15 @@ end
 -- later is found without the owner selecting the session again. Every other outcome is unchanged.
 selection.WAIT_MS = 5000
 selection.WAITING = "No plan is published for this session yet. This view keeps looking and opens the plan when it appears."
+-- A wait the window does not renew ends by itself: the window renews every tick (2 s), the host drops patience after
+-- PATIENCE_MS (15 s, about 7 missed renewals), so a closed or crashed window never leaves a host polling forever.
+selection.PATIENCE_MS = 15000
+function selection.patience(state: any, now: number): boolean
+    if state.patient == true and (type(state.patientAt) ~= "number" or now - state.patientAt > selection.PATIENCE_MS) then
+        state.patient = false
+    end
+    return state.patient == true
+end
 function selection.discoveryStep(status: number, decoded: boolean, envelope: any, patient: boolean): any
     local outcome = selection.discoveryOutcome(status, decoded, envelope)
     if outcome.action == "none" and patient then return { action = "wait", message = selection.WAITING } end

@@ -4,6 +4,7 @@ local sync_pane = require("../lib/sync_pane")
 local selection = require("../lib/host_selection")
 local sync_gate = require("../lib/sync_gate")
 local sync_status = require("../lib/sync_status")
+local wait_requests = require("../lib/wait_requests")
 local function cand(pane, remote) return { pane = pane, label = "p" .. pane, remote = remote, live = true } end
 local cands = { cand(1, false), cand(2, false) }
 local ui = {
@@ -179,11 +180,17 @@ return {
     {"an unpublished session with sync On keeps its plan view waiting and syncs once the plan is published", function()
         local kv = sharedKv()
         change(kv, "glitch", "on"); change(kv, "sync", "on"); change(kv, "attach", "1")
-        kv.set("target/77", 1) -- the window bound view panel 77 to session 1
         local none = { ok = true, state = "none" }
-        local function patient() return settings.waitsForPublication(settings.load(kv), kv.get("target/77")) end
+        -- The host never reads the plugin store: its view waits only because the window's event said so.
+        local view = { patient = false }
+        local now = 1000
+        local waits = wait_requests.new(function(panel, on) view.patient = selection.waitRequest({ ev = "action", id = "main", act = "sync-wait", value = if on then "on" else "off" }); view.patientAt = now end)
+        local function patient() return selection.patience(view, now) end
+        assert(not patient(), "a view that was never told to wait must not wait")
+        waits.sync(77)
         assert(patient())
         for _ = 1, 5 do
+            now += 5000; waits.sync(77)
             local step = selection.discoveryStep(0, true, none, patient())
             assert(step.action == "wait" and step.message:find("keeps looking", 1, true), step.action)
         end
@@ -272,5 +279,49 @@ return {
             { ev = "action", id = "other", act = "sync-wait", value = "on" }, { ev = "key", id = "main", act = "sync-wait", value = "on" } } do
             assert(selection.waitRequest(bad) == nil)
         end
+    end},
+    {"switching the attachment revokes the wait on the previous view, and its host stops discovery", function()
+        -- Two views, each with its own host state; events are the only road from window to host.
+        local hosts, now, discoveries = { [10] = { patient = false }, [20] = { patient = false } }, 1000, { [10] = 0, [20] = 0 }
+        local waits = wait_requests.new(function(panel, on)
+            local h = hosts[panel]; h.patient = selection.waitRequest({ ev = "action", id = "main", act = "sync-wait", value = if on then "on" else "off" }); h.patientAt = now
+        end)
+        local none = { ok = true, state = "none" }
+        local function hostTick(panel)
+            if selection.discoveryStep(0, true, none, selection.patience(hosts[panel], now)).action == "wait" then discoveries[panel] += 1 end
+        end
+        waits.sync(10) -- session A, sync On
+        hostTick(10); assert(discoveries[10] == 1)
+        waits.sync(20) -- another tab selects session B: the window now wants B's view only
+        assert(hosts[10].patient == false and hosts[20].patient == true)
+        for _ = 1, 3 do now += 2000; waits.sync(20); hostTick(10); hostTick(20) end
+        assert(discoveries[10] == 1, "A kept polling after the switch: " .. discoveries[10])
+        assert(discoveries[20] == 3)
+        waits.sync(nil) -- sync turned Off for B
+        now += 2000; hostTick(20); assert(discoveries[20] == 3)
+    end},
+    {"sync turned Off, and an attachment that becomes nil, each revoke the wait", function()
+        local log = {}
+        local waits = wait_requests.new(function(panel, on) table.insert(log, panel .. (if on then ":on" else ":off")) end)
+        waits.sync(10); waits.sync(10)
+        assert(table.concat(log, ",") == "10:on,10:on", table.concat(log, ",")) -- renewed every tick
+        waits.sync(nil) -- sync Off
+        assert(log[#log] == "10:off" and #waits.asked() == 0)
+        waits.sync(nil); assert(#log == 3, "revoke is sent once")
+        waits.sync(11); waits.revokeAll() -- attachment became nil / window teardown
+        assert(log[#log] == "11:off" and #waits.asked() == 0, table.concat(log, ","))
+    end},
+    {"a host whose window stops renewing drops patience after 15 s, so it never polls forever", function()
+        local view = { patient = true, patientAt = 1000 }
+        assert(selection.PATIENCE_MS == 15000)
+        assert(selection.patience(view, 1000 + 15000))
+        assert(not selection.patience(view, 1000 + 15001) and view.patient == false)
+        local none = { ok = true, state = "none" }
+        assert(selection.discoveryStep(0, true, none, selection.patience(view, 99999)).action == "none")
+        local unstamped = { patient = true } -- a patient flag with no stamp is not trusted
+        assert(not selection.patience(unstamped, 5))
+        local renewed = { patient = true, patientAt = 1000 }
+        renewed.patientAt = 14000 -- the window renewed
+        assert(selection.patience(renewed, 20000))
     end},
 }

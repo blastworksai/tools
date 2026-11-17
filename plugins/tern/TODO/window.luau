@@ -8,10 +8,18 @@ local board_claim = require("./lib/board_claim")
 local sync_gate = require("./lib/sync_gate")
 local sync_status = require("./lib/sync_status")
 local sync_pane = require("./lib/sync_pane")
+local wait_requests = require("./lib/wait_requests")
 local plan_read = require("./lib/plan_read")
 local KIND = tern.plugin.id .. ".list"
 local TITLE = "TODO Settings"
 local SYNC_MS, RETRY_MS = 2000, 10000
+
+-- Every view this window asked to wait is tracked, so a move of the attachment, sync Off or a closed session revokes it.
+local function sendWait(cx: any, panel: number, on: boolean)
+    pcall(function() cx.session:event(panel, { ev = "action", id = "main", act = "sync-wait", value = if on then "on" else "off" }) end)
+end
+local waitCx: any = nil
+local waits = wait_requests.new(function(panel: number, on: boolean) if waitCx then sendWait(waitCx, panel, on) end end)
 
 local controller = require("./lib/attach").new({
     plugin = { id = tern.plugin.id },
@@ -22,7 +30,7 @@ local controller = require("./lib/attach").new({
     -- The view's host may run on another machine: it is told by event, never through this machine's plugin store.
     configure = function(cx: WindowCx, panel: number, target: number)
         if settings.waitsForPublication(settings.load(tern.kv), target) then
-            pcall(function() cx.session:event(panel, { ev = "action", id = "main", act = "sync-wait", value = "on" }) end)
+            waitCx = cx; waits.sync(panel)
         end
     end,
     json = { encode = function(value: any): string return tern.json.encode(value) end },
@@ -172,9 +180,6 @@ end)
 
 -- Glitch -> Tern board sync, one way. Reads the plan the TODO view validated, from the view's own hidden node
 -- (lib/plan_read), so a session on another machine works like a local one; never reads or writes the canonical plan.
-local function sendWait(cx: any, panel: number, on: boolean)
-    pcall(function() cx.session:event(panel, { ev = "action", id = "main", act = "sync-wait", value = if on then "on" else "off" }) end)
-end
 local function syncTick(cx: any)
     local s = settings.load(tern.kv)
     local target = attached(cx, s)
@@ -184,12 +189,14 @@ local function syncTick(cx: any)
     local view, panel = "none", nil
     if target then view, panel = viewPanel(cx, target.pane) end
     local read: any = nil
+    local want: number? = nil
     if panel and view ~= "none" then
         read = plan_read.plan(cx, panel, KIND, function(text: string): any return tern.json.decode(text) end)
-        -- The view's host may be on another machine: it keeps waiting for a plan only while this window says so.
-        local desired = on and view == "match"
-        if read.wait ~= nil and read.wait ~= desired then sendWait(cx, panel, desired) end
+        -- The view's host may be on another machine: it keeps waiting for a plan only while this window says so, every
+        -- tick (a lease). Any view asked earlier that is not this one is revoked below.
+        if on and view == "match" then want = panel end
     end
+    waitCx = cx; waits.sync(want)
     if not on or busy then return end
     local entry: any = if read and read.kind == "entry" then read.entry else nil
     -- Never silent: say what is missing instead of leaving the pane as it was.

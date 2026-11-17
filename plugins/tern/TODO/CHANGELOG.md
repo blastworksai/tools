@@ -13,6 +13,7 @@
 - Fix: a waiting plan view that is restored after a restart is bound to the process it first saw (PID and birth time, reported by the helper), not to the PID alone. A PID reused by another session ends the wait with a notice instead of showing an unrelated plan or polling forever. The helper gains `discover --with-identity` and `--parent-birth`; its default answer is unchanged.
 - Fix: the README no longer says "At most one is active"; it matches the several-active rule.
 - Fix: with Glitch Off, when only sessions on other hosts are open, the list says that the board needs a session on this computer and how many were left out, instead of "No eligible session is open for this mode."
+- Fix: a plan view that waits for a plan stops waiting when you move the attachment to another session, turn sync Off or close the attached session, and a view whose window stops asking for 15 seconds stops on its own, so no view polls forever.
 - The Glitch Off control reads "Show the session's folder as a Tern Board?" instead of a bare "Board", so it is not mistaken for the Glitch sync setting.
 - Turning sync on while a plan view is attached starts syncing on the next tick; the status is cleared whenever sync turns off or the attached session changes.
 
