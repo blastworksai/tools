@@ -159,18 +159,19 @@ class RuntimeBoundaryTests(unittest.TestCase):
             self.assertIn(argument, command)
         self.assertNotIn("shell", options)
         self.assertEqual(options["stdin"], subprocess.DEVNULL)
-        self.assertEqual(options["stdout"], subprocess.DEVNULL)
-        self.assertEqual(options["stderr"], subprocess.PIPE)
+        self.assertEqual(options["stdout"], subprocess.PIPE)
+        self.assertEqual(options["stderr"], subprocess.STDOUT)
         self.assertEqual(options["env"]["TMPDIR"], str(self.root / "tmp"))
         self.assertEqual(list((self.root / "environments").iterdir()), [])
 
-    def _failed_pip(self, stderr):
+    def _failed_pip(self, output, step="pip"):
         private_directory(self.root)
         stamp = runtime.source_stamp()
         release = runtime._stage_release(self.root, runtime._sources(PACKAGE), stamp)
 
         def run(argv, **kwargs):
-            return subprocess.CompletedProcess(argv, 1 if "pip" in argv else 0, b"", stderr)
+            failing = "venv" in argv if step == "venv" else "pip" in argv
+            return subprocess.CompletedProcess(argv, 1 if failing else 0, output, None)
 
         with patch.object(runtime.subprocess, "run", side_effect=run):
             with self.assertRaises(runtime.RuntimeFailure) as caught:
@@ -195,6 +196,14 @@ class RuntimeBoundaryTests(unittest.TestCase):
         self.assertEqual(self._failed_pip(b"THESE PACKAGES DO NOT MATCH THE HASHES").state, "dependency_hash_mismatch")
         self.assertEqual(self._failed_pip(b"The virtual environment was not created successfully because "
                                           b"ensurepip is not available").state, "python_venv_unavailable")
+        # Debian/Ubuntu print this explanation on stdout of the venv step itself.
+        debian = (b"The virtual environment was not created successfully because ensurepip is not\n"
+                  b"available.  On Debian/Ubuntu systems, you need to install the python3-venv\n"
+                  b"package using the following command.\n\n    apt install python3.14-venv\n\n"
+                  b"Failing command: /x/bin/python\n")
+        venv = self._failed_pip(debian, step="venv")
+        self.assertEqual(venv.state, "python_venv_unavailable")
+        self.assertNotIn("apt", json.dumps(venv.public()))
         self.assertEqual(self._failed_pip(b"something unknown").state, "dependency_install_failed")
         self.assertEqual(self._failed_pip(None).state, "dependency_install_failed")
         # Only a package pin shape ever becomes a field.

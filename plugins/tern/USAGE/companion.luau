@@ -86,7 +86,7 @@ local STATES: { [string]: string } = {
 	start_timeout = "The USAGE companion process did not become ready in time. Open USAGE Diagnostics.",
 }
 local INSTALLING = "USAGE is installing its private dependencies for the first time; this can take a few minutes."
-type Failure = { code: string, message: string, specific: boolean? }
+type Failure = { code: string, message: string, specific: boolean?, state: string? }
 type Callback = (any?, Failure?, any?) -> ()
 type Job = {
 	generation: number, deadline: number, callback: Callback, done: boolean,
@@ -126,7 +126,7 @@ local function failureOf(code: string, value: any): Failure
 		text = string.format("Python %s has no prebuilt wheel for %s. Install Python 3.12, then choose Select existing Python interpreter in USAGE Setup (usage_python).",
 			value.python, value.package)
 	end
-	return { code = base.code, message = text, specific = true }
+	return { code = base.code, message = text, specific = true, state = value.state }
 end
 
 local function finish(job: Job, value: any?, err: Failure?, cx: any?)
@@ -374,7 +374,13 @@ function companion.ensure(callback: Callback, options: any?)
 	job.callback = function(value: any?, err: Failure?, cx: any?)
 		if value ~= nil then bootstrapNote = nil
 		elseif err ~= nil and err.code ~= "cancelled" then
-			bootstrapNote = if err.specific then err else nil
+			-- A check that did not try to install reports "consent required" whenever no environment
+			-- exists; that must not replace the cause of the install that did fail.
+			if not install and err.state == "dependency_consent_required" and bootstrapNote ~= nil then
+				err = bootstrapNote
+			else
+				bootstrapNote = if err.specific then err else nil
+			end
 		end
 		inner(value, err, cx)
 	end

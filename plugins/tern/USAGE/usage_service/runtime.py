@@ -290,9 +290,9 @@ _WHEEL = (re.compile(r"No matching distribution found for (" + _PIN + ")"),
           re.compile(r"Could not find a version that satisfies the requirement (" + _PIN + ")"))
 
 
-def _classify_setup_failure(stderr: bytes | None) -> tuple[str, dict]:
-    """Map a failed venv/pip child's stderr to a fixed state. Raw text never leaves this function."""
-    text = (stderr or b"")[-65536:].decode("utf-8", "replace")
+def _classify_setup_failure(output: bytes | None) -> tuple[str, dict]:
+    """Map a failed venv/pip child's output to a fixed state. Raw text never leaves this function."""
+    text = (output or b"")[-65536:].decode("utf-8", "replace")
     if "ensurepip" in text or "python3-venv" in text or "python3-full" in text:
         return "python_venv_unavailable", {}
     if "DO NOT MATCH THE HASHES" in text:
@@ -309,14 +309,15 @@ def _classify_setup_failure(stderr: bytes | None) -> tuple[str, dict]:
 
 def _run_setup(argv: list[str], root: Path, timeout: int) -> None:
     try:
-        result = subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                stderr=subprocess.PIPE, cwd=root, env=_child_environment(root),
+        # Debian's venv explains a missing ensurepip on STDOUT, so classify both streams.
+        result = subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT, cwd=root, env=_child_environment(root),
                                 close_fds=True, timeout=timeout, check=False,
                                 **({"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}))
     except (OSError, subprocess.SubprocessError):
         raise RuntimeFailure("setup_required", "dependency_install_failed") from None
     if result.returncode:
-        state, detail = _classify_setup_failure(getattr(result, "stderr", None))
+        state, detail = _classify_setup_failure(getattr(result, "stdout", None))
         raise RuntimeFailure("setup_required", state, detail)
 
 

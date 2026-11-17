@@ -629,4 +629,35 @@ test("failure states use fixed text and only a checked package pin", function()
 	assert(unknown[1].err.message == "USAGE setup is required.")
 end)
 
+test("a collector poll that does not install keeps the failed install's cause", function()
+	local f = fixture({ context = "host" })
+	local calls, done = recorder()
+	f.bridge.set_client("host", "host")
+	f.bridge.ensure(done, { auto_install = true })
+	f.probe()
+	f.raw(2, real.json.encode({ ok = false, error = { code = "setup_required", message = "SECRET" },
+		state = "dependency_network_failed" }), 1)
+	local network = calls[1].err.message
+	assert(calls[1].err.code == "setup_required" and network ~= "USAGE setup is required.")
+	-- The next collector tick checks without installing; the service answers consent required.
+	local poll, pollDone = recorder()
+	f.bridge.ensure(pollDone, { auto_install = true })
+	f.advance(0)
+	assert(real.json.decode(f.processes[#f.processes].opts.stdin).install_dependencies == false)
+	f.raw(#f.processes, real.json.encode({ ok = false, error = { code = "setup_required", message = "SECRET" },
+		state = "dependency_consent_required" }), 1)
+	assert(#poll == 1 and poll[1].err.message == network, "the poll must keep the install failure: " .. tostring(poll[1].err.message))
+	local later, laterDone = recorder()
+	f.bridge.request("diagnostics", {}, laterDone)
+	f.raw(#f.processes, real.json.encode({ ok = false, error = { code = "companion_unavailable", message = "SECRET" } }), 1)
+	assert(later[1].err.message == network, "later requests keep it too")
+	-- An explicit Setup attempt replaces it.
+	local setup, setupDone = recorder()
+	f.bridge.ensure(setupDone, { install_dependencies = true })
+	f.advance(0)
+	f.raw(#f.processes, real.json.encode({ ok = false, error = { code = "setup_required", message = "SECRET" },
+		state = "dependency_hash_mismatch" }), 1)
+	assert(setup[1].err.message ~= network, "a new attempt replaces the cause")
+end)
+
 return "PASS " .. tostring(tests) .. " companion asynchronous boundary fixtures"
