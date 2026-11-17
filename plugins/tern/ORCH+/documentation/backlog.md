@@ -49,3 +49,11 @@ It must not erase uncertainty about what the previous controller did.
 
 Let the person choose the model and the effort level, not only the provider and account.
 The provider's real capabilities and the saved launch configuration stay authoritative.
+
+## 8. Tern-native usage when USAGE is not installed
+
+Tern 0.9.22 shows its own usage statistics for some providers in the widget bar.
+When USAGE is not installed, offer Tern's own usage for those providers instead of showing usage as unavailable.
+USAGE stays the recommended path, because it reports usage per account across many accounts, which Tern's own statistics do not.
+First find out which providers and which data Tern exposes to plugins.
+Tracked as SKILLS-195.
