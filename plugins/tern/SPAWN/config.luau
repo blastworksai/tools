@@ -351,12 +351,42 @@ function Config.command_words(command: string, shell: string): ({string}?, strin
 	end
 	return Config.parse_arguments(command)
 end
--- The launches a record can make: ordinary (command + arguments) and fresh.
-local function launch_modes(record: any): { any }
+local AMBIGUOUS_COMMAND = "This command can be read two ways: as a Windows path and as shell words, and they name different programs or arguments. Remove the backslash, or put only the executable here and the options in Arguments."
+local function same_words(left: {string}, right: {string}): boolean
+	if #left ~= #right then return false end
+	for index, word in ipairs(left) do
+		if right[index] ~= word then return false end
+	end
+	return true
+end
+-- Both readings of a local command that selectors will be added to. Execution parses by the observed shell,
+-- which validation cannot know, so validation never picks one: it returns the words only when every reading
+-- that can apply agrees, else nil and a refusal. A bare Windows path (one word, no arguments in either reading)
+-- agrees: the shell reading adds no argument and no wrapper, so only the executable's spelling differs.
+local function selector_words(command: string): ({string}?, boolean)
+	local posix = Config.parse_arguments(command)
+	if not command:find("\\", 1, true) then return posix, false end
+	local windows = Config.command_words(command, "powershell")
+	if windows == nil then return posix, false end
+	if posix ~= nil and same_words(windows, posix) then return windows, false end
+	if posix ~= nil and #posix == 1 and #windows == 1 then return windows, false end
+	return nil, true
+end
+-- The launches a record can make: ordinary (command + arguments) and fresh. The second result is true when
+-- the ordinary command reads two ways under active selectors.
+local function launch_modes(record: any): ({ any }, boolean)
 	local modes = {}
+	local ambiguous = false
 	if type(record.command) == "string" and nonblank(record.command) then
-		local words = Config.command_words(record.command, if record.backend == "ssh-command" then "posix" else "powershell")
-		if words == nil then words = Config.parse_arguments(record.command) end
+		local words
+		if record.backend == "ssh-command" then
+			words = Config.parse_arguments(record.command)
+		elseif Config.selectors_active(record) then
+			words, ambiguous = selector_words(record.command)
+		else
+			words = Config.command_words(record.command, "powershell")
+			if words == nil then words = Config.parse_arguments(record.command) end
+		end
 		if words ~= nil and words[1] ~= nil then
 			local argv = {}
 			for index = 2, #words do table.insert(argv, words[index]) end
@@ -369,7 +399,7 @@ local function launch_modes(record: any): { any }
 	elseif record.fresh_executable ~= nil then
 		table.insert(modes, { name = "fresh", executable = record.fresh_executable, argv = record.fresh_arguments or {} })
 	end
-	return modes
+	return modes, ambiguous
 end
 function Config.selectors_active(record: any): boolean
 	return record.model_selector == true or record.effort ~= nil
@@ -393,7 +423,9 @@ function Config.selector_identity_error(record: any): string?
 	end
 	local provider_key = Selectors.provider_key(record.provider)
 	local seen
-	for _, mode in ipairs(launch_modes(record)) do
+	local modes, ambiguous = launch_modes(record)
+	if ambiguous then return AMBIGUOUS_COMMAND end
+	for _, mode in ipairs(modes) do
 		if basename(mode.executable) == "sudo" then
 			local _, _, login = Config.parse_sudo(mode.argv)
 			if login then return "Model and effort cannot be added to a sudo -i or -s launch: the target's login shell reads the arguments a second time. Remove -i or -s and set the OS user, so SPAWN's own login wrapper enters the login shell." end
@@ -420,7 +452,7 @@ end
 -- launch's own option region (the program's arguments up to its own `--`).
 local function selector_contract(record: any): string
 	local parts = { tostring(record.model_selector == true and record.model or ""), tostring(record.effort or "") }
-	for _, mode in ipairs(launch_modes(record)) do
+	for _, mode in ipairs((launch_modes(record))) do
 		local program, first = Config.program_of(mode.executable, mode.argv)
 		table.insert(parts, mode.name .. ":" .. tostring(program) .. ":" .. table.concat(Selectors.region(mode.argv, first), "\31"))
 	end
@@ -434,7 +466,7 @@ function Config.selector_error(record: any, previous: any?): string?
 	local why = Config.selector_identity_error(record)
 	if why ~= nil then return why end
 	if previous ~= nil and Config.selectors_active(previous) and selector_contract(previous) == selector_contract(record) then return nil end
-	for _, mode in ipairs(launch_modes(record)) do
+	for _, mode in ipairs((launch_modes(record))) do
 		local program, first = Config.program_of(mode.executable, mode.argv)
 		local key = Selectors.program_key(program)
 		local model = if record.model_selector == true then record.model else nil

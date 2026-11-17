@@ -695,6 +695,18 @@ do
   check(Config.selector_error(record({provider="claude",command="sudo",arguments={flag,"-u","other","--","claude"}}))==nil,"sudo "..flag.." without selectors stays valid")
  end
  check(Config.selector_error(record({provider="claude",command="sudo",arguments={"-u","other","--","claude"},model_selector=true,model="sonnet"}))==nil,"plain sudo keeps selectors (SPAWN quotes it)")
+ -- round 3: a command that reads two ways (Windows path vs POSIX words) is refused, never validated under one reading
+ local sudo_i=record({provider="claude",command="sudo -i -u other -- claude --add-dir /tmp/work\\ dir/claude.exe",model_selector=true,model="$HOME"})
+ local two_ways=Config.selector_error(sudo_i)
+ check(two_ways~=nil and two_ways:find("read two ways",1,true)~=nil,"sudo -i hidden behind a backslash path is refused as ambiguous: "..tostring(two_ways))
+ check(Config.validate_record(sudo_i)==nil,"validate_record refuses the ambiguous sudo -i command")
+ check(Executor.render(sudo_i,"/bin/bash","linux")==nil,"ordinary launch rendering refuses the ambiguous sudo -i command")
+ local dup=record({provider="claude",command="claude --model opus --add-dir /tmp/work\\ dir/claude.exe",model_selector=true,model="sonnet"})
+ check(Config.selector_error(dup)~=nil,"typed --model behind a backslash path is not hidden from the duplicate scan")
+ check(Config.validate_record(dup)==nil,"validate_record refuses the ambiguous duplicate command")
+ check(Executor.render(dup,"/bin/bash","linux")==nil,"ordinary launch rendering refuses the ambiguous duplicate command")
+ check(Config.validate_record(record({provider="claude",command="claude --add-dir /tmp/work\\ dir/claude.exe"}))~=nil,"without selectors the same command still validates")
+ check(Config.validate_record(record({provider="claude",command="C:\\Tools\\claude.exe",model_selector=true,model="sonnet"}))~=nil,"a bare Windows path still validates with selectors")
 
 end
 
