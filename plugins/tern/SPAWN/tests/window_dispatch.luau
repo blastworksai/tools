@@ -1286,6 +1286,12 @@ if section==nil or section=='window' then
     local chunk=assert(loadstring(runtime.fs.read(root..'/'..name..'.luau'),name))
     setfenv(chunk,setmetatable({tern=fake,require=load},{__index=environment}))
     stubs[name]=chunk()
+    if name=='managed_route_window' then
+     -- Observe the real module: how many approvals were captured and how many were cancelled.
+     local real_capture,real_cancel=stubs[name].capture_reviewed,stubs[name].cancel_reviewed
+     stubs[name].capture_reviewed=function(...)local captured,why=real_capture(...);if captured then world.captures=(world.captures or 0)+1 end;return captured,why end
+     stubs[name].cancel_reviewed=function(captured,...)if captured then world.cancels=(world.cancels or 0)+1 end;return real_cancel(captured,...) end
+    end
    end
    return stubs[name] or load_pure(name)
   end
@@ -1365,6 +1371,10 @@ if section==nil or section=='window' then
     end
     local a=world.authority
     if opts.root=='main.spawn-state' then
+     -- Numbered state reads (counted from a test's reset) place a change between two exact steps.
+     world.state_reads=(world.state_reads or 0)+1
+     local state_hook=if world.state_hooks then world.state_hooks[world.state_reads] else nil
+     if state_hook then world.state_hooks[world.state_reads]=nil;state_hook() end
      local state={version=2,ready=true,host_key='host:fixture',authority_id=a.authority_id,session_key=a.session_key,config_revision=a.config_revision,attempt_revision=0,records=a.records,attempts={},jobs={},replies=a.replies,request_sequences=a.request_sequences,host_cwd=if world.host_cwd==false then nil else world.host_cwd or '/fixture'}
      state.setup={schema=1,state=world.setup_state or 'not_started',config_revision=a.config_revision,readiness={state='not_run',config_revision=a.config_revision,summary=''}}
      for key,extra in pairs(a.extra or {})do state[key]=extra end
@@ -1869,13 +1879,33 @@ if section==nil or section=='window' then
   end
   -- The native window changes after the capture, before the dispatch is accepted.
   local moved,movedView,movedPane=setup_world();submit(moved)
-  moved.result_hooks={[2]=function()movedView.cx.window_key=function()return 'different-native-window'end end}
+  moved.result_hooks={[2]=function()movedView.cx.window_key=function()return 'different-native-window'end end}  -- read 2 is BEFORE capture: capture itself refuses
   review(moved,movedView,movedPane)
   check(moved.imports==nil and moved.preparation_calls==nil,'a window change after capture refuses the dispatch and never reaches preparation')
   movedView.cx.window_key=function()return 'win' end
   moved.result_hooks=nil;moved.result_reads=0
   review(moved,movedView,movedPane);movedView.round(4)
   check(moved.imports==1 and moved.preparation_calls==1,'the window-change refusal cancelled its captured approval, so a fresh review can capture again')
+  -- The window changes AFTER a successful capture and before the dispatch is accepted: the
+  -- existing capture must be cancelled, nothing saved or prepared, and a fresh capture must work.
+  local exercised=0
+  for nth=1,10 do
+   local late,lateView,latePane=setup_world();submit(late)
+   late.state_reads=0
+   late.state_hooks={[nth]=function()lateView.cx.window_key=function()return 'different-native-window'end end}
+   review(late,lateView,latePane)
+   if late.captures and late.captures>0 and late.imports==nil then
+    exercised+=1
+    check(late.preparation_calls==nil and #late.authority.records==0,'a window change after a successful capture refuses the dispatch: nothing saved or prepared (state read '..nth..')')
+    check((late.cancels or 0)>0,'the existing capture is cancelled when the window changes before dispatch (state read '..nth..')')
+    local captures_before=late.captures
+    lateView.cx.window_key=function()return 'win' end
+    late.state_hooks=nil
+    review(late,lateView,latePane);lateView.round(4)
+    check(late.captures>captures_before and late.imports==1 and late.preparation_calls==1,'a fresh capture succeeds after the cancelled one (state read '..nth..')')
+   end
+  end
+  check(exercised>0,'at least one window change landed after a successful capture and before dispatch')
   -- The window changes after the save, before preparation starts: saved, never retargeted.
   local after,afterView,afterPane=setup_world();submit(after)
   after.after_import=function()afterView.cx.window_key=function()return 'different-native-window'end end

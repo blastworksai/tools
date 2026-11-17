@@ -443,7 +443,11 @@ local managed_candidates,native_check_scope
 -- Preparation counts only while it still matches the record's launch/account contract.
 -- Editing a contract field of a prepared record invalidates it (see update_record); a
 -- saved OS account that no longer matches the verified worker identity is stale too.
-local CONTRACT_FIELDS={provider=true,backend=true,command=true,arguments=true,cwd=true,host=true,user=true,key_path=true,prompt=true}
+-- Every record field can shape a launch (launch_resolution, backend and mailbox preparation read
+-- command/arguments/fresh_*/task_argument_index/host/user/key_path/cwd/model/profile/shell and
+-- platform fields, and more may follow), so preparation is bound to ALL of them by default. Only
+-- fields that provably never reach a launch are exempt.
+local NON_CONTRACT_FIELDS={account_label=true,enabled=true,placement=true,review_required=true,review_reason=true,provider_family=true,mailbox=true}
 local function preparation_current(record)
 	local mailbox=record.mailbox
 	if type(mailbox)~="table" or mailbox.verified~=true then return false end
@@ -1368,8 +1372,14 @@ end
 -- verification was made for the old contract, so it is withdrawn, never silently kept.
 local function withdraw_stale_preparation(old,new)
 	if type(new.mailbox)~="table" or new.mailbox.verified~=true then return false end
-	for field in pairs(CONTRACT_FIELDS) do
-		if not Dispatch.protocol.equal(old[field],new[field]) then new.mailbox.verified=false;return true end
+	local seen={}
+	for _,source in ipairs({old,new}) do
+		for field in pairs(source) do
+			if not NON_CONTRACT_FIELDS[field] and not seen[field] then
+				seen[field]=true
+				if not Dispatch.protocol.equal(old[field],new[field]) then new.mailbox.verified=false;return true end
+			end
+		end
 	end
 	return false
 end

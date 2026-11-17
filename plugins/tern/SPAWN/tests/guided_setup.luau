@@ -105,6 +105,12 @@ local function intents()
  end
  error('no intent node')
 end
+local sentRecords
+local realEdit=A.edit
+A.edit=function(binding,expected,operation,data)
+ if operation=='replace-records' and sentRecords~='hold' then sentRecords=data.records end
+ return realEdit(binding,expected,operation,data)
+end
 local function click(act) pause();definition.event(state,{ev='action',act=act..'@'..state.snapshot.config_revision},cx) end
 
 -- 1. Device choices are shown by default, as children of Guided setup.
@@ -276,13 +282,42 @@ section('stale preparation',function()
  -- Editing a contract field of a prepared record withdraws the preparation.
  local revision=state.snapshot.config_revision
  pause()
+ sentRecords=nil
  definition.event(state,{ev='change',item='agent:prep-c:cwd:'..revision,value='/fixture/other'},cx)
- pause()
- local saved_record=A.snapshot(state.binding).records[1]
- check(saved_record.cwd=='/fixture/other' and saved_record.mailbox.verified==false,'changing a prepared record\'s folder withdraws its verification')
+ check(sentRecords~=nil and sentRecords[1].cwd=='/fixture/other' and sentRecords[1].mailbox.verified==false,'changing a prepared record\'s folder hands the authority a withdrawn verification')
  pause()
  definition.event(state,{ev='action',act='refresh'},cx)
  check(rows_of('setup')['setup-managed']~=nil,'the withdrawn preparation is offered again as missing work')
+end)
+pause()
+section('fresh contract invalidation',function()
+ pause()
+ definition.event(state,{ev='action',act='advanced-open'},cx)
+ local function seeded()
+  local base={id='fresh-d',provider='custom',account_label='fresh-d',backend='local-terminal',command='ordinary-cli',arguments={},enabled=true,placement='tab',cwd='/fixture',
+   fresh_executable='/tools/worker',fresh_arguments={'--fresh','--task'},task_argument_index=3,
+   mailbox={permitted_root='/mailboxes',helper_path='/tools/mailbox_target.sh',producer_helper_path='/tools/mailbox_worker.sh',worker_identity='worker',producer={read=true,write=true,hash=true,journal=true,poll=true},capabilities={'report-files-v1','worker-poll-v1','argv-v1'},wake='worker-poll-v1',verified=false,evidence_ref='fixture-unverified'}}
+  pause()
+  check(A.edit(state.binding,state.snapshot.config_revision,'replace-records',{records={base}}),'seed a record with a fresh launch contract')
+  definition.event(state,{ev='action',act='refresh'},cx)
+  state.config.agents[1].mailbox.verified=true
+  return state.config.agents[1]
+ end
+ for _,change in ipairs({
+  {'fresh_executable',function(r)r.fresh_executable='/tools/other-worker' end},
+  {'one fresh_arguments element',function(r)r.fresh_arguments={'--fresh','--other'} end},
+  {'task_argument_index',function(r)r.task_argument_index=2 end},
+  {'host_shell',function(r)r.host_shell='bash' end},
+ }) do
+  local record=seeded()
+  local edited=tern.json.decode(tern.json.encode(record))
+  change[2](edited)
+  pause()
+  sentRecords=nil
+  definition.event(state,{ev='change',item='agent:fresh-d:json:'..state.snapshot.config_revision,value=tern.json.encode(edited)},cx)
+  check(sentRecords~=nil and sentRecords[1].mailbox~=nil and sentRecords[1].mailbox.verified==false,'a JSON edit of '..change[1]..' withdraws the preparation even though the mailbox is preserved')
+ end
+ definition.event(state,{ev='action',act='advanced-close'},cx)
 end)
 assert(#failures==0,'guided_setup FAILED sections: '..table.concat(failedSections,', ')..' || '..(table.concat(failures,' | '):gsub('[%c"]',' ')))
 return 'PASS guided_setup '..checks
