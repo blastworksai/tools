@@ -1748,6 +1748,8 @@ sections.selectors=function()
   {name='provider and executable name different CLIs',provider='claude',exe='codex',model='m',text='names claude'},
   {name='typed flag behind a sudo wrapper',provider='claude',exe='sudo',args={'-u','x','claude','--model','typed'},command='sudo -u x claude',model='other',text='already contain'},
   {name='typed effort flag',provider='claude',exe='claude',args={'--effort=low'},effort='high',text='already contain'},
+  {name='login sudo -i',provider='claude',exe='sudo',args={'-i','-u','x','--','claude'},command='sudo -i -u x claude',model='$HOME',text='sudo -i or -s'},
+  {name='login sudo -s',provider='claude',exe='sudo',args={'-s','-u','x','--','claude'},command='sudo -s -u x claude',effort='high',text='sudo -i or -s'},
  }) do
   local f=fixture();local rec=terminal(f,case.provider,case.exe,case.args);if case.command then rec.command=case.command end
   local original=copy(f.snapshot.records[1])
@@ -1767,6 +1769,13 @@ sections.selectors=function()
   local f=fixture();terminal(f,'codex','codex')
   local result,request=started(f,'codex-model','gpt-5.6-sol')
   check(result.status=='resolved' and f.d.execution(request,77).launch.command:find("'-m' 'gpt-5.6-sol'",1,true),'codex takes a model override through its own flag')
+ end
+ -- A Windows executable path is identified as its CLI (read literally, as a launch reads it), so an override applies.
+ do
+  local f=fixture();terminal(f,'claude','C:\\Tools\\claude.exe')
+  local result,request=started(f,'windows-path','chosen-model')
+  check(result.status=='resolved','a Windows executable path is identified as claude for an override: '..tostring(result.error and result.error.message))
+  check(f.d.execution(request,77).launch.command:find('chosen-model',1,true)~=nil,'the override reaches a Windows-path launch')
  end
  -- Same typed-flag record launches unchanged when nothing is overridden (a saved record that already types the flag keeps working).
  do
