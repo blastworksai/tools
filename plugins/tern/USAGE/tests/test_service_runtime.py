@@ -245,6 +245,35 @@ class RuntimeBoundaryTests(unittest.TestCase):
         self.assertEqual(caught.exception.state, "dependency_install_failed")
         self.assertEqual(list((self.root / "environments").iterdir()), [])
 
+    def test_a_refused_cleanup_after_a_refused_rename_keeps_the_named_failure(self):
+        private_directory(self.root)
+        stamp = runtime.source_stamp()
+        release = runtime._stage_release(self.root, runtime._sources(PACKAGE), stamp)
+        real_replace = os.replace
+        real_rmtree = shutil.rmtree
+
+        def refuse_environment(source, target, *args, **kwargs):
+            if Path(target).parent.name == "environments":
+                raise PermissionError(13, "Access is denied")
+            return real_replace(source, target, *args, **kwargs)
+
+        def refuse_cleanup(path, *args, **kwargs):
+            if not kwargs.get("ignore_errors") and kwargs.get("onerror") is None and kwargs.get("onexc") is None:
+                raise PermissionError(13, "Access is denied")
+            return real_rmtree(path, *args, **kwargs)
+
+        def fake_run(argv, **kwargs):
+            if "venv" in argv:
+                Path(argv[-1]).mkdir(mode=0o700, exist_ok=True)
+            return subprocess.CompletedProcess(argv, 0, b"", None)
+
+        with patch.object(runtime.subprocess, "run", side_effect=fake_run), \
+                patch.object(runtime.os, "replace", side_effect=refuse_environment), \
+                patch.object(runtime.shutil, "rmtree", side_effect=refuse_cleanup):
+            with self.assertRaises(runtime.RuntimeFailure) as caught:
+                runtime._stage_environment(self.root, release, stamp, True)
+        self.assertEqual(caught.exception.state, "dependency_install_failed")
+
     def test_no_console_detached_spawn_options_on_current_platform(self):
         options = runtime.detached_options()
         self.assertTrue(options["close_fds"])

@@ -352,8 +352,8 @@ def _stage_environment(root: Path, release: Path, stamp: dict, consent: bool) ->
             raise RuntimeFailure("setup_required", "dependency_install_failed") from None
         return name
     finally:
-        if staging.exists():
-            shutil.rmtree(staging)
+        # Best effort: a scanner still holding a file must not replace the named failure.
+        shutil.rmtree(staging, ignore_errors=True)
 
 
 def _root_identity(root: Path) -> str | None:

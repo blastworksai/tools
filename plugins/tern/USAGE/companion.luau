@@ -18,7 +18,7 @@ local MESSAGES: { [string]: string } = {
 	spawn_failed = "The local USAGE launcher could not start.",
 	decode_failed = "The local USAGE launcher returned an invalid response.",
 	response_too_large = "The local USAGE response exceeds its size limit.",
-	python_required = "Python 3.11 or newer is required; open USAGE Setup.",
+	python_required = "Python 3.11 or newer was not found; install it (python.org or Homebrew), then open USAGE Setup.",
 	unsupported_platform = "The USAGE companion is unavailable on this platform.",
 	configuration_unavailable = "USAGE could not read its interpreter configuration.",
 	-- Companion service errors.
@@ -209,7 +209,8 @@ local function candidates(): ({ { string } }?, string?)
 		end
 		return nil, "invalid_request"
 	end
-	if os == "macos" then return { { "python3" }, { "/opt/homebrew/bin/python3" }, { "/usr/local/bin/python3" },
+	if os == "macos" then -- No bare python3 here: Apple's /usr/bin/python3 shim can open the developer-tools installer dialog.
+		return { { "/opt/homebrew/bin/python3" }, { "/usr/local/bin/python3" },
 		{ "/Library/Frameworks/Python.framework/Versions/Current/bin/python3" } }, nil end
 	if os == "linux" then return { { "python3" } }, nil end
 	local paths = { { "py", "-3" }, { "python3" }, { "python" } }
