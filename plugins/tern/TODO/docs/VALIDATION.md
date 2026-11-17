@@ -6,13 +6,13 @@ Blastworks.ai · 9 November 2026. This receipt supersedes the older 0.5.x valida
 
 The immutable handoff is commit `ca8bebb4553e1338c7bf49844494f9d665af33fc`, based on `9f761f031154bd57e20391755a5c9fb675be9963`; its author receipt records version `0.6.0`. Integration preserves the owned updater work and adds the scoped review corrections below. No git command or runtime check was used during integration.
 
-The following SHA256 values are the current source-byte identities needed for a later coordinated companion/plugin rollout:
+The following SHA256 values are the source-byte identities of TODO 0.7.3 as released on tools main (after the credit edit), needed for a later coordinated companion/plugin rollout:
 
 | Helper | SHA256 |
 | --- | --- |
-| `bin/todo.py` | `03f04874c7ba446bfeb9319530e6454e502b1c590a69f504f37614a71511907c` |
-| `bin/publication.py` | `9aae7120bc622891115ebd3bab0fd15aeea79e25b280c96e6e736063b88470d0` |
-| `bin/process_identity.py` | `d81cfd5c9dc2362fab5e9408992fe96dfd1caeaa5681fde229908e92f7dce72b` |
+| `bin/todo.py` | `c66f06d070a687b88e18869388601ef2546be68f0fda3ace9479d58c2cdecdd3` |
+| `bin/publication.py` | `616c36dfe93e2cdad931f54d3fb90bfa853677fab66b650aa72e8f864da6c844` |
+| `bin/process_identity.py` | `d4369444f152d199826a905ca29f8d0ce4bbe16d0549c2fe8dd5e7c5027c874f` |
 
 These are source hashes, not installed-companion or installed-plugin readbacks. A later authorized rollout must compare all three companion and plugin helpers at the same reviewed head and refuse schema/version skew. Task 2C performed no companion copy, plugin install/link/reload, deployment, publication or other rollout.
 
