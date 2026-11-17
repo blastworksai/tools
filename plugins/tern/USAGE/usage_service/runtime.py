@@ -46,12 +46,15 @@ _BACKUP = re.compile(r"upgrade-[0-9a-f]{32}\.sqlite3\Z")
 
 
 class RuntimeFailure(ServiceError):
-    def __init__(self, code: str, state: str):
+    def __init__(self, code: str, state: str, detail: dict | None = None):
         super().__init__(code, 503)
         self.state = state
+        self.detail = detail or {}
 
     def public(self) -> dict:
-        return dict(super().public(), state=self.state)
+        # `detail` holds only pattern-checked fields (package pin, interpreter version),
+        # never raw child output.
+        return dict(super().public(), state=self.state, **self.detail)
 
 
 class OSLock:
@@ -236,8 +239,12 @@ def _stage_release(root: Path, files: dict[str, bytes], stamp: dict) -> Path:
         os.replace(staging, destination)
         return destination
     finally:
-        if staging.exists():
-            shutil.rmtree(staging)
+        # Best effort: a refused cleanup must never replace the primary error.
+        try:
+            if staging.exists():
+                shutil.rmtree(staging)
+        except OSError:
+            pass
 
 
 def _python(environment: Path) -> Path:
@@ -279,16 +286,46 @@ def _child_environment(root: Path) -> dict[str, str]:
     return result
 
 
+_PIN = r"[A-Za-z0-9][A-Za-z0-9._-]{0,60}(?:==[A-Za-z0-9.!+_-]{1,30})?"
+_NETWORK = re.compile(r"Failed to establish a new connection|Temporary failure in name resolution|"
+                      r"Name or service not known|Max retries exceeded|Could not fetch URL|Network is unreachable|"
+                      r"ProxyError|SSLError|CERTIFICATE_VERIFY_FAILED|Connection (?:refused|timed out|reset|aborted)|"
+                      r"Read timed out|ConnectTimeout|getaddrinfo failed|nodename nor servname|"
+                      r"WinError (?:10051|10053|10054|10060|10061|11001)", re.I)
+_WHEEL = (re.compile(r"No matching distribution found for (" + _PIN + ")"),
+          re.compile(r"Could not find a version that satisfies the requirement (" + _PIN + ")"))
+
+
+def _classify_setup_failure(output: bytes | None) -> tuple[str, dict]:
+    """Map a failed venv/pip child's output to a fixed state. Raw text never leaves this function."""
+    text = (output or b"")[-65536:].decode("utf-8", "replace")
+    if ("ensurepip" in text or "python3-venv" in text or "python3-full" in text
+            or "No module named venv" in text):
+        return "python_venv_unavailable", {}
+    if "DO NOT MATCH THE HASHES" in text:
+        return "dependency_hash_mismatch", {}
+    if _NETWORK.search(text):
+        return "dependency_network_failed", {}
+    for pattern in _WHEEL:
+        found = pattern.search(text)
+        if found:
+            return "dependency_wheel_unavailable", {"package": found.group(1),
+                    "python": "%d.%d" % sys.version_info[:2]}
+    return "dependency_install_failed", {}
+
+
 def _run_setup(argv: list[str], root: Path, timeout: int) -> None:
     try:
-        result = subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                stderr=subprocess.DEVNULL, cwd=root, env=_child_environment(root),
+        # Debian's venv explains a missing ensurepip on STDOUT, so classify both streams.
+        result = subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT, cwd=root, env=_child_environment(root),
                                 close_fds=True, timeout=timeout, check=False,
                                 **({"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}))
     except (OSError, subprocess.SubprocessError):
         raise RuntimeFailure("setup_required", "dependency_install_failed") from None
     if result.returncode:
-        raise RuntimeFailure("setup_required", "dependency_install_failed")
+        state, detail = _classify_setup_failure(getattr(result, "stdout", None))
+        raise RuntimeFailure("setup_required", state, detail)
 
 
 def _stage_environment(root: Path, release: Path, stamp: dict, consent: bool) -> str:
@@ -312,11 +349,15 @@ def _stage_environment(root: Path, release: Path, stamp: dict, consent: bool) ->
         _run_setup([python, "-I", "-B", "-c", "import aiohttp, cryptography, tzdata"], root, 30)
         write_private(staging / "environment.json", encode({"lock_digest": stamp["lock_digest"],
                       "interpreter": _interpreter(), "installed_with": stamp}))
-        os.replace(staging, directory)
+        try:
+            os.replace(staging, directory)
+        except OSError:
+            # Windows refuses the rename while a scanner holds a file; the cause is not the network.
+            raise RuntimeFailure("setup_required", "dependency_install_failed") from None
         return name
     finally:
-        if staging.exists():
-            shutil.rmtree(staging)
+        # Best effort: a scanner still holding a file must not replace the named failure.
+        shutil.rmtree(staging, ignore_errors=True)
 
 
 def _root_identity(root: Path) -> str | None:

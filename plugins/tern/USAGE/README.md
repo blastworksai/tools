@@ -36,7 +36,7 @@ USAGE reads SPAWN's saved roster from SPAWN's plugin data on the same machine. S
 | --- | --- |
 | Tern | 0.9.10 or later, desktop. Linux is the only qualified source-host platform. |
 | SPAWN | Installed on the same machine, with your accounts defined in it. |
-| Python | 3.11 or later, with `venv`/`pip`. USAGE installs its hash-locked dependencies (`aiohttp`, `cryptography`, `tzdata`; see `requirements.lock`) into its own private environment on first setup. That needs access to PyPI once. It never changes system packages. |
+| Python | 3.11 or later, with `venv`/`pip`. USAGE installs its hash-locked dependencies (`aiohttp`, `cryptography`, `tzdata`; see `requirements.lock`) into its own private environment the first time the plugin starts on Linux, Windows and macOS (Windows and macOS are not yet proven; Setup is the retry road everywhere). That needs access to PyPI once, and a Python with prebuilt wheels for the pinned packages (a very new Python can lack them; then choose Python 3.12 with **Select existing Python interpreter**). It never changes system packages. |
 | Provider CLIs | Installed and already signed in, on the machine where SPAWN runs them. |
 | Platform | **Linux is qualified. macOS and Windows remain unqualified** pending real runtime/provider acceptance, so USAGE shows a platform hold and withholds readings there. iOS and Tern's web client cannot run the companion (see [Limitations](#limitations)). |
 
@@ -66,7 +66,8 @@ This is Tern's documented form for a plugin in a repository subfolder ([Tern: Di
 
 The plugin id is `usage`. Then:
 
-1. Open **USAGE Setup** from the command palette. If USAGE has no private runtime yet, choose **Install private dependencies** and confirm. If Python is missing, use **Open official Python installer page**, or **Select existing Python interpreter** to point at a specific `python3` executable.
+0. Installing USAGE is the request to start it (Linux proven; Windows and macOS attempt the same, still unproven): when the plugin starts for the first time it creates its private runtime once, with no extra step. If that fails, the USAGE pane and Setup name the cause (no PyPI access, no wheel for this Python, missing `venv`). It does not retry by itself; fix the cause and use Setup.
+1. Open **USAGE Setup** from the command palette. If USAGE has no private runtime yet, or the first start could not create it, choose **Install private dependencies** and confirm. If Python is missing, use **Open official Python installer page**, or **Select existing Python interpreter** to point at a specific `python3` executable.
 2. In **USAGE Setup**, choose **Allow headless usage reads**. Refresh does nothing until you allow it. You can stop it again from the same menu.
 3. Choose **USAGE Refresh**, or press **Refresh** in the USAGE pane.
 4. Optional: choose which accounts show in the status bar (see [Status bar](#status-bar)). The first time a USAGE window starts, a shared prompt asks once whether to add the **Plugin segments** widget to Tern's widget bar when it is not placed. USAGE never adds it by itself, and respects a later hide.
@@ -341,7 +342,7 @@ backslash or change argument boundaries. Requoting cannot soundly accommodate
 arbitrary shim programs.
 
 The unresolved qualification choice is to verify each actual installed shim's
-intact-forwarding behavior on Odin, or to use a separately reviewed native
+intact-forwarding behavior on a native Windows installation, or to use a separately reviewed native
 executable/per-shim adapter for a shim that rebuilds arguments. There is no generic
 shim-fidelity guarantee or runtime shim-content classifier today. Spaces, Unicode
 and trailing backslashes remain required native cases, not inputs to drop to make

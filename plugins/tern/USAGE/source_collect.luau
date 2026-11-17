@@ -189,7 +189,7 @@ tick = function(token: number)
 			busy = false
 			ready = true
 			tick(token)
-		end, { install_dependencies = false })
+		end, { auto_install = true })
 	elseif tern.now() >= next_renew then
 		companion.renew(function(value, err)
 			if not live(token) then return end

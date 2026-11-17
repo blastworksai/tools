@@ -159,11 +159,139 @@ class RuntimeBoundaryTests(unittest.TestCase):
             self.assertIn(argument, command)
         self.assertNotIn("shell", options)
         self.assertEqual(options["stdin"], subprocess.DEVNULL)
-        self.assertEqual(options["stdout"], subprocess.DEVNULL)
-        self.assertEqual(options["stderr"], subprocess.DEVNULL)
+        self.assertEqual(options["stdout"], subprocess.PIPE)
+        self.assertEqual(options["stderr"], subprocess.STDOUT)
         self.assertEqual(options["env"]["TMPDIR"], str(self.root / "tmp"))
         self.assertEqual(list((self.root / "environments").iterdir()), [])
+
+    def _failed_pip(self, output, step="pip"):
+        private_directory(self.root)
+        stamp = runtime.source_stamp()
+        release = runtime._stage_release(self.root, runtime._sources(PACKAGE), stamp)
+
+        def run(argv, **kwargs):
+            failing = "venv" in argv if step == "venv" else "pip" in argv
+            return subprocess.CompletedProcess(argv, 1 if failing else 0, output, None)
+
+        with patch.object(runtime.subprocess, "run", side_effect=run):
+            with self.assertRaises(runtime.RuntimeFailure) as caught:
+                runtime._stage_environment(self.root, release, stamp, True)
+        return caught.exception
+
+    def test_failed_install_names_its_cause_without_echoing_child_output(self):
+        python = "%d.%d" % sys.version_info[:2]
+        wheel = self._failed_pip(b"ERROR: Could not find a version that satisfies the requirement "
+                                 b"frozenlist==1.8.0 (from versions: none)\nSECRET token\n"
+                                 b"ERROR: No matching distribution found for frozenlist==1.8.0\n")
+        self.assertEqual(wheel.state, "dependency_wheel_unavailable")
+        self.assertEqual(wheel.public()["package"], "frozenlist==1.8.0")
+        self.assertEqual(wheel.public()["python"], python)
+        self.assertNotIn("SECRET", json.dumps(wheel.public()))
+        # An unreachable index also says "from versions: none"; the network cause wins.
+        network = self._failed_pip(b"WARNING: Retrying (Retry(total=4)) after connection broken by "
+                                   b"'NewConnectionError(Failed to establish a new connection)'\n"
+                                   b"ERROR: No matching distribution found for aiohttp==3.14.5\n")
+        self.assertEqual(network.state, "dependency_network_failed")
+        self.assertNotIn("package", network.public())
+        self.assertEqual(self._failed_pip(b"THESE PACKAGES DO NOT MATCH THE HASHES").state, "dependency_hash_mismatch")
+        self.assertEqual(self._failed_pip(b"The virtual environment was not created successfully because "
+                                          b"ensurepip is not available").state, "python_venv_unavailable")
+        # Debian/Ubuntu print this explanation on stdout of the venv step itself.
+        debian = (b"The virtual environment was not created successfully because ensurepip is not\n"
+                  b"available.  On Debian/Ubuntu systems, you need to install the python3-venv\n"
+                  b"package using the following command.\n\n    apt install python3.14-venv\n\n"
+                  b"Failing command: /x/bin/python\n")
+        venv = self._failed_pip(debian, step="venv")
+        self.assertEqual(venv.state, "python_venv_unavailable")
+        self.assertNotIn("apt", json.dumps(venv.public()))
+        # Windows and macOS wording: pip's own network errors and a Python without venv.
+        for wording in (b"WARNING: Retrying after connection broken by 'NewConnectionError(<pip._vendor.urllib3."
+                        b"connection.HTTPSConnection>: Failed to resolve): [Errno 11001] getaddrinfo failed'\n",
+                        b"ERROR: Could not install: [WinError 10060] A connection attempt failed\n",
+                        b"SSLError(SSLCertVerificationError(1, '[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed'))\n"
+                        b"ERROR: No matching distribution found for aiohttp==3.14.5\n",
+                        b"[Errno 8] nodename nor servname provided, or not known\n"):
+            self.assertEqual(self._failed_pip(wording).state, "dependency_network_failed", wording)
+        self.assertEqual(self._failed_pip(b"/x/python.exe: No module named venv\n", step="venv").state,
+                         "python_venv_unavailable")
+        self.assertEqual(self._failed_pip(b"something unknown").state, "dependency_install_failed")
+        self.assertEqual(self._failed_pip(None).state, "dependency_install_failed")
+        # Only a package pin shape ever becomes a field.
+        hostile = self._failed_pip(b"No matching distribution found for x;rm -rf /\n")
+        self.assertEqual(hostile.public().get("package"), "x")
         self.assertFalse((self.root / "state.sqlite3").exists())
+
+    def test_a_refused_environment_rename_is_a_named_install_failure(self):
+        # Windows refuses os.replace while a scanner holds a file in the new environment.
+        private_directory(self.root)
+        stamp = runtime.source_stamp()
+        release = runtime._stage_release(self.root, runtime._sources(PACKAGE), stamp)
+        real_replace = os.replace
+
+        def refuse_environment(source, target, *args, **kwargs):
+            if Path(target).parent.name == "environments":
+                raise PermissionError(13, "Access is denied")
+            return real_replace(source, target, *args, **kwargs)
+
+        def fake_run(argv, **kwargs):
+            if "venv" in argv:
+                Path(argv[-1]).mkdir(mode=0o700, exist_ok=True)
+            return subprocess.CompletedProcess(argv, 0, b"", None)
+
+        with patch.object(runtime.subprocess, "run", side_effect=fake_run), \
+                patch.object(runtime.os, "replace", side_effect=refuse_environment):
+            with self.assertRaises(runtime.RuntimeFailure) as caught:
+                runtime._stage_environment(self.root, release, stamp, True)
+        self.assertEqual(caught.exception.state, "dependency_install_failed")
+        self.assertEqual(list((self.root / "environments").iterdir()), [])
+
+    def test_a_refused_cleanup_after_a_refused_rename_keeps_the_named_failure(self):
+        private_directory(self.root)
+        stamp = runtime.source_stamp()
+        release = runtime._stage_release(self.root, runtime._sources(PACKAGE), stamp)
+        real_replace = os.replace
+        real_rmtree = shutil.rmtree
+
+        def refuse_environment(source, target, *args, **kwargs):
+            if Path(target).parent.name == "environments":
+                raise PermissionError(13, "Access is denied")
+            return real_replace(source, target, *args, **kwargs)
+
+        def refuse_cleanup(path, *args, **kwargs):
+            if not kwargs.get("ignore_errors") and kwargs.get("onerror") is None and kwargs.get("onexc") is None:
+                raise PermissionError(13, "Access is denied")
+            return real_rmtree(path, *args, **kwargs)
+
+        def fake_run(argv, **kwargs):
+            if "venv" in argv:
+                Path(argv[-1]).mkdir(mode=0o700, exist_ok=True)
+            return subprocess.CompletedProcess(argv, 0, b"", None)
+
+        with patch.object(runtime.subprocess, "run", side_effect=fake_run), \
+                patch.object(runtime.os, "replace", side_effect=refuse_environment), \
+                patch.object(runtime.shutil, "rmtree", side_effect=refuse_cleanup):
+            with self.assertRaises(runtime.RuntimeFailure) as caught:
+                runtime._stage_environment(self.root, release, stamp, True)
+        self.assertEqual(caught.exception.state, "dependency_install_failed")
+
+    def test_a_refused_cleanup_after_a_refused_release_write_keeps_the_primary_error(self):
+        private_directory(self.root)
+        stamp = runtime.source_stamp()
+        real_rmtree = shutil.rmtree
+
+        def refuse_write(path, content):
+            raise runtime.RuntimeFailure("setup_required", "release_write_refused")
+
+        def refuse_cleanup(path, *args, **kwargs):
+            if not kwargs.get("ignore_errors") and kwargs.get("onerror") is None and kwargs.get("onexc") is None:
+                raise PermissionError(13, "Access is denied")
+            return real_rmtree(path, *args, **kwargs)
+
+        with patch.object(runtime, "write_private", side_effect=refuse_write), \
+                patch.object(runtime.shutil, "rmtree", side_effect=refuse_cleanup):
+            with self.assertRaises(runtime.RuntimeFailure) as caught:
+                runtime._stage_release(self.root, runtime._sources(PACKAGE), stamp)
+        self.assertEqual(caught.exception.state, "release_write_refused")
 
     def test_no_console_detached_spawn_options_on_current_platform(self):
         options = runtime.detached_options()

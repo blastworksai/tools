@@ -442,13 +442,12 @@ test("GUI macOS falls back from old PATH interpreter", function()
 	local f = fixture({ os = "macos" })
 	local calls, done = recorder()
 	f.bridge.request("inventory", {}, done)
+	assert(f.processes[1].argv[1] == "/opt/homebrew/bin/python3")
 	f.probe(1, 10)
-	assert(f.processes[2].argv[1] == "/opt/homebrew/bin/python3")
-	f.raw(2, "not Python", 1)
-	assert(f.processes[3].argv[1] == "/usr/local/bin/python3")
-	f.probe(3, 14)
-	f.resolve(4, { ok = true })
-	assert(#calls == 1 and calls[1].err == nil and f.processes[4].argv[1] == "/usr/local/bin/python3")
+	assert(f.processes[2].argv[1] == "/usr/local/bin/python3")
+	f.probe(2, 14)
+	f.resolve(3, { ok = true })
+	assert(#calls == 1 and calls[1].err == nil and f.processes[3].argv[1] == "/usr/local/bin/python3")
 end)
 
 test("Windows launcher and GUI installation paths are argv not shell", function()
@@ -462,6 +461,61 @@ test("Windows launcher and GUI installation paths are argv not shell", function(
 	assert(f.processes[5].argv[1] == f.processes[4].argv[1])
 	f.resolve(5, { ok = true })
 	assert(#calls == 1 and calls[1].err == nil)
+end)
+
+test("Windows Store python stubs and missing interpreters end in python_required, not a hang", function()
+	local f = fixture({ os = "windows", env = { LOCALAPPDATA = "C:/Local" } })
+	local calls, done = recorder()
+	f.bridge.request("inventory", {}, done)
+	for index = 1, 8 do
+		assert(f.processes[index] ~= nil, "candidate " .. index)
+		-- The App Execution Alias stub prints "Python was not found" and exits 9009.
+		f.raw(index, "Python was not found; run without arguments to install from the Microsoft Store.", 9009)
+	end
+	f.advance(0)
+	oneError(calls, "python_required")
+	local text = calls[1].err.message
+	assert(text:find("Python 3.11 or newer was not found.", 1, true) and text:find("Install it from python.org, then open USAGE Setup.", 1, true))
+	assert(not text:find("Homebrew", 1, true))
+end)
+
+test("macOS also tries the python.org framework install", function()
+	local f = fixture({ os = "macos" })
+	local calls, done = recorder()
+	f.bridge.request("inventory", {}, done)
+	f.raw(1, "", 1); f.raw(2, "", 1)
+	assert(f.processes[3].argv[1] == "/Library/Frameworks/Python.framework/Versions/Current/bin/python3")
+	f.probe(3, 13)
+	f.resolve(4, { ok = true })
+	assert(#calls == 1 and calls[1].err == nil)
+end)
+
+test("macOS never probes bare python3 (Apple's shim opens an installer dialog); none found names the road", function()
+	local f = fixture({ os = "macos" })
+	local calls, done = recorder()
+	f.bridge.request("inventory", {}, done)
+	for index = 1, 3 do
+		assert(f.processes[index] ~= nil and f.processes[index].argv[1] ~= "python3", "candidate " .. index)
+		f.raw(index, "", 1)
+	end
+	f.advance(0)
+	assert(#f.processes == 3)
+	oneError(calls, "python_required")
+	assert(calls[1].err.message:find("Python 3.11 or newer was not found.", 1, true))
+	assert(calls[1].err.message:find("Install it from python.org or with Homebrew, then open USAGE Setup.", 1, true))
+end)
+
+test("Linux python_required names the distribution package manager and venv support", function()
+	local f = fixture({ os = "linux" })
+	local calls, done = recorder()
+	f.bridge.request("inventory", {}, done)
+	for index = 1, 8 do
+		if f.processes[index] ~= nil then f.raw(index, "", 1) end
+	end
+	f.advance(0)
+	oneError(calls, "python_required")
+	assert(calls[1].err.message:find("Python 3.11 or newer was not found.", 1, true))
+	assert(calls[1].err.message:find("Install it with venv support using your distribution's package manager, then open USAGE Setup.", 1, true))
 end)
 
 test("configured executable is validated without default fallback", function()
@@ -543,6 +597,135 @@ test("every companion service code keeps its own fixed message", function()
 		codes += 1
 	end
 	assert(codes >= 30, "protocol MESSAGES parsed")
+end)
+
+test("the host bootstraps once per load on Linux, Windows and macOS, never for another client", function()
+	local f = fixture({ context = "host" })
+	local calls, done = recorder()
+	f.bridge.set_client("host", "host")
+	f.bridge.ensure(done, { auto_install = true })
+	f.probe()
+	assert(real.json.decode(f.processes[2].opts.stdin).install_dependencies == true, "first host start installs")
+	f.resolve(2, ready())
+	assert(#calls == 1 and calls[1].err == nil)
+	local again, done2 = recorder()
+	f.bridge.ensure(done2, { auto_install = true })
+	f.advance(0)
+	local last = f.processes[#f.processes]
+	assert(real.json.decode(last.opts.stdin).install_dependencies == false, "a second start never installs again")
+	for _, case in { { context = "window", os = "linux" }, { context = "window", os = "macos" }, { context = "window", os = "windows" } } do
+		local g = fixture({ context = case.context, os = case.os })
+		local _, cb = recorder()
+		g.bridge.set_client("window:1", "window")
+		g.bridge.ensure(cb, { auto_install = true })
+		g.probe()
+		assert(real.json.decode(g.processes[2].opts.stdin).install_dependencies == false, case.os .. "/" .. case.context)
+	end
+	for _, osName in { "macos", "windows" } do
+		local g = fixture({ context = "host", os = osName, env = { LOCALAPPDATA = "C:/Local" } })
+		local gCalls, cb = recorder()
+		g.bridge.set_client("host", "host")
+		g.bridge.ensure(cb, { auto_install = true })
+		g.probe()
+		assert(real.json.decode(g.processes[2].opts.stdin).install_dependencies == true, osName .. " host installs")
+		g.resolve(2, ready())
+		assert(#gCalls == 1 and gCalls[1].err == nil, osName)
+		local _, cb2 = recorder()
+		g.bridge.ensure(cb2, { auto_install = true })
+		g.advance(0)
+		assert(real.json.decode(g.processes[#g.processes].opts.stdin).install_dependencies == false, osName .. " second start never installs")
+	end
+	local bad = fixture({ context = "host" })
+	local badCalls, badDone = recorder()
+	bad.bridge.set_client("host", "host")
+	bad.bridge.ensure(badDone, { auto_install = "yes" })
+	bad.advance(0)
+	oneError(badCalls, "invalid_request")
+end)
+
+test("a bootstrap failure names its cause and later requests report it", function()
+	local f = fixture({ context = "host" })
+	local calls, done = recorder()
+	f.bridge.set_client("host", "host")
+	f.bridge.ensure(done, { auto_install = true })
+	f.probe()
+	-- While the install runs, a request says so instead of "unavailable".
+	local early, earlyDone = recorder()
+	f.bridge.request("diagnostics", {}, earlyDone)
+	f.raw(3, real.json.encode({ ok = false, error = { code = "companion_unavailable", message = "SECRET" } }), 1)
+	assert(#early == 1 and early[1].err.code == "setup_required" and early[1].err.message:find("installing", 1, true))
+	f.raw(2, real.json.encode({ ok = false, error = { code = "setup_required", message = "SECRET" },
+		state = "dependency_wheel_unavailable", package = "frozenlist==1.8.0", python = "3.14" }), 1)
+	assert(#calls == 1 and calls[1].err.code == "setup_required")
+	assert(calls[1].err.message:find("Python 3.14 has no prebuilt wheel for frozenlist==1.8.0", 1, true), calls[1].err.message)
+	assert(calls[1].err.message:find("3.12", 1, true) and not calls[1].err.message:find("SECRET", 1, true))
+	local later, laterDone = recorder()
+	f.bridge.request("diagnostics", {}, laterDone)
+	f.raw(4, real.json.encode({ ok = false, error = { code = "companion_unavailable", message = "SECRET" } }), 1)
+	assert(#later == 1 and later[1].err.message:find("frozenlist==1.8.0", 1, true), "request keeps the bootstrap cause")
+	-- A later success clears it.
+	local ok, okDone = recorder()
+	f.bridge.ensure(okDone, { auto_install = true })
+	f.advance(0)
+	f.resolve(5, ready())
+	local plain, plainDone = recorder()
+	f.bridge.request("diagnostics", {}, plainDone)
+	f.raw(6, real.json.encode({ ok = false, error = { code = "companion_unavailable", message = "SECRET" } }), 1)
+	assert(plain[1].err.code == "companion_unavailable" and plain[1].err.message == "The local USAGE companion is unavailable.")
+end)
+
+test("failure states use fixed text and only a checked package pin", function()
+	local f = fixture({ context = "host" })
+	local first = true
+	local function launched(value)
+		local calls, done = recorder()
+		f.bridge.ensure(done)
+		if first then f.probe(); first = false end
+		f.raw(#f.processes, real.json.encode(value), 1)
+		return calls
+	end
+	f.bridge.set_client("host", "host")
+	for state in ("dependency_consent_required dependency_install_failed dependency_network_failed dependency_hash_mismatch python_venv_unavailable python_311_required"):gmatch("%S+") do
+		local calls = launched({ ok = false, error = { code = "setup_required", message = "SECRET" }, state = state })
+		assert(calls[1].err.code == "setup_required" and calls[1].err.message ~= "USAGE setup is required.", state)
+		assert(not calls[1].err.message:find("SECRET", 1, true))
+	end
+	local hostile = launched({ ok = false, error = { code = "setup_required", message = "x" },
+		state = "dependency_wheel_unavailable", package = "x; rm -rf /", python = "3.14" })
+	assert(not hostile[1].err.message:find("rm -rf", 1, true) and hostile[1].err.message:find("no prebuilt wheel", 1, true))
+	local unknown = launched({ ok = false, error = { code = "setup_required", message = "x" }, state = "SECRET weird" })
+	assert(unknown[1].err.message == "USAGE setup is required.")
+end)
+
+test("a collector poll that does not install keeps the failed install's cause", function()
+	local f = fixture({ context = "host" })
+	local calls, done = recorder()
+	f.bridge.set_client("host", "host")
+	f.bridge.ensure(done, { auto_install = true })
+	f.probe()
+	f.raw(2, real.json.encode({ ok = false, error = { code = "setup_required", message = "SECRET" },
+		state = "dependency_network_failed" }), 1)
+	local network = calls[1].err.message
+	assert(calls[1].err.code == "setup_required" and network ~= "USAGE setup is required.")
+	-- The next collector tick checks without installing; the service answers consent required.
+	local poll, pollDone = recorder()
+	f.bridge.ensure(pollDone, { auto_install = true })
+	f.advance(0)
+	assert(real.json.decode(f.processes[#f.processes].opts.stdin).install_dependencies == false)
+	f.raw(#f.processes, real.json.encode({ ok = false, error = { code = "setup_required", message = "SECRET" },
+		state = "dependency_consent_required" }), 1)
+	assert(#poll == 1 and poll[1].err.message == network, "the poll must keep the install failure: " .. tostring(poll[1].err.message))
+	local later, laterDone = recorder()
+	f.bridge.request("diagnostics", {}, laterDone)
+	f.raw(#f.processes, real.json.encode({ ok = false, error = { code = "companion_unavailable", message = "SECRET" } }), 1)
+	assert(later[1].err.message == network, "later requests keep it too")
+	-- An explicit Setup attempt replaces it.
+	local setup, setupDone = recorder()
+	f.bridge.ensure(setupDone, { install_dependencies = true })
+	f.advance(0)
+	f.raw(#f.processes, real.json.encode({ ok = false, error = { code = "setup_required", message = "SECRET" },
+		state = "dependency_hash_mismatch" }), 1)
+	assert(setup[1].err.message ~= network, "a new attempt replaces the cause")
 end)
 
 return "PASS " .. tostring(tests) .. " companion asynchronous boundary fixtures"
