@@ -1200,7 +1200,8 @@ local function result_records(bytes,run_id)
 	local value,problem=Config.decode_setup_json(bytes)
 	if not value then return nil,problem end
 	local review,why=require("./setup_review").prepare(value,run_id)
-	return if review then review.records else nil,why
+	if not review then return nil,why end
+	return review.records,nil,review.paid_checks
 end
 -- Only untrusted Guided/manual proposals need this guard. Owner-validated paired
 -- migration gates preserve already verified identities through managed_import.
@@ -1281,7 +1282,7 @@ local function dispatch(root,key,r,now,context)
 		if job.observer_id~=r.observer_id or job.setup_run_id~=d.setup_run_id or job.stage~="submitted"
 			or not job.pending or job.pending.consumed or job.pending.digest~=d.pending_digest then return nil,"Setup result is inactive, consumed or belongs to another review" end
 		if scope.launch.revision>=MAX_INT then return nil,"capacity" end
-		local validated,err=result_records(job.pending.bytes,d.setup_run_id);if not validated then return nil,err end
+		local validated,err,paid=result_records(job.pending.bytes,d.setup_run_id);if not validated then return nil,err end
 		local ordinary,claim_error=untrusted_records(root,validated);if not ordinary then return nil,claim_error end
 		local result,problem=import_records(root,ordinary);if not result then return nil,problem end
 		if d.preparation then
@@ -1289,8 +1290,10 @@ local function dispatch(root,key,r,now,context)
 			if preparation.revision~=root.config_revision or preparation.window~=context.window then return nil,"The reviewed preparation revision/window differs from the exact saved roster" end
 			local index=0
 			local begin=root.setup.state=="not_started" or root.setup.state=="dismissed"
+			-- Only what the helper's retained result discloses may be prepared: terminal accounts and the
+			-- native accounts listed in its paid_checks. Other enabled records are saved, never prepared.
 			for _,record in ipairs(ordinary) do
-				if record.enabled then
+				if record.enabled and (record.backend~="native-agent" or (paid and paid[record.id]==true)) then
 					index+=1
 					local entry=preparation.entries[index]
 					if record.review_required or not entry or entry.record_id~=record.id or entry.label~=record.provider.." — "..record.account_label or entry.backend~=record.backend or entry.revision~=root.config_revision+(if begin then 1 else 0)+index-1 then return nil,"Preparation approval differs from the exact reviewed enabled accounts" end

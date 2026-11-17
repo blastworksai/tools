@@ -51,9 +51,13 @@ Configuration belongs to the **execution host that owns the Glitch registry**. I
 Open **WORK → Setup** to:
 
 - enter the absolute Glitch root on a fresh installation, or review an existing root shown as **Glitch root (preserved)**;
-- choose **ACP — native ready signal** or **CLI — clipboard fallback**;
-- edit the executable and each argument as separate native fields;
-- add or remove arguments, then choose **Save Setup**.
+- choose **ACP - Recommended** (Tern's native queued prompt) or **CLI - Manual Paste Req.** (copies `/work-on <slug>` to the clicking window's clipboard);
+- edit the executable (labelled **Command**) and each later argument (**Option 1**, **Option 2**, ...) as separate native fields;
+- add or remove options with **Add option**, then choose **Save Setup**.
+
+The screen opens with the line "Choose which agent opens when you click Work On.". The empty Glitch root box shows the placeholder "Your Glitch folder, e.g. /opt/glitch or C:\Users\you\Glitch"; WORK does not detect a folder. A grey hint under the rows reads "Starts Tern's own agent pane." (ACP) or "Starts Claude Code in a terminal." (CLI) only while the rows equal that kind's defaults; editing, adding or removing a row hides it. An untouched Setup with no Glitch root shows a calm instruction instead of the `setup_required` error; the red error appears only after a Save Setup or Refresh attempt.
+
+Setup checks for external edits before it saves and verifies the saved configuration by reading it back. JSON at `config.json` is recovery only. This explanation is documented here and no longer shown on the Setup screen.
 
 A fresh Setup opens with ACP and `tern acp` as two argv entries (`["tern", "acp"]`). Changing **Agent kind** loads that kind's default argv: CLI becomes `["claude"]`, and returning to ACP restores `["tern", "acp"]`. This replaces argv edits made under the previous kind, so review the entries before saving. Enter an absolute executable path when the host's GUI `PATH` is insufficient. An argv is a nonempty dense array of at most 64 strings, each at most 4096 bytes and without control characters. The executable must not be empty; later empty arguments are retained. WORK never splits a combined command string, so quotes and spaces inside one entry remain literal argument content.
 

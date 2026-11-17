@@ -2252,13 +2252,13 @@ local function default_fixture(roster,run_id)
 	function f.envelope()
 		return {schema=1,kind="spawn-setup-result",setup_run_id=f.run,binding=f.job.setup.binding,path=f.job.setup.result_path}
 	end
-	function f.result(records,padding)
-		local bytes=runtime.json.encode({schema=2,setup_run_id=f.run,confirmed=true,agents=records})..string.rep(" ",padding or 0)
+	function f.result(records,padding,paid)
+		local bytes=runtime.json.encode({schema=2,setup_run_id=f.run,confirmed=true,agents=records,paid_checks=paid})..string.rep(" ",padding or 0)
 		db.files[f.job.setup.result_path]=bytes
 		return bytes
 	end
-	function f.accept(records,padding)
-		local bytes=f.result(records,padding)
+	function f.accept(records,padding,paid)
+		local bytes=f.result(records,padding,paid)
 		local ok,why=f.a.setup_submission(f.b,f.envelope(),f.context)
 		check(ok,"explicit setup bytes retained: "..tostring(why))
 		f.job=snapshot(f.a,f.b).jobs[1]
@@ -2417,6 +2417,38 @@ sections.setup_import_fences=function()
 			check(#snapshot(guarded.a,guarded.b).records==0 and not assert(guarded.a.setup_pending(guarded.b,guarded.job.id)).consumed,"changed roster, revision, recipient or nonce cannot save or authorize model preparation")
 		end
 	end
+end
+-- SKILLS-194: preparation consent covers exactly what the retained result discloses:
+-- terminal accounts plus the native accounts in its paid_checks. Every enabled record is still
+-- saved. The real authority validates the manifest; nothing broader is ever accepted.
+sections.setup_paid_subset=function()
+	local function roster()
+		return {record("terminal-a"),record("native-b",{provider="OMP",backend="native-agent",command="omp",prompt="Begin."})}
+	end
+	local TERMINAL={record_id="terminal-a",label="custom — terminal-a",backend="local-terminal"}
+	local NATIVE={record_id="native-b",label="OMP — native-b",backend="native-agent"}
+	local function attempt(paid,picks)
+		local f=default_fixture();f.bind();f.accept(roster(),nil,paid)
+		local entries,consents={},{}
+		for index,pick in ipairs(picks) do
+			local nonce="prepare-subset-"..tostring(index)
+			table.insert(entries,{nonce=nonce,record_id=pick.record_id,label=pick.label,backend=pick.backend,revision=1+index})
+			table.insert(consents,{nonce=nonce,window_consent="consent-"..pick.record_id})
+		end
+		local data=f.import_data()
+		data.preparation={nonce="prepare-subset",revision=1,window=f.context.window,native_namespace="fixture-desktop",native_conn=1,native_since=10,entries=entries,consents=consents}
+		return f,f.send("import_records",data)
+	end
+	local f,reply=attempt(nil,{TERMINAL})
+	check(reply.ok and #snapshot(f.a,f.b).records==2 and assert(f.a.setup_pending(f.b,f.job.id)).consumed,"an undisclosed native account is saved with the roster while only the terminal account is prepared")
+	f,reply=attempt(nil,{TERMINAL,NATIVE})
+	check(not reply.ok and #snapshot(f.a,f.b).records==0 and not assert(f.a.setup_pending(f.b,f.job.id)).consumed,"a manifest that includes an undisclosed native account is refused and saves nothing")
+	f,reply=attempt({"native-b"},{TERMINAL,NATIVE})
+	check(reply.ok and #snapshot(f.a,f.b).records==2,"a native account listed in the result's paid_checks is prepared with the roster")
+	f,reply=attempt({"native-b"},{TERMINAL})
+	check(not reply.ok and #snapshot(f.a,f.b).records==0,"a manifest narrower than the disclosed scope is refused too")
+	f,reply=attempt({"native-b"},{NATIVE,TERMINAL})
+	check(not reply.ok and #snapshot(f.a,f.b).records==0,"a reordered manifest is refused")
 end
 sections.setup_import_conflicts=function()
 	local existing=record("existing")

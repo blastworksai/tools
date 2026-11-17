@@ -1,7 +1,7 @@
 schema = 1
 id = "tern-work"
 name = "WORK"
-version = "0.6.2"
+version = "0.6.3"
 description = "Live active Glitch workspaces with Work On and GitHub actions."
 icon = "list"
 host = "host.luau"

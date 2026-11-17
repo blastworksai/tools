@@ -52,9 +52,9 @@ A linked development checkout (`tern plugin link`) is never updated by the plugi
 
 Open **SPAWN** from its status-bar segment (sparkle icon) or the command palette. There is no Files-pane button. The first time, SPAWN offers once to add the **Plugin segments** widget to the status bar if it is not placed. Either way it opens a real pane beside the active pane, not a floating menu. An unconfigured installation opens **Setup**; a configured one opens **Start an agent**. Opening either page starts nothing.
 
-1. **Set up agents.** On **Setup**, use **Guided setup**, or **Add agent on current machine** for manual entry. The description identifies the execution host. The desktop and an attached remote host are different machines.
+1. **Set up agents.** On **Setup**, the **Guided setup** heading already shows its device choices (**Single device** by default, or **Multi device**) and **Find execution machine(s)**, which stays grey and disabled until you choose Multi device. One **Start Guided setup — may use model credits** action follows. Or use **Add agent on current machine** for manual entry. The description identifies the execution host. The desktop and an attached remote host are different machines.
    Guided setup uses the working folder reported by that execution host. A desktop can display remote paths in its own format; SPAWN does not use that display path to launch the helper. If the host folder changes before startup, setup stops without starting a helper.
-2. **Review and save.** Check the executable, arguments, account routing, folder and permission choices. **Save and prepare** saves the reviewed roster and completes the required ORCH+ preparation in the same approved workflow. **Save settings only** saves the roster without preparing it.
+2. **Approve once, in the helper.** Check the executable, arguments, account routing, folder and permission choices in the helper's own approval. After you submit it, SPAWN saves, prepares and verifies the roster automatically and shows progress, specific failures and the final result in its own pane. There is no review popup and no second click.
 3. **Start an agent.** Choose one eligible saved account. Each agent row shows Tern's own icon for its provider (a generic mark for an unknown one), its launch command underneath and a **Spawn** button. Disabled or review-required records show why they cannot start. This one page is SPAWN's own layout (a bold title, one bordered card per agent, Options cards) beside the same page navigation, because Tern's settings rows have no icon slot; every other page keeps the settings layout. Each click creates a separate session; it does not reuse an unrelated running pane.
 4. **Watch current agents.** **Current agents** shows current observations and lets you open the corresponding sessions. Failed/exited history, raw identifiers and request repair are under **Advanced**. Missing evidence means unknown, not stopped.
 5. **Finished launches clear themselves.** SPAWN observes its panes and moves definitively ended launches to history. This updates SPAWN's own records; it does not stop an agent or close its pane to make the status look successful.
@@ -73,9 +73,9 @@ Permission choices include normal provider defaults and an explicit unrestricted
 
 The helper follows `skills/setup/SKILL.md` and submits through its run-bound helper. SPAWN binds the result to that setup run, execution host, session and source pane; it does not scrape terminal output.
 
-SPAWN opens the complete submitted configuration for review. **Save and prepare these agents** approves the exact settings and prepares enabled agents; native checks disclose the accounts and model costs before approval. Terminal checks are offline. Resources, route verification, owned diagnostic cleanup, saving and status refresh follow automatically. Disabled agents stay unchanged, and records needing review or a different execution route must be resolved first.
+The helper's approval is the only approval. It names the exact roster and the checks SPAWN will run: terminal checks are offline; each native OMP account gets one harmless model message that the approval discloses (accounts, model, possible credits). The helper's result carries that scope as `paid_checks` (the exact native agent IDs it disclosed), bound to the run and result like the roster. After the run-bound submission, SPAWN saves the roster, then runs resource preparation, route verification, owned diagnostic cleanup, final save/readback and status refresh automatically. A native account not listed in `paid_checks` is saved but never checked automatically: SPAWN names it, and **Prepare agents for ORCH+** later shows its account, model, permissions and possible credits before you click. Optional provider-backed readiness tests stay separate and never run from this flow. Disabled agents stay unchanged; a roster with nothing enabled, an SSH route or a record needing review is saved without preparation and SPAWN says why.
 
-**Save settings only** imports the exact reviewed roster without preparation. Identical records are skipped; conflicts refuse the import rather than partly changing the roster. Delivery is not acceptance, and a roster-save receipt is not full setup success. SPAWN reports the actual committed/prepared outcome, naming any incomplete account; it never reports a successful login or real-task readiness from these checks.
+A save is identical-skipping: identical records are skipped; conflicts refuse the import rather than partly changing the roster. Delivery is not acceptance, and a roster-save receipt is not full setup success. SPAWN reports the actual committed/prepared outcome, naming any incomplete account; it never reports a successful login or real-task readiness from these checks.
 
 Normal pages show readable summaries. **Advanced** holds full-record JSON, diagnostics and exceptional retained-result recovery. A pending retained submission must be resolved or explicitly discarded as the exact submission; changing tabs or typing another run ID does not authorize it.
 
@@ -87,7 +87,7 @@ Open **SPAWN → Setup → Prepare agents for ORCH+**. It works with an empty ro
 
 An enabled ordinary roster record is not necessarily a managed worker. Managed setup prepares the fresh launch/input contract, repository working folder and reviewed mailbox helpers required by ORCH+. Merely loading a catalog does not create resources or establish provider readiness. ORCH+ owns its compact agent picker and loads the available catalog automatically; SPAWN owns the saved configurations and setup, not orchestration projects or conversations.
 
-1. For existing accounts, choose **Prepare saved agents**. It prepares the enabled roster without changing disabled agents. To inspect one account or create a record, use **Choose one agent to prepare** and review its account, executable, folder, route and permission settings.
+1. Preparation follows install order. If ORCH+ is already installed when agents are configured, Guided setup prepares them as part of the same flow. If ORCH+ is installed after SPAWN and saved agents still need preparation, Setup offers one **Prepare agents for ORCH+** action for the missing work only, with the account, model, permissions and possible credits of any paid native check shown on the action before you click (terminal-only work is offline). Prepared agents are reused, and when all are prepared SPAWN shows that state instead of a button. Preparation counts only for the launch and account settings it was made for: editing a prepared agent's command, folder, account or route withdraws it, and a saved OS account that differs from the verified worker identity is not treated as prepared. To inspect or re-prepare one account, or create a record, open **Advanced → Inspect or re-prepare agents** and review its account, executable, folder, route and permission settings.
 2. Choose **Prepare and save** for that account, or the roster action above. One approval covers resource checks, route verification, owned diagnostic cleanup, saving and refresh. Native routes disclose one real model message per selected native account, preserving its model/profile/authentication and permission flags. Terminal checks use an offline helper. These routes are not sandboxes.
 3. SPAWN checks the selected identity, executable, folder, arguments and mailbox access, then publishes exact packaged helpers to stable, digest-specific bundles. When the selected terminal CLI's own help declares `--prompt-interactive`, SPAWN can use it for an otherwise inferred final task slot. Explicit input modes, separators and custom task positions remain unchanged. Ordinary launch arguments and review/disabled state are preserved.
 4. Saving follows only successful route observation and confirmed cleanup of its own temporary diagnostic. Observation lasts at most **45 seconds**, normally ending early after positive native identity. Missing/ambiguous identity, changed settings, active or uncertain work, or incomplete cleanup stops the workflow with the actual reason. It does not repeat an issued diagnostic or launch a replacement.
@@ -223,11 +223,17 @@ env SPAWN_PACKAGE_DIR="/path/to/SPAWN" tern shot /path/to/SPAWN/tests/authority.
 
 Both exit 0 when every scenario prints its `PASS` line.
 
+The Guided setup groups (`setup_review`, `guided_setup`) also fit `tern shot`, because `guided_setup` yields between phases to stay inside the 50 ms window-half slice:
+
+```sh
+env SPAWN_PACKAGE_DIR="/path/to/SPAWN" tern shot /path/to/SPAWN/tests/guided_setup.txt --out /tmp/spawn-guided
+```
+
 All Luau groups run through the native runner `tests/run.luau`:
 
 ```lua
 return assert(loadstring(tern.fs.read(root .. "/tests/run.luau")))(root,
-  "behavior,authority,backend,dispatch,window_dispatch,mailbox,host_editor,retirement_adapter")
+  "behavior,authority,backend,dispatch,window_dispatch,mailbox,host_editor,retirement_adapter,setup_review,guided_setup")
 ```
 
 Mailbox helper regressions run outside Tern: `python3 tests/mailbox_posix.py` on POSIX and `powershell -NoProfile -File tests/mailbox_helpers.ps1` on Windows. Group sections and coverage are listed in [BRIDGE.md](BRIDGE.md#verification-entrypoints).
@@ -258,7 +264,7 @@ Mailbox helper regressions run outside Tern: `python3 tests/mailbox_posix.py` on
 - `BRIDGE.md`: managed dispatch bridge reference
 - `assets/icons/`: provider artwork from [lobe-icons](https://github.com/lobehub/lobe-icons) (MIT, see `assets/icons/LICENSE.lobe-icons.txt`)
 - `assets/screenshots/`: historical captures; these may not match the current interface
-- `tests/`: `run.luau` runner, `behavior.txt`/`authority.txt` shot scenarios, Luau suites (`behavior`, `authority`, `backend`, `dispatch`, `window_dispatch`, `mailbox`, `host_editor`, `retirement_adapter`) and mailbox helper regressions (`mailbox_posix.py`, `mailbox_helpers.ps1`)
+- `tests/`: `run.luau` runner, `behavior.txt`/`authority.txt` shot scenarios, Luau suites (`behavior`, `authority`, `backend`, `dispatch`, `window_dispatch`, `mailbox`, `host_editor`, `retirement_adapter`, `setup_review`, `guided_setup`) and mailbox helper regressions (`mailbox_posix.py`, `mailbox_helpers.ps1`)
 
 ## License
 

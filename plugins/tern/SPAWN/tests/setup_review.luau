@@ -389,4 +389,44 @@ do
 	check(equal(alias.fresh_arguments, interactive.fresh_arguments) and alias.task_argument_index == interactive.task_argument_index,
 		"a declared short-and-long option row supports the same named interactive input contract")
 end
+-- SKILLS-194: the helper's approval is the only approval, and it carries the paid-check
+-- scope. The pure plan decides what SPAWN may do automatically for a bound submission.
+do
+	local terminal_a, terminal_b = record("term-a"), record("term-b")
+	local omp = record("omp-a"); omp.provider = "OMP"; omp.backend = "native-agent"; omp.command = "omp"; omp.prompt = "Begin."
+	local function prepared(list, scope)
+		local value = result(list)
+		if scope ~= nil then value.paid_checks = scope end
+		local review = accepted(native(value))
+		return review, Review.automatic_plan(review.records, review.paid_checks)
+	end
+	local _, plan = prepared({ terminal_a, terminal_b })
+	check(plan.action == "prepare" and plan.enabled == 2 and #plan.native == 0 and #plan.withheld == 0 and plan.reason == nil,
+		"an approved terminal roster is saved and prepared automatically with no paid scope")
+	local review, native_plan = prepared({ terminal_a, omp }, { "omp-a" })
+	check(review.paid_checks["omp-a"] == true and native_plan.action == "prepare" and native_plan.enabled == 2 and #native_plan.native == 1
+		and native_plan.native[1]:find("OMP", 1, true) ~= nil and #native_plan.withheld == 0,
+		"a native account listed in the helper's paid_checks is prepared and named")
+	local _, undisclosed = prepared({ terminal_a, omp })
+	check(undisclosed.action == "prepare" and undisclosed.enabled == 1 and equal(undisclosed.prepare_ids, { "term-a" })
+		and #undisclosed.native == 0 and #undisclosed.withheld == 1,
+		"a native account the helper did not disclose is never prepared; offline work continues and the account is named as not checked")
+	local _, only_native = prepared({ omp })
+	check(only_native.action == "save_only" and #only_native.withheld == 1 and only_native.reason:find("did not disclose", 1, true) ~= nil,
+		"a roster whose only work is an undisclosed paid check saves without preparing and says why")
+	local disabled = record("off"); disabled.enabled = false
+	local _, none = prepared({ disabled })
+	check(none.action == "save_only" and none.enabled == 0 and type(none.reason) == "string", "a roster with nothing enabled is saved without preparation and says why")
+	local ssh = record("remote"); ssh.backend = "ssh-command"; ssh.host = "example.test"; ssh.user = "u"
+	local _, remote = prepared({ terminal_a, ssh })
+	check(remote.action == "save_only" and remote.reason:find("review", 1, true) ~= nil,
+		"an SSH route is saved, never prepared automatically, and the reason names the review it needs")
+	check(Review.automatic_plan({}).action == "save_only", "an empty roster never prepares")
+	refused((function() local v = result({ terminal_a }); v.paid_checks = { "term-a" }; return native(v) end)(), nil, "paid_checks cannot name a terminal agent")
+	refused((function() local v = result({ terminal_a, omp }); v.paid_checks = { "omp-a", "omp-a" }; return native(v) end)(), nil, "paid_checks cannot repeat an agent")
+	refused((function() local v = result({ terminal_a, omp }); v.paid_checks = { "ghost" }; return native(v) end)(), nil, "paid_checks cannot name an agent outside the result")
+	refused((function() local v = result({ terminal_a, omp }); v.paid_checks = "omp-a"; return native(v) end)(), nil, "paid_checks must be a list")
+	local off_native = record("omp-off"); off_native.provider = "OMP"; off_native.backend = "native-agent"; off_native.command = "omp"; off_native.prompt = "Begin."; off_native.enabled = false
+	refused((function() local v = result({ off_native }); v.paid_checks = { "omp-off" }; return native(v) end)(), nil, "paid_checks cannot name a disabled agent")
+end
 return "PASS setup_review " .. tostring(checks)

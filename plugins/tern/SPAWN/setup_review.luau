@@ -72,7 +72,7 @@ function Review.prepare(decoded_result: any, expected_run_id: any): (any?, strin
 	if not run_id(expected_run_id) then return nil, "A valid expected setup run ID is required" end
 	if type(decoded_result) ~= "table" then return nil, "Setup result must be a schema-2 object" end
 	for key in pairs(decoded_result) do
-		if key ~= "schema" and key ~= "setup_run_id" and key ~= "confirmed" and key ~= "agents" then
+		if key ~= "schema" and key ~= "setup_run_id" and key ~= "confirmed" and key ~= "agents" and key ~= "paid_checks" then
 			return nil, "Setup result contains an unsupported field"
 		end
 	end
@@ -85,7 +85,61 @@ function Review.prepare(decoded_result: any, expected_run_id: any): (any?, strin
 	if records == nil then return nil, reason end
 	local rows: { Row } = {}
 	for index, record in ipairs(records) do rows[index] = row(record) end
-	return { setup_run_id = decoded_result.setup_run_id, records = records, rows = rows }, nil
+	-- The helper's approval names every native account whose paid model check it disclosed.
+	-- It is bound to this run and result exactly like the roster; nothing else is inferred.
+	local paid: { [string]: boolean } = {}
+	local scope = decoded_result.paid_checks
+	if scope ~= nil then
+		if type(scope) ~= "table" or #scope > 32 then return nil, "paid_checks must be a list of at most 32 agent IDs" end
+		local count = 0
+		for _ in pairs(scope) do count += 1 end
+		if count ~= #scope then return nil, "paid_checks must be a plain list of agent IDs" end
+		local native_ids: { [string]: boolean } = {}
+		for _, record in ipairs(records) do
+			if record.enabled and record.backend == "native-agent" then native_ids[record.id] = true end
+		end
+		for _, id in ipairs(scope) do
+			if type(id) ~= "string" or paid[id] or not native_ids[id] then return nil, "paid_checks may list each enabled native agent of this result once" end
+			paid[id] = true
+		end
+	end
+	return { setup_run_id = decoded_result.setup_run_id, records = records, rows = rows, paid_checks = paid }, nil
+end
+
+-- The helper's approval names the exact roster and its checks, so SPAWN saves and
+-- prepares automatically after a bound submission. This pure plan only decides
+-- WHAT the automatic flow may do; it never approves a paid check the roster does
+-- not declare, and optional provider readiness exercises are never part of it.
+function Review.automatic_plan(records: any, paid_checks: any): any
+	local enabled, native, withheld, prepare_ids = 0, {}, {}, {}
+	local blocked: string? = nil
+	local scope = if type(paid_checks) == "table" then paid_checks else {}
+	for _, record in ipairs(if type(records) == "table" then records else {}) do
+		if record.enabled then
+			enabled += 1
+			if record.review_required or record.backend == "ssh-command" then
+				blocked = "An agent needs its launch settings or execution route reviewed before it can be prepared"
+			end
+			if record.backend == "native-agent" then
+				local label = tostring(record.provider) .. " — " .. tostring(record.account_label)
+					.. " (model: " .. tostring(record.model or "saved CLI settings/default") .. ")"
+				if scope[record.id] == true then
+					table.insert(native, label)
+					table.insert(prepare_ids, record.id)
+				else
+					table.insert(withheld, label)
+				end
+			else
+				table.insert(prepare_ids, record.id)
+			end
+		end
+	end
+	if enabled == 0 then return { action = "save_only", enabled = 0, native = {}, withheld = {}, prepare_ids = {}, reason = "No enabled agents to prepare" } end
+	if blocked ~= nil then return { action = "save_only", enabled = enabled, native = native, withheld = withheld, prepare_ids = {}, reason = blocked } end
+	if #prepare_ids == 0 then
+		return { action = "save_only", enabled = enabled, native = {}, withheld = withheld, prepare_ids = {}, reason = "Every enabled agent needs a paid model check the helper did not disclose" }
+	end
+	return { action = "prepare", enabled = #prepare_ids, native = native, withheld = withheld, prepare_ids = prepare_ids, reason = nil }
 end
 
 return Review

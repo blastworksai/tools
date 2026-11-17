@@ -49,3 +49,11 @@ The person should not need to open or click the ORCH+ panel to see it.
 Today the summary appears on the next panel interaction.
 Current SDK events cannot reliably tell a human message from an agent or automation message.
 A future version must not trigger on every automated message.
+
+## 8. Tern-native usage when USAGE is not installed
+
+Tern 0.9.22 shows its own usage statistics for some providers in the widget bar.
+When USAGE is not installed, offer Tern's own usage for those providers instead of showing usage as unavailable.
+USAGE stays the recommended path, because it reports usage per account across many accounts, which Tern's own statistics do not.
+First find out which providers and which data Tern exposes to plugins.
+Tracked as SKILLS-195.

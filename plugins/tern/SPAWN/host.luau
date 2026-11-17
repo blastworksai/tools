@@ -211,6 +211,8 @@ local function reload(state)
 		if job.setup_consumed then
 			if state.import_review and state.import_review.attempt_id==job.attempt_id then state.import_review=nil end
 			if state.setup_result_attempt==job.attempt_id then state.setup_result_attempt=nil end
+			-- The result is consumed: the retained "received" lead is no longer true.
+			if state.notice==SETUP_RESULT_NOTICE then state.notice=nil end
 		end
 	end
 	if state.choose_start_page then
@@ -432,6 +434,35 @@ local function action_row(id,label,act,hint) return {id=id,label=label,hint=hint
 local function static_row(id,label,value,hint)
 	return {id=id,label=label,hint=value.."\n"..hint,disabled="Read-only observation",control={k="action",act="noop",label="Read only"}}
 end
+-- A child row sits beneath its heading section and carries indent=1 for the native list.
+local function child(row)
+	row.indent=1
+	return row
+end
+local managed_candidates,native_check_scope
+-- Preparation counts only while it still matches the record's launch/account contract.
+-- Editing a contract field of a prepared record invalidates it (see update_record); a
+-- saved OS account that no longer matches the verified worker identity is stale too.
+-- Every record field can shape a launch (launch_resolution, backend and mailbox preparation read
+-- command/arguments/fresh_*/task_argument_index/host/user/key_path/cwd/model/profile/shell and
+-- platform fields, and more may follow), so preparation is bound to ALL of them by default. Only
+-- fields that provably never reach a launch are exempt.
+local NON_CONTRACT_FIELDS={account_label=true,enabled=true,placement=true,review_required=true,review_reason=true,provider_family=true,mailbox=true}
+local function preparation_current(record)
+	local mailbox=record.mailbox
+	if type(mailbox)~="table" or mailbox.verified~=true then return false end
+	if type(record.user)=="string" and record.user~="" and record.backend~="ssh-command" and record.user~=mailbox.worker_identity then return false end
+	return true
+end
+local function unprepared_ids(state)
+	local ids={}
+	for _,record in ipairs(state.config.agents) do
+		if record.enabled and not preparation_current(record) then table.insert(ids,record.id) end
+	end
+	return ids
+end
+local SETUP_RESULT_NOTICE="Setup result received. SPAWN saves, prepares and verifies the approved agents automatically."
+local GUIDED_HELP="Guided setup opens a helper beside SPAWN that finds your agents and asks you to approve the exact roster once. SPAWN then saves, prepares and verifies them automatically; there is no second approval. Choose the devices below, then start."
 local function readable_fields(rows,prefix,label,value)
 	if type(value)~="table" then
 		table.insert(rows,static_row(prefix,label,tostring(value),"Retained observation; not permission to launch."))
@@ -529,7 +560,7 @@ local function prepare_manual_review(state,revision)
 	state.import_review=nil
 	local payload,err=Config.decode_setup_json(state.import_text)
 	if not payload or type(payload)~="table" or payload.schema~=2 or type(payload.agents)~="table" then state.notice=err or "Expected current-schema {schema:2,agents:[...]} JSON";return end
-	for key in pairs(payload) do if key~="schema" and key~="agents" and key~="setup_run_id" and key~="confirmed" then state.notice="Unexpected setup JSON field: "..tostring(key);return end end
+	for key in pairs(payload) do if key~="schema" and key~="agents" and key~="setup_run_id" and key~="confirmed" and key~="paid_checks" then state.notice="Unexpected setup JSON field: "..tostring(key);return end end
 	if payload.setup_run_id~=nil or payload.confirmed~=nil then
 		if type(payload.setup_run_id)~="string" or #payload.setup_run_id==0 or #payload.setup_run_id>256 or payload.setup_run_id:find("%c") or payload.confirmed~=true then state.notice="Guided setup recovery requires a valid setup_run_id and confirmed:true; otherwise paste a manual schema/agents object";return end
 	end
@@ -538,37 +569,74 @@ local function prepare_manual_review(state,revision)
 	state.notice="Validated every record. Review the exact settings on the original host/session, then Import reviewed records. Manual recovery does not prove original automatic-source provenance."
 end
 local function setup_sections(state)
-	local rows={
-		action_row("setup-flow","Guided setup",action(state,"launch-setup"),"Recommended: OMP in ACP mode as your Tern default. Other configured default agents work too. Opens the helper on the left and SPAWN on the right; review the proposed settings before saving."),
-		action_row("setup-add-local","Add agent on "..tostring(state.host and state.host.name or state.host_key or "this machine"),action(state,"add-local"),"Choose a provider and account, then review its launch settings."),
-		action_row("setup-managed","Prepare agents for ORCH+",action(state,"managed-open"),"One action prepares the saved accounts, verifies their routes, saves and refreshes. Terminal checks are offline; native checks disclose model costs before you approve."),
+	local topology=state.setup_topology or {mode="single"}
+	local busy=setup_active(state)
+	local queued=false
+	for _,intent in ipairs(state.intents or {}) do if intent.kind=="setup" then queued=true;break end end
+	local guided={
+		child(choice_row("setup-device-mode","Single or Multi Device Setup?",topology.mode,{{value="single",label="Single device (default)"},{value="multi",label="Multi device"}},"Agents run on the primary execution machine. A Tern desktop attached through SSH is not another agent SSH hop.")),
 	}
-	if state.setup_topology then
-		local topology=state.setup_topology
-		table.insert(rows,2,choice_row("setup-device-mode","Single or Multi Device Setup?",topology.mode,{{value="single",label="Single device (default)"},{value="multi",label="Multi device"}},"Agents run on the primary execution machine. A Tern desktop attached through SSH is not another agent SSH hop."))
-		table.insert(rows,3,action_row("setup-find-devices","Find execution machines",action(state,"setup-find-devices"),"Read the devices already known to this Tern window. No connection, account or key is created."))
-		if topology.observation then
-			local options={}
-			for _,device in ipairs(topology.observation.devices) do table.insert(options,{value=tostring(device.id),label=device.name..(if device.id==topology.observation.current then " — current execution machine" else "")..(if device.state~="connected" then " — "..device.state else "")}) end
-			table.insert(rows,4,choice_row("setup-primary","Which Device is the primary execution machine?",tostring(topology.selected),options,"Discovery and preparation will run there, under the selected existing account. Other machines keep their own saved agents; no cross-host federation is configured."))
-			local launch=action_row("setup-start-helper","Start Guided setup — may use model credits",action(state,"setup-start-helper"),"Uses your current Tern default agent on the selected machine, on the left of SPAWN. It discovers commands and asks for your settings approval; it does not start orchestration work.")
-			if topology.request or setup_active(state) then launch.disabled="Wait for the current discovery or setup helper." end
-			table.insert(rows,5,launch)
+	local find=child(action_row("setup-find-devices","Find execution machine(s)",action(state,"setup-find-devices"),"Read the devices already known to this Tern window. No connection, account or key is created."))
+	if topology.mode~="multi" then find.disabled="Single device uses this execution machine. Choose Multi device to find others."
+	elseif topology.request then find.disabled="Discovery is running." end
+	table.insert(guided,find)
+	if topology.observation then
+		local options={}
+		for _,device in ipairs(topology.observation.devices) do table.insert(options,{value=tostring(device.id),label=device.name..(if device.id==topology.observation.current then " — current execution machine" else "")..(if device.state~="connected" then " — "..device.state else "")}) end
+		table.insert(guided,child(choice_row("setup-primary","Which Device is the primary execution machine?",tostring(topology.selected),options,"Discovery and preparation will run there, under the selected existing account. Other machines keep their own saved agents; no cross-host federation is configured.")))
+	end
+	local launch=child(action_row("setup-start-helper","Start Guided setup — may use model credits",action(state,"setup-start-helper"),"Uses your current Tern default agent on the selected machine, on the left of SPAWN. It discovers commands and asks for your settings approval once; it does not start orchestration work."))
+	if busy then launch.disabled="Finish the current Guided setup before starting another helper."
+	elseif queued then launch.disabled="Guided setup is already queued."
+	elseif topology.request then launch.disabled="Wait for the current discovery."
+	elseif topology.mode=="multi" and not topology.observation then launch.disabled="Find execution machine(s) first, then choose the primary machine." end
+	table.insert(guided,launch)
+	if topology.error then table.insert(guided,static_row("setup-device-error","Execution machine","Setup required",topology.error)) end
+	if busy then
+		table.insert(guided,child(action_row("setup-result","Recover setup result",action(state,"launch-result"),"Recovery only: SPAWN normally saves the approved result by itself. This asks the SPAWN window that started the run to process it once; nothing is saved twice.")))
+	end
+	local rows={
+		action_row("setup-add-local","Add agent on "..tostring(state.host and state.host.name or state.host_key or "this machine"),action(state,"add-local"),"Choose a provider and account, then review its launch settings."),
+	}
+	-- Preparation follows installation order: saved agents that ORCH+ still needs
+	-- prepared get ONE action for the missing work; prepared agents are reused.
+	if #state.config.agents>0 then
+		local missing=unprepared_ids(state)
+		if #missing>0 then
+			-- The one action names exactly what a click may run, before the click.
+			local candidates,blocked=managed_candidates(state,true,missing)
+			local scopes={}
+			if candidates then
+				for _,candidate in ipairs(candidates) do
+					if candidate.draft.backend=="native-agent" then table.insert(scopes,native_check_scope(candidate.draft)) end
+				end
+			end
+			if not candidates then
+				table.insert(rows,static_row("setup-managed","Prepare agents for ORCH+","Setup required",tostring(blocked)))
+			else
+				local label="Prepare agents for ORCH+"
+				local hint=tostring(#missing).." saved agent(s) still need preparation. Already prepared agents are reused, not repeated."
+				if #scopes>0 then
+					label..=" — uses model credits"
+					hint..=" Paid native checks, one harmless model message each: "..table.concat(scopes," | ").." May cost model credits; not a sandbox. Other agents are checked offline."
+				else
+					hint..=" All checks are offline; no model is called."
+				end
+				local prepare=action_row("setup-managed",label,action(state,"managed-prepare-missing"),hint)
+				if state.managed_busy or (state.managed_batch and state.managed_batch.status~="completed" and state.managed_batch.status~="failed") then prepare.disabled="Setup is already running." end
+				table.insert(rows,prepare)
+			end
+		else
+			table.insert(rows,text_row("setup-managed-state","Agents prepared for ORCH+","All saved agents are prepared","Preparation is current. Nothing more to click.","Already prepared"))
 		end
-		if topology.error then table.insert(rows,static_row("setup-device-error","Execution machine","Setup required",topology.error)) end
 	end
-	if setup_active(state) then
-		rows[1].disabled="Finish or review the current Guided setup before starting another helper."
-	else
-		for _,intent in ipairs(state.intents or {}) do if intent.kind=="setup" then rows[1].disabled="Guided setup is already queued.";break end end
-	end
-	if setup_active(state) then
-		table.insert(rows,3,action_row("setup-result","Review setup result",action(state,"launch-result"),"Recover the confirmed result of the active Guided setup run. The SPAWN window that started it reviews it; nothing is imported until you confirm."))
+	if state.advanced then
+		table.insert(rows,action_row("setup-managed-advanced","Inspect or re-prepare agents",action(state,"managed-open"),"Per-agent inspection and re-preparation, with machine-facing detail."))
 	end
 	for _,job in ipairs(state.snapshot.jobs or {}) do
 		if job.setup and (state.advanced or not job.setup_consumed) then
 			local status=if job.setup_discarded then "Discarded without saving" elseif job.setup_consumed then "Agents saved" elseif job.pending_bytes and job.pending_bytes>0 then "Ready to save your agents" else "Answer the setup questions"
-			table.insert(rows,static_row("setup-submission-"..job.attempt_id,"Guided setup result",status,if state.advanced then "Run "..tostring(job.setup_run_id)..". Review the exact retained settings; saving does not launch agents." else "SPAWN shows your proposed settings for approval. If you dismissed that review, choose Review setup result."))
+			table.insert(rows,static_row("setup-submission-"..job.attempt_id,"Guided setup result",status,if state.advanced then "Run "..tostring(job.setup_run_id)..". Review the exact retained settings; saving does not launch agents." else "The helper holds your one approval. SPAWN saves, prepares and verifies the roster by itself; if that did not finish, choose Recover setup result."))
 			if job.pending_bytes and job.pending_bytes>0 and not job.setup_consumed then
 				table.insert(rows,action_row("discard-setup-"..job.attempt_id,"Discard this setup result",action(state,"discard-setup:"..job.attempt_id),"Opens an explicit native decision for this exact pending submission. Saved records, helper conversations, other results and history remain unchanged."))
 			end
@@ -599,7 +667,10 @@ local function setup_sections(state)
 		review_rows(rows,"import",state.import_review.records,"Review the exact settings; conflicting IDs are never renamed or overwritten.")
 		table.insert(rows,action_row("manual-confirm","Import reviewed records", "manual-confirm@"..tostring(state.import_review.revision),"Manual recovery does not prove original automatic-source provenance. Imports only; never launches."))
 	end
-	return {{id="setup-guide",page="setup",title="Agent setup",rows=rows}}
+	return {
+		{id="setup-guided",page="setup",title="Guided setup",hint=GUIDED_HELP,rows=guided},
+		{id="setup-guide",page="setup",title="Agent setup",rows=rows},
+	}
 end
 local MANAGED_FIELDS={id=true,provider=true,provider_family=true,account_label=true,backend=true,executable=true,arguments=true,task_argument_index=true,cwd=true,root=true,user=true}
 local function managed_draft(state)
@@ -652,7 +723,7 @@ end
 local function managed_record_idle(state,id)
 	return Authority.record_preparation_available(state.host_key,id)
 end
-local function managed_candidates(state,all,selected)
+function managed_candidates(state,all,selected)
 	local candidates={}
 	local function add(draft,existing)
 		if draft.preparation_error then return nil,draft.account_label..": "..draft.preparation_error end
@@ -686,15 +757,15 @@ local function managed_candidates(state,all,selected)
 	if #candidates==0 then return nil,if all and #state.config.agents>0 then "No enabled agents are selected. Choose an agent and use Enable agent before preparation." else "Save at least one agent, or review a new agent's settings first." end
 	return candidates
 end
-local function native_check_scope(draft)
+function native_check_scope(draft)
 	local source=draft.source_record or {}
 	return draft.provider.." — "..draft.account_label.." (model: "..tostring(source.model or "saved CLI settings/default")..(if source.profile then "; profile: "..source.profile else "").."; existing account: "..(if draft.user~="" then draft.user else "current OS account").."; arguments: "..(if draft.arguments~="" then draft.arguments else "none")..")"
 end
-local function managed_batch_offer(state,cx,expected,all,plan)
+local function managed_batch_offer(state,cx,expected,all,plan,missing)
 	if state.managed_busy or (state.managed_batch and state.managed_batch.status~="failed" and state.managed_batch.status~="completed") then state.notice="Setup is already running; no second preparation was requested.";return end
 	local pending,why=Authority.setup_probe_read(state.host_key)
 	if pending or why then state.notice=why or "The previous diagnostic still needs positively observed cleanup. Nothing was repeated.";return end
-	local candidates,problem=managed_candidates(state,all,if plan then plan.selected else nil)
+	local candidates,problem=managed_candidates(state,all,if plan then plan.selected else missing)
 	if not candidates then state.notice="SPAWN Setup failed: "..problem;return end
 	local nonce=if plan then plan.nonce else string.format("prepare-%d-%08x-%08x",os.time(),math.random(1,2147483647),math.random(1,2147483647))
 	local begin=state.snapshot.setup.state=="not_started" or state.snapshot.setup.state=="dismissed"
@@ -775,7 +846,15 @@ local function managed_sections(state)
 	local rows={
 		static_row("managed-state","Setup",({not_started="Not prepared",in_progress="Preparing",completed="Saved",adopted_existing="Saved",dismissed="Dismissed"})[setup.state] or setup.state,"Helper access and native routing are verified automatically. Provider authentication, custom CLI semantics and readiness remain separate."),
 	}
-	local candidates,blocked=managed_candidates(state,true)
+	local missing=unprepared_ids(state)
+	local normal_view=not state.advanced and not state.managed_edit_one and #state.config.agents>0
+	local candidates,blocked
+	if normal_view and #missing==0 then
+		-- Everything enabled is already prepared: show that state, no button.
+		table.insert(rows,text_row("managed-all-prepared","Agents prepared for ORCH+","All saved agents are prepared","Preparation is current. Per-agent re-preparation is under Advanced.","Already prepared"))
+	else
+		candidates,blocked=managed_candidates(state,true,if normal_view then missing else nil)
+	end
 	if candidates then
 		local names,native={},{}
 		for _,candidate in ipairs(candidates) do
@@ -783,15 +862,12 @@ local function managed_sections(state)
 			table.insert(names,label)
 			if candidate.draft.backend=="native-agent" then table.insert(native,native_check_scope(candidate.draft)) end
 		end
-		local batch_action=action_row("managed-prepare-all",if #native>0 then "Prepare saved agents — includes paid native checks" else "Prepare saved agents",action(state,"managed-prepare-all"),"Prepares, verifies, saves and refreshes "..tostring(#candidates).." enabled agents on this execution machine: "..table.concat(names,", ")..". Disabled agents stay unchanged. SSH destinations are never inferred or converted automatically. Terminal checks are offline."..(if #native>0 then " One model message each for: "..table.concat(native,", ")..". These checks may use credits, use the saved model and permissions, and are not sandboxes." else " No provider/model task is launched."))
+		local batch_action=action_row(if normal_view then "managed-prepare-missing" else "managed-prepare-all",if #native>0 then "Prepare saved agents — includes paid native checks" else "Prepare saved agents",action(state,if normal_view then "managed-prepare-missing" else "managed-prepare-all"),"Prepares, verifies, saves and refreshes "..tostring(#candidates).." enabled agents on this execution machine: "..table.concat(names,", ")..". Disabled agents stay unchanged. SSH destinations are never inferred or converted automatically. Terminal checks are offline."..(if #native>0 then " One model message each for: "..table.concat(native,", ")..". These checks may use credits, use the saved model and permissions, and are not sandboxes." else " No provider/model task is launched."))
 		if state.managed_busy or (state.managed_batch and state.managed_batch.status~="completed" and state.managed_batch.status~="failed") then batch_action.disabled="Setup is already running." end
 		table.insert(rows,batch_action)
-	elseif #state.config.agents>0 then table.insert(rows,static_row("managed-batch-prerequisite","Prepare saved agents","Setup required",blocked)) end
+	elseif blocked and #state.config.agents>0 then table.insert(rows,static_row("managed-batch-prerequisite","Prepare saved agents","Setup required",blocked)) end
 	if #state.config.agents>0 and not state.managed_edit_one and not state.advanced then
 		if state.notice then table.insert(rows,static_row("managed-notice","Setup status","Review",state.notice)) end
-		local choose=action_row("managed-edit-one","Choose one agent to prepare",action(state,"managed-edit-one"),"Optional: inspect or prepare one saved account instead of the complete enabled roster.")
-		if state.managed_batch and state.managed_batch.status~="completed" and state.managed_batch.status~="failed" then choose.disabled="Wait for the current setup." end
-		table.insert(rows,choose)
 		table.insert(rows,action_row("managed-exercise","Check provider readiness…",action(state,"managed-exercise"),"Optional paid provider exercise, with separate consent. Required terminal setup above is offline."))
 		return {{id="managed-setup",page="managed",title="Prepare agents for ORCH+",rows=rows}}
 	end
@@ -1224,6 +1300,7 @@ local function view(state,cx)
 	local failure=observer_migration_error or state.reload_error or state.queue_error or state.transport_error
 	if failure then snapshot.ready=false;snapshot.error=failure end
 	local lead="Choose an agent, start a conversation, or manage its settings."
+	if state.notice==SETUP_RESULT_NOTICE and not (state.snapshot and setup_active(state)) then state.notice=nil end
 	if state.notice then lead..=" "..state.notice end
 	if snapshot.error then lead..=" "..snapshot.error end
 	local sections={}
@@ -1291,6 +1368,21 @@ local function view(state,cx)
 	end
 	return {main=ui.col(children)}
 end
+-- A prepared record whose launch/account contract changed is no longer prepared: the
+-- verification was made for the old contract, so it is withdrawn, never silently kept.
+local function withdraw_stale_preparation(old,new)
+	if type(new.mailbox)~="table" or new.mailbox.verified~=true then return false end
+	local seen={}
+	for _,source in ipairs({old,new}) do
+		for field in pairs(source) do
+			if not NON_CONTRACT_FIELDS[field] and not seen[field] then
+				seen[field]=true
+				if not Dispatch.protocol.equal(old[field],new[field]) then new.mailbox.verified=false;return true end
+			end
+		end
+	end
+	return false
+end
 local function update_record(state,cx,id,field,value,revision)
 	local record,index=record_by_id(state,id);if not record then return end
 	if field=="json" then
@@ -1302,6 +1394,7 @@ local function update_record(state,cx,id,field,value,revision)
 		if canonical.id~=id then state.notice="Stable ids are immutable; full-record JSON must keep this record's ID";return end
 		if Dispatch.protocol.equal(canonical,record) then state.notice="Record unchanged. No agents were launched.";return end
 		if canonical.mailbox and (canonical.mailbox.verified==true or canonical.mailbox.evidence_ref~=nil) and not Dispatch.protocol.equal(canonical.mailbox,record.mailbox) then state.notice="Managed readiness cannot be supplied by JSON. Use Prepare agents for ORCH+; unchanged previously verified helpers are preserved.";return end
+		withdraw_stale_preparation(record,canonical)
 		canonical.review_required=true
 		canonical.review_reason=record.review_reason or "Review all launch, mailbox and selector settings after editing this record's JSON"
 		local next_records=Authority.clone(state.config.agents);next_records[index]=canonical
@@ -1318,6 +1411,7 @@ local function update_record(state,cx,id,field,value,revision)
 	candidate[field]=value
 	if field=="backend" and value~=record.backend then candidate.review_required=true;candidate.review_reason="Review this account's launch command and routing after changing launch mode" end
 	local canonical,err=Config.validate_record(candidate);if not canonical then state.notice=err;return end
+	if withdraw_stale_preparation(record,canonical) then state.notice="This agent's launch settings changed, so its ORCH+ preparation was withdrawn. Prepare agents for ORCH+ to check it again." end
 	local next_records=Authority.clone(state.config.agents);next_records[index]=canonical
 	mutate(state,cx,revision,"replace-records",{records=next_records})
 end
@@ -1372,7 +1466,7 @@ local definition={
 	init=function(cx,args,saved)
 		local discovery=nil;if #args>0 then discovery=decode(args[1]) end
 		local page_only=type(discovery)=="table" and discovery.kind=="page"
-		local state={config={schema=2,agents={}},host_key=if page_only then nil else host_key(discovery),page="runtime",provider_filter="",label_filter="",import_text="",notice=nil,editing=nil,focus=nil}
+		local state={config={schema=2,agents={}},host_key=if page_only then nil else host_key(discovery),page="runtime",provider_filter="",label_filter="",import_text="",notice=nil,editing=nil,focus=nil,setup_topology={mode="single"}}
 		if type(saved)=="table" then
 			if PAGE_IDS[saved.page] then state.page=saved.page end
 			if type(saved.origin_session)=="number" then state.origin_session=saved.origin_session end
@@ -1528,7 +1622,7 @@ local definition={
 				if not setup_job(state,cx,input.attempt_id) then state.notice="Setup result belongs to another Config pane or window";return end
 				local pending,problem=Authority.setup_pending(binding,input.attempt_id)
 				if not pending or pending.consumed then state.notice=problem or "No unconsumed submitted setup result";return end
-				state.setup_result_attempt=input.attempt_id;state.notice="Submitted setup result ready for review in the original SPAWN window."
+				state.setup_result_attempt=input.attempt_id;state.notice=SETUP_RESULT_NOTICE
 			end)
 			return
 		end
@@ -1863,6 +1957,12 @@ local definition={
 				end
 				return
 			end
+			if op=="managed-prepare-missing" then
+				-- Reuse valid preparation: only enabled agents without verified preparation.
+				local missing=unprepared_ids(state)
+				if #missing==0 then state.notice="Every saved agent is already prepared for ORCH+; nothing to do.";return end
+				managed_batch_offer(state,cx,expected,true,nil,missing);return
+			end
 			if op=="managed-prepare" or op=="managed-prepare-all" then managed_batch_offer(state,cx,expected,op=="managed-prepare-all");return end
 			if op=="terminal-capability-check" then
 				if state.snapshot.host_os~="macos" or state.terminal_capability_busy then return end
@@ -1993,12 +2093,13 @@ local definition={
 				if setup_active(state) then state.notice="Guided setup is already active. Review its result or finish the original helper first.";return end
 				for _,intent in ipairs(state.intents or {}) do if intent.kind=="setup" then state.notice="Guided setup is already queued; no second helper was requested.";return end end
 				state.setup_topology=state.setup_topology or {mode="single"}
-				state.notice="Choose your device setup, then find execution machines. No helper has started.";return
+				state.notice="Choose your device setup, then press Start Guided setup. No helper has started.";return
 			end
 			if op=="setup-find-devices" then
 				if setup_active(state) then state.notice="Finish the current setup before finding devices again.";return end
 				for _,intent in ipairs(state.intents or {}) do if intent.kind=="setup" then state.notice="Execution-machine selection is already queued.";return end end
 				if not state.setup_topology then state.notice="Choose Single or Multi Device Setup first.";return end
+				if state.setup_topology.mode~="multi" then state.notice="Single device uses this execution machine. Choose Multi device to find others.";return end
 				if state.setup_topology.request then return end
 				state.setup_topology.request={nonce=string.format("devices-%d-%08x",os.time(),math.random(1,2147483647))}
 				state.setup_topology.observation=nil;state.setup_topology.selected=nil;state.setup_topology.error=nil
@@ -2008,8 +2109,12 @@ local definition={
 				if setup_active(state) then state.notice="Finish the original setup helper first.";return end
 				for _,intent in ipairs(state.intents or {}) do if intent.kind=="setup" then state.notice="Guided setup is already queued.";return end end
 				local topology=state.setup_topology
-				local device,why=SetupDiscovery.primary(if topology then topology.observation else nil,if topology then topology.selected else nil,if topology then topology.mode else nil)
-				if not device then state.notice=why;return end
+				-- Single device: the window resolves the current execution machine itself.
+				-- Multi device still needs an observed, connected primary machine.
+				if not (topology and topology.mode=="single" and topology.observation==nil) then
+					local device,why=SetupDiscovery.primary(if topology then topology.observation else nil,if topology then topology.selected else nil,if topology then topology.mode else nil)
+					if not device then state.notice=why;return end
+				end
 				publish_intent(state,cx,"setup",expected);return
 			end
 			local discard_id=op:match("^discard%-setup:(.+)$")
