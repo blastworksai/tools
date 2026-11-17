@@ -634,7 +634,7 @@ if section == nil or section == "project_choice" then
 	menu_choice:start("project_menu", { orch_project_id = "p1" }); menu_choice:choose("command", "new_conversation")
 	check(#menu_choice.picks == 0 and menu_choice.agent_picker ~= nil, "New Agent Session from a project menu uses that project")
 	local reach = fixture()
-	reach:start("project_menu", { orch_project_id = "p1" }); reach:choose("label", "New Agent Session in another project…")
+	reach:start("project_menu", { orch_project_id = "p1" }); reach:choose("label", "Start in another project…")
 	check(prompted(reach), "the project menu still reaches the picker when only one project exists")
 end
 return string.format("conversation_ui/%s: %d checks", section or "all", checks)

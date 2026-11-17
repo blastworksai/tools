@@ -379,7 +379,7 @@ function M.new(api: any): any
 			local project = projects(cx, source)[request.orch_project_id]
 			if not project then return true end
 			local items = {
-				{ label = "New Agent Session", command = "new_conversation" }, { label = "New Agent Session in another project…", command = "new_conversation", choose_project = true },
+				{ label = "New Agent Session", command = "new_conversation" }, { label = "Start in another project…", command = "new_conversation", choose_project = true },
 				{ label = "Attach Existing Agent Session", command = "attach_conversation" },
 				{ label = "Move managed conversation here…", command = "project_associate" },
 				{ label = "Add plan file…", source = "add-plan" }, { label = "Add board…", source = "add-board" },
