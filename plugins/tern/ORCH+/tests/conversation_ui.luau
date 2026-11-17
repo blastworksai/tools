@@ -1,6 +1,6 @@
 -- Exercise real conversation-window choices and one-shot submissions through native API boundaries.
 local root, section = ...
-assert(section == nil or table.find({ "conversation", "association", "projects", "creation", "presentation" }, section), "unknown conversation UI section")
+assert(section == nil or table.find({ "conversation", "association", "projects", "creation", "presentation", "project_choice" }, section), "unknown conversation UI section")
 local runtime, environment = tern, getfenv()
 local checks = 0
 local function check(value, message) assert(value, message); checks += 1 end
@@ -90,6 +90,9 @@ local function fixture()
 		},
 	}
 	f.ui = load("conversation_window").new(api)
+	function f:another_project()
+		self.projects.p0 = { orch_project_id = "p0", name = "Archive", revision = 1, decision_context = "other-proof", started = false, associations = {} }
+	end
 	function f:tick() self.ui.tick(self:context()) end
 	function f:choose(field, value)
 		local pending = table.remove(self.picks, 1); assert(pending, "missing native picker")
@@ -115,14 +118,14 @@ local function fixture()
 end
 if section == nil or section == "conversation" then
 	local f = fixture(); f.policy.quota_routing = true
-	f:start("new_conversation"); f:choose("project_id", "p1"); f:agent_choice()
+	f:start("new_conversation"); f:agent_choice()
 	local sent = f.sent[1]
 	check(sent.command == "queue" and sent.fields.presentation == "user_new_tab" and sent.fields.open_conversation == true, "new conversation overrides saved split with a focused native tab")
 	check(sent.fields.cwd == "/research" and sent.fields.execution_cwd == nil and sent.fields.files == nil and sent.fields.checks == nil, "text and research have no repository/files/checks/base wizard")
 	check(f.capacity_reads == 1 and #f.prompts == 0, "real capacity path precedes the explicit saved-record launch without a task prompt")
 	f:tick(); f.now = 31000; f:tick(); f:tick()
 	check(#f.sent == 1 and #f.notices == 1, "uncertain launch is never automatically replayed")
-	local fresh = fixture(); fresh:start("new_conversation"); fresh:choose("new", true); fresh:text("Notes")
+	local fresh = fixture(); fresh:another_project(); fresh:start("new_conversation"); fresh:choose("new", true); fresh:text("Notes")
 	check(#fresh.sent == 0 and fresh.agent_picker == nil, "new project waits for its own subject decision before creating or launching anything")
 	fresh.decision_result = { request_id = "another-decision", decision_context = "unrelated" }; fresh:tick()
 	check(#fresh.sent == 0, "another decision cannot authorize project creation")
@@ -133,25 +136,25 @@ if section == nil or section == "conversation" then
 	check(fresh.sent[2].fields.orch_project_id == "p2", "matching driver outcome is followed even when a different persistent owner outcome remains visible")
 	local preferred = fixture()
 	preferred.policy.preferred_worker_record, preferred.defaults.builder_record = "preferred", "other-default"
-	preferred:start("new_conversation"); preferred:choose("project_id", "p1")
+	preferred:start("new_conversation")
 	check(preferred.sent[1].fields.record_id == "preferred" and preferred.agent_picker == nil,
 		"an existing orchestration's preferred worker drives its actual normal launch independently of reusable defaults")
 	local orchestrator = fixture()
 	orchestrator.policy.preferred_orchestrator_record, orchestrator.defaults.coordinator_record = "preferred", "other-default"
-	orchestrator:start("start_orchestrator"); orchestrator:choose("project_id", "p1")
+	orchestrator:start("start_orchestrator")
 	check(orchestrator.sent[1].fields.record_id == "preferred" and orchestrator.sent[1].fields.coordinator == true,
 		"an existing orchestration's preferred orchestrator drives the actual adjacent coordinator launch")
 	local empty_preference = fixture(); empty_preference.policy.preferred_orchestrator_record = ""
-	empty_preference:start("start_orchestrator"); empty_preference:choose("project_id", "p1")
+	empty_preference:start("start_orchestrator")
 	check(empty_preference.agent_picker ~= nil and #empty_preference.sent == 0,
 		"an empty saved preference opens the actual agent selector without choosing or launching an agent")
 	local old_bundle = fixture(); old_bundle.policy.preferred_orchestrator_record = "preferred"
 	old_bundle.record.capabilities = { "report-files-v1", "coordinator-control-v1" }
-	old_bundle:start("start_orchestrator"); old_bundle:choose("project_id", "p1")
+	old_bundle:start("start_orchestrator")
 	check(#old_bundle.sent == 0 and old_bundle.agent_picker.options.need == "project-start-v1"
 		and old_bundle.policy.preferred_orchestrator_record == "preferred",
 		"a stale preferred bundle remains saved metadata but cannot start a fresh START-capable coordinator")
-	local changed = fixture(); changed:start("new_conversation"); changed:choose("new", true); changed:text("Retain this name")
+	local changed = fixture(); changed:another_project(); changed:start("new_conversation"); changed:choose("new", true); changed:text("Retain this name")
 	changed.decision_result = { request_id = changed.decision.request_id }; changed:tick(); changed:tick()
 	check(#changed.sent == 0 and changed.agent_picker == nil, "changed creation context never creates a project or launches a conversation")
 	changed:start("new_conversation"); changed:choose("new", true)
@@ -159,17 +162,17 @@ if section == nil or section == "conversation" then
 end
 if section == nil or section == "association" then
 	local f = fixture(); f.agent.state = "working"
-	f:start("attach_conversation"); f:choose("pane", 51); f:choose("project_id", "p1")
+	f:start("attach_conversation"); f:choose("pane", 51)
 	check(#f.sent == 0 and f.decision.fields.active and f.agent_picker == nil, "busy unknown-account conversation is associated without a saved-agent assertion or task delivery")
 	f.decision_result = { request_id = f.decision.request_id, decision_context = "association-proof" }; f:tick()
 	check(f.sent[1].command == "associate_conversation" and f.sent[1].fields.decision_context == "association-proof", "passive association uses exact host-produced subject proof")
 	f:answer(); check(#f.sent == 1 and f.agent_picker == nil and not f.projects.p1.started, "busy attachment neither enrolls nor starts a project")
-	local idle = fixture(); idle:start("attach_conversation"); idle:choose("pane", 51); idle:choose("project_id", "p1")
+	local idle = fixture(); idle:start("attach_conversation"); idle:choose("pane", 51)
 	idle.decision_result = { request_id = idle.decision.request_id, decision_context = "proof" }; idle:tick(); idle:answer(); idle:choose("enable", true); idle:agent_choice()
 	local enrolled = idle.sent[2]
 	check(enrolled.command == "enrol" and enrolled.fields.delivery == "native_ask" and enrolled.fields.prompt == nil and enrolled.fields.attestation == nil, "native idle enrollment appends only canonical protocol enrollment, never fake attestation or task replay")
 	local terminal = fixture(); terminal.agent = nil; terminal.panes[1].kind = "terminal"
-	terminal:start("attach_conversation"); terminal:choose("pane", 51); terminal:choose("project_id", "p1")
+	terminal:start("attach_conversation"); terminal:choose("pane", 51)
 	terminal.decision_result = { request_id = terminal.decision.request_id, decision_context = "proof" }; terminal:tick(); terminal:answer(); terminal:choose("enable", true); terminal:agent_choice()
 	check(terminal.sent[2].fields.delivery == "clipboard", "terminal enrollment requires the explicit one-time copy choice and never reports ACCEPTED")
 end
@@ -317,10 +320,9 @@ if section == nil or section == "creation" then
 	check(#f.sent == 1 and f.sent[1].command == "new_project" and f.agent_picker == nil,
 		"creating with defaults makes only the held project, never a provider launch")
 	f:start("start_orchestrator", { orch_project_id = "p2" })
-	check(#f.picks == 1 and #f.sent == 1,
+	check(#f.picks == 0 and #f.sent == 2,
 		"native Start consumes an already returned exact project receipt before its guard, without waiting for a timer or replaying creation")
-	check(not f.ui.runnable(42), "settling the exact creation receipt leaves no stale runnable creation or job while the project menu waits for input")
-	f:choose("project_id", "p2")
+	check(f.sent[2].command == "queue" and f.ui.runnable(42), "settling the exact creation receipt leaves no stale creation job; only the launch it released is in flight")
 	local queued = f.sent[2]
 	check(f.catalog_loaded and queued.command == "queue" and queued.fields.coordinator and queued.fields.presentation == "coordinator_adjacent",
 		"only an explicit Start orchestrator action resolves the saved preferred agent and queues its adjacent pane")
@@ -355,12 +357,12 @@ if section == nil or section == "creation" then
 				code = if boundary == "refused" then "project_refused" else "project_created", orch_project_id = "p1" } }
 		if boundary == "changed" then early.valid = false; early:tick(); early.valid = true end
 		early:tick(); early:tick()
-		check(#early.sent == 1 and #early.picks == (if boundary == "same" then 1 else 0),
-			"only the matching successful result in the unchanged scope opens that first project choice once: " .. boundary)
+		check(#early.sent == 1 and #early.picks == 0 and (early.agent_picker ~= nil) == (boundary == "same"),
+			"only the matching successful result in the unchanged scope continues to that first project's agent choice once: " .. boundary)
 		check(not early.ui.runnable(42), "the settled initial job cannot keep an idle helper or a second creation alive: " .. boundary)
 		if boundary ~= "same" then
 			early:start("start_orchestrator")
-			check(#early.picks == 1 and #early.sent == 1,
+			check(#early.picks == 0 and early.agent_picker ~= nil and #early.sent == 1,
 				"changed/refused initial setup needs a fresh explicit choice and never replays an effect: " .. boundary)
 		end
 	end
@@ -601,5 +603,38 @@ if section == nil or section == "presentation" then
 	projection.dispatch.workers[worker.worker_id] = nil
 	views.render(view, projection, "ready")
 	check(not start_offered(), "missing lifecycle evidence cannot enable duplicate coordinator startup")
+end
+if section == nil or section == "project_choice" then
+	local function prompted(f) return #f.picks == 1 and f.picks[1].options.placeholder == "Choose a project" end
+	local zero = fixture(); zero.projects = {}
+	zero:start("new_conversation")
+	check(#zero.picks == 0 and #zero.prompts == 1 and zero.prompts[1].options.placeholder == "New project name",
+		"no project goes straight to the New-project flow without a picker")
+	zero:text("Fresh start")
+	check(zero.decision ~= nil and zero.decision.command == "new_project" and zero.decision.fields.name == "Fresh start",
+		"the New-project flow from the empty case is unchanged: same decision for the same command and fields")
+	local one = fixture(); one:start("new_conversation")
+	check(#one.picks == 0 and #one.prompts == 0 and one.agent_picker ~= nil, "exactly one unfinished project is used without asking")
+	local attach = fixture(); attach:start("attach_conversation"); attach:choose("pane", 51)
+	check(#attach.picks == 0 and attach.decision ~= nil and attach.decision.fields.orch_project_id == "p1",
+		"attach also uses the only unfinished project without asking")
+	local finished = fixture(); finished.projects.p0 = { orch_project_id = "p0", name = "Old", revision = 1, finished = true, associations = {} }
+	finished:start("new_conversation")
+	check(#finished.picks == 0 and finished.agent_picker ~= nil, "finished projects do not count as a choice")
+	local preferred = fixture(); preferred:another_project()
+	preferred:start("new_conversation", { orch_project_id = "p0" })
+	check(#preferred.picks == 0 and preferred.agent_picker ~= nil, "a preferred unfinished project is used without asking, even beside others")
+	local stale = fixture(); stale:another_project()
+	stale:start("new_conversation", { orch_project_id = "gone" })
+	check(prompted(stale), "a preferred project that is not unfinished falls back to the picker")
+	local two = fixture(); two:another_project()
+	two:start("new_conversation")
+	check(prompted(two), "two unfinished projects prompt as before")
+	local menu_choice = fixture(); menu_choice:another_project()
+	menu_choice:start("project_menu", { orch_project_id = "p1" }); menu_choice:choose("command", "new_conversation")
+	check(#menu_choice.picks == 0 and menu_choice.agent_picker ~= nil, "New Agent Session from a project menu uses that project")
+	local reach = fixture()
+	reach:start("project_menu", { orch_project_id = "p1" }); reach:choose("label", "Start in another project…")
+	check(prompted(reach), "the project menu still reaches the picker when only one project exists")
 end
 return string.format("conversation_ui/%s: %d checks", section or "all", checks)

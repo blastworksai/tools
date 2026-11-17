@@ -39,12 +39,19 @@ function M.new(api: any): any
 				form_tag = if draft then draft.form_tag else nil, initial_creation = initial_creation }
 		end
 	end
-	local function choose_project(cx: any, source: number, origin: any, preferred: string?, done: any)
+	-- The picker only opens when there is something to choose: an unfinished `preferred` project, or a
+	-- single unfinished project, is used as is, and no project at all goes straight to the New-project
+	-- flow. `force` (the project menu's "Choose another project…") always shows the picker.
+	local function choose_project(cx: any, source: number, origin: any, preferred: string?, done: any, force: boolean?)
 		local choices = { { label = "New project…", new = true } }
+		local open_ids = {}
 		for id, project in projects(cx, source) do
-			if not project.finished then table.insert(choices, { label = project.name, project_id = id, current = id == preferred }) end
+			if not project.finished then
+				table.insert(open_ids, id)
+				table.insert(choices, { label = project.name, project_id = id, current = id == preferred })
+			end
 		end
-		ask(cx, source, origin, "Choose a project", choices, function(fresh: any, choice: any)
+		local function resolved(fresh: any, choice: any)
 			if choice.project_id then return done(fresh, api.fresh(fresh, source, origin), choice.project_id) end
 			api.forms.input(fresh, source, origin, { placeholder = "New project name", value = drafts[source], confirm_label = "Add project",
 				validate = function(name: string): string? return if not name:find("%S") or #name > 160 or name:find("%c") then "Use a project name of 1–160 bytes on one line." else nil end }, function(next_cx: any, name: any)
@@ -55,7 +62,13 @@ function M.new(api: any): any
 					if response.orch_project_id then done(last, api.fresh(last, source, origin), response.orch_project_id) end
 				end)
 			end)
-		end)
+		end
+		if not force then
+			if preferred and table.find(open_ids, preferred) then return resolved(cx, { project_id = preferred }) end
+			if #open_ids == 1 then return resolved(cx, { project_id = open_ids[1] }) end
+			if #open_ids == 0 then return resolved(cx, { new = true }) end
+		end
+		ask(cx, source, origin, "Choose a project", choices, resolved)
 	end
 	local function choose_agent(cx: any, source: number, origin: any, project_id: string, coordinator: boolean?, binding: any?, delivery: string?)
 		local flow = api.node(cx, source, "workflow-index", "orchplus.workflow")
@@ -329,7 +342,7 @@ function M.new(api: any): any
 		if command == "new_conversation" or command == "start_orchestrator" then
 			choose_project(cx, source, origin, request.orch_project_id, function(fresh: any, selected: any, project_id: string)
 				choose_agent(fresh, source, selected, project_id, command == "start_orchestrator")
-			end)
+			end, request.choose_project == true)
 		elseif command == "attach_conversation" then attach(cx, source, origin, request)
 		elseif command == "project_start" then
 			local project = projects(cx, source)[request.orch_project_id]
@@ -366,7 +379,8 @@ function M.new(api: any): any
 			local project = projects(cx, source)[request.orch_project_id]
 			if not project then return true end
 			local items = {
-				{ label = "New Agent Session", command = "new_conversation" }, { label = "Attach Existing Agent Session", command = "attach_conversation" },
+				{ label = "New Agent Session", command = "new_conversation" }, { label = "Start in another project…", command = "new_conversation", choose_project = true },
+				{ label = "Attach Existing Agent Session", command = "attach_conversation" },
 				{ label = "Move managed conversation here…", command = "project_associate" },
 				{ label = "Add plan file…", source = "add-plan" }, { label = "Add board…", source = "add-board" },
 				{ label = "Start from template…", source = "start-template" },
@@ -382,7 +396,8 @@ function M.new(api: any): any
 				if choice.source then api.sources.start(fresh, source, origin, choice.source, request)
 				else
 					local grant = if choice.command == "project_start_retry" then project.start else nil
-					start(fresh, source, origin, choice.command, { orch_project_id = project.orch_project_id,
+					start(fresh, source, origin, choice.command, { orch_project_id = if choice.choose_project then nil else project.orch_project_id,
+						choose_project = choice.choose_project,
 						start_id = if grant then grant.start_id else nil, project_revision = if grant then grant.project_revision else project.revision,
 						decision_context = if grant then grant.decision_context else project.decision_context })
 				end
