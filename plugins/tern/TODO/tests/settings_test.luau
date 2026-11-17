@@ -47,15 +47,18 @@ return {
         local glitchOff = settings.eligible({ glitch = true, sync = false }, cands)
         assert(#glitchOff == 2, "remote panes stay eligible for plain Glitch viewing")
         local synced = settings.eligible({ glitch = true, sync = true }, cands)
-        assert(#synced == 1 and synced[1].pane == 1)
+        assert(#synced == 2, "sync must not change which sessions can be attached")
+        assert(#settings.eligible({ glitch = true, sync = false }, cands) == #synced)
         assert(#settings.eligible({ glitch = false, board = false }, cands) == 0)
     end},
     {"a transition drops an attach the new mode makes ineligible, immediately", function()
         local s = { glitch = true, sync = false, board = true, attach = 2 }
         assert(settings.isEligible(s, cands, 2))
         local after = settings.apply(s, "sync", "on", cands)
-        assert(after.sync == true and after.attach == nil)
+        assert(after.sync == true and after.attach == 2)
         assert(settings.apply({ glitch = false, board = true }, "attach", "2", cands).attach == nil)
+        local keep = settings.apply({ glitch = true, sync = false, board = true, attach = 2 }, "sync", "on", cands)
+        assert(keep.sync == true and keep.attach == 2, "turning sync on keeps an attached remote session")
         assert(settings.apply({ glitch = false, board = true }, "attach", "1", cands).attach == 1)
         assert(settings.apply({ glitch = false, board = true, attach = 1 }, "attach", "3", cands).attach == nil)
     end},
@@ -98,5 +101,38 @@ return {
         settings.save(kv, cleared, s)
         local after = settings.load(kv)
         assert(after.attach == nil and after.sync == true and after.glitch == true)
+    end},
+    {"the pane says plainly why Glitch Off offers no session, and labels both board settings alike", function()
+        local s = settings.normalize(nil)
+        local remoteOnly = { cand(2, true) }
+        local text = joined(settings.draw(ui, s, settings.eligible(s, remoteOnly), nil, { hidden = settings.hiddenCount(s, remoteOnly) }))
+        assert(text:find("on this computer", 1, true) and text:find("1 session", 1, true), text)
+        assert(settings.hiddenCount({ glitch = true, sync = true }, remoteOnly) == 0)
+        assert(text:find("Tern Board?", 1, true), "Glitch Off label names the Tern Board")
+        local on = joined(settings.draw(ui, settings.normalize({ glitch = true, sync = true }), cands, nil))
+        assert(on:find("Sync Glitch Plan to Tern Board?", 1, true) and not on:find("No eligible session", 1, true))
+    end},
+    {"a synced board is named in the pane with an Open board control", function()
+        local s = settings.normalize({ glitch = true, sync = true, attach = 1 })
+        local text = joined(settings.draw(ui, s, cands, "Board synced", { board = { title = "TODO · CSV import", path = "/d/boards/p.md" } }))
+        assert(text:find("TODO · CSV import", 1, true) and text:find("ACT:openboard=go", 1, true), text)
+        local none = joined(settings.draw(ui, s, cands, nil, nil))
+        assert(not none:find("openboard", 1, true))
+    end},
+    {"sync never stays silent: each blocker names what is missing", function()
+        local s = { glitch = true, sync = true, attach = nil }
+        assert(settings.syncBlocker(s, nil, "none", false):find("Attach to", 1, true))
+        s.attach = 1
+        assert(settings.syncBlocker(s, nil, "none", false):find("no longer open", 1, true))
+        local local1, remote2 = cand(1, false), cand(2, true)
+        assert(settings.syncBlocker(s, local1, "none", false):find("plan view", 1, true))
+        assert(settings.syncBlocker(s, local1, "match", false):find("/glitch-plan", 1, true))
+        -- A remote session waits like a local one; only a view that cannot be read says the limit.
+        assert(settings.syncBlocker(s, remote2, "match", false):find("/glitch-plan", 1, true))
+        assert(settings.syncBlocker(s, remote2, "match", false, "unreadable") == settings.REMOTE_ONLY)
+        assert(settings.syncBlocker(s, local1, "match", false, "unreadable"):find("/glitch-plan", 1, true), "a local session never gets the remote limit")
+        assert(settings.syncBlocker(s, local1, "match", false, "too_large") == settings.TOO_LARGE)
+        assert(settings.syncBlocker(s, remote2, "match", false, "too_large") == settings.REMOTE_TOO_LARGE)
+        assert(settings.syncBlocker(s, local1, "match", true) == nil)
     end},
 }

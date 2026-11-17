@@ -223,6 +223,29 @@ class ProcessIdentityContract(unittest.TestCase):
         self.assertIs(envelope.get('terminal'), True)
         self.assertIn('ended', envelope.get('error', ''))
 
+    def test_discover_binds_a_saved_wait_to_the_process_birth_it_saw(self):
+        child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])
+        self.addCleanup(child.wait)
+        self.addCleanup(child.kill)
+        with tempfile.TemporaryDirectory(prefix='todo-birth-') as scratch:
+            env = dict(os.environ, TODO_PUBLICATION_ROOT=str(Path(scratch)/'metadata'))
+            def run(*extra):
+                result = subprocess.run([sys.executable, '-I', str(READER), 'discover', '--parent-pid', str(child.pid), *extra],
+                                        capture_output=True, text=True, timeout=6, env=env)
+                return result.returncode, json.loads(result.stdout)
+            # Without the flag the answer is byte-for-byte what it was.
+            self.assertEqual(run(), (0, {'ok': True, 'state': 'none'}))
+            code, first = run('--with-identity')
+            birth = first['parent_birth']
+            self.assertEqual((code, first['state'], birth), (0, 'none', process_identity.process(child.pid)['birth']))
+            # The same process still answers; a PID that now names another process ends the wait.
+            self.assertEqual(run('--with-identity', '--parent-birth', birth)[1]['state'], 'none')
+            code, reused = run('--with-identity', '--parent-birth', birth+'x')
+            self.assertEqual(code, 1)
+            self.assertIs(reused.get('ok'), False)
+            self.assertIs(reused.get('terminal'), True)
+            self.assertIn('ended or changed', reused.get('error', ''))
+
     def test_linux_permission_failure_remains_an_access_error(self):
         with patch('process_identity.sys.platform', 'linux'), \
                 patch('process_identity.Path.read_text', side_effect=PermissionError(13, 'inspection denied')):
@@ -860,13 +883,22 @@ class DetailedSchema(unittest.TestCase):
         self.rejects(mutated(detailed_plan(), lambda v: v['checkpoints'][0]['tasks'].append('x')), 'task needs')
         self.rejects(mutated(detailed_plan(), lambda v: v['checkpoints'][0]['tasks'][0].update(items='x')), 'list')
 
-    def test_multiple_active_blocked_without_reason_and_bad_current_are_refused(self):
-        self.rejects(mutated(detailed_plan(), lambda v: v['checkpoints'][1]['tasks'][0]['items'][0].update(state='active')), 'at most one active')
+    def test_several_active_entities_are_valid_for_parallel_builders(self):
+        def three_active(v):
+            v['checkpoints'][1]['tasks'][0]['items'][0].update(state='active')
+            v['checkpoints'][2].update(state='active')
+        plan = mutated(detailed_plan(), three_active)
+        self.assertEqual(self.reader.validate(plan)['plan_id'], plan['plan_id'])
+        self.assertIsNone(self.reader.validate(mutated(plan, lambda v: v.update(current=None)))['current'])
+        for bad in ('model', 'ghost', 5):
+            self.rejects(mutated(plan, lambda v: v.update(current=bad)), 'current')
+
+    def test_blocked_without_reason_and_bad_current_are_refused(self):
         self.rejects(mutated(detailed_plan(), lambda v: v['checkpoints'][1]['tasks'][0]['items'][1].pop('reason')), 'blocked')
         self.rejects(mutated(detailed_plan(), lambda v: v['checkpoints'][1]['tasks'][0]['items'][0].update(reason='why')), 'blocked')
         self.rejects(mutated(detailed_plan(), lambda v: v.update(current='ship')), 'current')
         self.rejects(mutated(detailed_plan(), lambda v: v.update(current='ghost')), 'current')
-        self.rejects(mutated(detailed_plan(), lambda v: v.update(current=None)), 'at most one active')
+        self.rejects(mutated(detailed_plan(), lambda v: v.update(current='model')), 'current')
 
     def test_bounds_are_enforced_at_each_level(self):
         def cp(i, tasks):
@@ -962,7 +994,8 @@ class WindowContract(unittest.TestCase):
         window = self.source('window.luau')
         self.assertIn('synced.settingsChanged(before, after)', window)
         self.assertNotIn('lastRev', window)
-        self.assertIn('synced.passed(key, entry.rev, gen, count, tern.now())', window)
+        self.assertIn('boardMemo.succeeded(target.pane, key, entry.rev, gen, count, tern.now(), title, path)', window)
+        self.assertIn('gate.passed(key, rev, gen, count, nowMs)', self.source('lib/sync_pane.luau'))
 
     def test_every_sync_status_change_repaints_an_open_settings_pane(self):
         window = self.source('window.luau')
@@ -976,7 +1009,7 @@ class WindowContract(unittest.TestCase):
 
     def test_manifest_keeps_version_and_icon(self):
         manifest = self.source('plugin.toml')
-        self.assertIn('version = "0.7.2"', manifest)
+        self.assertIn('version = "0.7.3"', manifest)
         self.assertIn('icon = "list-checks"', manifest)
 
 

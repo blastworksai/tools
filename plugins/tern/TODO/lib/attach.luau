@@ -11,6 +11,12 @@ export type AttachApi = {
     json: { encode: (value: any) -> string },
     -- Called once the view panel exists, so the window can remember which session it serves.
     bind: ((panel: number, target: number) -> ())?,
+    -- Called just before the host is asked to resolve the split: tells the view (a plain event, so it works whichever
+    -- machine the session runs on) whether to keep waiting for a plan that is not published yet.
+    configure: ((cx: WindowCx, panel: number, target: number) -> ())?,
+    -- Called when the tab already has a plan view and the window selects a session again: the window wakes the view
+    -- if it serves that session, so a dormant view looks for the plan at once (the owner never closes it).
+    wake: ((cx: WindowCx, panel: number, target: number) -> ())?,
 }
 export type Controller = {
     viewFor: (cx: WindowCx, target: number, boundTo: (panel: number) -> number?) -> (string, number?),
@@ -21,13 +27,13 @@ type Origin = { target: number, tab: number, host: number }
 function attach.new(api: AttachApi): Controller
     local KIND = api.plugin.id .. ".list"
     local controller = {} :: Controller
-    local function existing(cx: WindowCx, target: number): boolean
+    local function existing(cx: WindowCx, target: number): (boolean, number?)
         local owner = cx.session:pane(target)
-        if not owner then return true end
+        if not owner then return true, nil end
         for _, pane in cx.session:panes() do
-            if pane.tab == owner.tab and pane.block == KIND then return true end
+            if pane.tab == owner.tab and pane.block == KIND then return true, pane.pane end
         end
-        return false
+        return false, nil
     end
     -- The TODO view in the target's tab: ("none") no view, ("match", panel) a view for this
     -- session, ("other", panel) a view for another session of the same tab. `boundTo(panel)`
@@ -56,7 +62,12 @@ function attach.new(api: AttachApi): Controller
         local pane = cx.session:pane(target)
         local host = cx.hosts:current()
         if not pane or pane.tab == nil or pane.exited ~= nil or host.state ~= "connected" then changed(cx); return end
-        if existing(cx, target) then cx:toast("info", "This tab already has a plan view."); return end
+        local has, view = existing(cx, target)
+        if has then
+            cx:toast("info", "This tab already has a plan view.")
+            if view and api.wake then api.wake(cx, view, target) end
+            return
+        end
         -- Settings holds the focus, but confirmation needs the target focused: bring it forward.
         -- The new block opens with focus = false, so the target keeps it.
         if cx.session:focused() ~= target then cx.layout:focus(target) end
@@ -79,6 +90,7 @@ function attach.new(api: AttachApi): Controller
             end
             local layout = fresh.session:layout(origin.tab)
             if own and layout and fresh.session:focused() == target and binding.windowPair(layout.root, target, panel) then
+                if api.configure then api.configure(fresh, panel, target) end
                 fresh.session:event(panel, { ev = "action", id = "main", act = "confirm-selection", value = request })
             elseif api.now() < deadline then api.timer(100, confirm)
             else

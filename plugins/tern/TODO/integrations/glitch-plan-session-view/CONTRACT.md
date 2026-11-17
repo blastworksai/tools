@@ -26,13 +26,13 @@ checkpoints[]  id, text, state, reason?, tasks?[]
 ```
 
 - `/glitch-plan` creates every id once: lowercase, `[a-z][a-z0-9_-]{0,39}`, unique across the whole plan (checkpoints, tasks and items share one id space). Use a file change's own entry for each `file` item (with its repository-relative `path`), an implementation step for each `step`, and each acceptance check for a `validation`. Nesting is the parent link; there is no separate parent field.
-- `/glitch-execute` changes only `state` (`pending`, `active`, `blocked`, `done`), `reason` and `current`. It sets exactly one entity `active`, the one it is working on, and names it in `current`; ancestors stay as they are until their own outcome is verified. A blocked entity carries a concrete `reason`; no other state carries one. Nothing is inferred from prose or from a green test.
+- `/glitch-execute` changes only `state` (`pending`, `active`, `blocked`, `done`), `reason` and `current`. It sets every entity it is working on `active` (several at once when it runs parallel builders) and may name one of them, or a blocked entity, in `current`, or leave `current` null; ancestors stay as they are until their own outcome is verified. A blocked entity carries a concrete `reason`; no other state carries one. Nothing is inferred from prose or from a green test.
 - Renaming an entity edits its `text` and keeps its `id`. Reordering moves the entry and keeps every id. A removed step is deleted from the block, and its board card (when sync is on) is removed with it. A new step gets a new id. Never reuse an id for a different entity.
 - Bounds: 30 checkpoints, 20 tasks per checkpoint, 30 items per task, 500 entities in all, 240 characters of text, 400 of reason, one `TERN-SESSION` block, at most 1 MiB of plan file. The reader refuses anything outside the closed shape and the viewer then shows the error, never an earlier plan.
 
 ## During interactive execution
 
-The executor that owns the canonical plan owns its checkpoint block. When starting a checkpoint set it `active` and set `current` to its stable id. At most one checkpoint is active. If it is waiting, use `blocked` with a concrete `reason`, keeping `current` on that checkpoint. Mark `done` only when the agreed outcome has been verified; clear `current` if no active/blocked checkpoint is current. Preserve ids when editing descriptions or reordering steps.
+The executor that owns the canonical plan owns its checkpoint block. When starting a checkpoint set it `active` and set `current` to its stable id. Several checkpoints may be active when work runs in parallel. If it is waiting, use `blocked` with a concrete `reason`, keeping `current` on that checkpoint. Mark `done` only when the agreed outcome has been verified; clear `current` if no active/blocked checkpoint is current. Preserve ids when editing descriptions or reordering steps.
 
 Update the dated Progress evidence, checkpoint state and START HERE consistently in the same canonical file. Never treat a green test alone as owner acceptance, release permission or a reason to bypass another gate. The view does not write any of these values.
 

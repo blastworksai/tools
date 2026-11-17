@@ -240,6 +240,183 @@ function selection.new(api: SelectionApi): Resolver
     end
     return resolver
 end
+-- What the host does with one discovery answer. "none" (no plan published yet) closes the view with a
+-- notice, unless `patient`: then the view stays and asks again on the next wait tick, so a plan published
+-- later is found without the owner selecting the session again. Every other outcome is unchanged.
+selection.WAIT_MS = 5000
+selection.WAITING = "No plan is published for this session yet. This view keeps looking and opens the plan when it appears."
+-- A wait the window does not renew ends by itself: the window renews every tick (2 s), and a lease older than
+-- PATIENCE_MS (15 s, about 7 missed renewals) no longer counts, so a closed or crashed window never leaves a host
+-- polling forever. Each requesting window holds its OWN lease (state.leases: requester id -> last renewal), so one
+-- window's revoke ends only its own lease; the view is patient while ANY lease is fresh. At most MAX_LEASES leases
+-- are kept; the oldest is dropped first.
+selection.PATIENCE_MS = 15000
+selection.MAX_LEASES = 16
+-- A dormant view keeps one SLOW discovery poll (DORMANT_POLL_MS) instead of no timer: it still picks up a plan
+-- published later, notices a closed pane (its host entry is dropped) and an ended process (the view ends).
+selection.DORMANT_POLL_MS = 30000
+selection.DORMANT = "Waiting for a plan is paused because no window asked recently. It resumes when a window asks again."
+local LEGACY = "legacy"
+-- Renew (on) or revoke (off) one requester's lease. Returns whether the view's patience changed.
+function selection.applyLease(state: any, lease: { on: boolean, rid: string }, now: number): boolean
+    local before = selection.patience(state, now)
+    local leases = state.leases or {}
+    state.leases = leases
+    if lease.on then
+        leases[lease.rid] = now; state.hadWait = true
+        local count = 0
+        for _ in leases do count += 1 end
+        while count > selection.MAX_LEASES do
+            local oldest, oldestAt = nil, math.huge
+            for rid, at in leases do
+                if rid ~= lease.rid and at < oldestAt then oldest, oldestAt = rid, at end
+            end
+            if oldest == nil then break end
+            leases[oldest] = nil; count -= 1
+        end
+    else
+        leases[lease.rid] = nil
+    end
+    return selection.patience(state, now) ~= before
+end
+-- Patient while any lease is fresh; stale leases are dropped here.
+function selection.patience(state: any, now: number): boolean
+    local any = false
+    local leases = state.leases
+    if type(leases) == "table" then
+        for rid, at in leases do
+            if type(at) == "number" and now - at <= selection.PATIENCE_MS then any = true else leases[rid] = nil end
+        end
+    end
+    state.patient = any
+    return any
+end
+-- What the host does with one discovery answer. "none" (no plan published yet) closes the view with a
+-- notice, unless `patient`: then the view stays and asks again on the next wait tick, so a plan published
+-- later is found without the owner selecting the session again. A view that has waited (`hadWait`) but whose
+-- leases all lapsed or were revoked goes DORMANT: it stays open and stops polling until a window renews.
+-- Every other outcome is unchanged.
+selection.WAIT_MS = 5000
+selection.WAITING = "No plan is published for this session yet. This view keeps looking and opens the plan when it appears."
+function selection.discoveryStep(status: number, decoded: boolean, envelope: any, patient: boolean, hadWait: boolean?): any
+    local outcome = selection.discoveryOutcome(status, decoded, envelope)
+    if outcome.action == "none" then
+        if patient then return { action = "wait", message = selection.WAITING } end
+        if hadWait then return { action = "dormant", message = selection.DORMANT } end
+    end
+    return outcome
+end
+-- Apply a waiting or dormant discovery outcome to the view and return the delay of its next discovery poll
+-- (nil for any other outcome). A fresh lease turns a dormant view back to the fast WAIT_MS poll.
+function selection.settle(state: any, outcome: any): number?
+    if outcome.action == "wait" then
+        state.plan = nil; state.error = outcome.message; state.failures = 0; state.dormant = false
+        return selection.WAIT_MS
+    end
+    if outcome.action == "dormant" then
+        state.plan = nil; state.error = outcome.message; state.failures = 0; state.dormant = true
+        return selection.DORMANT_POLL_MS
+    end
+    return nil
+end
+-- Delay before retrying after a nonterminal discovery or startup failure. A dormant view with no fresh lease keeps
+-- its slow DORMANT_POLL_MS poll (a failure must not turn it into a fast poller); any other view keeps `normal`.
+function selection.retryDelay(state: any, normal: number, now: number): number
+    if state.dormant and not selection.patience(state, now) then return selection.DORMANT_POLL_MS end
+    return normal
+end
+-- One live discovery timer per view: scheduling bumps a generation, so an older pending timer (a slow dormant tick
+-- after a wake or renewal) fires into nothing and the poll chain never doubles.
+function selection.schedule(state: any, timer: (number, () -> ()) -> any, ms: number, fn: () -> ())
+    state.gen = (state.gen or 0) + 1
+    local mine = state.gen
+    timer(ms, function() if state.gen == mine then fn() end end)
+end
+-- Is this view still the live one of its pane? A dropped or closed one is removed from `instances`, and the
+-- plan it published is withdrawn.
+function selection.live(state: any, instances: { [number]: any }, panes: { any }, kind: string, publish: (any, any) -> ()): boolean
+    if state.finished or instances[state.panel] ~= state then publish(state, nil); return false end
+    for _, pane in panes do
+        if pane.pane == state.panel then return pane.program == kind end
+    end
+    instances[state.panel] = nil
+    publish(state, nil)
+    return false
+end
+-- The window's explicit re-attach of the session this view already serves: look again now.
+function selection.wakeEvent(event: any): boolean
+    return type(event) == "table" and event.ev == "action" and event.id == "main" and event.act == "sync-wake"
+end
+-- A wake resumes a dormant view; true when the view has a session to discover and should refresh at once.
+function selection.wake(state: any): boolean
+    if state.discover_pid == nil then return false end
+    state.dormant = false
+    return true
+end
+-- What a view persists across a plugin reload (`cx:save`). A view that is still waiting for its session's plan keeps
+-- the native session it serves (discover_pid) and its label, so after a reload it resumes waiting instead of
+-- coming back with nothing to read while the window still believes it serves the session.
+function selection.saveState(state: any): any
+    if state.source and state.plan_id then return { schema = 2, source = state.source, plan_id = state.plan_id } end
+    -- The PID alone is not an identity: it may name another process after a restart. Save the process birth the
+    -- helper reported with it; without one nothing is saved, because nothing could be re-validated.
+    if type(state.discover_pid) == "number" and type(state.discover_birth) == "string" then
+        local rids = {}
+        for rid in (state.leases or {}) do
+            if #rids < selection.MAX_LEASES then table.insert(rids, rid) end
+        end
+        table.sort(rids)
+        return { schema = 2, discover_pid = state.discover_pid, birth = state.discover_birth, label = state.discovery_label, leases = rids }
+    end
+    return { schema = 2 }
+end
+-- The restored part of a view's state; empty when the save holds nothing usable. `sourceValid` is the host's check.
+function selection.restoreState(saved: any, sourceValid: (any) -> boolean, now: number?): any
+    if type(saved) ~= "table" or saved.schema ~= 2 then return {} end
+    if sourceValid(saved.source) and type(saved.plan_id) == "string" then
+        return { source = saved.source, plan_id = saved.plan_id, bindingSaved = true }
+    end
+    if type(saved.discover_pid) == "number" and saved.discover_pid > 0 and saved.discover_pid % 1 == 0
+        and type(saved.birth) == "string" and #saved.birth >= 1 and #saved.birth <= 160
+        and (saved.label == nil or (type(saved.label) == "string" and #saved.label <= 400)) then
+        -- Only a view that waits for a plan is saved with a session, so it was patient: every saved lease restarts fresh
+        -- (a window that is gone never renews it, and it lapses to dormant); a save without any restarts one anonymous lease.
+        local leases = {}
+        if type(saved.leases) == "table" then
+            for _, rid in saved.leases do
+                if #leases < selection.MAX_LEASES and selection.validRequester(rid) then table.insert(leases, rid) end
+            end
+        end
+        if #leases == 0 then table.insert(leases, LEGACY) end
+        local stamped = {}
+        for _, rid in leases do stamped[rid] = now or 0 end
+        return { discover_pid = saved.discover_pid, discover_birth = saved.birth, discovery_label = saved.label, leases = stamped, hadWait = true }
+    end
+    return {}
+end
+-- A requester id: a window's own random token.
+function selection.validRequester(rid: any): boolean
+    return type(rid) == "string" and #rid >= 1 and #rid <= 40 and rid:match("^[%w%-]+$") ~= nil
+end
+-- The window's wait-for-a-plan request to a plan view: `on` or `off`, then ":<requester id>" ("on:ab12cd"); a bare
+-- value is the anonymous legacy requester. nil for any other event or a malformed id.
+function selection.waitLease(event: any): { on: boolean, rid: string }?
+    if type(event) ~= "table" or event.ev ~= "action" or event.id ~= "main" or event.act ~= "sync-wait" or type(event.value) ~= "string" then return nil end
+    local verb, rid = event.value:match("^(%a+):?(.*)$")
+    if rid == "" then rid = LEGACY elseif not selection.validRequester(rid) then return nil end
+    if verb == "on" then return { on = true, rid = rid } end
+    if verb == "off" then return { on = false, rid = rid } end
+    return nil
+end
+function selection.waitRequest(event: any): boolean?
+    local lease = selection.waitLease(event)
+    if lease == nil then return nil end
+    return lease.on
+end
+-- Has this view anything to read? (A view with neither a source nor a session to discover just shows its notice.)
+function selection.hasWork(state: any): boolean
+    return state.source ~= nil or state.discover_pid ~= nil
+end
 function selection.resolve(panel: number, window: string, alive: () -> boolean, callback: (pid: number?, problem: string?) -> ())
     return selection.new({
         native = Native,

@@ -1,40 +1,55 @@
--- Plan publication to plugin KV: stale success never survives a reload. CodexBWAI; MIT.
+-- The plan-sync node text: one JSON document, never a cut one. CodexBWAI; MIT.
 local publication = require("../lib/plan_publish")
-local function kvStore()
-    local store, sets = {}, 0
-    return { store = store, sets = function() return sets end,
-        get = function(k) return store[k] end,
-        set = function(k, v) sets += 1; store[k] = v end }
-end
-local function new(kv, panel)
-    return publication.new(kv, tern.json.encode, function() return 42 end, panel)
-end
+local clock = 40
+local function new() return publication.new(tern.json.encode, function() clock += 1; return clock end) end
 local plan = { schema = 2, plan_id = "plan-0123456789ab", title = "T", checkpoints = {} }
+local function parsed(p, wait) return tern.json.decode(p.payload(wait)) end
 return {
-    {"publish stores the plan and revision; an unchanged plan is not written twice", function()
-        local kv = kvStore(); local p = new(kv, 7)
-        p.publish(plan); p.publish(plan)
-        assert(kv.store["plan/7"].plan == plan and kv.store["plan/7"].rev == 42 and kv.sets() == 1)
+    {"a view with no plan says so and echoes the wait flag", function()
+        local p = new()
+        local v = parsed(p, false)
+        assert(v.v == 1 and v.plan == nil and v.too_large == nil and v.wait == false and type(v.rev) == "number")
+        assert(parsed(p, true).wait == true)
     end},
-    {"a failed read after a reload removes the plan the previous instance published", function()
-        local kv = kvStore()
-        new(kv, 7).publish(plan)
-        assert(kv.store["plan/7"] ~= nil)
-        -- Plugin reload: a new instance of the same panel starts with nothing published.
-        local reloaded = new(kv, 7)
+    {"publish carries the plan and a revision; an unchanged plan keeps its revision, a changed one moves it", function()
+        local p = new()
+        p.publish(plan)
+        local first = parsed(p, false)
+        assert(first.plan.plan_id == plan.plan_id and type(first.rev) == "number")
+        p.publish(plan)
+        assert(parsed(p, true).rev == first.rev, "an unchanged plan must not look new")
+        p.publish({ schema = 2, plan_id = "plan-0123456789ab", title = "Changed", checkpoints = {} })
+        assert(parsed(p, false).rev > first.rev)
+    end},
+    {"a failed read or a fresh start removes the plan, and the revision moves so the window sees the change", function()
+        local p = new()
+        p.publish(plan)
+        local with = parsed(p, false)
+        p.publish(nil)
+        local without = parsed(p, false)
+        assert(without.plan == nil and without.rev > with.rev)
+        local reloaded = new()
         reloaded.clear()
-        reloaded.publish(nil)
-        assert(kv.store["plan/7"] == nil, "stale plan survived the reload")
+        assert(parsed(reloaded, false).plan == nil)
     end},
-    {"publish(nil) after a success deletes it, and repeated nil writes nothing more", function()
-        local kv = kvStore(); local p = new(kv, 3)
-        p.publish(plan); p.publish(nil)
-        assert(kv.store["plan/3"] == nil)
-        local before = kv.sets(); p.publish(nil); p.publish(nil)
-        assert(kv.sets() == before)
+    {"a plan over the cap is never sent cut: the node says too_large and is still valid JSON", function()
+        local huge = { schema = 2, plan_id = "plan-0123456789ab", title = string.rep("x", publication.LIMIT), checkpoints = {} }
+        local p = new()
+        p.publish(huge)
+        local text = p.payload(true)
+        assert(#text < 200, #text)
+        local v = tern.json.decode(text)
+        assert(v.too_large == true and v.plan == nil and v.wait == true)
+        p.publish(plan)
+        assert(parsed(p, false).too_large == nil, "a smaller plan must be sent again")
     end},
-    {"a throwing store is tolerated", function()
-        local bad = { get = function() end, set = function() error("io") end }
-        local p = new(bad, 1); p.publish(plan); p.clear(); p.publish(nil)
+    {"a plan right under the cap is sent whole", function()
+        local p = new()
+        local head = #'{"v":1,"rev":41,"wait":false,"plan":}'
+        local base = #tern.json.encode({ schema = 2, plan_id = "plan-0123456789ab", title = "", checkpoints = {} })
+        local fit = { schema = 2, plan_id = "plan-0123456789ab", title = string.rep("x", publication.LIMIT - head - base - 4), checkpoints = {} }
+        p.publish(fit)
+        local text = p.payload(false)
+        assert(#text <= publication.LIMIT and tern.json.decode(text).plan ~= nil, #text)
     end},
 }

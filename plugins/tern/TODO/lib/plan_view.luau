@@ -85,7 +85,7 @@ function view.validate(plan: any): string?
     if current ~= nil and (type(current) ~= "string" or (ids.seen[current] ~= "active" and ids.seen[current] ~= "blocked")) then
         return "current must name an active/blocked entity, or be null"
     end
-    if #active > 1 or (#active == 1 and current ~= active[1]) then return "at most one active entity, named by current" end
+    -- Parallel builders may leave several entities active at once; current is optional focus on one active/blocked entity.
     return nil
 end
 
@@ -134,16 +134,32 @@ local function row(plan: any, e: any): any
     return { id = e.id, text = (if plan.current == e.id then "Current · " else "") .. PREFIX[e.depth] .. label, status = e.state, note = note }
 end
 
-function view.draw(ui, plan, source, errorText, updated)
+-- The one hidden, keyed node the window reads through the pane surface (lib/plan_publish says what it holds).
+-- It is a node of this view, so it is read the same way whichever machine the session runs on.
+function view.syncNode(ui, text: string)
+    local node = ui.text(text)
+    node.p = node.p or {}
+    node.p.key = "plan-sync"
+    node.p.role = "todo.plan"
+    node.p.hidden = true
+    return node
+end
+
+-- `sync` (optional): the text of the hidden plan-sync node, drawn with every state of the view.
+function view.draw(ui, plan, source, errorText, updated, sync)
+    local function main(children)
+        if sync then table.insert(children, view.syncNode(ui, sync)) end
+        return {main = ui.col(children)}
+    end
     if errorText then
-        return {main = ui.col({
+        return main({
             ui.node("checklist", {mode = "full", phases = {{id = "error", items = {{id = "error", text = "Plan unavailable", status = "blocked", note = errorText}}}}}),
-        })}
+        })
     end
     if not plan then
-        return {main = ui.col({
+        return main({
             ui.text({ui.span("Reading the selected interactive plan…", "muted")}),
-        })}
+        })
     end
     local footer = {
         ui.text({ui.span(source, "muted")}),
@@ -157,12 +173,12 @@ function view.draw(ui, plan, source, errorText, updated)
             table.insert(items, row(plan, { id = cp.id, depth = 1, text = cp.text, state = cp.state, reason = cp.reason }))
             if cp.state == "done" then done += 1 end
         end
-        return {main = ui.col({
+        return main({
             ui.text({ui.span(plan.title .. " · " .. tostring(done) .. "/" .. tostring(#items), "muted")}),
             -- Use the same unframed native checklist family as OMP's ACP todos.
             ui.node("checklist", {mode = "full", phases = {{id = "checkpoints", items = items}}}),
             footer[1], footer[2],
-        })}
+        })
     end
     -- One disclosure group per checkpoint keeps ownership: its tasks and their steps stay under it.
     local children = { ui.text({ui.span(plan.title .. " · " .. progress(plan), "muted")}) }
@@ -179,7 +195,7 @@ function view.draw(ui, plan, source, errorText, updated)
     end
     close()
     table.insert(children, footer[1]); table.insert(children, footer[2])
-    return {main = ui.col(children)}
+    return main(children)
 end
 
 return view
