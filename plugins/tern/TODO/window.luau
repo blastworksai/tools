@@ -54,7 +54,7 @@ local synced = sync_gate.new()
 local failedAt = -RETRY_MS
 local busy = false
 
-local boardMemo = sync_pane.new() -- the board this window last synced, shown only while its session is still attached
+local boardMemo: any -- assigned below, once syncStatus exists
 local function drawExtra(s: any, cands: { any }): any return boardMemo.extra(s, cands) end
 local function paint(cx: any, pane: number)
     local s = settings.load(tern.kv)
@@ -62,7 +62,6 @@ local function paint(cx: any, pane: number)
     local cands = candidates(cx)
     local eligible = settings.eligible(s, cands)
     if s.attach and not settings.isEligible(s, eligible, s.attach) then s.attach = nil; settings.save(tern.kv, s, before) end
-    boardMemo.observe(s, if s.attach then true else nil)
     cx.canvas:set(pane, { view = settings.draw(tern.ui, s, eligible, syncStatus.get(), drawExtra(s, cands)) })
 end
 local function settingsPane(cx: any): number?
@@ -76,6 +75,9 @@ syncStatus = sync_status.new({
     pane = settingsPane,
     paint = paint,
 })
+-- The board this window last synced, shown only while its session is still attached; one key (the attachment)
+-- keeps it, the revision gate and the repaint in step (lib/sync_pane).
+boardMemo = sync_pane.new({ gate = synced, repaint = function() syncStatus.repaint() end })
 local function openSettings(cx: any)
     local pane = settingsPane(cx)
     if pane then paint(cx, pane); cx.layout:focus(pane); return end
@@ -169,12 +171,11 @@ local function syncTick(cx: any)
     if target then view, panel = viewPanel(cx, target.pane) end
     local entry: any = nil
     if view == "match" and panel then entry = tern.kv.get("plan/" .. string.format("%.0f", panel)) end
-    local entryOk = type(entry) == "table" and type(entry.rev) == "number" and plan_view.validate(entry.plan) == nil
     -- Never silent: say what is missing instead of leaving the pane as it was.
-    local blocker = settings.syncBlocker(s, target, view, entryOk)
-    if blocker then syncStatus.set(blocker); return end
-    local key = string.format("%.0f", panel) .. ":" .. entry.plan.plan_id
-    if synced.matches(key, entry.rev, tern.now()) or tern.now() - failedAt < RETRY_MS then return end
+    local verdict, detail = boardMemo.decide(s, target, view, panel, entry, tern.now(), tern.now() - failedAt < RETRY_MS)
+    if verdict == "blocked" then syncStatus.set(detail); return end
+    if verdict == "skip" then return end
+    local key = detail :: string
     if #plan_view.entities(entry.plan) > board_sync.MAX_SYNC_ENTITIES then
         syncStatus.set(board_sync.TOO_BIG)
         return
@@ -205,8 +206,7 @@ local function syncTick(cx: any)
             release()
             busy = false
             if ok then
-                synced.passed(key, entry.rev, gen, count, tern.now())
-                boardMemo.record(target.pane, title, path)
+                boardMemo.succeeded(target.pane, key, entry.rev, gen, count, tern.now(), title, path)
                 syncStatus.set("Board \"" .. title .. "\" synced · " .. tostring(count) .. " change(s)")
             elseif stillOn() then
                 failedAt = tern.now(); syncStatus.set(problem)

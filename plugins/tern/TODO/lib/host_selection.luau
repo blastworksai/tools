@@ -250,6 +250,32 @@ function selection.discoveryStep(status: number, decoded: boolean, envelope: any
     if outcome.action == "none" and patient then return { action = "wait", message = selection.WAITING } end
     return outcome
 end
+-- What a view persists across a plugin reload (`cx:save`). A view that is still waiting for its session's plan keeps
+-- the native session it serves (discover_pid) and its label, so after a reload it resumes waiting instead of
+-- coming back with nothing to read while the window still believes it serves the session.
+function selection.saveState(state: any): any
+    if state.source and state.plan_id then return { schema = 2, source = state.source, plan_id = state.plan_id } end
+    if type(state.discover_pid) == "number" then
+        return { schema = 2, discover_pid = state.discover_pid, label = state.discovery_label }
+    end
+    return { schema = 2 }
+end
+-- The restored part of a view's state; empty when the save holds nothing usable. `sourceValid` is the host's check.
+function selection.restoreState(saved: any, sourceValid: (any) -> boolean): any
+    if type(saved) ~= "table" or saved.schema ~= 2 then return {} end
+    if sourceValid(saved.source) and type(saved.plan_id) == "string" then
+        return { source = saved.source, plan_id = saved.plan_id, bindingSaved = true }
+    end
+    if type(saved.discover_pid) == "number" and saved.discover_pid > 0 and saved.discover_pid % 1 == 0
+        and (saved.label == nil or (type(saved.label) == "string" and #saved.label <= 400)) then
+        return { discover_pid = saved.discover_pid, discovery_label = saved.label }
+    end
+    return {}
+end
+-- Has this view anything to read? (A view with neither a source nor a session to discover just shows its notice.)
+function selection.hasWork(state: any): boolean
+    return state.source ~= nil or state.discover_pid ~= nil
+end
 function selection.resolve(panel: number, window: string, alive: () -> boolean, callback: (pid: number?, problem: string?) -> ())
     return selection.new({
         native = Native,

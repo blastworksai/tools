@@ -15,14 +15,18 @@ function status.new(env: Env)
 	local current: string? = nil
 	local self = {}
 	function self.get(): string? return current end
-	function self.set(text: string?)
-		if text == current then return end
-		current = text
+	-- Redraw the open pane even when the text is unchanged (what is drawn around the text may have changed).
+	function self.repaint()
 		env.timer(0, function(fresh: any?)
 			if fresh == nil then return end
 			local pane = env.pane(fresh)
 			if pane then env.paint(fresh, pane) end
 		end)
+	end
+	function self.set(text: string?)
+		if text == current then return end
+		current = text
+		self.repaint()
 	end
 	return self
 end

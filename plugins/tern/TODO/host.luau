@@ -24,6 +24,7 @@ type State = {
     source: Source?,
     plan_id: string?,
     bindingSaved: boolean?,
+    waitSaved: boolean?,
     selection: Selection?,
     selectionStarted: boolean?,
     discover_pid: number?,
@@ -79,7 +80,7 @@ local function helperArguments(state: State, helper: string): { string }
     return arguments
 end
 local function refresh(state: State, cx: BlockCx)
-    if not live(state) or (not state.source and not state.discover_pid) or state.reading then return end
+    if not live(state) or not selection.hasWork(state) or state.reading then return end
     state.reading = true
     local helper = tern.plugin.dir .. "/bin/todo.py"
     python.run(helperArguments(state, helper), { timeout_ms = 6000 }, function(result, problem)
@@ -101,6 +102,8 @@ local function refresh(state: State, cx: BlockCx)
             local outcome = selection.discoveryStep(result.status, decoded, envelope, patient)
             if outcome.action == "wait" then
                 state.plan = nil; publish(state, nil); state.error = outcome.message; state.failures = 0
+                -- Persist the waiting view (selection.saveState) so a plugin reload resumes it.
+                if not state.waitSaved then state.waitSaved = pcall(function() cx:save() end) end
                 redraw(state, cx)
                 tern.timer(selection.WAIT_MS, function() refresh(state, cx) end)
                 return
@@ -168,8 +171,11 @@ tern.block.define("list", {
         state.publisher.clear()
         -- A saved binding can only read the same selected source and stable plan id.
         -- Legacy bare-pane saves/args are deliberately not migrated or followed.
-        if type(saved) == "table" and saved.schema == 2 and sourceValid(saved.source) and type(saved.plan_id) == "string" then
-            state.source = saved.source; state.plan_id = saved.plan_id; state.bindingSaved = true
+        local restored = selection.restoreState(saved, sourceValid)
+        if restored.source then
+            state.source = restored.source; state.plan_id = restored.plan_id; state.bindingSaved = true
+        elseif restored.discover_pid then
+            state.discover_pid = restored.discover_pid; state.discovery_label = restored.discovery_label; state.waitSaved = true
         elseif saved == nil and type(args[1]) == "string" then
             local ok, source = pcall(tern.json.decode, args[1])
             if ok and type(source) == "table" and source.mode == "selected" and type(source.request) == "string" and #source.request <= 128 and type(source.label) == "string" and #source.label <= 400 then
@@ -199,8 +205,7 @@ tern.block.define("list", {
     end,
     title = function(state: State): string return if state.plan then state.plan.title else "TODO" end,
     save = function(state: State): any
-        if state.source and state.plan_id then return { schema = 2, source = state.source, plan_id = state.plan_id } end
-        return { schema = 2 }
+        return selection.saveState(state)
     end,
     event = function(state: State, event: UiEvent, cx: BlockCx)
         local selected = state.selection

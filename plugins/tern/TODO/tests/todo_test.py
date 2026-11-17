@@ -971,7 +971,8 @@ class WindowContract(unittest.TestCase):
         window = self.source('window.luau')
         self.assertIn('synced.settingsChanged(before, after)', window)
         self.assertNotIn('lastRev', window)
-        self.assertIn('synced.passed(key, entry.rev, gen, count, tern.now())', window)
+        self.assertIn('boardMemo.succeeded(target.pane, key, entry.rev, gen, count, tern.now(), title, path)', window)
+        self.assertIn('gate.passed(key, rev, gen, count, nowMs)', self.source('lib/sync_pane.luau'))
 
     def test_every_sync_status_change_repaints_an_open_settings_pane(self):
         window = self.source('window.luau')
