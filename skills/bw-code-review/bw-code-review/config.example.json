@@ -1,0 +1,5 @@
+{
+  "self_names": ["my-agent-name", "my-bot-login"],
+  "tracker_command": ["gh", "issue", "comment", "{pr}", "--repo", "{repo}", "--body-file", "{review}"],
+  "tracker_timeout_s": 60
+}
