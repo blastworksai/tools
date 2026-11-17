@@ -343,6 +343,22 @@ local function normalize(source: any, legacy: boolean): (any?, string?)
 	local argv, err = arguments(source.arguments, legacy)
 	if argv == nil then return nil, err end
 	record.arguments = argv
+	-- A program named like an option (`-a`) would be read as an option by the launch wrapper's exec.
+	if not legacy and record.command ~= nil then
+		local words = Config.parse_arguments(record.command)
+		if words ~= nil and words[1] ~= nil then
+			local target = words[1]
+			if basename(target) == "sudo" then
+				local rest = {}
+				for index = 2, #words do table.insert(rest, words[index]) end
+				for _, argument in ipairs(argv) do table.insert(rest, argument) end
+				for index, argument in ipairs(rest) do
+					if argument == "--" then target = rest[index + 1] or ""; break end
+				end
+			end
+			if target:sub(1, 1) == "-" then return nil, "The program name must not start with -" end
+		end
+	end
 	local managed_error = managed_fields(source, record)
 	if managed_error ~= nil then return nil, managed_error end
 

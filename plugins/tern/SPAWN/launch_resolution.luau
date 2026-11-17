@@ -65,14 +65,17 @@ end
 -- `sudo -i` is not used: it leaves `$` unescaped for the login shell, so `$HOME` in an argument would expand.
 -- The approved program and arguments travel as one fully single-quoted command text, run by the login shell
 -- AFTER its profile: a profile can neither move the folder (the launch folder is restored from $0) nor replace
--- the argv (the text does not use positional parameters). A shell that is not a known one (nologin, false) or
+-- the argv (the text does not use positional parameters). Every lookup runs with a fixed PATH set first, so a
+-- caller-controlled PATH (sudoers without secure_path) cannot supply getent; the login shell's own profile then
+-- builds the real PATH, and the plain /bin/sh fallback gets the original PATH back. A shell that is not a known one (nologin, false) or
 -- a missing passwd tool falls back to /bin/sh with the same text, as before the login shell was added.
-local LOGIN_SCRIPT = [==[u=$(id -un); d=$PWD; sh=$(getent passwd "$u" 2>/dev/null | cut -d: -f7); [ -n "$sh" ] || sh=$(dscl . -read "/Users/$u" UserShell 2>/dev/null | sed -n 's/^UserShell: //p'); case "${sh##*/}" in bash|zsh|sh|dash|ksh) [ -x "$sh" ] && exec "$sh" -lc "$1" "$d";; esac; exec /bin/sh -c "$1" "$d"]==]
+local LOGIN_SCRIPT = [==[o=$PATH; PATH=/usr/bin:/bin:/usr/sbin:/sbin; export PATH; u=$(id -un); d=$PWD; sh=$(getent passwd "$u" 2>/dev/null | cut -d: -f7); [ -n "$sh" ] || sh=$(dscl . -read "/Users/$u" UserShell 2>/dev/null | sed -n 's/^UserShell: //p'); case "${sh##*/}" in bash|zsh|sh|dash|ksh) [ -x "$sh" ] && exec "$sh" -lc "$1" "$d";; esac; PATH=$o; export PATH; exec /bin/sh -c "$1" "$d"]==]
 local SHELL_TARGETS = { sh = true, bash = true, dash = true, zsh = true, ksh = true }
 local function sh_quote(word: string): string
 	return "'" .. (string.gsub(word, "'", "'\\''")) .. "'"
 end
 -- Replaces argv[at..] (the program and its arguments) with the login wrapper carrying them as quoted text.
+-- A program named like an option would be read by `exec` as one, so it is never wrapped (callers refuse it).
 local function login_wrap(argv: {string}, at: number)
 	local quoted = {}
 	for index = at, #argv do table.insert(quoted, sh_quote(argv[index])) end
@@ -110,7 +113,7 @@ function Resolution.select_user(resolved: any, shell: string, noninteractive: bo
 		-- login shell; anything else keeps its argv exactly as approved.
 		if shell ~= "posix" or executable:match("([^/]+)$") ~= "sudo" then return true, nil end
 		local selected, index, login = parse_sudo(argv)
-		if selected == nil or argv[index] == nil or argv[index] == "" or argv[index]:find("=", 1, true) then return true, nil end
+		if selected == nil or argv[index] == nil or argv[index] == "" or argv[index]:find("=", 1, true) or argv[index]:sub(1, 1) == "-" then return true, nil end
 		if not login and not SHELL_TARGETS[argv[index]:match("([^/]+)$")] then login_wrap(argv, index) end
 		if noninteractive then table.insert(argv, 1, "-n") end
 		return true, nil
@@ -124,9 +127,11 @@ function Resolution.select_user(resolved: any, shell: string, noninteractive: bo
 		if selected ~= record.user or argv[index] == nil or argv[index] == "" or argv[index]:find("=", 1, true) then
 			return false, "Configured sudo does not explicitly select the configured OS user"
 		end
+		if argv[index]:sub(1, 1) == "-" then return false, "The program name must not start with -" end
 		if not login and not SHELL_TARGETS[argv[index]:match("([^/]+)$")] then login_wrap(argv, index) end
 		if noninteractive then table.insert(argv,1,"-n") end
 	else
+		if executable:sub(1, 1) == "-" then return false, "The program name must not start with -" end
 		local wrapped = { "-u", record.user, "-H", "--", executable }
 		for _, argument in ipairs(argv) do table.insert(wrapped, argument) end
 		if not SHELL_TARGETS[executable:match("([^/]+)$")] then login_wrap(wrapped, 5) end

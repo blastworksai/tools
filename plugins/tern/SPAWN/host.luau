@@ -2151,7 +2151,9 @@ local definition={
 			local function refuse(text)
 				state.notice=text
 				local run,bound=envelope.setup_run_id,envelope.binding
-				if type(run)~="string" or #run>256 or type(bound)~="string" or #bound>256 or not state.snapshot then return end
+				-- The window's own identity rule (1..256 bytes, no control characters); anything else would make it reject the whole snapshot.
+				local function identity(value) return type(value)=="string" and #value>0 and #value<=256 and not value:find("%c") end
+				if not identity(run) or not identity(bound) or not state.snapshot or not identity(state.snapshot.authority_id) then return end
 				local kept={}
 				for _,entry in ipairs(state.setup_refusals or {}) do if not (entry.setup_run_id==run and entry.binding==bound) then table.insert(kept,entry) end end
 				table.insert(kept,{authority_id=state.snapshot.authority_id,setup_run_id=run,binding=bound,text=string.sub(text,1,600)})

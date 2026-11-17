@@ -1642,6 +1642,15 @@ do
   if entry.setup_run_id==job.setup_run_id then seenMine=true elseif entry.setup_run_id=='another-run' then seenOther=true end
  end
  check(seenMine and seenOther,'refusals of two runs stay separate entries')
+ -- Malformed identifiers stay a notice: publishing them would make the window reject the whole snapshot.
+ for _,bad in ipairs({{run='',bind=''},{run='run\nx',bind=job.setup.binding},{run=job.setup_run_id,bind='b\1d'},{run=string.rep('r',300),bind=job.setup.binding}})do
+  local malformed=clone(envelope);malformed.setup_run_id=bad.run;malformed.binding=bad.bind
+  check(submit(malformed),'a malformed identifier envelope is consumed')
+  local view=stateNode()
+  for _,entry in ipairs(view.setup_refusals or {})do
+   check(#entry.setup_run_id>0 and #entry.setup_run_id<=256 and not entry.setup_run_id:find('%c') and #entry.binding>0 and #entry.binding<=256 and not entry.binding:find('%c'),'only well-formed identifiers are published')
+  end
+ end
  inventory.sessions[1].tabs[1].blocks[2].command=job.setup.command
  -- The helper (OMP) may leave its launch folder after binding; that is not a different pane.
  inventory.sessions[1].tabs[1].blocks[2].cwd='/tmp/omp-auto-switched'

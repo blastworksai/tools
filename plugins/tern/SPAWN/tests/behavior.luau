@@ -174,7 +174,7 @@ same(ordinary_render, render_before, "host rendering does not mutate the approve
 -- The program and its arguments stay separate positional parameters, never shell text.
 -- The account's login shell comes from its passwd entry (never from the environment) and is entered with the
 -- approved program text, so a profile can neither move the folder nor replace the argv.
-local LOGIN_SCRIPT = [==[u=$(id -un); d=$PWD; sh=$(getent passwd "$u" 2>/dev/null | cut -d: -f7); [ -n "$sh" ] || sh=$(dscl . -read "/Users/$u" UserShell 2>/dev/null | sed -n 's/^UserShell: //p'); case "${sh##*/}" in bash|zsh|sh|dash|ksh) [ -x "$sh" ] && exec "$sh" -lc "$1" "$d";; esac; exec /bin/sh -c "$1" "$d"]==]
+local LOGIN_SCRIPT = [==[o=$PATH; PATH=/usr/bin:/bin:/usr/sbin:/sbin; export PATH; u=$(id -un); d=$PWD; sh=$(getent passwd "$u" 2>/dev/null | cut -d: -f7); [ -n "$sh" ] || sh=$(dscl . -read "/Users/$u" UserShell 2>/dev/null | sed -n 's/^UserShell: //p'); case "${sh##*/}" in bash|zsh|sh|dash|ksh) [ -x "$sh" ] && exec "$sh" -lc "$1" "$d";; esac; PATH=$o; export PATH; exec /bin/sh -c "$1" "$d"]==]
 local function sq(word) return "'" .. word:gsub("'", "'\\''") .. "'" end
 local function with_login(prefix, rest)
 	local out = {}
@@ -216,6 +216,21 @@ do
 			"ordinary launch of " .. agent.id .. " enters the login shell without a configured user field")
 		check(words[at + 5]:find("exec '" .. source.arguments[table.find(source.arguments, "--") + 1] .. "'", 1, true) ~= nil, "the approved program is carried exactly for " .. agent.id)
 	end
+end
+check(LOGIN_SCRIPT:find("PATH=/usr/bin:/bin:/usr/sbin:/sbin; export PATH; u=$(id -un)", 1, true) ~= nil, "every lookup in the login script runs with a fixed PATH, set before the first command")
+-- An executable literally named like an option would be read by exec as one.
+for _, bad in ipairs({
+	record("dash-direct", { command = "-a", user = "seat" }),
+	record("dash-literal", { command = "sudo", arguments = { "-n", "-H", "-u", "seat", "--", "-a", "x" }, user = "seat" }),
+	record("dash-unconfigured", { command = "sudo", arguments = { "-n", "-H", "-u", "seat", "--", "-a", "x" } }),
+}) do
+	check(select(2, config.validate_record(bad)) ~= nil, "a record whose program name starts with - is refused at validation: " .. bad.id)
+end
+local dash_guard = load("launch_resolution")
+for _, guarded in ipairs({ { executable = "sudo", arguments = { "-n", "-u", "seat", "--", "-a" }, user = "seat" }, { executable = "-a", arguments = {}, user = "seat" } }) do
+	local resolved = { record = { backend = "local-terminal", user = guarded.user }, executable = guarded.executable, arguments = table.clone(guarded.arguments) }
+	local ok = dash_guard.select_user(resolved, "posix", true)
+	check(not ok, "the wrapper itself refuses a program name starting with - " .. guarded.executable)
 end
 local odd_sudo = record("odd-sudo", { command = "sudo", arguments = { "-g", "group", "--", "/usr/bin/claude" } })
 same(argv_of(assert(executor.render(odd_sudo, "/bin/bash", "linux")), "custom"), { "sudo", "-g", "group", "--", "/usr/bin/claude" }, "an unreviewed sudo form without a configured user keeps its argv unchanged")
