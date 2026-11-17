@@ -20,8 +20,9 @@ local function load(name, dependencies, fixture_runtime)
 	end }, { __index = environment }))
 	return chunk()
 end
-local Config = load("config")
-local Backend = load("backend", { ["./config"] = Config, ["./launch_resolution"] = load("launch_resolution", { ["./config"] = Config }) })
+local Selectors = load("selectors")
+local Config = load("config", { ["./selectors"] = Selectors })
+local Backend = load("backend", { ["./config"] = Config, ["./launch_resolution"] = load("launch_resolution", { ["./config"] = Config, ["./selectors"] = Selectors }) })
 local Review = load("setup_review", { ["./config"] = Config })
 local function record(id)
 	return { id = id or "account", provider = "Example", backend = "local-terminal", command = "example" }
@@ -233,7 +234,7 @@ do
 			sha256_feed = function() end, sha256_step = function() return true end,
 			sha256_digest = function() return digest end,
 		},
-		["./backend"] = Backend, ["./native_cli"] = {},
+		["./backend"] = Backend, ["./native_cli"] = {}, ["./launch_resolution"] = load("launch_resolution", { ["./config"] = Config, ["./selectors"] = Selectors }),
 		["./mailbox_adapter"] = { absolute_path = function(path) return type(path) == "string" and path:sub(1, 1) == "/" end },
 		["./prereq"] = {
 			identity = function(_, done) identity_calls += 1; done("fixture-user", nil) end,
@@ -289,7 +290,7 @@ do
 	})
 	check(not eligible and table.find(reasons, "Configured execution host differs from canonical host authority") ~= nil,
 		"adopted remote host binding remains subject to the unchanged authority eligibility guard")
-	for _, selector in ipairs({ "model", "profile" }) do
+	for _, selector in ipairs({ "profile" }) do -- model is allowed on a native fresh default since SPAWN 0.7.0
 		local invalid = native(saved); invalid[selector] = "selected"
 		local invalid_draft = Setup.from_record(invalid); invalid_draft.root = draft.root
 		local calls = identity_calls

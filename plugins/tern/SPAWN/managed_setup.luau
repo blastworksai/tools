@@ -5,11 +5,12 @@ local Backend=require('./backend')
 local Prereq=require('./prereq')
 local Adapter=require('./mailbox_adapter')
 local Native=require('./native_cli')
+local Resolution=require('./launch_resolution')
 local M={}
 local sequence=0
 local ASSETS={'mailbox_target.sh','mailbox_worker.sh','mailbox_json.awk','mailbox_reply.jq','mailbox_target.ps1','mailbox_worker.ps1','setup_argv.ps1','setup_route.sh','setup_route.ps1'}
 function M.defaults(cwd)
- return {id='managed-local',provider=if tern.runtime.os=='windows' then 'Local worker' else 'Native agent',account_label='Current OS account',backend=if tern.runtime.os=='windows' then 'local-terminal' else 'native-agent',executable=if tern.runtime.os=='windows' then '' else 'omp',arguments='',task_argument_index='',cwd=if Adapter.absolute_path(cwd,tern.runtime.os=='windows') then cwd else '',root=tern.plugin.data..'/managed',user=''}
+ return {id='managed-local',provider=if tern.runtime.os=='windows' then 'Local worker' else 'Native agent',account_label='Current OS account',backend=if tern.runtime.os=='windows' then 'local-terminal' else 'native-agent',executable=if tern.runtime.os=='windows' then '' else 'omp',arguments='',task_argument_index='',model='',effort='',cwd=if Adapter.absolute_path(cwd,tern.runtime.os=='windows') then cwd else '',root=tern.plugin.data..'/managed',user=''}
 end
 local function ordinary_route(record,user)
  local words,why=Config.parse_arguments(record.command or 'omp')
@@ -21,7 +22,7 @@ end
 function M.from_record(record,cwd)
  local d=M.defaults(cwd)
  d.id=record.id;d.provider=record.provider;d.account_label=record.account_label;d.backend=record.backend;d.executable=record.fresh_executable or record.command or 'omp'
- d.provider_family=record.provider_family
+ d.provider_family=record.provider_family;d.model=if record.model_selector then record.model else '';d.effort=record.effort or ''
  d.arguments=Config.render_arguments(record.fresh_arguments or record.arguments or {});d.cwd=if record.cwd and record.cwd~='' then record.cwd else d.cwd;d.user=record.user or ''
  -- The native fresh default is deliberately independent of ordinary resume argv.
  if record.fresh_native_default then d.executable='omp';d.arguments='' end
@@ -145,8 +146,8 @@ function M.prepare(draft,context,done)
  draft=table.clone(draft)
  local argv,why=Config.parse_arguments(draft.arguments)
  if draft.source_record and draft.source_record.id~=draft.id then done(nil,nil,'Existing stable record IDs are immutable; choose Create a new managed record');return end
- if draft.source_record and draft.source_record.fresh_native_default and (draft.source_record.model or draft.source_record.profile) then
-  done(nil,nil,'Native fresh default cannot retain model/profile selectors; review an explicit fresh executable/argv contract in the full record editor');return
+ if draft.source_record and draft.source_record.fresh_native_default and draft.source_record.profile then
+  done(nil,nil,'Native fresh default cannot retain a profile selector; review an explicit fresh executable/argv contract in the full record editor');return
  end
  if not argv then done(nil,nil,why);return end
  if draft.preparation_error then done(nil,nil,draft.preparation_error);return end
@@ -196,7 +197,7 @@ function M.prepare(draft,context,done)
      -- Preserve selectors, capacity, ordinary launch/resume and unrelated metadata.
      -- Only the explicitly reviewed managed fields are upgraded by this wizard.
      local prior=assert(Config.validate_record(draft.source_record))
-     for _,key in ipairs({'model','profile','variant_id','capacity_binding','capacity_limit','selector_evidence','placement','enabled','review_required','review_reason'}) do record[key]=prior[key] end
+     for _,key in ipairs({'model','model_selector','profile','variant_id','capacity_binding','capacity_limit','selector_evidence','placement','enabled','review_required','review_reason'}) do record[key]=prior[key] end
      -- SSH destinations/keys do not describe the explicitly selected same-host route.
      -- Existing native/local host bindings still participate in the eligibility guard.
      if prior.backend~='ssh-command' then record.host=prior.host;record.key_path=prior.key_path end
@@ -205,8 +206,16 @@ function M.prepare(draft,context,done)
      else record.command=prior.command;record.arguments=prior.arguments end
      record.prompt=prior.prompt
     end
+    -- A typed id is an explicit selector; an empty box keeps a saved display label and drops only a selector.
+    if draft.model~=nil then
+     if draft.model~='' then record.model=draft.model;record.model_selector=true
+     elseif record.model_selector then record.model=nil;record.model_selector=nil end
+    end
+    if draft.effort~=nil then record.effort=if draft.effort=='' then nil else draft.effort end
     local canonical,err=Config.validate_record(record)
     if not canonical then done(nil,nil,err);return end
+    local selector_problem=Config.selector_error(canonical,draft.source_record)
+    if selector_problem then done(nil,nil,selector_problem);return end
     sequence+=1
     local probe_context={host_os=context.host_os,host_shell=context.host_shell,bundle_digest=installed.digest,provision_handle='setup-'..Codec.sha256(identity..':'..tostring(tern.now())..':'..tostring(sequence)):sub(1,40)}
     local function probe() Prereq.probe(canonical,probe_context,function(result) done(canonical,result,nil) end) end
@@ -253,7 +262,7 @@ function M.route(record,probe,context,revision,window,nonce)
   table.insert(candidate.fresh_arguments,record.mailbox.permitted_root..'/'..nonce..'-native')
   local launch,why=Backend.build(candidate,context,{fresh=true,prompt=sentinel,cwd=record.cwd,placement='tab'})
   if not launch then return nil,why end
-  route.command=launch.command;route.prompt=sentinel;route.expected_arguments=candidate.fresh_arguments
+  route.command=launch.command;route.prompt=sentinel;route.expected_arguments=(Resolution.fresh_argv(candidate))
  else
   route.output=record.mailbox.permitted_root..'/'..nonce..'.observation'
   route.expected=nonce..'\n'..Codec.sha256(sentinel)..'\n'..record.mailbox.worker_identity..'\n'
