@@ -767,4 +767,20 @@ do
 
 end
 
+do -- records without model or effort behave as at 0.6.6: only .exe/.cmd/.bat are stripped for ACP and sudo detection
+	local function plain(fields) return Config.validate_record(record(fields)) end
+	local r1, w1 = plain({ command = "codex-acp.ps1" })
+	check(r1 ~= nil and r1.review_required ~= true and w1 == nil, "a selector-free codex-acp.ps1 stays an ordinary command, as at 0.6.6: " .. tostring(w1))
+	local r2, w2 = plain({ command = "codex-acp.cmd" })
+	check(r2 == nil and w2 ~= nil, "codex-acp.cmd is still detected as an ACP server")
+	local r3, w3 = plain({ command = "sudo.ps1", arguments = { "codex-acp" } })
+	check(r3 ~= nil and w3 == nil, "a selector-free sudo.ps1 is not a wrapper, as at 0.6.6: " .. tostring(w3))
+	local r4, w4 = plain({ command = "sudo.cmd", arguments = { "codex-acp" } })
+	check(r4 == nil and w4 ~= nil, "sudo.cmd is still a wrapper that blocks a server-shaped argument")
+	local program, index = Config.program_of("sudo.ps1", { "-u", "worker", "--", "claude" })
+	check(program == "sudo.ps1" and index == 1, "sudo.ps1 is not unwrapped by program_of, as at 0.6.6")
+	program = Config.program_of("sudo.cmd", { "-u", "worker", "--", "claude" })
+	check(program == "claude", "sudo.cmd is still unwrapped by program_of")
+end
+
 return string.format("PASS %d SPAWN backend checks", checks)

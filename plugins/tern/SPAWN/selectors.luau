@@ -27,18 +27,21 @@ local CLIS = {
 }
 local ALIASES = { antigravity = "agy" }
 -- The ONE program-name normalization (also used by config.luau for ordinary launches): lower case,
--- last path part, launcher suffix removed. Windows launches run .exe programs and .cmd, .bat and
--- .ps1 shims (npm installs CLIs as .cmd shims), so all four name the same CLI.
-local SUFFIXES = { "%.exe$", "%.cmd$", "%.bat$", "%.ps1$" }
-function Selectors.basename(value: string): string
+-- last path part, launcher suffix removed. Ordinary launch detection (ACP servers, sudo) strips the
+-- 0.6.6 list .exe/.cmd/.bat and nothing else, so records without model or effort behave as before.
+-- Selector identity passes { ps1 = true }: SPAWN's launch scripts (backend.luau, host_executor.luau)
+-- run a PATH-resolved .ps1 through PowerShell, so a .ps1 shim names its CLI for model and effort.
+local SUFFIXES = { "%.exe$", "%.cmd$", "%.bat$" }
+function Selectors.basename(value: string, options: { ps1: boolean? }?): string
 	local normalized = string.gsub(value, "\\", "/")
 	local name = string.lower(string.match(normalized, "([^/]+)$") or normalized)
 	for _, suffix in ipairs(SUFFIXES) do name = string.gsub(name, suffix, "") end
+	if options ~= nil and options.ps1 == true then name = string.gsub(name, "%.ps1$", "") end
 	return name
 end
 local function base(path: any): string?
 	if type(path) ~= "string" then return nil end
-	return Selectors.basename(path)
+	return Selectors.basename(path, { ps1 = true })
 end
 local function known(name: string?): string?
 	if name == nil then return nil end

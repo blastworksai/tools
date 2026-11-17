@@ -135,7 +135,8 @@ local function arguments(value: any, legacy: boolean): ({ string }?, string?)
 	return result, nil
 end
 
-local basename = Selectors.basename
+-- Ordinary launch detection keeps the 0.6.6 launcher list (.exe/.cmd/.bat); only selector identity adds .ps1.
+local function basename(value: string): string return Selectors.basename(value) end
 
 local SERVERS = {
 	["claude-agent-acp"] = true, ["claude-code-acp"] = true,
