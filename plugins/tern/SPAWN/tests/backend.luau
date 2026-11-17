@@ -655,6 +655,17 @@ do
   fields.fresh_executable=case[1];fields.fresh_arguments=case[2];fields.arguments={};fields.task_argument_index=#case[2]+1
   same(fresh_of(fields),table.concat(case[2],"|"),"fresh launch never doubles a typed flag: "..case[2][1])
  end
+ -- attached short form -mVALUE is a duplicate too, on every CLI with a short flag; long flags stay exact
+ for _,cli in ipairs({"codex","kimi","grok"}) do
+  local fields={provider=cli,command=cli,arguments={"-mgpt-old"},model_selector=true,model="gpt-new"}
+  local why=Config.selector_error(record(fields))
+  check(why~=nil and why:find("Remove one",1,true),"attached -mVALUE refused as a duplicate: "..cli)
+  same(argv_of(fields),"-mgpt-old","launch never doubles an attached -mVALUE: "..cli)
+  fields.fresh_executable=cli;fields.fresh_arguments={"-mgpt-old"};fields.arguments={};fields.task_argument_index=2
+  same(fresh_of(fields),"-mgpt-old","fresh launch never doubles an attached -mVALUE: "..cli)
+  check(Config.selector_error(record({provider=cli,command=cli,arguments={"--modelx"},model_selector=true,model="m"}))==nil,"--modelx is not a duplicate: "..cli)
+  check(Config.selector_error(record({provider=cli,command=cli,arguments={"-m"..cli}}))==nil,"attached form alone stays valid without the fields: "..cli)
+ end
  check(Config.selector_error(record({provider="claude",command="claude",arguments={"--model","x"}}))==nil,"hand-typed flag alone stays valid without the fields")
  check(Config.selector_error(record({provider="claude",command="claude",arguments={"--model","x"},effort="low"}))==nil,"a typed model flag does not clash with a chosen effort")
  same(argv_of({provider="custom",command="worker",model="display text",arguments={"--a"}}),"--a","unknown CLI never gets flags; stored display model keeps loading")

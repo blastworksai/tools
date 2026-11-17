@@ -104,6 +104,10 @@ function Selectors.duplicate(key: string?, words: { string }, model: any, effort
 		for _, word in ipairs(words) do
 			for _, name in ipairs(names(entry)) do
 				if word == name or word:sub(1, #name + 1) == name .. "=" then return name end
+				-- A short flag also takes its value attached (-mVALUE). Such a word is refused as a
+				-- duplicate even if it might be a boolean cluster (-mv): refusing is the safe side, and
+				-- every short flag in the table takes a value, so a CLI reads -mv as -m v anyway.
+				if name:find("^%-%a$") and #word > 2 and word:sub(1, 2) == name then return name end
 			end
 		end
 		return nil
