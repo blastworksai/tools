@@ -860,13 +860,22 @@ class DetailedSchema(unittest.TestCase):
         self.rejects(mutated(detailed_plan(), lambda v: v['checkpoints'][0]['tasks'].append('x')), 'task needs')
         self.rejects(mutated(detailed_plan(), lambda v: v['checkpoints'][0]['tasks'][0].update(items='x')), 'list')
 
-    def test_multiple_active_blocked_without_reason_and_bad_current_are_refused(self):
-        self.rejects(mutated(detailed_plan(), lambda v: v['checkpoints'][1]['tasks'][0]['items'][0].update(state='active')), 'at most one active')
+    def test_several_active_entities_are_valid_for_parallel_builders(self):
+        def three_active(v):
+            v['checkpoints'][1]['tasks'][0]['items'][0].update(state='active')
+            v['checkpoints'][2].update(state='active')
+        plan = mutated(detailed_plan(), three_active)
+        self.assertEqual(self.reader.validate(plan)['plan_id'], plan['plan_id'])
+        self.assertIsNone(self.reader.validate(mutated(plan, lambda v: v.update(current=None)))['current'])
+        for bad in ('model', 'ghost', 5):
+            self.rejects(mutated(plan, lambda v: v.update(current=bad)), 'current')
+
+    def test_blocked_without_reason_and_bad_current_are_refused(self):
         self.rejects(mutated(detailed_plan(), lambda v: v['checkpoints'][1]['tasks'][0]['items'][1].pop('reason')), 'blocked')
         self.rejects(mutated(detailed_plan(), lambda v: v['checkpoints'][1]['tasks'][0]['items'][0].update(reason='why')), 'blocked')
         self.rejects(mutated(detailed_plan(), lambda v: v.update(current='ship')), 'current')
         self.rejects(mutated(detailed_plan(), lambda v: v.update(current='ghost')), 'current')
-        self.rejects(mutated(detailed_plan(), lambda v: v.update(current=None)), 'at most one active')
+        self.rejects(mutated(detailed_plan(), lambda v: v.update(current='model')), 'current')
 
     def test_bounds_are_enforced_at_each_level(self):
         def cp(i, tasks):
@@ -976,7 +985,7 @@ class WindowContract(unittest.TestCase):
 
     def test_manifest_keeps_version_and_icon(self):
         manifest = self.source('plugin.toml')
-        self.assertIn('version = "0.7.2"', manifest)
+        self.assertIn('version = "0.7.3"', manifest)
         self.assertIn('icon = "list-checks"', manifest)
 
 

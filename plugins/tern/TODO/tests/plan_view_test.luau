@@ -51,6 +51,22 @@ return {
         assert(item.status=="blocked")
         assert(item.note=="Owner approval required")
     end},
+    {"parallel builders: several active entities are valid and all draw as active",function()
+        local plan=detailed(function(p)
+            p.checkpoints[2].tasks[1].items[1].state="active"
+            p.checkpoints[3].state="active"
+        end)
+        assert(view.validate(plan)==nil,tostring(view.validate(plan)))
+        local seen=rows(view.draw(ui,plan,"Local",nil,"now"))
+        assert(seen["impl"].status=="active" and seen["impl-file"].status=="active" and seen["ship"].status=="active")
+        assert(seen["impl"].text:find("Current · ",1,true)==1 and seen["ship"].text:find("Current",1,true)==nil)
+        plan.current=nil
+        assert(view.validate(plan)==nil,"current may be null while entities are active")
+        plan.current="parse"
+        assert(view.validate(plan)~=nil,"current naming a done entity is refused")
+        plan.current="ghost"
+        assert(view.validate(plan)~=nil,"current naming an unknown id is refused")
+    end},
     {"failed source does not draw prior success",function()
         local plan={title="Old success",checkpoints={{id="cp1",text="Old work",state="done"}}}
         local region=view.draw(ui,plan,"Local","Source lost",nil).main
@@ -117,11 +133,10 @@ return {
         bad(function(p) p.checkpoints[1].tasks[1].items[1].path=nil end,"file without path")
         bad(function(p) p.checkpoints[1].tasks[1].items[1].items={} end,"item children")
         bad(function(p) p.checkpoints[1].tasks[1].tasks={} end,"task children")
-        bad(function(p) p.checkpoints[2].tasks[1].items[1].state="active" end,"two active")
         bad(function(p) p.checkpoints[2].tasks[1].items[2].reason=nil end,"blocked without reason")
         bad(function(p) p.checkpoints[2].tasks[1].items[1].reason="x" end,"reason without block")
         bad(function(p) p.current="ship" end,"current names a pending entity")
-        bad(function(p) p.current=nil end,"active but current null")
+        bad(function(p) p.current="model" end,"current names a done entity")
         bad(function(p) p.extra=1 end,"unknown top-level field")
         bad(function(p) p.schema=3 end,"schema")
         bad(function(p) p.plan_id="plan-xyz" end,"plan id")

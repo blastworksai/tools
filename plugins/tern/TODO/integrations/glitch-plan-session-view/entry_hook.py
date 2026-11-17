@@ -21,7 +21,7 @@ NOTICE = (
     "the plan's already-agreed checkpoints and your verified current state. Preserve "
     "checkpoint names, conditions, approvals, Build choices and START HERE. Use "
     "schema 2 for new blocks: stable unique ids for every checkpoint, task, file "
-    "change, step and validation, one active entity named by current. Do not "
+    "change, step and validation, every entity in progress marked active (current may name one of them). Do not "
     "guess completion or ask the operator for the plan path. Identify your own durable "
     "agent PID using native ancestry, then publish this plan with the companion. "
     "For /glitch-plan, add the block and publish when the agreed plan is written. "

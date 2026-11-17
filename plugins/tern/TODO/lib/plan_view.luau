@@ -85,7 +85,7 @@ function view.validate(plan: any): string?
     if current ~= nil and (type(current) ~= "string" or (ids.seen[current] ~= "active" and ids.seen[current] ~= "blocked")) then
         return "current must name an active/blocked entity, or be null"
     end
-    if #active > 1 or (#active == 1 and current ~= active[1]) then return "at most one active entity, named by current" end
+    -- Parallel builders may leave several entities active at once; current is optional focus on one active/blocked entity.
     return nil
 end
 

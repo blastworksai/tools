@@ -94,8 +94,7 @@ def validate(plan):
     current = plan['current']
     if current is not None and (not isinstance(current, str) or current not in ids or ids[current] not in {'active', 'blocked'}):
         raise ValueError('current must name an active/blocked entity, or be null')
-    if len(active) > 1 or (active and current != active[0]):
-        raise ValueError('at most one active entity, named by current')
+    # Several entities may be active at once (parallel builders); current is an optional focus on one active/blocked entity.
     return plan
 
 

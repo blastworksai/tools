@@ -3,7 +3,7 @@
 local settings = {}
 
 settings.KEY = "settings"
-settings.EMPTY = "No TODO source is enabled. Turn on Board or enable Glitch integration in TODO Settings."
+settings.EMPTY = "No TODO source is enabled. Turn on the Tern Board option or enable Glitch integration in TODO Settings."
 settings.GLITCH_NOTE = "/glitch-plan progress will be shown in the TODO pane."
 -- A fresh installation: Glitch off, native board on, no sync, nothing attached.
 settings.DEFAULTS = { schema = 1, glitch = false, board = true, sync = false }
@@ -58,14 +58,15 @@ function settings.mode(s: any): string
     if s.glitch then return if s.sync then "glitch-sync" else "glitch" end
     return if s.board then "native-board" else "none"
 end
--- Board modes need cx.board, which is desktop/local only.
+-- Only the native board needs a session on this computer: it opens TODO.md in the session's own folder,
+-- and cx.board is desktop/local only. Glitch sync writes its board into this plugin's own data folder, so
+-- it never depends on where the session runs; turning sync on must not change which sessions can be attached.
 function settings.needsLocal(s: any): boolean
-    local mode = settings.mode(s)
-    return mode == "native-board" or mode == "glitch-sync"
+    return settings.mode(s) == "native-board"
 end
 
 -- candidates: { pane, label, detail?, remote, live } built by the window from current panes.
--- Stale, closed and ineligible panes never come back; remote panes only for plain Glitch viewing.
+-- Stale, closed and ineligible panes never come back; remote panes are left out only for the native board.
 function settings.eligible(s: any, candidates: { any }): { any }
     local out, needsLocal = {}, settings.needsLocal(s)
     if settings.mode(s) == "none" then return out end
@@ -73,6 +74,27 @@ function settings.eligible(s: any, candidates: { any }): { any }
         if c.live and not (needsLocal and c.remote) then table.insert(out, c) end
     end
     return out
+end
+-- How many live sessions the current mode leaves out (so the pane can say why the list is short).
+function settings.hiddenCount(s: any, candidates: { any }): number
+    if settings.mode(s) == "none" then return 0 end
+    local live = 0
+    for _, c in candidates do if c.live then live += 1 end end
+    return live - #settings.eligible(s, candidates)
+end
+settings.OTHER_HOST = "This session runs on another host. Its plan stays on that host and this window cannot read it, so no board is made. Board sync works for sessions on this computer."
+-- Why sync is not producing a board right now, in plain words; nil when nothing blocks it.
+-- target: the attached candidate (or nil); view: "none" | "match" | "other"; planSeen: this window holds a valid plan.
+function settings.syncBlocker(s: any, target: any, view: string, planSeen: boolean): string?
+    if not s.attach then return "Sync is on. Pick a session under Attach to; its plan goes to the board." end
+    if not target then return "The attached session is no longer open. Pick another under Attach to." end
+    if view == "other" then return "This tab's plan view serves another session. Select the session again in TODO Settings." end
+    if view ~= "match" then return "Waiting for this session's plan view to open." end
+    if not planSeen then
+        if target.remote then return settings.OTHER_HOST end
+        return "Waiting for this session to publish a plan (/glitch-plan)."
+    end
+    return nil
 end
 function settings.isEligible(s: any, candidates: { any }, pane: any): boolean
     if type(pane) ~= "number" then return false end
@@ -102,11 +124,16 @@ local function choice(ui: any, label: string, current: boolean, act: string): an
 end
 
 -- The settings pane. `candidates` are already filtered by settings.eligible.
-function settings.draw(ui: any, s: any, eligible: { any }, status: string?): any
+-- extra (optional): hidden = sessions the mode leaves out; board = { title, path } of the synced board.
+function settings.draw(ui: any, s: any, eligible: { any }, status: string?, extra: any?): any
+    local hidden = if extra and type(extra.hidden) == "number" then extra.hidden else 0
     local nodes = {}
     table.insert(nodes, ui.text({ ui.span("Attach to", "strong") }))
     if #eligible == 0 then
-        table.insert(nodes, ui.text({ ui.span(if settings.mode(s) == "none" then settings.EMPTY else "No eligible session is open for this mode.", "muted") }))
+        local empty = "No eligible session is open for this mode."
+        if settings.mode(s) == "none" then empty = settings.EMPTY
+        elseif hidden > 0 then empty = "No session on this computer is open. " .. string.format("%.0f", hidden) .. " session(s) on other hosts cannot be used: this board is a file in the session's own folder, on this computer." end
+        table.insert(nodes, ui.text({ ui.span(empty, "muted") }))
     else
         for _, c in eligible do
             local picked = s.attach == c.pane
@@ -119,8 +146,12 @@ function settings.draw(ui: any, s: any, eligible: { any }, status: string?): any
         table.insert(nodes, ui.text({ ui.span(settings.GLITCH_NOTE, "muted") }))
         table.insert(nodes, choice(ui, "Sync Glitch Plan to Tern Board?", s.sync, "sync"))
     else
-        table.insert(nodes, choice(ui, "Board", s.board, "board"))
+        table.insert(nodes, choice(ui, "Show the session's folder as a Tern Board?", s.board, "board"))
         if not s.board then table.insert(nodes, ui.text({ ui.span(settings.EMPTY, "muted") })) end
+    end
+    if s.glitch and s.sync and extra and extra.board then
+        table.insert(nodes, ui.text({ ui.span("Board: " .. extra.board.title, "strong") }))
+        table.insert(nodes, ui.el("button", { text = "Open board", actions = { click = "openboard=go" } }))
     end
     if status then table.insert(nodes, ui.text({ ui.span(status, "muted") })) end
     return ui.col(nodes)
