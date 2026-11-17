@@ -646,6 +646,30 @@ do
   check(Resolution.resolve(record({provider="claude",command="claude",model_selector=true,model=bad}),"ordinary","posix")==nil,"launch refuses an invalid model id")
  end
  check(Config.selector_error(record({provider="claude",command="claude",model_selector=true,model="claude-opus-5-5"}))==nil,"exact model id is accepted")
+ -- round 7: Windows shims (.cmd .bat .ps1, any case) name the same CLI as the bare program
+ for _,case in ipairs({{"codex","codex.cmd","-m|gpt-new"},{"claude","claude.bat","--model|gpt-new"},{"kimi","kimi.ps1","-m|gpt-new"},{"codex","CODEX.CMD","-m|gpt-new"},{"claude","Claude.Bat","--model|gpt-new"},{"kimi","KIMI.PS1","-m|gpt-new"},{"grok","grok.exe","-m|gpt-new"},{"omp","omp.cmd","--model=gpt-new"}}) do
+  local fields={provider=case[1],command=case[2],arguments={"--keep"},model_selector=true,model="gpt-new"}
+  same(argv_of(fields),"--keep|"..case[3],"ordinary shim launch gets flags: "..case[2])
+  check(Config.selector_error(record(fields))==nil,"shim command is a known CLI: "..case[2])
+  check(Config.record_cli(record(fields))==case[1],"record_cli identifies "..case[2])
+  local fresh=table.clone(fields);fresh.fresh_executable=case[2];fresh.fresh_arguments={"--keep"};fresh.task_argument_index=2;fresh.arguments=nil
+  same(fresh_of(fresh),case[3].."|--keep","fresh shim launch gets flags: "..case[2])
+  local plain=record({provider=case[1],command=case[2],arguments={"--keep","x y"}})
+  same(table.concat(assert(Resolution.resolve(plain,"ordinary","posix")).arguments,"|"),"--keep|x y","selector-free shim record unchanged: "..case[2])
+ end
+ check(Config.selector_error(record({provider="codex",command="codex.cmd.txt",model_selector=true,model="m"}))~=nil,"a non-launcher suffix is still an unknown CLI")
+ -- round 7: a model id carries no character cmd.exe or PowerShell acts on, for every CLI and shim
+ for _,bad in ipairs({"m&calc","m|x","m<x","m>x","m^x","m%PATH%","m!x","m\"x","m'x","m`x","m$x","m(x)","m;x","m,x","m x"}) do
+  for _,command in ipairs({"codex.cmd","claude.bat","kimi.ps1","codex"}) do
+   local fields={provider=command:match("^[a-z]+"),command=command,model_selector=true,model=bad}
+   check(Config.selector_error(record(fields))~=nil,"model id refused at edit/import: "..bad.." on "..command)
+   check(Config.validate_record(record(fields))==nil,"model id refused by validate_record: "..bad.." on "..command)
+   check(Resolution.resolve(record(fields),"ordinary","posix")==nil,"model id refused at launch: "..bad.." on "..command)
+  end
+ end
+ for _,good in ipairs({"claude-sonnet-5-5","gpt-5.6-sol","meta/muse-glimmer","kimi-k3","anthropic/claude-sonnet-5-5","opus[1m]","gpt-5:high","name@v1","a+b_c"}) do
+  check(Config.selector_error(record({provider="claude",command="claude.cmd",model_selector=true,model=good}))==nil,"real model id shape accepted: "..good)
+ end
  -- no double flags
  for _,case in ipairs({{"claude",{"--model","x"},"m",nil},{"claude",{"--model=x"},"m",nil},{"claude",{"--effort","low"},nil,"high"},{"codex",{"-m","x"},"m",nil},{"codex",{"--model=x"},"m",nil},{"omp",{"--thinking=low"},nil,"high"},{"omp",{"--model","x"},"m",nil},{"muse",{"--effort","low"},nil,"low"}}) do
   local fields={provider=case[1],command=case[1],arguments=case[2],model_selector=case[3]~=nil or nil,model=case[3],effort=case[4]}
@@ -710,13 +734,13 @@ do
  check(Config.selector_error(record({provider="claude",command="C:\\Tools\\claude.exe",arguments={"--model","a"},model_selector=true,model="sonnet"}))~=nil,"a Windows path launch still refuses a duplicate flag")
  -- login sudo passes the command through a second shell
  for _,flag in ipairs({"-i","-s"}) do
-  local why=Config.selector_error(record({provider="claude",command="sudo",arguments={flag,"-u","other","--","claude"},model_selector=true,model="$HOME"}))
+  local why=Config.selector_error(record({provider="claude",command="sudo",arguments={flag,"-u","other","--","claude"},model_selector=true,model="sonnet"}))
   check(why~=nil and why:find("sudo -i or -s",1,true)~=nil,"selectors are refused on sudo "..flag..": "..tostring(why))
   check(Config.selector_error(record({provider="claude",command="sudo",arguments={flag,"-u","other","--","claude"}}))==nil,"sudo "..flag.." without selectors stays valid")
  end
  check(Config.selector_error(record({provider="claude",command="sudo",arguments={"-u","other","--","claude"},model_selector=true,model="sonnet"}))==nil,"plain sudo keeps selectors (SPAWN quotes it)")
  -- round 3: a command that reads two ways (Windows path vs POSIX words) is refused, never validated under one reading
- local sudo_i=record({provider="claude",command="sudo -i -u other -- claude --add-dir /tmp/work\\ dir/claude.exe",model_selector=true,model="$HOME"})
+ local sudo_i=record({provider="claude",command="sudo -i -u other -- claude --add-dir /tmp/work\\ dir/claude.exe",model_selector=true,model="sonnet"})
  local two_ways=Config.selector_error(sudo_i)
  check(two_ways~=nil and two_ways:find("read two ways",1,true)~=nil,"sudo -i hidden behind a backslash path is refused as ambiguous: "..tostring(two_ways))
  check(Config.validate_record(sudo_i)==nil,"validate_record refuses the ambiguous sudo -i command")

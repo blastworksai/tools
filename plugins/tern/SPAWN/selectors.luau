@@ -26,11 +26,19 @@ local CLIS = {
 	},
 }
 local ALIASES = { antigravity = "agy" }
+-- The ONE program-name normalization (also used by config.luau for ordinary launches): lower case,
+-- last path part, launcher suffix removed. Windows launches run .exe programs and .cmd, .bat and
+-- .ps1 shims (npm installs CLIs as .cmd shims), so all four name the same CLI.
+local SUFFIXES = { "%.exe$", "%.cmd$", "%.bat$", "%.ps1$" }
+function Selectors.basename(value: string): string
+	local normalized = string.gsub(value, "\\", "/")
+	local name = string.lower(string.match(normalized, "([^/]+)$") or normalized)
+	for _, suffix in ipairs(SUFFIXES) do name = string.gsub(name, suffix, "") end
+	return name
+end
 local function base(path: any): string?
 	if type(path) ~= "string" then return nil end
-	local name = path:lower():gsub("\\", "/"):match("([^/]+)$")
-	if name == nil then return nil end
-	return (name:gsub("%.exe$", ""))
+	return Selectors.basename(path)
 end
 local function known(name: string?): string?
 	if name == nil then return nil end
@@ -60,6 +68,10 @@ function Selectors.model_error(model: any): string?
 	if #model > MAX_MODEL then return "Model id is longer than " .. tostring(MAX_MODEL) .. " bytes" end
 	if model:find("%c") or utf8.len(model) == nil then return "Model id must not contain control characters" end
 	if model:sub(1, 1) == "-" then return "Model id must not start with -" end
+	-- Real ids are letters, digits and . _ - : / @ + (and [1m]-style suffixes). Anything else, notably
+	-- & | < > ^ % ! " ' ` $ ( ) ; , and spaces, is refused: a .cmd/.bat/.ps1 shim re-reads its arguments
+	-- through cmd.exe or PowerShell, so the value must never carry a character those shells act on.
+	if model:find("[^%w%._:/@+%-%[%]]") then return "Model id may contain only letters, digits and . _ - : / @ + [ ] (no spaces or shell characters)" end
 	return nil
 end
 function Selectors.effort_error(key: string?, effort: any): string?

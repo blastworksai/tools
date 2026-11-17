@@ -141,7 +141,7 @@ These routes run as the selected OS account, **not in a sandbox**. Labels, profi
 | `prompt` | OMP startup prompt. Native OMP needs a non-empty prompt. |
 | `enabled` | Whether this account can be started. There is no batch-inclusion setting. |
 | `placement` | `tab`, `split` or `replace_if_alone`. |
-| `model`, `model_selector` | `model` is display text, as before 0.7. With `model_selector: true` (written when you type an id in the form or editor) it is an exact model id and SPAWN adds the CLI's own model flag (table below). A saved label is never turned into a flag. No alias is ever guessed. |
+| `model`, `model_selector` | `model` is display text, as before 0.7. With `model_selector: true` (written when you type an id in the form or editor) it is an exact model id and SPAWN adds the CLI's own model flag (table below). A saved label is never turned into a flag. No alias is ever guessed. The id may hold only letters, digits and `. _ - : / @ + [ ]`; anything else is refused with "Model id may contain only letters, digits and . _ - : / @ + [ ] (no spaces or shell characters)". |
 | `effort` | Optional effort level, only for a CLI with a verified effort flag and only its listed values. Empty adds no flag. |
 | `provider_family` | Optional explicit underlying AI provider for wrappers, OMP and review policy. Configure it in Advanced agent settings; the display name is not identity proof. |
 
@@ -214,7 +214,7 @@ The host-owned launch state has a 120,000-byte ceiling (about 1.6 KB per launch)
 - A provider tab shows its icon while the provider is running; after it exits, the tab shows the shell icon again.
 - Native OMP needs a non-empty startup prompt; Tern's start API rejects blank ones ([tern-sdk#213](https://github.com/stencil-hq/tern-sdk/issues/213)).
 - Host restarts are recognised only on hosts whose daemon identity can be read (Linux). On other hosts the restart epoch is unverifiable, so only the pane rule applies: a launch settles when its pane is gone.
-- Model and effort need a command without backslashes: a Windows-style path such as `C:\Tools\claude.exe` reads two ways and is refused with them; use a launcher on PATH (for example `claude`) and put options in Arguments. Records without model or effort are unaffected.
+- Model and effort need a command without backslashes: a Windows-style path such as `C:\Tools\claude.exe` reads two ways and is refused with them; use a launcher on PATH (for example `claude`) and put options in Arguments. A `.cmd`, `.bat` or `.ps1` shim on PATH (for example `codex.cmd`) counts as its CLI. Records without model or effort are unaffected.
 - `Running` means the process is alive. It does not prove the provider is signed in or its model is ready.
 
 ## Managed dispatch bridge (for ORCH+)

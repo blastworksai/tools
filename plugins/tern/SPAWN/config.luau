@@ -135,11 +135,7 @@ local function arguments(value: any, legacy: boolean): ({ string }?, string?)
 	return result, nil
 end
 
-local function basename(value: string): string
-	local normalized = string.gsub(value, "\\", "/")
-	local name = string.lower(string.match(normalized, "([^/]+)$") or normalized)
-	return (string.gsub(string.gsub(string.gsub(name, "%.exe$", ""), "%.cmd$", ""), "%.bat$", ""))
-end
+local basename = Selectors.basename
 
 local SERVERS = {
 	["claude-agent-acp"] = true, ["claude-code-acp"] = true,
