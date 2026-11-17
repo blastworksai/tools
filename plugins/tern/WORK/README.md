@@ -63,9 +63,9 @@ A fresh Setup opens with ACP and `tern acp` as two argv entries (`["tern", "acp"
 
 Examples of host-local values, not evidence of platform qualification:
 
-- **macOS ACP:** `glitch_root` such as `/Users/einh/Glitch`, with argv `["/opt/homebrew/bin/tern", "acp"]` when Tern is installed there.
+- **macOS ACP:** `glitch_root` such as `/Users/user/Glitch`, with argv `["/opt/homebrew/bin/tern", "acp"]` when Tern is installed there.
 - **macOS CLI:** the same host root, with argv such as `["/opt/homebrew/bin/claude", "--dangerously-skip-permissions"]`.
-- **Windows ACP:** `glitch_root` such as `C:/Users/einh/Glitch`, with argv `["tern.exe", "acp"]` or an absolute host executable path.
+- **Windows ACP:** `glitch_root` such as `C:/Users/user/Glitch`, with argv `["tern.exe", "acp"]` or an absolute host executable path.
 - **Windows CLI:** the same host root, with argv such as `["claude.exe", "--dangerously-skip-permissions"]`. Drive and UNC roots are accepted; escaped backslashes are valid JSON too. An explicit `.cmd` or `.bat` target is rejected before launch, and a target that resolves to a batch file also fails closed. Native `.exe` and PowerShell-script launch routes remain implemented, but their real Windows behavior is still unqualified.
 - **Remote host:** use the remote execution host's Glitch path and executable, even when the clicking desktop runs another OS. For example, a Windows desktop attached to a Linux Glitch VM uses the VM's `/opt/glitch` and the VM's agent argv, never a Windows client command.
 

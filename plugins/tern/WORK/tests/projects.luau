@@ -102,11 +102,11 @@ check(acp ~= nil and acp_err == nil, "validate ACP argv")
 check(acp.glitch_root == "/glitch" and acp.agent.kind == "acp", "normalized ACP config")
 check(#acp.agent.argv == 6 and acp.agent.argv[3] == "" and acp.agent.argv[4] == "two words", "ACP argv remains structured")
 local cli, cli_err = Config.validate({
-	glitch_root = "C:\\Users\\einh\\Glitch\\",
+	glitch_root = "C:\\Users\\user\\Glitch\\",
 	agent = { kind = "cli", argv = { "C:\\Program Files\\agent\\agent.exe", "--flag", "value" } },
 })
 check(cli ~= nil and cli_err == nil, "validate CLI argv without host annotation")
-check(cli.glitch_root == "C:/Users/einh/Glitch" and cli.agent.argv[1] == "C:\\Program Files\\agent\\agent.exe", "CLI executable and root are not command-parsed")
+check(cli.glitch_root == "C:/Users/user/Glitch" and cli.agent.argv[1] == "C:\\Program Files\\agent\\agent.exe", "CLI executable and root are not command-parsed")
 local opaque, opaque_err = Config.validate({
 	glitch_root = "/glitch",
 	agent = { kind = "cli", argv = { "agent --not-split" } },
@@ -155,11 +155,11 @@ for index, value in invalid_configs do
 end
 
 check(Config.normalize_root("C:\\", "windows") == "C:/", "normalize drive root")
-check(Config.normalize_root("C:\\Users\\einh\\Glitch\\", "windows") == "C:/Users/einh/Glitch", "normalize drive path")
+check(Config.normalize_root("C:\\Users\\user\\Glitch\\", "windows") == "C:/Users/user/Glitch", "normalize drive path")
 check(Config.normalize_root("\\\\server\\share\\Glitch\\", "windows") == "//server/share/Glitch", "normalize UNC path")
-check(Config.normalize_root("/Users/einh/Library\\ Mobile/Glitch/", "macos") == "/Users/einh/Library\\ Mobile/Glitch", "preserve macOS backslash")
+check(Config.normalize_root("/Users/user/Library\\ Mobile/Glitch/", "macos") == "/Users/user/Library\\ Mobile/Glitch", "preserve macOS backslash")
 check(Config.normalize_root("/opt/Glitch\\Archive/", "linux") == "/opt/Glitch\\Archive", "preserve Linux backslash")
-check(Config.normalize_root("C:/Users/einh/Glitch", "macos") == nil, "drive path is not absolute on macOS")
+check(Config.normalize_root("C:/Users/user/Glitch", "macos") == nil, "drive path is not absolute on macOS")
 check(Config.normalize_root("\\\\server\\share\\Glitch", "linux") == nil, "UNC path is not absolute on Linux")
 check(Config.normalize_root("/bad/../root", "linux") == nil, "reject parent path")
 check(Config.normalize_root("/bad\nroot", "linux") == nil, "reject root control character")
@@ -254,7 +254,7 @@ local unreadable, unreadable_problem = fixture("/glitch/_local/tern-projects", {
 }, config_path).load()
 check_problem(unreadable_problem, "config_invalid", "unreadable config does not fall back")
 
-for _, host_root in ipairs({ "C:\\Users\\einh\\Glitch\\", "\\\\server\\share\\Glitch\\" }) do
+for _, host_root in ipairs({ "C:\\Users\\user\\Glitch\\", "\\\\server\\share\\Glitch\\" }) do
 	local normalized = host_root:gsub("\\", "/"):gsub("/+$", "")
 	local windows, windows_problem = fixture("C:/native/plugins/tern-work", {
 		[config_path] = encoded_config(host_root, "cli", { "C:\\Tools\\agent.exe", "" }),
@@ -265,9 +265,9 @@ for _, host_root in ipairs({ "C:\\Users\\einh\\Glitch\\", "\\\\server\\share\\Gl
 	check(windows.agent.argv[1] == "C:\\Tools\\agent.exe" and windows.agent.argv[2] == "", "Windows argv is preserved exactly")
 end
 
-local mac_root = "/Users/einh/Glitch\\Archive/"
-local mac_normalized = "/Users/einh/Glitch\\Archive"
-local mac, mac_problem = fixture("/Users/einh/tern-work", {
+local mac_root = "/Users/user/Glitch\\Archive/"
+local mac_normalized = "/Users/user/Glitch\\Archive"
+local mac, mac_problem = fixture("/Users/user/tern-work", {
 	[config_path] = encoded_config(mac_root, "acp", { "acp-agent" }),
 	[mac_normalized .. "/workspaces/registry.json"] = registry_text,
 }, nil, "macos").load()

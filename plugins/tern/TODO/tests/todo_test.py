@@ -123,7 +123,7 @@ class SourceContract(unittest.TestCase):
         record, env = self.ssh_fixture()
         result = self.cli('source', '--plan', self.path, '--ssh', 'reviewed-test', env=env)
         self.assertEqual((result.returncode, json.loads(result.stdout)['plan']), (0, plan()))
-        self.assertEqual(self.cli('source', '--plan', self.path, '--ssh', 'seat-claudebwai').returncode, 1)
+        self.assertEqual(self.cli('source', '--plan', self.path, '--ssh', 'seat-agent').returncode, 1)
 
     def test_option_destination_is_rejected_before_any_ssh_process(self):
         record, env = self.ssh_fixture()

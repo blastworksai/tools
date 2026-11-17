@@ -7,8 +7,8 @@ local function check(ok,message) assert(ok,message);checks+=1 end
 local source=runtime.fs.read(root..'/managed_route_window.luau')
 local function fixture(backend)
  local f={starts=0,stops=0,closes=0,proofs=0,consents=0,ensures=0,live=false,visible=true,source=1,clock=1000,timers={},events={},published=false}
- f.recipient={namespace='odin-desktop',window_key='',conn=11,since=100}
- f.route={schema=1,nonce='setup-fixture-route',config_revision=7,window='',native_session=404,source_pane=501,backend=backend or 'native-agent',command="'omp' '--session-dir' '/private/setup-fixture-route-native'",cwd='/fixture/repo',prompt='exact "literal" \\ Ω\nbody',status='running',cleanup_pending=true,native_namespace='odin-desktop',native_conn=11,native_since=100}
+ f.recipient={namespace='alpha-desktop',window_key='',conn=11,since=100}
+ f.route={schema=1,nonce='setup-fixture-route',config_revision=7,window='',native_session=404,source_pane=501,backend=backend or 'native-agent',command="'omp' '--session-dir' '/private/setup-fixture-route-native'",cwd='/fixture/repo',prompt='exact "literal" \\ Ω\nbody',status='running',cleanup_pending=true,native_namespace='alpha-desktop',native_conn=11,native_since=100}
  local fake=setmetatable({json=runtime.json,now=function()return f.clock end,timer=function(_,callback)table.insert(f.timers,callback)end},{__index=runtime})
  local bridge={read_node=function(_,pane,_block,key)
   if key=='spawn-managed-prepare' then return if f.prepare and not f.hide_manifest and f.visible and pane==f.source then runtime.json.encode(f.prepare) else nil end
@@ -280,7 +280,7 @@ for _,backend in ipairs({'native-agent','local-terminal'}) do
  for _,field in ipairs({'namespace','conn','since'}) do
   local other=fixture(backend);other.published=true;other.live=true
   other.route.bound_pane=509;other.route.owned_pane=509;other.route.bound_window_pane=9
-  other.recipient[field]=if field=='namespace' then 'thor-desktop' else 999
+  other.recipient[field]=if field=='namespace' then 'beta-desktop' else 999
   local foreign=fixture(backend);foreign.recipient[field]=other.recipient[field]
   foreign.consent(foreign.load());foreign.drain()
   check(foreign.starts==0 and foreign.stops==0 and foreign.closes==0 and foreign.route.cleanup_pending,'even directed consent cannot launch a published route belonging to another recipient: '..backend..'/'..field)
@@ -315,7 +315,7 @@ blockedDuringPreflight.route.cleanup_blocked=true;blockedDuringPreflight.drain()
 check(blockedDuringPreflight.starts==0 and blockedDuringPreflight.route.cleanup_pending,'incarnation block after consent still prevents native effect')
 local changed=fixture();changed.consent(changed.load());changed.until_started()
 local callbacksBeforeRecipientChange=#changed.events
-changed.recipient={namespace='thor-desktop',window_key='',conn=11,since=100};changed.drain()
+changed.recipient={namespace='beta-desktop',window_key='',conn=11,since=100};changed.drain()
 check(changed.starts==1 and changed.stops==0 and changed.proofs==0 and #changed.events==callbacksBeforeRecipientChange and changed.route.cleanup_pending,'polling loses effect/callback authority when namespace changes with identical connection/time/window')
 local uncertain=fixture();uncertain.throw_start=true;uncertain.hidden=true
 uncertain.consent(uncertain.load());uncertain.drain()

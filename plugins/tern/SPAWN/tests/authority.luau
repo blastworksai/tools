@@ -466,7 +466,7 @@ sections.setup_invalid=function()
 end
 -- The native cleanup owner is injected evidence, not an executed process here.
 local function setup_route(backend,revision,nonce,binding)
-	local route={schema=1,nonce=nonce,window_consent="window-consent-"..nonce,config_revision=revision,window="",native_namespace="desktop-odin",native_session=4,source_pane=9,native_conn=7,native_since=1700000000,
+	local route={schema=1,nonce=nonce,window_consent="window-consent-"..nonce,config_revision=revision,window="",native_namespace="desktop-alpha",native_session=4,source_pane=9,native_conn=7,native_since=1700000000,
 		backend=backend,command="fixture-only "..nonce,cwd="/fixture/work",record_sha256=string.rep("b",64),
 		record_id="managed",
 		worker_identity="fixture-worker",host_os="linux",status="running",authority_id=binding.authority_id,

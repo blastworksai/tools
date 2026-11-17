@@ -1,6 +1,6 @@
 """--follow: the helper runs the events loop itself, right after the open or from a cursor (SKILLS-168).
 
-The reported shape (Kimi on kimibwai, 16 Nov 2026): the agent's next tool call came more than 35 seconds
+The reported shape (Kimi on a seat account, 16 Nov 2026): the agent's next tool call came more than 35 seconds
 after browser-open, so the lease had lapsed and the first wait returned agent_unavailable.
 """
 import json

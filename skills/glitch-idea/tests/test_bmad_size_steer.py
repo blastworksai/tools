@@ -8,7 +8,7 @@ SKILL = (ROOT / 'glitch-idea/SKILL.md').read_text(encoding='utf-8')
 METHODS_MD = (ROOT / 'glitch-idea/references/methods.md').read_text(encoding='utf-8')
 METHOD_JS = (ROOT / 'glitch-idea/web/steps/method.js').read_text(encoding='utf-8')
 
-# einh's pick B, 16 Nov 2026, added after the card's existing line.
+# the owner's pick B, 16 Nov 2026, added after the card's existing line.
 STEER = 'Best for big builds (a project or an epic). Smaller work usually goes faster with Full Plan Up Front.'
 CARD_LINE = 'Fix a written brief, requirements and architecture first; then build story by story. ' + STEER
 KEEP_LABEL = 'BMAD kept for this size:'

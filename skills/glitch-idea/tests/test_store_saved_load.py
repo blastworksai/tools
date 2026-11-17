@@ -219,7 +219,7 @@ class SavedLoadTests(unittest.TestCase):
         self.assert_miss(lambda: self.rewrite(lambda v: v['state']['order'].reverse(), checksum=False))
 
     def test_a_resealed_payload_is_the_accepted_trust_line(self):
-        # einh's ruling: a deliberate edit by the owning account, checksum recomputed, is not detected.
+        # the owner's ruling: a deliberate edit by the owning account, checksum recomputed, is not detected.
         # Recorded so the boundary is explicit and a change to it is a visible decision.
         self.start()
         self.rewrite(lambda v: v['state']['order'].reverse())

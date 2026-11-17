@@ -12,10 +12,10 @@
      "hops": [
       {
        "from": "",
-       "host": "dev-blastworks",
+       "host": "dev-host",
        "method": "local",
-       "principal": "claudebwai",
-       "user": "claudebwai"
+       "principal": "agent",
+       "user": "agent"
       }
      ]
     },
@@ -29,10 +29,10 @@
      "hops": [
       {
        "from": "",
-       "host": "dev-blastworks",
+       "host": "dev-host",
        "method": "local",
-       "principal": "claudebwai",
-       "user": "claudebwai"
+       "principal": "agent",
+       "user": "agent"
       }
      ]
     },
@@ -55,7 +55,7 @@
         "args": [],
         "cols": 0,
         "command": null,
-        "cwd": "/opt/glitch",
+        "cwd": "/srv/glitch",
         "exited": null,
         "focused": true,
         "id": 5,

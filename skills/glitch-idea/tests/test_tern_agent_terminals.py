@@ -42,7 +42,7 @@ class AgentTerminalTests(unittest.TestCase):
         return dict(proc=str(self.proc), uid=ME, devcheck=lambda p: p in self.writable)
 
     def reported_shape(self):
-        """codexbwai, 13 Nov: tern -> bash -> codex TUI on pts/25; the app-server daemon runs the helper with no terminal."""
+        """seat account, 13 Nov: tern -> bash -> codex TUI on pts/25; the app-server daemon runs the helper with no terminal."""
         self.process(1, 0, "systemd")
         self.process(900, 1, "tern")
         self.process(1300, 900, "bash", tty=tty_nr(25), fds={0: "/dev/pts/25"})

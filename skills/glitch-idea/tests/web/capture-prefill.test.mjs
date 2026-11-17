@@ -109,7 +109,7 @@ test('typed text is never replaced, also on a later state refresh', async () => 
 const ID = 'idea_' + '1'.repeat(32);
 const saved = {name: 'Saved Site', path: '/work/saved', confirmed: true};
 
-// The reported shape (SKILLS-168, Kimi on kimibwai 16 Nov 2026): the agent saves the words with `capture`
+// The reported shape (SKILLS-168, Kimi on a seat account 16 Nov 2026): the agent saves the words with `capture`
 // first, then opens that idea by id; the service hands Capture a draft holding only raw_text.
 test('an idea captured in the terminal, with no workspace yet, gets the prefill', async () => {
   await app(async h => {
