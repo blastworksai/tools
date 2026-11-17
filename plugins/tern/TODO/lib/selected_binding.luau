@@ -1,6 +1,6 @@
 --!strict
 -- Native split is the cross-namespace link; never decode a window pane handle.
--- CodexBWAI; MIT.
+-- Blastworks.ai; MIT.
 local binding = {}
 export type Binding = { session: number, tab: number, target: number, panel: number, window: string? }
 

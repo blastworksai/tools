@@ -54,14 +54,14 @@ class RuntimeHomeFallbackTests(unittest.TestCase):
 
     # --- the reported shapes first ---
 
-    def test_kimibwai_shape_xdg_folder_exists_but_variable_unset(self):
+    def test_seat_shape_xdg_folder_exists_but_variable_unset(self):
         self.loose_state()
         self.xdg.mkdir();os.chmod(self.xdg,0o700)  # /run/user/<uid> exists, the pane has no XDG_RUNTIME_DIR
         root,marker=self.resolve()
         self.assertEqual(root,self.fallback);self.assertEqual(marker,self.expected_marker())
         self.assert_private_dir(self.fallback)
 
-    def test_grokbwai_shape_no_xdg_folder_at_all(self):
+    def test_seat_shape_no_xdg_folder_at_all(self):
         self.loose_state()
         root,marker=self.resolve()
         self.assertEqual(root,self.fallback);self.assertEqual(marker,self.expected_marker())

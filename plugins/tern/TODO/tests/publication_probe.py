@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Real native Tern publication boundaries. CodexBWAI; MIT. No AI or live config.
+"""Real native Tern publication boundaries. Blastworks.ai; MIT. No AI or live config.
 
 Launch as an owned native Tern program, with a new private --work-dir.
 Adjacent flat helpers support a portable qualification bundle; normal package
@@ -40,7 +40,7 @@ def run(*parts, ok=True):
     return child.returncode, value
 
 
-receipt = {'author': 'CodexBWAI', 'platform': sys.platform, 'python': sys.version,
+receipt = {'author': 'Blastworks.ai', 'platform': sys.platform, 'python': sys.version,
            'checks': [], 'case': args.case, 'scope': 'Owned native program; private fixture metadata only'}
 owns_binding = False
 slow = None

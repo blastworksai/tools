@@ -1,4 +1,4 @@
--- Active TODO view contracts in an isolated real Tern Luau VM. CodexBWAI; MIT.
+-- Active TODO view contracts in an isolated real Tern Luau VM. Blastworks.ai; MIT.
 local tests=require("./plan_view_test")
 for _,name in {"./plan_publish_test","./plan_read_test","./board_sync_test","./settings_test","./attach_test","./selected_binding_test","./host_selection_test","./sync_lifecycle_test","./host_interpreter"} do
     for _,test in require(name) do table.insert(tests,test) end

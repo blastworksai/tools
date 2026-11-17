@@ -5,7 +5,7 @@
 -- window never syncs a stale success.
 -- The text is JSON {v, rev, wait, plan?, too_large?}. `rev` changes whenever the plan changes (the window's
 -- "already synced" gate compares it); `wait` echoes the host's wait-for-publication flag, which the window sets by event.
--- A plan whose JSON passes LIMIT is never cut: the node carries `too_large` instead. CodexBWAI; MIT.
+-- A plan whose JSON passes LIMIT is never cut: the node carries `too_large` instead. Blastworks.ai; MIT.
 local publication = {}
 
 publication.KEY = "plan-sync"

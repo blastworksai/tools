@@ -1,5 +1,5 @@
 -- Read-only SSH polling must not penalize other sessions on the same host.
--- CodexBWAI; MIT.
+-- Blastworks.ai; MIT.
 local polling = {}
 function polling.delay(ssh, consecutiveFailures)
     if not ssh then return 1500 end

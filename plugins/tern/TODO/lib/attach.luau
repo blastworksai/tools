@@ -1,6 +1,6 @@
 --!strict
 -- Window controller: select a session; native host resolves its explicit publication.
--- CodexBWAI; MIT.
+-- Blastworks.ai; MIT.
 local binding = require("./selected_binding")
 local attach = {}
 

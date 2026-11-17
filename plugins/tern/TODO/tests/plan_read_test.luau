@@ -1,4 +1,4 @@
--- The window's read of a plan view through the pane surface: one path for a local and a remote session. CodexBWAI; MIT.
+-- The window's read of a plan view through the pane surface: one path for a local and a remote session. Blastworks.ai; MIT.
 local read = require("../lib/plan_read")
 local publication = require("../lib/plan_publish")
 local sync_pane = require("../lib/sync_pane")

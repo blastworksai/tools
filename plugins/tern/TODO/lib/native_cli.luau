@@ -1,4 +1,4 @@
--- Native host executable/socket discovery and bounded CLI calls. CodexBWAI; MIT.
+-- Native host executable/socket discovery and bounded CLI calls. Blastworks.ai; MIT.
 -- Discovery is vendored with the updater; this module retains TODO's runner.
 local Discovery = require("../updater/discovery")
 local Native = {}

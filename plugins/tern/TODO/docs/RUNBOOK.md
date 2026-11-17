@@ -1,6 +1,6 @@
 # TODO rollout runbook
 
-CodexBWAI · MIT. The owner has authorized merge and deployment to specific hosts and desktop clients. The simplified tools release route is GitHub-only, outside FORGE/ReleaseManager. These instructions confer no additional authority.
+Blastworks.ai · MIT. The owner has authorized merge and deployment to specific hosts and desktop clients. The simplified tools release route is GitHub-only, outside FORGE/ReleaseManager. These instructions confer no additional authority.
 
 1. Obtain a fresh cross-family review on the exact PR head. Match every runtime hash in evidence to that head. Merge only after the review passes, then verify the merged subtree matches the reviewed package.
 2. Check the actual running Tern daemon/client versions (minimum 0.9.8), installed TODO package and owning account. Do not update or restart Tern. Install only the reviewed immutable TODO release with the normal local-package installer, preserving plugin data. Read back the plugin catalogue and installed file hashes. Compare all three companion helper hashes with the installed plugin helpers; refuse schema/version skew. [VALIDATION.md](VALIDATION.md) records the integrated source hashes and distinguishes them from the immutable handoff for this later coordinated comparison. They are not installed-companion receipts; neither Task 2C nor integration performed a rollout.

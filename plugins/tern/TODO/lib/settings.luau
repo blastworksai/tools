@@ -1,4 +1,4 @@
--- TODO settings: closed model, eligibility and the pane view. CodexBWAI; MIT.
+-- TODO settings: closed model, eligibility and the pane view. Blastworks.ai; MIT.
 -- Pure apart from load/save (plugin KV). The window owns every effect.
 local settings = {}
 

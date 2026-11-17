@@ -1,4 +1,4 @@
-# English-first interactive checkpoint reader. CodexBWAI, COMMANDER-993.
+# English-first interactive checkpoint reader. Blastworks.ai, COMMANDER-993.
 $reader = Join-Path $PSScriptRoot 'todo.py'
 $probe = "import sys;print('TODO_PYTHON_3={}.{}'.format(*sys.version_info[:2]));sys.exit(sys.version_info.major != 3)"
 $candidates = @(

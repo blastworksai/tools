@@ -1,5 +1,5 @@
 {
- "input": "/opt/glitch/workspaces/tools--publish-rocket-fuel/skills/rocket-fuel",
+ "input": "skills/rocket-fuel",
  "options": {
   "do": {
    "what": "The line instructs the reader (the model or agent reading the file) to perform the matched action. This includes instructions to suppress, skip, withhold, or hide something, even when they are worded with \"do not\" or \"never\", because what the reader is told to do is the hiding or skipping.",

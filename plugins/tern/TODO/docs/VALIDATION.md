@@ -1,18 +1,18 @@
 # TODO 0.6.0+ — validation
 
-CodexBWAI · 9 November 2026. This receipt supersedes the older 0.5.x validation headings for the current TODO reliability lane. Earlier 0.5.0, 0.5.1 and 0.5.2 receipts are historical and are not carried forward as evidence for this source.
+Blastworks.ai · 9 November 2026. This receipt supersedes the older 0.5.x validation headings for the current TODO reliability lane. Earlier 0.5.0, 0.5.1 and 0.5.2 receipts are historical and are not carried forward as evidence for this source.
 
 ## Source and helper receipt
 
 The immutable handoff is commit `ca8bebb4553e1338c7bf49844494f9d665af33fc`, based on `9f761f031154bd57e20391755a5c9fb675be9963`; its author receipt records version `0.6.0`. Integration preserves the owned updater work and adds the scoped review corrections below. No git command or runtime check was used during integration.
 
-The following SHA256 values are the current source-byte identities needed for a later coordinated companion/plugin rollout:
+The following SHA256 values are the source-byte identities of TODO 0.7.3 as released on tools main (after the credit edit), needed for a later coordinated companion/plugin rollout:
 
 | Helper | SHA256 |
 | --- | --- |
-| `bin/todo.py` | `03f04874c7ba446bfeb9319530e6454e502b1c590a69f504f37614a71511907c` |
-| `bin/publication.py` | `9aae7120bc622891115ebd3bab0fd15aeea79e25b280c96e6e736063b88470d0` |
-| `bin/process_identity.py` | `d81cfd5c9dc2362fab5e9408992fe96dfd1caeaa5681fde229908e92f7dce72b` |
+| `bin/todo.py` | `c66f06d070a687b88e18869388601ef2546be68f0fda3ace9479d58c2cdecdd3` |
+| `bin/publication.py` | `616c36dfe93e2cdad931f54d3fb90bfa853677fab66b650aa72e8f864da6c844` |
+| `bin/process_identity.py` | `d4369444f152d199826a905ca29f8d0ce4bbe16d0549c2fe8dd5e7c5027c874f` |
 
 These are source hashes, not installed-companion or installed-plugin readbacks. A later authorized rollout must compare all three companion and plugin helpers at the same reviewed head and refuse schema/version skew. Task 2C performed no companion copy, plugin install/link/reload, deployment, publication or other rollout.
 
@@ -36,7 +36,7 @@ After all three CP1 writers stopped, the owner ran this selected batch from the 
 env PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=tests python3 -m unittest todo_test.SourceContract todo_test.ProcessIdentityContract todo_test.WindowsReadContract todo_test.PublicationContract
 ```
 
-The actual `bin/todo.py template --title Qualification --step First` → `source --plan <owned-private-file>` roundtrip returned the identical generated plan ID, title and checkpoint. A real hardlinked lock was refused before entering the writer body; canonical bytes, mode, owner and group remained unchanged, and no publication was created. Evidence: `_local/orchplus-adversarial-review-20261106/platform-completion/cp1-todo-smoke-20261109.json` in the private Brain evidence home. The owned throwaway fixture was removed after success. These checks made no network connection or publication into a real agent. The publication probe and `todo_smoke.py --contracts-only` remain separate supervised native operations; no install/link/reload or companion rollout occurred.
+The actual `bin/todo.py template --title Qualification --step First` → `source --plan <owned-private-file>` roundtrip returned the identical generated plan ID, title and checkpoint. A real hardlinked lock was refused before entering the writer body; canonical bytes, mode, owner and group remained unchanged, and no publication was created. The owner holds the receipt privately. The owned throwaway fixture was removed after success. These checks made no network connection or publication into a real agent. The publication probe and `todo_smoke.py --contracts-only` remain separate supervised native operations; no install/link/reload or companion rollout occurred.
 
 ### Native Mac discovery and installed-helper immutability
 
@@ -44,7 +44,7 @@ Mac a12 exercised the actual Files-header hover, TODO button and picker, then fa
 
 That run also created two helper bytecode files inside the installed plugin. The shared CLI entrypoint now sets `sys.dont_write_bytecode` before importing its helpers. Actual Mac CLI-only discovery with Python `-I`, without `-B`, preserved exact writable-install membership and bytes. The full isolated Python suite passed **38 tests** after supplying a private OS identity fixture required by offline OpenSSH configuration expansion; the earlier runner failure remains retained, and the fixture was removed. Neither result qualifies native pane environment forwarding or the GUI.
 
-Evidence in the private Brain evidence home: `cp2m-adapter-a12-receipts-20261109.json`, `cp2m-a12-external-pointer-cleanup-20261109.json`, `cp2m-a12-installed-package-delta-20261109.json`, `cp1t-bytecode-actual-mac-cli-smoke-20261109.json`, and `cp1t-bytecode-isolated-regression-suite-with-identity-20261109.json`.
+The owner holds these receipts privately: `cp2m-adapter-a12-receipts-20261109.json`, `cp2m-a12-external-pointer-cleanup-20261109.json`, `cp2m-a12-installed-package-delta-20261109.json`, `cp1t-bytecode-actual-mac-cli-smoke-20261109.json`, and `cp1t-bytecode-isolated-regression-suite-with-identity-20261109.json`.
 
 Mac a15 subsequently **passed the selected cold publication/discovery and native checkpoint-refresh case** against the corrected helpers. The actual durable publisher and host reader used the reviewed private roots, the real Files-header button/picker selected the plan, and the rendered rows changed to a completed first checkpoint and current second checkpoint. The retained 1280×800 native screenshot was viewed and matches the machine readback. Installed/source/input preservation, the specified production-preservation projection, original deadline, observed-owned-zero and endpoint cleanup passed. This is a selected real-GUI case, not a full Mac, connected, provider or estate qualification.
 

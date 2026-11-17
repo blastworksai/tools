@@ -1,6 +1,6 @@
 # Stage 6 review packet: needs a human read
 
-Input: `/opt/glitch/workspaces/tools--publish-rocket-fuel/skills/rocket-fuel`  
+Input: `skills/rocket-fuel`  
 Written: 2026-11-09  
 Questions: 2 (1 labeling, 1 relational)  
 Backends: none (packet only)

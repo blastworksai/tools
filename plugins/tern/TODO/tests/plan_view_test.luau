@@ -1,5 +1,5 @@
 -- Active view contract: explicit current/blocked state and no stale success on error.
--- CodexBWAI, COMMANDER-993.
+-- Blastworks.ai, COMMANDER-993.
 local view = require("../lib/plan_view")
 local polling = require("../lib/polling")
 local ui = {

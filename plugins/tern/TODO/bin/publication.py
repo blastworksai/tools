@@ -1,4 +1,4 @@
-"""Explicit plan pointers owned by live agent processes. CodexBWAI; MIT.
+"""Explicit plan pointers owned by live agent processes. Blastworks.ai; MIT.
 
 This metadata is not a second plan or a work queue. No input reaches an agent.
 """
