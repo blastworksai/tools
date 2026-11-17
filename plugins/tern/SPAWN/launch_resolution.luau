@@ -45,18 +45,19 @@ end
 -- A record with neither field keeps its argv exactly. The flags go at the task slot (or the
 -- end), after any sudo wrapper, and move the slot so the task text still lands where it was set.
 local function derive(record: any, executable: string, argv: { string }, slot: number?): ({ string }, number?)
-	local key = Selectors.record_key(record)
-	-- A flag the saved arguments already carry wins: never a second copy.
-	local model, effort = record.model, record.effort
-	if model ~= nil and Selectors.duplicate(key, argv, model, nil) then model = nil end
-	if effort ~= nil and Selectors.duplicate(key, argv, nil, effort) then effort = nil end
+	if not Config.selectors_active(record) then return argv, slot end
+	-- The CLI is the program this launch actually runs (a literal sudo is unwrapped), never the label.
+	local program, first = Config.program_of(executable, argv)
+	local key = Selectors.program_key(program)
+	if key == nil then return argv, slot end
+	-- A flag the saved arguments already carry in the program's option region wins: never a second copy.
+	local region = Selectors.region(argv, first)
+	local model = if record.model_selector == true then record.model else nil
+	local effort = record.effort
+	if model ~= nil and Selectors.duplicate(key, region, model, nil) then model = nil end
+	if effort ~= nil and Selectors.duplicate(key, region, nil, effort) then effort = nil end
 	local flags = Selectors.flags(key, model, effort)
 	if #flags == 0 then return argv, slot end
-	local first = 1
-	if executable:match("([^/]+)$") == "sudo" then
-		local _, index, _, problem = Config.parse_sudo(argv)
-		if problem == nil and argv[index] ~= nil then first = index + 1 end
-	end
 	return Selectors.apply(argv, flags, slot, first)
 end
 -- Fresh terminal argv with the derived flags and the matching task slot, for callers that
@@ -69,8 +70,6 @@ function Resolution.resolve(source: any, mode: string, shell: string): (any?, st
 	local record, err = Config.validate_record(source)
 	if record == nil then return nil, err end
 	if record.review_required then return nil, record.review_reason end
-	local selector_problem = Config.selector_error(record, true)
-	if selector_problem ~= nil then return nil, selector_problem end
 	local executable, argv, slot
 	if mode == "fresh" then
 		if not Resolution.fresh_available(record) then return nil, "No explicit fresh executable/argv contract for this record" end

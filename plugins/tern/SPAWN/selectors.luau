@@ -32,21 +32,19 @@ local function base(path: any): string?
 	if name == nil then return nil end
 	return (name:gsub("%.exe$", ""))
 end
--- The CLI is named by the record's provider, else by the executable it launches.
-function Selectors.cli_key(provider: any, executable: any): string?
-	local key = base(provider)
-	key = ALIASES[key or ""] or key
-	if key ~= nil and CLIS[key] then return key end
-	key = base(executable)
-	key = ALIASES[key or ""] or key
-	if key ~= nil and CLIS[key] then return key end
+local function known(name: string?): string?
+	if name == nil then return nil end
+	name = ALIASES[name] or name
+	if CLIS[name] then return name end
 	return nil
 end
-function Selectors.record_key(record: any): string?
-	local executable = record.fresh_executable
-	if executable == nil and type(record.command) == "string" then executable = record.command:match("^%s*(%S+)") end
-	if record.fresh_native_default then executable = "omp" end
-	return Selectors.cli_key(record.provider, executable)
+-- The CLI a program word names (its executable name only), or nil for any other program.
+function Selectors.program_key(program: any): string?
+	return known(base(program))
+end
+-- The CLI a provider label names, or nil for a descriptive label. Never decides a launch.
+function Selectors.provider_key(provider: any): string?
+	return known(base(provider))
 end
 function Selectors.supports_model(key: string?): boolean
 	return key ~= nil and CLIS[key] ~= nil
@@ -72,6 +70,7 @@ function Selectors.effort_error(key: string?, effort: any): string?
 	return nil
 end
 -- argv words derived from the fields. Empty when nothing is chosen or the CLI is unknown.
+-- `model` is passed only when the caller hands it as a selector (record.model_selector).
 function Selectors.flags(key: string?, model: any, effort: any): { string }
 	local cli = if key ~= nil then CLIS[key] else nil
 	local flags = {}
@@ -87,6 +86,15 @@ local function names(entry: any): { string }
 	local list = { entry.flag }
 	for _, name in ipairs(entry.also or {}) do table.insert(list, name) end
 	return list
+end
+-- The program's own option region: from `first` up to its own `--` (text after it is positional).
+function Selectors.region(argv: { string }, first: number?): { string }
+	local words = {}
+	for index = first or 1, #argv do
+		if argv[index] == "--" then break end
+		table.insert(words, argv[index])
+	end
+	return words
 end
 -- The first hand-typed flag in `words` that the derived flags would duplicate, or nil.
 function Selectors.duplicate(key: string?, words: { string }, model: any, effort: any): string?

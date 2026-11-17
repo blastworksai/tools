@@ -22,7 +22,7 @@ end
 function M.from_record(record,cwd)
  local d=M.defaults(cwd)
  d.id=record.id;d.provider=record.provider;d.account_label=record.account_label;d.backend=record.backend;d.executable=record.fresh_executable or record.command or 'omp'
- d.provider_family=record.provider_family;d.model=record.model or '';d.effort=record.effort or ''
+ d.provider_family=record.provider_family;d.model=if record.model_selector then record.model else '';d.effort=record.effort or ''
  d.arguments=Config.render_arguments(record.fresh_arguments or record.arguments or {});d.cwd=if record.cwd and record.cwd~='' then record.cwd else d.cwd;d.user=record.user or ''
  -- The native fresh default is deliberately independent of ordinary resume argv.
  if record.fresh_native_default then d.executable='omp';d.arguments='' end
@@ -197,7 +197,7 @@ function M.prepare(draft,context,done)
      -- Preserve selectors, capacity, ordinary launch/resume and unrelated metadata.
      -- Only the explicitly reviewed managed fields are upgraded by this wizard.
      local prior=assert(Config.validate_record(draft.source_record))
-     for _,key in ipairs({'model','profile','variant_id','capacity_binding','capacity_limit','selector_evidence','placement','enabled','review_required','review_reason'}) do record[key]=prior[key] end
+     for _,key in ipairs({'model','model_selector','profile','variant_id','capacity_binding','capacity_limit','selector_evidence','placement','enabled','review_required','review_reason'}) do record[key]=prior[key] end
      -- SSH destinations/keys do not describe the explicitly selected same-host route.
      -- Existing native/local host bindings still participate in the eligibility guard.
      if prior.backend~='ssh-command' then record.host=prior.host;record.key_path=prior.key_path end
@@ -206,13 +206,15 @@ function M.prepare(draft,context,done)
      else record.command=prior.command;record.arguments=prior.arguments end
      record.prompt=prior.prompt
     end
-    if draft.model~=nil then record.model=if draft.model=='' then nil else draft.model end
+    -- A typed id is an explicit selector; an empty box keeps a saved display label and drops only a selector.
+    if draft.model~=nil then
+     if draft.model~='' then record.model=draft.model;record.model_selector=true
+     elseif record.model_selector then record.model=nil;record.model_selector=nil end
+    end
     if draft.effort~=nil then record.effort=if draft.effort=='' then nil else draft.effort end
     local canonical,err=Config.validate_record(record)
     if not canonical then done(nil,nil,err);return end
-    -- Re-preparing a saved agent that already held both a field and a typed flag, unchanged, never fails on it.
-    local unchanged=draft.source_record~=nil and draft.source_record.model==canonical.model and draft.source_record.effort==canonical.effort and Config.selector_error(draft.source_record)~=nil
-    local selector_problem=Config.selector_error(canonical,unchanged)
+    local selector_problem=Config.selector_error(canonical,draft.source_record)
     if selector_problem then done(nil,nil,selector_problem);return end
     sequence+=1
     local probe_context={host_os=context.host_os,host_shell=context.host_shell,bundle_digest=installed.digest,provision_handle='setup-'..Codec.sha256(identity..':'..tostring(tern.now())..':'..tostring(sequence)):sub(1,40)}

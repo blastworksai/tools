@@ -15,7 +15,7 @@ local FIELDS = {
 	host = true, user = true, key_path = true, review_required = true, review_reason = true,
 	fresh_executable = true, fresh_arguments = true, fresh_native_default = true, task_argument_index = true,
 	host_shell = true, target_os = true, target_shell = true, mailbox = true,
-	model = true, effort = true, profile = true, variant_id = true, capacity_binding = true, capacity_limit = true,
+	model = true, model_selector = true, effort = true, profile = true, variant_id = true, capacity_binding = true, capacity_limit = true,
 	selector_evidence = true,
 	argv_contract = true,
 }
@@ -220,11 +220,12 @@ local function managed_fields(source: any, record: any): string?
 			record[field] = value
 		end
 	end
-	if record.effort ~= nil then
-		-- Effort is new and strict: only values this CLI's own --help lists, only on a CLI that has the flag.
-		local key = Selectors.cli_key(record.provider, record.fresh_executable or (if type(record.command) == "string" then record.command:match("^%s*(%S+)") else nil))
-		local effort_error = Selectors.effort_error(key, record.effort)
-		if effort_error ~= nil then return effort_error end
+	if source.model_selector ~= nil then
+		-- Set only by the 0.7 setup form, editor or setup result: it marks `model` as an exact id to send.
+		-- A `model` without it stays display text and is never turned into a flag.
+		if source.model_selector ~= true then return "model_selector must be true or absent" end
+		if record.model == nil then return "model_selector needs a model" end
+		record.model_selector = true
 	end
 	if source.target_os ~= nil then
 		if source.target_os ~= "linux" and source.target_os ~= "macos" and source.target_os ~= "windows" then return "Unsupported target OS" end
@@ -327,36 +328,103 @@ function Config.parse_sudo(argv: {string}): (string?, number, boolean, string?)
 	end
 	return selected, index, login, nil
 end
--- Strict check of the model/effort selectors a launch would use. It is not part of loading a
--- saved roster (an older record may hold display text in `model`, or both the field and a typed
--- flag). The setup form and the record editor refuse a duplicate flag; a launch (launching=true)
--- checks only the id and effort, and a flag the arguments already carry wins, so nothing is doubled
--- and no saved roster stops launching.
-function Config.selector_error(record: any, launching: boolean?): string?
-	if record.model == nil and record.effort == nil then return nil end
-	local key = Selectors.record_key(record)
-	if record.model ~= nil then
+-- The program a launch really runs and the index in `argv` where its own arguments start,
+-- unwrapping a literal sudo (selected user, optional `--`). nil when it cannot be named.
+function Config.program_of(executable: any, argv: { string }): (string?, number)
+	if type(executable) ~= "string" or executable == "" then return nil, 1 end
+	if basename(executable) == "sudo" then
+		local _, index, _, problem = Config.parse_sudo(argv)
+		if problem ~= nil or argv[index] == nil then return nil, 1 end
+		return argv[index], index + 1
+	end
+	return executable, 1
+end
+-- The launches a record can make: ordinary (command + arguments) and fresh.
+local function launch_modes(record: any): { any }
+	local modes = {}
+	if type(record.command) == "string" and nonblank(record.command) then
+		local words = Config.parse_arguments(record.command)
+		if words ~= nil and words[1] ~= nil then
+			local argv = {}
+			for index = 2, #words do table.insert(argv, words[index]) end
+			for _, word in ipairs(record.arguments or {}) do table.insert(argv, word) end
+			table.insert(modes, { name = "ordinary", executable = words[1], argv = argv })
+		end
+	end
+	if record.fresh_native_default then
+		table.insert(modes, { name = "fresh", executable = "omp", argv = {} })
+	elseif record.fresh_executable ~= nil then
+		table.insert(modes, { name = "fresh", executable = record.fresh_executable, argv = record.fresh_arguments or {} })
+	end
+	return modes
+end
+function Config.selectors_active(record: any): boolean
+	return record.model_selector == true or record.effort ~= nil
+end
+-- The CLI the record's own launch runs (fresh first), for forms that show model/effort controls.
+function Config.record_cli(record: any): string?
+	local modes = launch_modes(record)
+	table.sort(modes, function(a, b) return a.name == "fresh" and b.name ~= "fresh" end)
+	local mode = modes[1]
+	if mode == nil then return nil end
+	return Selectors.program_key((Config.program_of(mode.executable, mode.argv)))
+end
+-- Identity and value rules for the selectors a record sets. Only records that set a 0.7 selector
+-- (`model_selector` or `effort`) are checked, so a saved roster with display-text models loads and
+-- launches as before. The CLI is the program each launch really runs, never the provider label.
+function Config.selector_identity_error(record: any): string?
+	if not Config.selectors_active(record) then return nil end
+	if record.model_selector == true then
 		local why = Selectors.model_error(record.model)
 		if why ~= nil then return why end
 	end
-	if record.effort ~= nil then
-		local why = Selectors.effort_error(key, record.effort)
-		if why ~= nil then return why end
-	end
-	local words = {}
-	if type(record.command) == "string" then
-		local parsed = Config.parse_arguments(record.command)
-		if parsed ~= nil then
-			for index = 2, #parsed do table.insert(words, parsed[index]) end
+	local provider_key = Selectors.provider_key(record.provider)
+	local seen
+	for _, mode in ipairs(launch_modes(record)) do
+		local program = Config.program_of(mode.executable, mode.argv)
+		local key = Selectors.program_key(program)
+		if key == nil then
+			return "Model and effort need a known CLI (claude, codex, kimi, grok, agy, muse or omp). The " .. mode.name .. " launch runs " .. tostring(program or mode.executable) .. "; clear model and effort, or run a known CLI."
+		end
+		if provider_key ~= nil and provider_key ~= key then
+			return "Provider " .. tostring(record.provider) .. " names " .. provider_key .. " but the " .. mode.name .. " launch runs " .. key .. ". Fix the provider or the command."
+		end
+		if seen ~= nil and seen ~= key then return "The ordinary and fresh launches run different CLIs (" .. seen .. " and " .. key .. ")." end
+		seen = key
+		if record.effort ~= nil then
+			local why = Selectors.effort_error(key, record.effort)
+			if why ~= nil then return why end
 		end
 	end
-	for _, list in ipairs({ record.arguments or {}, record.fresh_arguments or {} }) do
-		for _, word in ipairs(list) do table.insert(words, word) end
+	if seen == nil then return "Model and effort need a launch command to apply to." end
+	return nil
+end
+-- The launch contract a duplicate-flag decision depends on: the selector fields and each
+-- launch's own option region (the program's arguments up to its own `--`).
+local function selector_contract(record: any): string
+	local parts = { tostring(record.model_selector == true and record.model or ""), tostring(record.effort or "") }
+	for _, mode in ipairs(launch_modes(record)) do
+		local program, first = Config.program_of(mode.executable, mode.argv)
+		table.insert(parts, mode.name .. ":" .. tostring(program) .. ":" .. table.concat(Selectors.region(mode.argv, first), "\31"))
 	end
-	if launching then return nil end
-	local hit = Selectors.duplicate(key, words, record.model, record.effort)
-	if hit ~= nil then
-		return "This record sets model or effort and its arguments also contain " .. hit .. ". Remove one of them: the flag is added from the record's model and effort fields."
+	return table.concat(parts, "\30")
+end
+-- Full check used by the setup form, the record editor, full-record JSON and approval:
+-- the identity rules plus no flag typed twice. A conflict that `previous` already held with the
+-- same launch contract is preserved; any changed contract must not introduce one.
+function Config.selector_error(record: any, previous: any?): string?
+	if not Config.selectors_active(record) then return nil end
+	local why = Config.selector_identity_error(record)
+	if why ~= nil then return why end
+	if previous ~= nil and Config.selectors_active(previous) and selector_contract(previous) == selector_contract(record) then return nil end
+	for _, mode in ipairs(launch_modes(record)) do
+		local program, first = Config.program_of(mode.executable, mode.argv)
+		local key = Selectors.program_key(program)
+		local model = if record.model_selector == true then record.model else nil
+		local hit = Selectors.duplicate(key, Selectors.region(mode.argv, first), model, record.effort)
+		if hit ~= nil then
+			return "This record sets model or effort and the " .. mode.name .. " arguments also contain " .. hit .. ". Remove one of them: the flag is added from the record's model and effort fields."
+		end
 	end
 	return nil
 end
@@ -471,6 +539,8 @@ local function normalize(source: any, legacy: boolean): (any?, string?)
 		if legacy then mark_review(record, "Review this account's SSH destination")
 		elseif not record.review_required then return nil, "SSH terminal requires a destination" end
 	end
+	local selector_problem = Config.selector_identity_error(record)
+	if selector_problem ~= nil then return nil, selector_problem end
 	return record, nil
 end
 

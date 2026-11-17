@@ -433,6 +433,9 @@ do
  local plain=record('selcodex');plain.provider='codex';plain.command='codex';plain.account_label='Sel2'
  local unknown=record('selunknown')
  local prior=clone(snapshot().records);local list=clone(prior);table.insert(list,sel);table.insert(list,plain);table.insert(list,unknown)
+ local legacy=record('sellegacy');legacy.provider='claude';legacy.command='claude';legacy.account_label='Old';legacy.model='Claude Opus 4.7'
+ local conflict=record('selconf');conflict.provider='claude';conflict.command='claude';conflict.account_label='Conf';conflict.arguments={'--model','opus'};conflict.model='sonnet';conflict.model_selector=true
+ table.insert(list,legacy);table.insert(list,conflict)
  check(A.edit(state.binding,snapshot().config_revision,'replace-records',{records=list}),'seed claude, codex and unknown-CLI records')
  refresh()
  local function rid(id,field)return 'agent:'..id..':'..field..':'..tostring(state.snapshot.config_revision) end
@@ -460,6 +463,26 @@ do
  check(saved_record('selclaude').effort==nil,'an empty effort clears back to the CLI default')
  definition.event(state,{ev='change',item=rid('selclaude','model'),value=''},cx)
  check(saved_record('selclaude').model==nil,'an empty model clears back to the CLI default')
+ -- a saved display label is shown as display-only and typing an id turns it into a selector
+ rows=rows_of('agents')
+ check(rows[rid('sellegacy','model')].control.value=='' and rows[rid('sellegacy','model')].hint:find('display only',1,true)~=nil and rows[rid('sellegacy','model')].hint:find('Claude Opus 4.7',1,true)~=nil,'a pre-0.7 model label is shown as display text with the way to turn it into a selector')
+ definition.event(state,{ev='change',item=rid('sellegacy','effort'),value='low'},cx)
+ check(saved_record('sellegacy').model=='Claude Opus 4.7' and saved_record('sellegacy').model_selector==nil and saved_record('sellegacy').effort=='low','setting effort leaves the display label a label')
+ definition.event(state,{ev='change',item=rid('sellegacy','model'),value=''},cx)
+ check(saved_record('sellegacy').model=='Claude Opus 4.7','an empty Model box keeps a saved display label')
+ definition.event(state,{ev='change',item=rid('sellegacy','model'),value='claude-opus-4-7'},cx)
+ check(saved_record('sellegacy').model=='claude-opus-4-7' and saved_record('sellegacy').model_selector==true,'typing an id makes it an explicit selector')
+ -- an existing conflict survives only while its launch contract is unchanged
+ definition.event(state,{ev='change',item=rid('selconf','cwd'),value='/else'},cx)
+ check(saved_record('selconf').cwd=='/else','a change outside the launch contract keeps an existing conflict')
+ definition.event(state,{ev='change',item=rid('selconf','arguments'),value='--model other'},cx)
+ check(saved_record('selconf').arguments[2]=='opus' and state.notice:find('Remove one',1,true)~=nil,'editing the typed flag cannot carry a conflict through')
+ local json_candidate=clone(saved_record('selconf'));json_candidate.arguments={'--model','other'}
+ definition.event(state,{ev='action',act='advanced-open'},cx)
+ definition.event(state,{ev='change',item=rid('selconf','json'),value=runtime.json.encode(json_candidate)},cx)
+ definition.event(state,{ev='action',act='advanced-close'},cx)
+ check(saved_record('selconf').arguments[2]=='opus' and state.notice:find('Remove one',1,true)~=nil,'full-record JSON validates a changed conflict too: '..tostring(state.notice)..tostring(saved_record('selconf').arguments[2]))
+ local approve=clone(saved_record('selconf'));approve.review_required=true;approve.review_reason='r'
  check(A.edit(state.binding,snapshot().config_revision,'replace-records',{records=prior}),'selector fixtures removed');refresh();state.page='spawn'
 end
 -- Every agent row carries Tern's own provider icon cell: the right name per provider, a fallback for an unknown one.

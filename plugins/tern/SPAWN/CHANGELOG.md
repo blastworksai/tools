@@ -2,12 +2,14 @@
 
 ## 0.7.0
 
-- **Choose the model and the effort per agent.** An agent's `model` (already stored, until now display text only) and a new `effort` field now reach the CLI's argv, derived from one per-CLI capability table (`selectors.luau`). Set them on **Agent settings** (a Model text box, and an Effort drop-down for CLIs that have one) or on the **Setup** form. Nothing chosen adds no flag: a record without `model` or `effort` launches byte for byte as before.
-- Model is an exact typed id, never an alias SPAWN invents: not empty, no control characters, no leading `-`, at most 200 bytes. Effort is a drop-down limited to the values that CLI's own `--help` lists; a CLI with no verified effort flag shows no Effort control, and `effort` on it is refused.
+- **Choose the model and the effort per agent.** An agent's model and a new `effort` field now reach the CLI's argv, derived from one per-CLI capability table (`selectors.luau`). Set them on **Agent settings** (a Model text box, and an Effort drop-down for CLIs that have one) or on the **Setup** form. Nothing chosen adds no flag: a record without them launches byte for byte as before.
+- **A model becomes a flag only when it was explicitly chosen.** Typing an id in the form or editor writes `model` and `model_selector: true`. A model saved before 0.7 is display text: it never becomes a flag, never refuses a launch whatever its length, and the editor shows it as a label with the way to turn it into a selector. `model_selector` is also what a setup result must set to ask for a flag.
+- A selector id is exact, never an alias SPAWN invents: not empty, no control characters, no leading `-`, at most 200 bytes. Effort is a drop-down limited to the values that CLI's own `--help` lists; a CLI with no verified effort flag shows no Effort control and refuses `effort`.
+- **The CLI is the program the launch actually runs**, not the provider label: the executable of that launch (ordinary or fresh), with a literal `sudo` form unwrapped. A provider label and a program naming different known CLIs, or an ordinary and a fresh launch naming different ones, are refused. An unknown program refuses model and effort with a clear message.
 - Flags added: claude `--model`, `--effort`; codex `-m`; kimi `-m`; grok `-m`; agy `--model`, `--effort`; muse `--model`, `--reasoning-effort`; OMP `--model=`, `--thinking=`. Not supported yet: codex, kimi and grok effort (values not verified from `--help`).
-- A native OMP fresh default may now carry `model` and `effort` (only those two derived flags; `profile` is still refused), so a coordinator can start on a chosen model.
-- No double flags. The Setup form and Agent settings refuse a model or effort change while the arguments already type the same flag. A saved record that already holds both keeps launching: the typed flag wins and SPAWN adds none.
-- The model and effort show where SPAWN already showed the record's model label (setup review and the paid-check scope).
+- A native OMP fresh default may now carry a model selector and `effort` (only those two derived flags; `profile` is still refused), so a coordinator can start on a chosen model.
+- No double flags. Only the program's own option region counts, ending at its own `--` (text after it is positional). Setup, Agent settings, full-record JSON and approval refuse a record that types the same flag, except a conflict the record already held with an unchanged launch contract (selector fields and that option region). At launch a typed flag wins and none is added.
+- The model and effort show where SPAWN already showed the record's model label.
 
 ## 0.6.6
 

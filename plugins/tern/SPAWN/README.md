@@ -141,13 +141,13 @@ These routes run as the selected OS account, **not in a sandbox**. Labels, profi
 | `prompt` | OMP startup prompt. Native OMP needs a non-empty prompt. |
 | `enabled` | Whether this account can be started. There is no batch-inclusion setting. |
 | `placement` | `tab`, `split` or `replace_if_alone`. |
-| `model` | Optional exact model id. When set, SPAWN adds the CLI's own model flag (table below). Empty adds no flag, so the CLI keeps its own default. No alias is ever guessed. |
+| `model`, `model_selector` | `model` is display text, as before 0.7. With `model_selector: true` (written when you type an id in the form or editor) it is an exact model id and SPAWN adds the CLI's own model flag (table below). A saved label is never turned into a flag. No alias is ever guessed. |
 | `effort` | Optional effort level, only for a CLI with a verified effort flag and only its listed values. Empty adds no flag. |
 | `provider_family` | Optional explicit underlying AI provider for wrappers, OMP and review policy. Configure it in Advanced agent settings; the display name is not identity proof. |
 
 ### Model and effort per CLI
 
-The flags are derived from `model` and `effort` through one table (`selectors.luau`), taken from each CLI's own `--help`. They go after the saved arguments (at the task slot for a fresh launch, before any `--`). If the arguments already type the same flag, the typed flag wins and none is added; the Setup form and Agent settings refuse a new model or effort that clashes.
+The flags are derived from `model` and `effort` through one table (`selectors.luau`), taken from each CLI's own `--help`. They go after the saved arguments (at the task slot for a fresh launch, before any `--`). Only the program's option region counts (it ends at the program's own `--`). If the arguments already type the same flag, the typed flag wins and none is added; Setup, Agent settings, full-record JSON and approval refuse a clash unless the record already held it with an unchanged launch contract.
 
 | CLI | Model flag | Effort flag and values |
 | --- | --- | --- |
@@ -159,7 +159,7 @@ The flags are derived from `model` and `effort` through one table (`selectors.lu
 | muse | `--model <id>` | `--reasoning-effort`: none, minimal, low, medium, high, xhigh, max, ultra |
 | omp | `--model=<id>` | `--thinking=`: off, minimal, low, medium, high, xhigh, max, auto |
 
-A native OMP fresh default may carry `model` and `effort`; `profile` is still refused there. The CLI is found from the provider name, else from the executable name.
+A native OMP fresh default may carry `model` and `effort`; `profile` is still refused there. The CLI is the program the launch runs (ordinary and fresh each; a literal `sudo` form is unwrapped), never the provider label. A provider and a program naming different CLIs, or an unknown program, are refused when model or effort is set.
 
 Advanced manual import example (**Agent settings → Advanced → Setup → Paste setup JSON**):
 

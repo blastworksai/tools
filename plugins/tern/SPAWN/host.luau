@@ -899,7 +899,8 @@ local function managed_sections(state)
 		table.insert(rows,text_row("managed:"..field,labels[field],text(draft[field]),hints[field]))
 	end
 	do
-		local key=Selectors.cli_key(draft.provider,draft.executable)
+		local program=Config.program_of(draft.executable,(Config.parse_arguments(draft.arguments)) or {})
+		local key=Selectors.program_key(program)
 		if Selectors.supports_model(key) then
 			table.insert(rows,text_row("managed:model","Model",draft.model or "","Exact model id passed to the CLI. Empty keeps the CLI's own default. SPAWN never guesses an alias."))
 			local values=Selectors.efforts(key)
@@ -981,9 +982,10 @@ local function record_sections(state)
 			if record.backend=="ssh-command" then table.insert(rows,text_row(prefix("key_path"),"Key path",text(record.key_path),"Path only; never paste private key contents.")) end
 		end
 		do
-			local key=Selectors.record_key(record)
+			local key=Config.record_cli(record)
 			if Selectors.supports_model(key) then
-				table.insert(rows,text_row(prefix("model"),"Model",text(record.model),"Exact model id passed to the CLI at launch. Empty keeps the CLI's own default. Do not also type the model flag in Arguments."))
+				local legacy=record.model~=nil and record.model_selector~=true
+				table.insert(rows,text_row(prefix("model"),"Model",if record.model_selector then text(record.model) else "",if legacy then "Saved label, display only, not sent to the CLI: "..record.model..". Type an exact model id here to send it as the CLI's model flag." else "Exact model id passed to the CLI at launch. Empty keeps the CLI's own default. Do not also type the model flag in Arguments."))
 				local values=Selectors.efforts(key)
 				if values then
 					local options={{value="",label="CLI default"}}
@@ -1418,6 +1420,7 @@ local function update_record(state,cx,id,field,value,revision)
 		local canonical,why=Config.validate_record(candidate)
 		if not canonical then state.notice=why;return end
 		if canonical.id~=id then state.notice="Stable ids are immutable; full-record JSON must keep this record's ID";return end
+		local json_selector_problem=Config.selector_error(canonical,record);if json_selector_problem then state.notice=json_selector_problem;return end
 		if Dispatch.protocol.equal(canonical,record) then state.notice="Record unchanged. No agents were launched.";return end
 		if canonical.mailbox and (canonical.mailbox.verified==true or canonical.mailbox.evidence_ref~=nil) and not Dispatch.protocol.equal(canonical.mailbox,record.mailbox) then state.notice="Managed readiness cannot be supplied by JSON. Use Prepare agents for ORCH+; unchanged previously verified helpers are preserved.";return end
 		withdraw_stale_preparation(record,canonical)
@@ -1434,11 +1437,14 @@ local function update_record(state,cx,id,field,value,revision)
 	elseif field=="enabled" then
 		if type(value)~="boolean" then state.notice="Expected a switch value";return end
 	elseif type(value)~="string" or #value>32000 then state.notice="Invalid or oversized field";return end
-	if (field=="model" or field=="effort") and value=="" then value=nil end
-	candidate[field]=value
+	if field=="model" then
+		-- Typing an id makes it a selector; a saved display label is left alone by an empty box.
+		if value=="" then if candidate.model_selector then candidate.model=nil;candidate.model_selector=nil end else candidate.model=value;candidate.model_selector=true end
+	elseif field=="effort" then candidate.effort=if value=="" then nil else value
+	else candidate[field]=value end
 	if field=="backend" and value~=record.backend then candidate.review_required=true;candidate.review_reason="Review this account's launch command and routing after changing launch mode" end
 	local canonical,err=Config.validate_record(candidate);if not canonical then state.notice=err;return end
-	local selector_problem=Config.selector_error(canonical,canonical.model==record.model and canonical.effort==record.effort and Config.selector_error(record)~=nil);if selector_problem then state.notice=selector_problem;return end
+	local selector_problem=Config.selector_error(canonical,record);if selector_problem then state.notice=selector_problem;return end
 	if withdraw_stale_preparation(record,canonical) then state.notice="This agent's launch settings changed, so its ORCH+ preparation was withdrawn. Prepare agents for ORCH+ to check it again." end
 	local next_records=Authority.clone(state.config.agents);next_records[index]=canonical
 	mutate(state,cx,revision,"replace-records",{records=next_records})
@@ -2115,6 +2121,7 @@ local definition={
 				local candidate=Authority.clone(record)
 				candidate.review_required=nil;candidate.review_reason=nil
 				local validated,why=Config.validate_record(candidate);if not validated then state.notice=why;return end
+				local approve_problem=Config.selector_error(validated);if approve_problem then state.notice=approve_problem;return end
 				local records=Authority.clone(state.config.agents);records[index]=validated;mutate(state,cx,expected,"replace-records",{records=records});return
 			end
 			if op=="launch-setup" then
