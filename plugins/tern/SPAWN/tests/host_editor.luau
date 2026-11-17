@@ -482,7 +482,19 @@ do
  definition.event(state,{ev='change',item=rid('selconf','json'),value=runtime.json.encode(json_candidate)},cx)
  definition.event(state,{ev='action',act='advanced-close'},cx)
  check(saved_record('selconf').arguments[2]=='opus' and state.notice:find('Remove one',1,true)~=nil,'full-record JSON validates a changed conflict too: '..tostring(state.notice)..tostring(saved_record('selconf').arguments[2]))
+ -- approval of a review-required record refuses a conflict
  local approve=clone(saved_record('selconf'));approve.review_required=true;approve.review_reason='r'
+ local with_review=clone(snapshot().records);for index,item in ipairs(with_review) do if item.id=='selconf' then with_review[index]=approve end end
+ check(A.edit(state.binding,snapshot().config_revision,'replace-records',{records=with_review}),'review-required conflict fixture saved');refresh()
+ definition.event(state,{ev='action',act='approve:selconf@'..state.snapshot.config_revision},cx)
+ check(saved_record('selconf').review_required==true and state.notice:find('Remove one',1,true)~=nil,'Approve refuses a record that carries a duplicate flag: '..tostring(state.notice))
+ -- manual Setup JSON import refuses a new conflicting record at review
+ local bad=record('selbad');bad.provider='claude';bad.command='claude';bad.account_label='Bad';bad.arguments={'--model','opus'};bad.model='sonnet';bad.model_selector=true
+ definition.event(state,{ev='action',act='advanced-open'},cx)
+ definition.event(state,{ev='change',item='manual-json',value=runtime.json.encode({schema=2,agents={bad}})},cx)
+ definition.event(state,{ev='action',act='manual-review@'..state.snapshot.config_revision},cx)
+ check(state.import_review==nil and state.notice:find('Remove one',1,true)~=nil,'manual import refuses a new selector conflict: '..tostring(state.notice))
+ definition.event(state,{ev='action',act='advanced-close'},cx)
  check(A.edit(state.binding,snapshot().config_revision,'replace-records',{records=prior}),'selector fixtures removed');refresh();state.page='spawn'
 end
 -- Every agent row carries Tern's own provider icon cell: the right name per provider, a fallback for an unknown one.

@@ -10,17 +10,6 @@ end
 local function text(value: any, limit: number): boolean
 	return type(value) == "string" and #value <= limit and not value:find("%z") and utf8.len(value) ~= nil
 end
-local function command_words(command: string, shell: string): ({string}?, string?)
-	-- Windows paths are literal; POSIX command parsing would eat backslashes.
-	-- Ordinary SSH still targets the released POSIX shell contract.
-	if shell == "powershell" and command:find("\\", 1, true) then
-		local path = command:match('^"(.*)"$') or command:match("^'(.*)'$") or command
-		local lower = path:lower()
-		if lower:match("%.exe$") or lower:match("%.cmd$") or lower:match("%.bat$") or lower:match("%.ps1$") then return { path }, nil end
-		return nil, "Use an exact Windows executable path and put its arguments in Arguments"
-	end
-	return Config.parse_arguments(command)
-end
 -- Setup has no ordinary record or argv reinterpretation. Native agents:start
 -- consumes the effective Tern command verbatim and owns prompt delivery.
 function Resolution.setup_default(command: any, cwd: any, host_os: any): (any?, string?)
@@ -78,7 +67,7 @@ function Resolution.resolve(source: any, mode: string, shell: string): (any?, st
 		argv, slot = derive(record, executable, argv, slot)
 	else
 		if not nonblank(record.command) then return nil, "Review this account's launch command" end
-		local words, parse_error = command_words(record.command, if record.backend == "ssh-command" then "posix" else shell)
+		local words, parse_error = Config.command_words(record.command, if record.backend == "ssh-command" then "posix" else shell)
 		if words == nil or #words == 0 then return nil, parse_error or "Command is empty" end
 		executable = table.remove(words, 1)
 		argv = words

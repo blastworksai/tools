@@ -339,11 +339,24 @@ function Config.program_of(executable: any, argv: { string }): (string?, number)
 	end
 	return executable, 1
 end
+-- ONE reading of a command line for validation and for launch: a Windows path stays literal, anything else is POSIX words.
+function Config.command_words(command: string, shell: string): ({string}?, string?)
+	-- Windows paths are literal; POSIX command parsing would eat backslashes.
+	-- Ordinary SSH still targets the released POSIX shell contract.
+	if shell == "powershell" and command:find("\\", 1, true) then
+		local path = command:match('^"(.*)"$') or command:match("^'(.*)'$") or command
+		local lower = path:lower()
+		if lower:match("%.exe$") or lower:match("%.cmd$") or lower:match("%.bat$") or lower:match("%.ps1$") then return { path }, nil end
+		return nil, "Use an exact Windows executable path and put its arguments in Arguments"
+	end
+	return Config.parse_arguments(command)
+end
 -- The launches a record can make: ordinary (command + arguments) and fresh.
 local function launch_modes(record: any): { any }
 	local modes = {}
 	if type(record.command) == "string" and nonblank(record.command) then
-		local words = Config.parse_arguments(record.command)
+		local words = Config.command_words(record.command, if record.backend == "ssh-command" then "posix" else "powershell")
+		if words == nil then words = Config.parse_arguments(record.command) end
 		if words ~= nil and words[1] ~= nil then
 			local argv = {}
 			for index = 2, #words do table.insert(argv, words[index]) end
@@ -381,6 +394,10 @@ function Config.selector_identity_error(record: any): string?
 	local provider_key = Selectors.provider_key(record.provider)
 	local seen
 	for _, mode in ipairs(launch_modes(record)) do
+		if basename(mode.executable) == "sudo" then
+			local _, _, login = Config.parse_sudo(mode.argv)
+			if login then return "Model and effort cannot be added to a sudo -i or -s launch: the target's login shell reads the arguments a second time. Remove -i or -s and set the OS user, so SPAWN's own login wrapper enters the login shell." end
+		end
 		local program = Config.program_of(mode.executable, mode.argv)
 		local key = Selectors.program_key(program)
 		if key == nil then

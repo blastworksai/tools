@@ -10,6 +10,9 @@
 - A native OMP fresh default may now carry a model selector and `effort` (only those two derived flags; `profile` is still refused), so a coordinator can start on a chosen model.
 - No double flags. Only the program's own option region counts, ending at its own `--` (text after it is positional). Setup, Agent settings, full-record JSON and approval refuse a record that types the same flag, except a conflict the record already held with an unchanged launch contract (selector fields and that option region). At launch a typed flag wins and none is added.
 - The model and effort show where SPAWN already showed the record's model label.
+- Setup JSON (manual import and a guided result) gets the same duplicate-flag refusal as the editor: a new record that types a flag its model or effort field also sets is refused before it is saved; a saved conflict stays only while its launch contract is unchanged.
+- A Windows executable path such as `C:\Tools\claude.exe` is identified by the same reading of the command that launch uses, so selectors work on it.
+- Model and effort are refused on a literal `sudo -i` or `sudo -s` launch: the target's login shell would read the value a second time (a `$` would expand). Set the OS user instead; SPAWN's own login wrapper quotes the value.
 
 ## 0.6.6
 

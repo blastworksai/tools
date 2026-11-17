@@ -566,6 +566,11 @@ local function prepare_manual_review(state,revision)
 		if type(payload.setup_run_id)~="string" or #payload.setup_run_id==0 or #payload.setup_run_id>256 or payload.setup_run_id:find("%c") or payload.confirmed~=true then state.notice="Guided setup recovery requires a valid setup_run_id and confirmed:true; otherwise paste a manual schema/agents object";return end
 	end
 	local records,why=Config.validate_records(payload.agents);if not records then state.notice=why;return end
+	for _,record in ipairs(records) do
+		local stored=nil
+		for _,saved in ipairs(state.config and state.config.agents or {}) do if saved.id==record.id then stored=saved end end
+		local selector_problem=Config.selector_error(record,stored);if selector_problem then state.notice=record.id..": "..selector_problem;return end
+	end
 	state.import_review={records=records,revision=revision,run=payload.setup_run_id,bytes=state.import_text}
 	state.notice="Validated every record. Review the exact settings on the original host/session, then Import reviewed records. Manual recovery does not prove original automatic-source provenance."
 end

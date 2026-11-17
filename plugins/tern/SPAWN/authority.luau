@@ -1225,7 +1225,7 @@ local function import_records(root,source)
 		local found=nil
 		for _,old in ipairs(combined) do if old.id==record.id then found=old end end
 		if found and not equal(found,record) then return nil,"record-conflict: "..record.id.."; edit or review the saved record explicitly" end
-		if not found then table.insert(combined,record);added+=1 end
+		if not found then local selector_problem=Config.selector_error(record,nil);if selector_problem then return nil,selector_problem end;table.insert(combined,record);added+=1 end
 	end
 	local canonical,why=Config.validate_records(combined);if not canonical then return nil,why end
 	root.config.hosts[root.host_key].agents=canonical

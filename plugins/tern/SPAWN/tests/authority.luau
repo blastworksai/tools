@@ -1109,6 +1109,10 @@ sections.stale_config = function()
 	local conflict = request(binding, "importer", 4, after.config_revision, "import_records", { setup_run_id = "approved-setup", records = { record("third", { command = "different" }) },manual=true,confirmed=true })
 	check(not submit(authority, binding, conflict).ok, "conflicting import of an existing record is rejected")
 	same(snapshot(authority, binding).records, after.records, "setup replay and conflict preserve exact roster")
+	local clash = record("clash", { provider = "claude", command = "claude", arguments = { "--model", "opus" }, model = "sonnet", model_selector = true })
+	local clash_reply = submit(authority, binding, request(binding, "importer", 5, after.config_revision, "import_records", { setup_run_id = "clash-setup", records = { clash }, manual = true, confirmed = true }))
+	check(not clash_reply.ok, "import of a new record whose flag is also in its arguments is refused")
+	same(snapshot(authority, binding).records, after.records, "refused selector conflict leaves the roster exact")
 end
 
 -- One atomic write commits the mutation, reply and watermark together.

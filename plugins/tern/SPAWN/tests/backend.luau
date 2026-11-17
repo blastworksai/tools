@@ -684,6 +684,18 @@ do
  local changed_model=table.clone(held);changed_model.model="haiku"
  check(Config.selector_error(changed_model,held)~=nil,"changing the selector is a changed contract")
 
+ -- one command reading for validation and launch
+ check(Config.selector_error(record({provider="claude",command="C:\\Tools\\claude.exe",model_selector=true,model="sonnet"}))==nil,"a Windows executable path is identified as claude")
+ check(Config.record_cli(record({provider="claude",command="C:\\Tools\\claude.exe"}))=="claude","record_cli reads the Windows path literally")
+ check(Config.selector_error(record({provider="claude",command="C:\\Tools\\claude.exe",arguments={"--model","a"},model_selector=true,model="sonnet"}))~=nil,"a Windows path launch still refuses a duplicate flag")
+ -- login sudo passes the command through a second shell
+ for _,flag in ipairs({"-i","-s"}) do
+  local why=Config.selector_error(record({provider="claude",command="sudo",arguments={flag,"-u","other","--","claude"},model_selector=true,model="$HOME"}))
+  check(why~=nil and why:find("sudo -i or -s",1,true)~=nil,"selectors are refused on sudo "..flag..": "..tostring(why))
+  check(Config.selector_error(record({provider="claude",command="sudo",arguments={flag,"-u","other","--","claude"}}))==nil,"sudo "..flag.." without selectors stays valid")
+ end
+ check(Config.selector_error(record({provider="claude",command="sudo",arguments={"-u","other","--","claude"},model_selector=true,model="sonnet"}))==nil,"plain sudo keeps selectors (SPAWN quotes it)")
+
 end
 
 return string.format("PASS %d SPAWN backend checks", checks)
