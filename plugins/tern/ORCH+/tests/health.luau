@@ -1,6 +1,6 @@
 -- Deterministic real reducer/host/window coverage. Run bounded sections in native host callbacks.
 local root, section = ...
-assert(section == nil or table.find({ "clock", "native", "controls", "status_launcher", "timer", "epoch_window", "epoch_host", "finish", "continuation", "alias_recovery", "held_report", "sweep_schedule", "readable_views", "cp2_controls", "guided_recovery", "guided_recovery_empty", "guided_recovery_host_restart", "stopped_worker_view", "expired_wake", "revoked_authorization", "observe_retention", "uncertain_read", "quota_reader", "bridge_lifecycle", "withdraw_fenced", "config_cards", "work_picker", "inbox_window", "usage_row",
+assert(section == nil or table.find({ "clock", "form_hold_notice", "native", "controls", "status_launcher", "timer", "epoch_window", "epoch_host", "finish", "continuation", "alias_recovery", "held_report", "sweep_schedule", "readable_views", "cp2_controls", "guided_recovery", "guided_recovery_empty", "guided_recovery_host_restart", "stopped_worker_view", "expired_wake", "revoked_authorization", "observe_retention", "uncertain_read", "quota_reader", "bridge_lifecycle", "withdraw_fenced", "config_cards", "work_picker", "inbox_window", "usage_row",
 	"reconnect_stale", "reconnect_missing", "reconnect_unknown", "reconnect_unrelated", "worker_attachment", "worker_attachment_form",
 	"driver_admission_noop", "driver_admission_refused", "driver_retry_original", "driver_retry_unrelated", "driver_retry_absent",
 	"driver_deadline_absent", "driver_deadline_unrelated", "driver_missing", "driver_suspension", "driver_fence_origin", "driver_fence_claim",
@@ -713,6 +713,7 @@ local function window_fixture(options: any?)
 				open = function(_, source, _, spec, done) forms[source] = { spec = spec, done = done } end,
 				cancel = function(_, source) forms[source] = nil end,
 				active = function(source, tag) return forms[source] ~= nil and (tag == nil or forms[source].spec.tag == tag) end,
+				title = function(source) local s = forms[source]; return s and (s.spec.title or s.spec.placeholder) end,
 				update = function() return true end, focus = function() return true end, tick = function() end,
 			}
 		end } end
@@ -3074,6 +3075,32 @@ if section == nil or section == "control_scheduling" then
 		if event.command == "claim" and event.action_id == action_id then claimed = true end
 	end
 	check(claimed, "the queued effect resumes through its normal claim door after control settlement")
+end
+if section == nil or section == "form_hold_notice" then
+	-- A ready action held by an open menu or form says so once, and issues after the form closes.
+	local w = window_fixture()
+	w:bridge({ placeholder = true })
+	w:click("poll", { worker_id = w.id, bytes = "watermark" })
+	local action_id = assert(w:worker().active_action_id)
+	assert(w.f:action(action_id).phase == "ready")
+	w:click("orchestration_menu")
+	assert(w:picker() ~= nil)
+	local before = #w.notice_events
+	for _ = 1, 6 do w:tick() end
+	local waits = 0
+	for index = before + 1, #w.notice_events do
+		local message = w.notice_events[index].message
+		if type(message) == "string" and message:find("Launch waits until you close", 1, true) then waits += 1 end
+	end
+	check(waits == 1 and w.f:action(action_id).claim == nil,
+		"a ready launch held by an open menu posts exactly one notice naming it")
+	w:pick(nil)
+	for _ = 1, 6 do w:tick() end
+	local claimed = false
+	for _, event in w.events do
+		if event.command == "claim" and event.action_id == action_id then claimed = true end
+	end
+	check(claimed, "the held launch issues once the menu closes")
 end
 if section == nil or section == "work_input_priority" then
 	local w = window_fixture()

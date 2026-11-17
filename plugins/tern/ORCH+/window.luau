@@ -1577,7 +1577,16 @@ local function advance(cx: WindowCx, driver: any)
 		-- A loading selector or ordinary form must not strand its read-only catalog
 		-- or an already-authorized exact route attachment. Other controls stay fenced.
 		local form_independent = request.op == "catalog" or (request.op == "attach_worker" and driver.attachment_action_id == request.action_id)
-		if not claims_in_flight[request.action_id] and control_pending(driver.source, form_independent) then return end
+		if not claims_in_flight[request.action_id] and control_pending(driver.source, form_independent) then
+			-- Only an open form or menu is silent to the owner; say so once, until the launch issues.
+			if not form_independent and not driver.form_hold_notice and forms_ui.active(driver.source) then
+				driver.form_hold_notice = true
+				local name = forms_ui.title and forms_ui.title(driver.source) or "the open menu or form"
+				notice(cx, driver.source, driver.origin.alias_nonce, "Launch waits until you close " .. name, "info")
+			end
+			return
+		end
+		driver.form_hold_notice = nil
 		if a.retry_after_serial then
 			if not driver.retry_notice then
 				driver.retry_notice = true
