@@ -1291,6 +1291,7 @@ end
 local function view(state,cx)
 	local snapshot=if state.snapshot then Authority.clone(state.snapshot) else {version=2,host_key=state.host_key or "unknown",authority_id="unavailable",session_key="unknown",config_revision=0,records={},attempt_revision=0,attempts={},jobs={},replies={},request_sequences={},host_os=tern.runtime.os,host_shell=tern.getenv("SHELL") or tern.getenv("ComSpec") or "unknown",ready=false}
 	snapshot.host_cwd=state.default_cwd
+	if type(state.setup_refusals)=="table" and #state.setup_refusals>0 then snapshot.setup_refusals=Authority.clone(state.setup_refusals) end
 	local replies=0;for _ in pairs(snapshot.replies) do replies+=1 end
 	for _,entry in ipairs(state.transient or {}) do
 		local id=entry.reply.request_id
@@ -2142,20 +2143,38 @@ local definition={
 	key=function(state,key,cx)
 		local pasted=if key.name=="paste" and type(key.text)=="string" and #key.text<=4096 then Config.decode_setup_json(key.text) else nil
 		if (type(pasted)=="table" and pasted.kind=="spawn-setup-result") or (pasted==nil and key.name=="paste" and type(key.text)=="string" and key.text:find('"kind"%s*:%s*"spawn%-setup%-result"')) then
+			-- A refusal of an identified run is also published in the snapshot, bound to that run, so only its own
+			-- Setup page shows it. An envelope that cannot be read names no run and stays a notice.
 			if #key.text>4096 then state.notice="Setup submission envelope exceeds 4096 bytes";cx:render();return true end
 			local envelope,why=Config.decode_setup_json(key.text)
 			if type(envelope)~="table" or envelope.kind~="spawn-setup-result" then state.notice=why or "Invalid setup submission envelope";cx:render();return true end
+			local function refuse(text)
+				state.notice=text
+				local run,bound=envelope.setup_run_id,envelope.binding
+				-- The window's own identity rule (1..256 bytes, no control characters); anything else would make it reject the whole snapshot.
+				local function identity(value) return type(value)=="string" and #value>0 and #value<=256 and not value:find("%c") end
+				if not identity(run) or not identity(bound) or not state.snapshot or not identity(state.snapshot.authority_id) then return end
+				local kept={}
+				for _,entry in ipairs(state.setup_refusals or {}) do if not (entry.setup_run_id==run and entry.binding==bound) then table.insert(kept,entry) end end
+				table.insert(kept,{authority_id=state.snapshot.authority_id,setup_run_id=run,binding=bound,text=string.sub(text,1,600)})
+				while #kept>8 do table.remove(kept,1) end
+				state.setup_refusals=kept
+			end
 			local binding,window=state.binding,state.native_window
 			verify(state,cx,function(session,err)
-				if not session or not binding or state.binding~=binding or state.native_window~=window or not reload(state) then state.notice=err or "Setup submission Config source changed";return end
+				if not session or not binding or state.binding~=binding or state.native_window~=window or not reload(state) then refuse(err or "Setup submission Config source changed");cx:render();return end
 				local accepted,problem=Authority.setup_submission(binding,envelope,{config_pane=cx.pane,window=window,host_window=state.host_window,inventory=state.inventory,epoch=Executor.epoch()})
 				if not reload(state) then return end
 				if accepted then
 					for _,job in ipairs(state.snapshot.jobs) do
 						if job.setup_run_id==envelope.setup_run_id and setup_job(state,cx,job.attempt_id) then state.setup_result_attempt=job.attempt_id end
 					end
+					local kept={}
+					for _,entry in ipairs(state.setup_refusals or {}) do if entry.setup_run_id~=envelope.setup_run_id then table.insert(kept,entry) end end
+					state.setup_refusals=kept
 					state.notice="Setup result accepted. Review the submitted records, then explicitly import them; no agents were launched."
-				else state.notice=problem or "Setup submission refused; no records imported" end
+				else refuse(problem or "Setup submission refused; no records imported") end
+				cx:render()
 			end)
 			return true
 		end

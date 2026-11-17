@@ -1781,6 +1781,27 @@ if section==nil or section=='window' then
  check(native.starts==1 and #native.requests==4,'reload observes admitted setup without repeating native start')
  review(native,reloadView,setupPane)
  check(#reloadView.picks==0 and native.imports==nil,'finished/idle native agent with no explicit submission produces no review or import')
+ -- SKILLS-194b: a published refusal is shown only for the run, binding and authority it names.
+ do
+  local world,_,pane=setup_world()
+  local view=window(world);view.round(5)
+  local function refusalToast()
+   for _,toast in ipairs(view.toasts)do local s=tostring(toast.text)..' '..tostring(toast.sub);if s:find('SPAWN refused the helper',1,true) then return s end end
+  end
+  local function refusing(entry)
+   world.authority.extra.setup_refusals=if entry then {entry} else nil;view.toasts={}
+   review(world,view,pane);view.round(8)
+   return refusalToast()
+  end
+  local mine={authority_id=world.authority.authority_id,setup_run_id=world.job.setup_run_id,binding=world.job.setup.binding,text='Record 12: Record contains an unsupported field: startup_prompt'}
+  local function variant(field,value)local copy={};for k,v in pairs(mine)do copy[k]=v end;copy[field]=value;return copy end
+  check(refusing(nil)==nil and #view.toasts>0,'without a published refusal the generic message stands')
+  check(refusing(variant('setup_run_id','another-run'))==nil,"run A's refusal is not shown against run B")
+  check(refusing(variant('binding','another-binding'))==nil,'a refusal for another submission binding is not shown')
+  check(refusing(variant('authority_id','another-authority'))==nil,'a refusal from another authority generation is not shown')
+  local shown=refusing(mine)
+  check(shown and shown:find('startup_prompt',1,true)~=nil,'the refusal bound to this run, binding and authority is shown with its reason')
+ end
  submit(native);review(native,reloadView,setupPane)
  check(#reloadView.picks==0 and native.imports==1 and native.starts==1,'explicit immutable host submission is saved automatically with no review popup and no launch (the helper held the one approval)')
  reloadView.round(4)
@@ -1797,6 +1818,16 @@ if section==nil or section=='window' then
   check(remote.starts==1 and remote.started.cwd=='/fixture','a Windows desktop starts setup in the actual POSIX execution-host folder, not its displayed path')
   remote.agents[901].cwd='\\fixture';submit(remote);review(remote,view,pane);view.round(4)
   check(remote.imports==1 and remote.starts==1,'desktop-formatted remote agent folders do not strand a host-bound proposal or repeat startup')
+  -- SKILLS-194b: OMP moves itself to a temp folder when started in a home folder; only then does it get --allow-home.
+  local home=new_world({});home.setup_enabled=true;home.default_command='omp';home.host_cwd='/home/demo'
+  local homePane=add_block(home);local homeView=window(home);homeView.approve_setup(homePane);homeView.round(16)
+  check(home.starts==1 and home.started.command=='omp --allow-home' and home.started.cwd=='/home/demo','OMP started in a home folder keeps that folder through --allow-home: '..tostring(home.started and home.started.command))
+  local work=new_world({});work.setup_enabled=true;work.default_command='omp';work.host_cwd='/opt/demo'
+  local workPane=add_block(work);local workView=window(work);workView.approve_setup(workPane);workView.round(16)
+  check(work.starts==1 and work.started.command=='omp' and work.started.cwd=='/opt/demo','OMP started in a chosen working folder is passed through untouched')
+  local other=new_world({});other.setup_enabled=true;other.default_command='claude';other.host_cwd='/home/demo'
+  local otherPane=add_block(other);local otherView=window(other);otherView.approve_setup(otherPane);otherView.round(16)
+  check(other.starts==1 and other.started.command=='claude','a non-OMP default is never given --allow-home')
   local absent=new_world({});absent.setup_enabled=true;absent.default_command='native-default';absent.host_cwd=false
   local missingPane=add_block(absent);local missingView=window(absent);missingView.approve_setup(missingPane);missingView.round(5)
   check(absent.starts==0 and #absent.requests==0,'missing host-folder evidence cannot fall back to the desktop folder or start a helper')

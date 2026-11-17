@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.6
+
+- **A helper result that SPAWN refuses is no longer silent.** Guided setup could finish with 0 agents saved and no message. Cause 1: the helper (OMP) moved itself out of its launch folder after SPAWN bound it, and SPAWN refused the result because the pane's folder no longer equalled the launch folder; the pane is now identified by its id, session, command and window incarnation only. Cause 2: the helper wrote the OMP startup prompt as `startup_prompt` instead of `prompt`; that refusal is legitimate, now names the field, and the setup skill names `prompt` exactly. Every refusal is also published to the window, so Recover setup result shows "SPAWN refused the helper's result: ..." instead of "No complete explicit submission is available".
+- The OMP helper stays in the folder SPAWN started it in. OMP silently switches to a temp folder when started in a home folder; SPAWN now adds `--allow-home` for an OMP helper only when the chosen folder is a home folder.
+- Agents run as another OS account now enter that account's login shell, so its `~/.profile` PATH (`~/.local/bin`) and exported login tokens apply. The shell is read from the account's passwd entry (never from the environment), the approved program and arguments travel as one fully single-quoted command run after the profile, and the launch folder is restored after it, so a profile cannot move the agent or change its argv. `-n` is kept (no password prompt). This covers literal `sudo -n -H -u <account> -- <program>` records that carry no separate user field. `sudo -i` is not used because it leaves `$` unescaped. Its lookups run with a fixed PATH, a program name starting with `-` is refused, and the account's profile still builds the real PATH. An explicit `sudo -i`/`-s`, a shell target, an unknown shell or a missing passwd tool is run through plain `/bin/sh` or as before. If your sudoers rules allow only specific programs, they must also allow `/bin/sh`.
+- A refusal shown on Setup is bound to its own authority, setup run and submission binding; another run never displays it.
+
 ## 0.6.5
 
 - **Guided setup is one flow with one approval.** On Setup, **Guided setup** is now a heading with helper text, not a button. Its device choices (**Single device** by default, or **Multi device**) and **Find execution machine(s)** are shown by default and indented beneath it; discovery is grey and disabled while Single device is selected. Exactly one action follows, **Start Guided setup — may use model credits**, and Single device needs no discovery step.

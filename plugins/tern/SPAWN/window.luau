@@ -79,6 +79,21 @@ local function effective_default(cx: any): (string?, string?)
 	-- This is an opaque native setting, not an argv or shell ticket to reinterpret.
 	return command, nil
 end
+-- OMP silently moves to a temp folder when started in a home folder, so the helper would no
+-- longer sit in the folder SPAWN bound it to. The flag is added only for OMP and only when the
+-- chosen folder genuinely is a home folder; elsewhere the opaque command is passed untouched.
+local function is_home_folder(cwd: string): boolean
+	local path = cwd:gsub("[/\\]+$", "")
+	return path == "/root" or path:match("^/home/[^/]+$") ~= nil or path:match("^/Users/[^/]+$") ~= nil
+		or path:match("^%a:[/\\]Users[/\\][^/\\]+$") ~= nil
+end
+local function helper_command(command: string, cwd: string?): string
+	if cwd == nil or not is_home_folder(cwd) or command:find("%-%-allow%-home") then return command end
+	local first = command:match("^%s*(%S+)")
+	local name = if first then first:match("([^/\\]+)$") else nil
+	if name == "omp" or name == "omp.exe" then return command .. " --allow-home" end
+	return command
+end
 local function integer(value: any): boolean
 	return type(value) == "number" and value >= 0 and value % 1 == 0 and value <= 9007199254740991
 end
@@ -319,6 +334,12 @@ local function validate_snapshot(value: any): (any?, string?)
 	if not identity(value.host_key, 2048) or not identity(value.authority_id, 256) or not identity(value.session_key, 2048) then return nil, "Authority identity is invalid" end
 	if value.namespace ~= nil and not identity(value.namespace, 256) then return nil, "Authority namespace is invalid" end
 	if value.host_cwd~=nil and not identity(value.host_cwd,8192) then return nil,"Execution-host working folder is invalid" end
+	if value.setup_refusals~=nil then
+		if type(value.setup_refusals)~="table" or #value.setup_refusals>8 then return nil,"Setup refusal list is invalid" end
+		for _,entry in ipairs(value.setup_refusals) do
+			if type(entry)~="table" or not identity(entry.authority_id,256) or not identity(entry.setup_run_id,256) or not identity(entry.binding,256) or type(entry.text)~="string" or #entry.text>600 then return nil,"Setup refusal is invalid" end
+		end
+	end
 	if not integer(value.config_revision) or not integer(value.attempt_revision) then return nil, "Authority revision is invalid" end
 	local records, err = Config.validate_records(value.records)
 	if records == nil then return nil, "Invalid authority roster: " .. tostring(err) end
@@ -1277,7 +1298,7 @@ local function setup_source(cx: any, run: any, supplied: any?): (any?, any?, str
 	local changed = context_error(cx, run.origin, true)
 	if changed ~= nil then return nil, nil, changed end
 	local command, default_error = effective_default(cx)
-	if command ~= run.command then return nil, nil, default_error or "The effective default agent changed; review cannot be reused" end
+	if command == nil or helper_command(command, run.cwd) ~= run.command then return nil, nil, default_error or "The effective default agent changed; review cannot be reused" end
 	local value, err = supplied, nil
 	if value == nil then value, err = snapshot(cx, run.origin) end
 	if value == nil then return nil, nil, err end
@@ -1328,6 +1349,14 @@ local function pending_setup(cx: any, run: any, value: any?, reviewed: any?): (a
 	local job, attempt, err = setup_source(cx, run, value)
 	if job == nil then return nil, err end
 	if run.pane == nil or job.stage ~= "submitted" or job.setup_consumed ~= false or not integer(job.pending_bytes) or job.pending_bytes == 0 or type(job.pending_digest) ~= "string" then
+		-- The host recorded why it refused the helper's submission (for example a record field it does not know).
+		-- Only a refusal bound to THIS authority, run and submission binding is this run's.
+		local latest = if value ~= nil then value else snapshot(cx, run.origin)
+		if run.pane ~= nil and job.stage == "submitted" and type(latest) == "table" and type(latest.setup_refusals) == "table" then
+			for _, entry in ipairs(latest.setup_refusals) do
+				if entry.authority_id == latest.authority_id and entry.setup_run_id == run.id and entry.binding == job.setup.binding then return nil, "SPAWN refused the helper's result: " .. entry.text end
+			end
+		end
 		return nil, "No complete explicit submission is available for this bound run"
 	end
 	-- Surface framing needs headroom beyond the raw result's independent byte cap.
@@ -1478,17 +1507,19 @@ local function launch_setup(cx: any, target: number?)
 		if current ~= command then fail(fresh, why or "The effective default agent changed; choose setup again"); return end
 		local cwd = nonempty(value.host_cwd)
 		if cwd == nil then fail(fresh, "The captured Config host directory is unavailable; no setup was started"); return end
+		-- The helper's own start command; the unchanged default stays the freshness reference.
+		local helper = helper_command(command, cwd)
 		local window = fresh:window_key()
 		local run_id = observer.id .. ":setup:" .. tostring(observer.next_run)
 		observer.next_run += 1
 		opened_for_batch[origin.pane] = nil
 		if not save_observer(fresh) then return end
-		request(fresh, origin, "start_setup", { setup_run_id = run_id, command = command, cwd = cwd, window = window, config_pane = origin.pane }, function(admitted_cx, reply, admission_error)
+		request(fresh, origin, "start_setup", { setup_run_id = run_id, command = helper, cwd = cwd, window = window, config_pane = origin.pane }, function(admitted_cx, reply, admission_error)
 			if admission_error ~= nil then fail(admitted_cx, "Setup admission failed: " .. tostring(admission_error)); return end
 			local job, attempt, result_error = admission_result(reply, origin, "setup-default", "setup", run_id)
 			if job == nil or type(job.setup) ~= "table" then fail(admitted_cx, result_error or "Setup bootstrap is missing; nothing started"); return end
 			local run = { id = run_id, job_id = job.id, token = job.token, executor = attempt.observer_id, bootstrap = table.clone(job.setup), initial_prompt = job.initial_prompt, origin = table.clone(origin),
-				command = command, cwd = cwd, window = window, binding = job.setup.binding, config_revision = value.config_revision, sequence = reply.request_sequence }
+				command = helper, cwd = cwd, window = window, binding = job.setup.binding, config_revision = value.config_revision, sequence = reply.request_sequence }
 			setup = run
 			if not save_observer(admitted_cx) then return end
 			if reply.result.replayed then fail(admitted_cx, "Retained setup admission is observation-only; native start was not repeated"); return end
@@ -1512,7 +1543,7 @@ local function launch_setup(cx: any, target: number?)
 					run.effect_intent = true
 					if not save_observer(effect_cx) then return end
 					local started, created = pcall(function()
-						return effect_cx.agents:start({ command = command, cwd = cwd, prompt = run.initial_prompt, how = current_job.placement })
+						return effect_cx.agents:start({ command = helper, cwd = cwd, prompt = run.initial_prompt, how = current_job.placement })
 					end)
 					if not started or not integer(created) then
 						request(effect_cx, run.origin, "setup_uncertain", { attempt_id = run.job_id, setup_run_id = run.id }, function(done_cx, _, uncertain_error)

@@ -1,0 +1,253 @@
+{
+ "schema": 2,
+ "setup_run_id": "window-observer-demo:setup:1",
+ "confirmed": true,
+ "agents": [
+  {
+   "id": "claude-a",
+   "provider": "Claude",
+   "provider_family": "anthropic",
+   "account_label": "Demo A",
+   "backend": "local-terminal",
+   "enabled": true,
+   "command": "sudo",
+   "arguments": [
+    "-n",
+    "-H",
+    "-u",
+    "user-a",
+    "--",
+    "/usr/bin/claude",
+    "--dangerously-skip-permissions"
+   ],
+   "cwd": "/opt/demo",
+   "placement": "tab"
+  },
+  {
+   "id": "claude-b",
+   "provider": "Claude",
+   "provider_family": "anthropic",
+   "account_label": "Demo B",
+   "backend": "local-terminal",
+   "enabled": true,
+   "command": "sudo",
+   "arguments": [
+    "-n",
+    "-H",
+    "-u",
+    "user-b",
+    "--",
+    "/usr/bin/claude",
+    "--dangerously-skip-permissions"
+   ],
+   "cwd": "/opt/demo",
+   "placement": "tab"
+  },
+  {
+   "id": "codex-c",
+   "provider": "Codex",
+   "provider_family": "openai",
+   "account_label": "Demo C",
+   "backend": "local-terminal",
+   "enabled": true,
+   "command": "sudo",
+   "arguments": [
+    "-n",
+    "-H",
+    "-u",
+    "user-c",
+    "--",
+    "/usr/bin/codex",
+    "--dangerously-bypass-approvals-and-sandbox"
+   ],
+   "cwd": "/opt/demo",
+   "placement": "tab"
+  },
+  {
+   "id": "codex-d",
+   "provider": "Codex",
+   "provider_family": "openai",
+   "account_label": "Demo D",
+   "backend": "local-terminal",
+   "enabled": true,
+   "command": "sudo",
+   "arguments": [
+    "-n",
+    "-H",
+    "-u",
+    "user-d",
+    "--",
+    "/usr/bin/codex",
+    "--dangerously-bypass-approvals-and-sandbox"
+   ],
+   "cwd": "/opt/demo",
+   "placement": "tab"
+  },
+  {
+   "id": "kimi-e",
+   "provider": "Kimi",
+   "provider_family": "moonshot",
+   "account_label": "Demo E",
+   "backend": "local-terminal",
+   "enabled": true,
+   "command": "sudo",
+   "arguments": [
+    "-n",
+    "-H",
+    "-u",
+    "user-e",
+    "--",
+    "/usr/bin/kimi",
+    "--auto"
+   ],
+   "cwd": "/opt/demo",
+   "placement": "tab"
+  },
+  {
+   "id": "grok-f",
+   "provider": "Grok",
+   "provider_family": "xai",
+   "account_label": "Demo F",
+   "backend": "local-terminal",
+   "enabled": true,
+   "command": "sudo",
+   "arguments": [
+    "-n",
+    "-H",
+    "-u",
+    "user-f",
+    "--",
+    "/usr/bin/grok",
+    "--permission-mode",
+    "bypassPermissions"
+   ],
+   "cwd": "/opt/demo",
+   "placement": "tab"
+  },
+  {
+   "id": "agy-g",
+   "provider": "Agy",
+   "provider_family": "google",
+   "account_label": "Demo G",
+   "backend": "local-terminal",
+   "enabled": true,
+   "command": "sudo",
+   "arguments": [
+    "-n",
+    "-H",
+    "-u",
+    "user-g",
+    "--",
+    "/usr/bin/agy",
+    "--dangerously-skip-permissions"
+   ],
+   "cwd": "/opt/demo",
+   "placement": "tab"
+  },
+  {
+   "id": "agy-h",
+   "provider": "Agy",
+   "provider_family": "google",
+   "account_label": "Demo H",
+   "backend": "local-terminal",
+   "enabled": true,
+   "command": "sudo",
+   "arguments": [
+    "-n",
+    "-H",
+    "-u",
+    "user-h",
+    "--",
+    "/usr/bin/agy",
+    "--dangerously-skip-permissions"
+   ],
+   "cwd": "/opt/demo",
+   "placement": "tab"
+  },
+  {
+   "id": "agy-i",
+   "provider": "Agy",
+   "provider_family": "google",
+   "account_label": "Demo I",
+   "backend": "local-terminal",
+   "enabled": true,
+   "command": "sudo",
+   "arguments": [
+    "-n",
+    "-H",
+    "-u",
+    "user-i",
+    "--",
+    "/usr/bin/agy",
+    "--dangerously-skip-permissions"
+   ],
+   "cwd": "/opt/demo",
+   "placement": "tab"
+  },
+  {
+   "id": "agy-j",
+   "provider": "Agy",
+   "provider_family": "google",
+   "account_label": "Demo J",
+   "backend": "local-terminal",
+   "enabled": true,
+   "command": "sudo",
+   "arguments": [
+    "-n",
+    "-H",
+    "-u",
+    "user-j",
+    "--",
+    "/usr/bin/agy",
+    "--dangerously-skip-permissions"
+   ],
+   "cwd": "/opt/demo",
+   "placement": "tab"
+  },
+  {
+   "id": "muse-k",
+   "provider": "Muse",
+   "provider_family": "meta",
+   "account_label": "Demo K",
+   "backend": "local-terminal",
+   "enabled": true,
+   "command": "sudo",
+   "arguments": [
+    "-n",
+    "-H",
+    "-u",
+    "user-k",
+    "--",
+    "/usr/bin/muse",
+    "--yolo"
+   ],
+   "cwd": "/opt/demo",
+   "placement": "tab"
+  },
+  {
+   "id": "omp-l",
+   "provider": "OMP",
+   "provider_family": "openai",
+   "account_label": "Demo L",
+   "backend": "native-agent",
+   "enabled": true,
+   "command": "sudo",
+   "arguments": [
+    "-n",
+    "-H",
+    "-u",
+    "user-l",
+    "--",
+    "/usr/local/bin/omp",
+    "--approval-mode",
+    "yolo"
+   ],
+   "cwd": "/opt/demo",
+   "placement": "tab",
+   "startup_prompt": "Open a demo conversation."
+  }
+ ],
+ "paid_checks": [
+  "omp-l"
+ ]
+}

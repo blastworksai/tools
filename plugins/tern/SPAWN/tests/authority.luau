@@ -2354,7 +2354,7 @@ sections.setup_import_fences=function()
 		function(f)f.context.inventory.clients[1].since+=1 end,
 		function(f)f.context.epoch="fixture-host:2" end,
 		function(f)f.context.inventory.sessions[1].tabs[1].blocks[2].command="pane reused" end,
-		function(f)f.context.inventory.sessions[1].tabs[1].blocks[2].cwd="/different" end,
+		-- A changed live folder is no longer a source fence: the helper may leave its launch folder (see setup_real_result).
 		function(f)table.remove(f.context.inventory.sessions[1].tabs[1].blocks,2)end,
 		function(f)edit(f.a,f.b,"replace-records",{records={record("manual-change")}})end,
 	}
@@ -2511,6 +2511,32 @@ sections.setup_discard=function()
 	local fresh=f.send("start_setup",{setup_run_id="fresh-after-discard",command="truthful-default",cwd=f.job.cwd,window=f.context.window,config_pane=700})
 	check(fresh.ok and #snapshot(f.a,f.b).attempts==#before.attempts+1,"a discarded conflicting result no longer strands the single-run guard and a separately approved fresh run may be admitted")
 end
+-- SKILLS-194b: an anonymised copy of a helper result that SPAWN refused (12 records, one paid_checks entry).
+-- The helper (OMP) leaves its launch folder after SPAWN bound it, so the live pane cwd
+-- no longer equals the launch cwd. Pane identity is id, session, command and window
+-- incarnation; a folder change must not refuse the helper's approved submission.
+sections.setup_real_result=function()
+	local real=runtime.fs.read(root.."/tests/setup_result_fixture.json")
+	local decoded=assert(runtime.json.decode(real))
+	local f=default_fixture(nil,decoded.setup_run_id);f.bind()
+	f.db.files[f.job.setup.result_path]=real
+	local pane
+	for _,block in ipairs(f.context.inventory.sessions[1].tabs[1].blocks) do if block.id==42 then pane=block end end
+	check(pane~=nil and pane.cwd==f.job.setup.cwd,"the bound helper pane starts in the launch folder")
+	pane.cwd="/tmp/omp-auto-switched"
+	-- The helper named the OMP prompt "startup_prompt"; the record field is "prompt". That refusal is legitimate and must name the field.
+	local before=f.db.image()
+	local refused,reason=f.a.setup_submission(f.b,f.envelope(),f.context)
+	check(not refused and reason:find("startup_prompt",1,true)~=nil,"the helper's wrong field name is refused and named: "..tostring(reason))
+	same(f.db.image(),before,"a refused submission changes nothing")
+	local corrected=real:gsub('"startup_prompt"','"prompt"')
+	f.db.files[f.job.setup.result_path]=corrected
+	local ok,why=f.a.setup_submission(f.b,f.envelope(),f.context)
+	check(ok,"the 12-record result is retained although the helper left its launch folder: "..tostring(why))
+	f.job=snapshot(f.a,f.b).jobs[1]
+	check(f.job.pending_bytes==#corrected,"the exact submitted bytes are pending")
+end
+
 sections.setup_default_recovery=function()
 	for _,claimed in ipairs({false,true}) do
 		local f=default_fixture()

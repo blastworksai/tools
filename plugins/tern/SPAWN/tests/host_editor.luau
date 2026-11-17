@@ -1623,9 +1623,43 @@ do
  check(submit(wrong) and reads==0,'an alternate filesystem path is refused before reading')
  inventory.sessions[1].tabs[1].blocks[2].command='replacement-source'
  check(submit() and reads==0,'reused native source is refused before any result-file read')
+ -- SKILLS-194b: the refusal is carried in the state snapshot the window reads, not only in a notice nobody sees.
+ local function stateNode()
+  for _,node in ipairs(definition.view(panel,cx).main.children)do if node.text and node.text:sub(1,15)=='SPAWN_STATE_V2 ' then return runtime.json.decode(node.text:sub(16)) end end
+ end
+ local refusedState=stateNode()
+ local mineRefusal
+ for _,entry in ipairs(refusedState and refusedState.setup_refusals or {})do if entry.binding==job.setup.binding and entry.setup_run_id==job.setup_run_id then mineRefusal=entry end end
+ check(mineRefusal and mineRefusal.setup_run_id==job.setup_run_id and mineRefusal.binding==job.setup.binding and mineRefusal.authority_id==panel.snapshot.authority_id
+  and mineRefusal.text:find('closed, moved or changed',1,true)~=nil,
+  'a refused setup submission is published in the snapshot bound to its authority, run and binding: '..tostring(mineRefusal and mineRefusal.text))
+ -- A late submission naming another run is its own entry; it never replaces or relabels this run's refusal.
+ local otherRun=clone(envelope);otherRun.setup_run_id='another-run'
+ check(submit(otherRun),'a submission naming another run is consumed')
+ local bothState=stateNode()
+ local seenMine,seenOther=false,false
+ for _,entry in ipairs(bothState.setup_refusals or {})do
+  if entry.setup_run_id==job.setup_run_id then seenMine=true elseif entry.setup_run_id=='another-run' then seenOther=true end
+ end
+ check(seenMine and seenOther,'refusals of two runs stay separate entries')
+ -- Malformed identifiers stay a notice: publishing them would make the window reject the whole snapshot.
+ for _,bad in ipairs({{run='',bind=''},{run='run\nx',bind=job.setup.binding},{run=job.setup_run_id,bind='b\1d'},{run=string.rep('r',300),bind=job.setup.binding}})do
+  local malformed=clone(envelope);malformed.setup_run_id=bad.run;malformed.binding=bad.bind
+  check(submit(malformed),'a malformed identifier envelope is consumed')
+  local view=stateNode()
+  for _,entry in ipairs(view.setup_refusals or {})do
+   check(#entry.setup_run_id>0 and #entry.setup_run_id<=256 and not entry.setup_run_id:find('%c') and #entry.binding>0 and #entry.binding<=256 and not entry.binding:find('%c'),'only well-formed identifiers are published')
+  end
+ end
  inventory.sessions[1].tabs[1].blocks[2].command=job.setup.command
+ -- The helper (OMP) may leave its launch folder after binding; that is not a different pane.
+ inventory.sessions[1].tabs[1].blocks[2].cwd='/tmp/omp-auto-switched'
  check(submit() and reads==1 and panel.setup_result_attempt==job.attempt_id and #panel.snapshot.records==0,
   'explicit Config BLOCK paste accepts immutable run-bound bytes once but does not import')
+ local afterAccept=stateNode()
+ local leftover=false
+ for _,entry in ipairs(afterAccept.setup_refusals or {})do if entry.setup_run_id==job.setup_run_id then leftover=true end end
+ check(not leftover,'an accepted submission clears only its own published refusal')
  journalFiles[resultPath]='changed after submission'
  check(submit() and reads==1,'duplicate submission is consumed and refused without rereading the changed file')
  local pending=assert(A.setup_pending(panel.binding,job.attempt_id))

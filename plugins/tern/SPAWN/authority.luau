@@ -1190,7 +1190,9 @@ local function setup_source(root,scope,job,context,require_pane)
 		if not job.native then return nil,"Setup native pane has not been bound" end
 		local found=nil
 		for _,pane in ipairs(native.panes) do if pane.id==job.native.pane then found=pane end end
-		if not found or found.session~=scope.native_session or found.command~=s.command or found.cwd~=s.cwd then
+		-- The folder is deliberately not compared here: bind already matched the exact launch folder, and
+		-- a helper (OMP) may leave it afterwards. Pane id, session, command and window incarnation are the identity.
+		if not found or found.session~=scope.native_session or found.command~=s.command then
 			return nil,"Setup native source closed, moved or changed; automatic import was refused"
 		end
 	end

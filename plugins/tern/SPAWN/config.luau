@@ -298,11 +298,33 @@ local function managed_fields(source: any, record: any): string?
 	return nil
 end
 
+local SUDO_FLAGS = { ["-H"] = true, ["-n"] = true, ["-E"] = true, ["-i"] = true, ["-s"] = true, ["-S"] = true, ["-k"] = true, ["-K"] = true, ["-b"] = true, ["-P"] = true }
+-- Literal sudo argv, read only up to sudo's own target (the first non-option word or the word after its `--`): the selected account, the index of the target program, whether it is already a login shell.
+function Config.parse_sudo(argv: {string}): (string?, number, boolean, string?)
+	local selected, index, login = nil, 1, false
+	while index <= #argv do
+		local argument = argv[index]
+		if argument == "--" then index += 1; break end
+		if argument:sub(1, 1) ~= "-" then break end
+		local selector = argument:match("^%-%-user=(.+)$") or argument:match("^%-u(.+)$")
+		if argument == "-u" or argument == "--user" then index += 1; selector = argv[index] end
+		if selector ~= nil then
+			if selected ~= nil then return nil, index, login, "Configured sudo has ambiguous OS-user selectors" end
+			selected = selector
+		elseif not SUDO_FLAGS[argument] then
+			return nil, index, login, "Configured sudo identity options require review"
+		elseif argument == "-i" or argument == "-s" then
+			login = true
+		end
+		index += 1
+	end
+	return selected, index, login, nil
+end
 local function normalize(source: any, legacy: boolean): (any?, string?)
 	if type(source) ~= "table" then return nil, "Record must be an object" end
 	for field in pairs(source) do
 		if not FIELDS[field] and not RETIRED_FIELDS[field] and not (legacy and LEGACY_FIELDS[field]) then
-			return nil, "Record contains an unsupported field"
+			return nil, "Record contains an unsupported field: " .. string.sub(string.gsub(tostring(field), "%c", "?"), 1, 40)
 		end
 	end
 	if not text(source.id, 96) or not nonblank(source.id) or string.find(source.id, "%c") ~= nil then
@@ -343,6 +365,22 @@ local function normalize(source: any, legacy: boolean): (any?, string?)
 	local argv, err = arguments(source.arguments, legacy)
 	if argv == nil then return nil, err end
 	record.arguments = argv
+	-- A program named like an option (`-a`) would be read as an option by the launch wrapper's exec.
+	if not legacy and record.command ~= nil then
+		local words = Config.parse_arguments(record.command)
+		if words ~= nil and words[1] ~= nil then
+			local target = words[1]
+			if basename(target) == "sudo" then
+				local rest = {}
+				for index = 2, #words do table.insert(rest, words[index]) end
+				for _, argument in ipairs(argv) do table.insert(rest, argument) end
+				-- Unknown or ambiguous sudo options are launch's concern; only a target named like an option is refused here.
+				local selected, index, _, problem = Config.parse_sudo(rest)
+				target = if problem == nil and rest[index] ~= nil then rest[index] else ""
+			end
+			if target:sub(1, 1) == "-" then return nil, "The program name must not start with -" end
+		end
+	end
 	local managed_error = managed_fields(source, record)
 	if managed_error ~= nil then return nil, managed_error end
 

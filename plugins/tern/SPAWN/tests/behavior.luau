@@ -170,15 +170,89 @@ local expected_words = { "/opt/My Tools/custom-cli" }
 for _, value in ipairs(argv) do table.insert(expected_words, value) end
 same(rendered_words, expected_words, "host POSIX rendering preserves empty, quoted, newline and Unicode argv")
 same(ordinary_render, render_before, "host rendering does not mutate the approved record")
+-- SKILLS-194b: an OS-user launch enters the account's own login shell so ~/.profile PATH and tokens apply.
+-- The program and its arguments stay separate positional parameters, never shell text.
+-- The account's login shell comes from its passwd entry (never from the environment) and is entered with the
+-- approved program text, so a profile can neither move the folder nor replace the argv.
+local LOGIN_SCRIPT = [==[o=$PATH; PATH=/usr/bin:/bin:/usr/sbin:/sbin; export PATH; u=$(id -un); d=$PWD; sh=$(getent passwd "$u" 2>/dev/null | cut -d: -f7); [ -n "$sh" ] || sh=$(dscl . -read "/Users/$u" UserShell 2>/dev/null | sed -n 's/^UserShell: //p'); case "${sh##*/}" in bash|zsh|sh|dash|ksh) [ -x "$sh" ] && exec "$sh" -lc "$1" "$d";; esac; PATH=$o; export PATH; exec /bin/sh -c "$1" "$d"]==]
+local function sq(word) return "'" .. word:gsub("'", "'\\''") .. "'" end
+local function with_login(prefix, rest)
+	local out = {}
+	for _, v in ipairs(prefix) do table.insert(out, v) end
+	local quoted = {}
+	for _, v in ipairs(rest) do table.insert(quoted, sq(v)) end
+	for _, v in ipairs({ "/bin/sh", "-c", LOGIN_SCRIPT, "spawn-login", 'cd -- "$0" || exit 1; exec ' .. table.concat(quoted, " ") }) do table.insert(out, v) end
+	return out
+end
 local approved_prompt = "  Exact approved prompt.\nQuotes: ' \" $HOME `literal`  "
 local native_record = record("native-render", { provider = "omp", backend = "native-agent", command = "omp", arguments = { "--profile", "work account" }, prompt = "saved greeting", user = "account" })
 rendered = assert(executor.render(native_record, "/bin/zsh", "macos", approved_prompt))
-same(argv_of(rendered, "omp"), { "sudo", "-u", "account", "-H", "--", "omp", "--profile", "work account", approved_prompt }, "ordinary OMP explicit prompt override remains one exact argv after approved arguments")
+same(argv_of(rendered, "omp"), with_login({ "sudo", "-u", "account", "-H", "--" }, { "omp", "--profile", "work account", approved_prompt }), "ordinary OMP explicit prompt override remains one exact argv after approved arguments")
 check(native_record.prompt == "saved greeting" and #native_record.arguments == 2, "ordinary prompt override does not mutate persisted argv")
 native_record.user = ""
 same(argv_of(assert(executor.render(native_record, "/bin/bash", "linux")), "omp"), { "omp", "--profile", "work account", "saved greeting" }, "ordinary native launch uses its approved stored prompt")
 local wrapped = record("wrapped", { command = "sudo -u explicit -- ordinary-cli", user = "explicit", arguments = { "one" } })
-same(argv_of(assert(executor.render(wrapped, "/bin/bash", "linux")), "custom"), { "sudo", "-u", "explicit", "--", "ordinary-cli", "one" }, "explicit sudo wrapper is preserved rather than nested")
+same(argv_of(assert(executor.render(wrapped, "/bin/bash", "linux")), "custom"), with_login({ "sudo", "-u", "explicit", "--" }, { "ordinary-cli", "one" }), "explicit sudo wrapper is preserved rather than nested, and enters the account's login shell")
+local hostile = record("hostile", { command = "sudo -n -H -u seat -- /usr/bin/claude", user = "seat", arguments = { "--flag", "; touch /tmp/pwned $(id) `id`", "it's" } })
+same(argv_of(assert(executor.render(hostile, "/bin/bash", "linux")), "custom"), with_login({ "sudo", "-n", "-H", "-u", "seat", "--" }, { "/usr/bin/claude", "--flag", "; touch /tmp/pwned $(id) `id`", "it's" }), "the real literal sudo shape keeps -n and every argument exact inside the login wrapper")
+local already = record("already", { command = "sudo -n -i -u seat -- claude", user = "seat" })
+same(argv_of(assert(executor.render(already, "/bin/bash", "linux")), "custom"), { "sudo", "-n", "-i", "-u", "seat", "--", "claude" }, "an explicit sudo -i is already a login shell and is not wrapped again")
+check(LOGIN_SCRIPT:find("$SHELL", 1, true) == nil and LOGIN_SCRIPT:find("getent passwd", 1, true) ~= nil, "the login shell is read from the passwd entry, never from the environment")
+-- A record that selects its account only through literal sudo arguments (every record of a guided result) is wrapped too.
+local selector_only = record("selector-only", { command = "sudo", arguments = { "-n", "-H", "-u", "user-a", "--", "/usr/bin/claude", "--flag" } })
+same(argv_of(assert(executor.render(selector_only, "/bin/bash", "linux")), "custom"), with_login({ "sudo", "-n", "-H", "-u", "user-a", "--" }, { "/usr/bin/claude", "--flag" }), "a record without a user field but with literal sudo selectors enters the login shell on ordinary launch")
+do
+	-- Every record of the anonymised guided result selects its account by literal sudo arguments only.
+	local fixture = assert(runtime.json.decode(runtime.fs.read(root .. "/tests/setup_result_fixture.json")))
+	check(#fixture.agents == 12, "the guided-result fixture has twelve records")
+	for _, agent in ipairs(fixture.agents) do
+		local source = table.clone(agent)
+		if source.startup_prompt ~= nil then source.prompt = source.startup_prompt; source.startup_prompt = nil end
+		local line = assert(executor.render(source, "/bin/bash", "linux"), "fixture record renders: " .. tostring(agent.id))
+		local words = assert(config.parse_arguments(line))
+		table.remove(words, 1)
+		local at = table.find(words, "--")
+		check(words[1] == "sudo" and words[2] == "-n" and words[at + 1] == "/bin/sh" and words[at + 2] == "-c" and words[at + 4] == "spawn-login",
+			"ordinary launch of " .. agent.id .. " enters the login shell without a configured user field")
+		check(words[at + 5]:find("exec '" .. source.arguments[table.find(source.arguments, "--") + 1] .. "'", 1, true) ~= nil, "the approved program is carried exactly for " .. agent.id)
+	end
+end
+check(LOGIN_SCRIPT:find("PATH=/usr/bin:/bin:/usr/sbin:/sbin; export PATH; u=$(id -un)", 1, true) ~= nil, "every lookup in the login script runs with a fixed PATH, set before the first command")
+-- An executable literally named like an option would be read by exec as one.
+for _, bad in ipairs({
+	record("dash-direct", { command = "-a", user = "seat" }),
+	record("dash-literal", { command = "sudo", arguments = { "-n", "-H", "-u", "seat", "--", "-a", "x" }, user = "seat" }),
+	record("dash-unconfigured", { command = "sudo", arguments = { "-n", "-H", "-u", "seat", "--", "-a", "x" } }),
+}) do
+	check(select(2, config.validate_record(bad)) ~= nil, "a record whose program name starts with - is refused at validation: " .. bad.id)
+end
+-- The leading-dash check reads sudo only up to sudo's own target, with the same parser launch uses.
+for _, good in ipairs({
+	record("printf-sep-args", { command = "sudo -n -u seat /usr/bin/printf", arguments = { "--", "-x" }, user = "seat" }),
+	record("printf-sep-literal", { command = "sudo -n -u seat -- /usr/bin/printf", arguments = { "--", "-x" }, user = "seat" }),
+	record("printf-sep-unconfigured", { command = "sudo -n -u seat /usr/bin/printf", arguments = { "--", "-x" } }),
+}) do
+	local valid, why = config.validate_record(good)
+	check(valid ~= nil, "a valid record whose target program has its own -- is accepted: " .. good.id .. " " .. tostring(why))
+end
+check(select(2, config.validate_record(record("sudo-dash-target", { command = "sudo -n -u seat -- -a", user = "seat" }))) ~= nil, "a target after sudo's own -- that starts with - is refused")
+-- `sudo -n -u seat -a`: -a is a sudo option SPAWN does not know. Validation leaves it to launch, as before; launch
+-- refuses it for a configured user and keeps the argv unchanged without one (same parser, so they cannot disagree).
+local unknown_option = record("sudo-unknown-option", { command = "sudo -n -u seat -a", user = "seat" })
+check(config.parse_sudo ~= nil and select(4, config.parse_sudo({ "-n", "-u", "seat", "-a" })) ~= nil, "the shared parser reports sudo's unknown option")
+local resolved_unknown = { record = unknown_option, executable = "sudo", arguments = { "-n", "-u", "seat", "-a" } }
+check(not load("launch_resolution").select_user(resolved_unknown, "posix", true), "launch refuses a configured user's unknown sudo option")
+local dash_guard = load("launch_resolution")
+for _, guarded in ipairs({ { executable = "sudo", arguments = { "-n", "-u", "seat", "--", "-a" }, user = "seat" }, { executable = "-a", arguments = {}, user = "seat" } }) do
+	local resolved = { record = { backend = "local-terminal", user = guarded.user }, executable = guarded.executable, arguments = table.clone(guarded.arguments) }
+	local ok = dash_guard.select_user(resolved, "posix", true)
+	check(not ok, "the wrapper itself refuses a program name starting with - " .. guarded.executable)
+end
+local odd_sudo = record("odd-sudo", { command = "sudo", arguments = { "-g", "group", "--", "/usr/bin/claude" } })
+same(argv_of(assert(executor.render(odd_sudo, "/bin/bash", "linux")), "custom"), { "sudo", "-g", "group", "--", "/usr/bin/claude" }, "an unreviewed sudo form without a configured user keeps its argv unchanged")
+local shelled = record("shelled", { command = "sudo -n -H -u seat -- /bin/bash", user = "seat", arguments = { "-c", "x" } })
+same(argv_of(assert(executor.render(shelled, "/bin/bash", "linux")), "custom"), { "sudo", "-n", "-H", "-u", "seat", "--", "/bin/bash", "-c", "x" }, "an explicit shell target is not wrapped in a second shell")
+
 wrapped.user = "saved-user"
 check(executor.render(wrapped, "/bin/bash", "linux") == nil, "explicit sudo wrapper cannot override the exact configured account identity")
 local remote_record = record("remote-render", { backend = "ssh-command", host = "example.test", user = "remote-user", key_path = "/keys/a key", cwd = "~/project 'quoted'", arguments = { "", "two words", "$HOME" } })
