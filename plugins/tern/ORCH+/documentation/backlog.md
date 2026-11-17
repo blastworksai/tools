@@ -56,4 +56,8 @@ Tern 0.9.22 shows its own usage statistics for some providers in the widget bar.
 When USAGE is not installed, offer Tern's own usage for those providers instead of showing usage as unavailable.
 USAGE stays the recommended path, because it reports usage per account across many accounts, which Tern's own statistics do not.
 First find out which providers and which data Tern exposes to plugins.
+Shipped in 0.6.3: when USAGE is not installed, the agent picker adds one muted line under "Usage unavailable" that points to Tern's own widget (widget bar, AI usage limits) and to USAGE for per-account figures.
+It shows no number.
+Remaining: Tern 0.9.22 gives plugins no usage read API, so real numbers inside ORCH+ need a request to the Tern authors (for example a call that returns provider, window name, used percent, reset time and account label).
+Quota routing stays held without USAGE.
 Tracked as SKILLS-195.

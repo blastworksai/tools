@@ -40,6 +40,14 @@ local function bound(row: any, catalog: any, usage: any): boolean
 		and usage.host_key == catalog.host_key and usage.config_revision == catalog.config_revision
 		and (row.definition_revision == nil or usage.definition_revision == row.definition_revision)
 end
+-- One muted line shown only on installation evidence that USAGE is absent (api.usage_installed() == false, from the
+-- window's block types). A missing relay or an unanswered read is unknown, never "absent". It points at Tern's own
+-- widget and states no number: Tern gives plugins no usage read API, and usage is never inferred.
+local NATIVE_HINT = "Tern's own usage widget (widget bar › AI usage limits) shows per-provider limits. Install USAGE for per-account figures."
+local function usage_hint(text_: string, installed: boolean?): string
+	if installed == false and text_ == "Usage unavailable" then return text_ .. "\n" .. NATIVE_HINT end
+	return text_
+end
 local function usage_text(row: any, index: any, readings: any, now: number, status: string): string
 	local reading = readings[row.id]
 	if not bound(row, index, reading) then return "Usage unavailable" .. (if status == "disabled" then " · enable Show usage in ORCH+ in USAGE" else "") end
@@ -55,7 +63,7 @@ local function usage_text(row: any, index: any, readings: any, now: number, stat
 		elseif reading.state == "login" then "login needed; last known" elseif reading.state == "last_known" then "last known" else "stale"
 	return string.format("%.0f%% used · %s · %dm ago", reading.used, state, math.floor(age / 60000))
 end
-M.eligible, M.usage_text = eligible, usage_text
+M.eligible, M.usage_text, M.usage_hint = eligible, usage_text, usage_hint
 function M.new(api: any): any
 	local pending: any = {}
 	local loaded: any = {}
@@ -96,6 +104,7 @@ function M.new(api: any): any
 			return false
 		end
 		local items = {}
+		local usage_installed = if api.usage_installed then api.usage_installed(cx) else nil
 		local bound_title = s.options.pane_title
 		if s.options.pane_binding and api.pane then
 			bound_title = provider_display.pane_title(api.pane(cx, s.source, tonumber(s.options.pane_binding.pane_id), s.origin))
@@ -106,7 +115,7 @@ function M.new(api: any): any
 				local title = if s.options.pane_binding then bound_title else bound_title or (if api.agent_titles then api.agent_titles(cx, s.source, record.id, s.origin) else nil)
 				table.insert(items, { label = provider_display.name(record.provider) .. " · " .. account .. " — " .. (title or "No active pane"),
 					icon = provider_display.icon(record.provider),
-					detail = usage_text(record, s.index, s.readings, math.floor(os.time() * 1000), s.usage_status)
+					detail = usage_hint(usage_text(record, s.index, s.readings, math.floor(os.time() * 1000), s.usage_status), usage_installed)
 						.. (if s.options.selected and table.find(s.options.selected, record.id) then " · selected" else ""),
 					position = position, choice_key = "record:" .. record.id })
 			end

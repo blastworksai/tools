@@ -49,6 +49,13 @@ Installing or reloading the plugin does not start agents or resume projects.
 
 The agent list shows provider icon, provider name and account label, with usage when available. Missing usage is shown as unavailable, never as zero. A displayed percentage is informational; it is not permission to switch accounts or models.
 
+### Usage without USAGE
+
+Without USAGE installed, the agent list still shows "Usage unavailable" and adds one hint line: Tern's own usage widget (widget bar, AI usage limits) shows per-provider limits, and USAGE adds per-account figures.
+The hint shows no number and infers nothing from account labels.
+Quota-based routing stays held without USAGE.
+Tern gives plugins no way to read its built-in usage, so showing real numbers inside ORCH+ would need a read API from Tern.
+
 If no agent is eligible, the interface explains the missing setup. It does not silently substitute a raw terminal command or grant capabilities based on an account's name.
 
 ## ORCHESTRATED WORK
