@@ -36,6 +36,14 @@ local controller = require("./lib/attach").new({
             waitCx = cx; waits.sync(panel)
         end
     end,
+    -- Selecting the session a view already serves wakes it (renews the wait when sync asks for one, then asks for an
+    -- immediate look), so a plan published while it was dormant shows without closing the view.
+    wake = function(cx: WindowCx, panel: number, target: number)
+        local ok, bound = pcall(tern.kv.get, "target/" .. string.format("%.0f", panel))
+        if not ok or bound ~= target then return end
+        if settings.waitsForPublication(settings.load(tern.kv), target) then waitCx = cx; waits.sync(panel) end
+        pcall(function() cx.session:event(panel, { ev = "action", id = "main", act = "sync-wake", value = "" }) end)
+    end,
     json = { encode = function(value: any): string return tern.json.encode(value) end },
 })
 
@@ -157,6 +165,8 @@ local function changed(cx: any, before: any, after: any, act: string)
             local m = settings.mode(now)
             if (m == "glitch" or m == "glitch-sync") and now.attach == target.pane then controller.start(fresh, false, target.pane) end
         end)
+    elseif (mode == "glitch" or mode == "glitch-sync") and view == "match" and panel and act == "attach" then
+        controller.start(cx, false, target.pane) -- the same session again: wakes its view
     elseif (mode == "glitch" or mode == "glitch-sync") and view == "none" then
         controller.start(cx, false, target.pane)
     elseif mode == "native-board" and (act == "attach" or act == "board" or act == "glitch") then

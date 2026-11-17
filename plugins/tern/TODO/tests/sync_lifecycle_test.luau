@@ -371,4 +371,68 @@ return {
         local bad = selection.restoreState({ schema = 2, discover_pid = 4242, birth = "b", leases = { "ok-1", "bad id", 5 } }, valid, 1)
         assert(bad.leases["ok-1"] == 1 and bad.leases["bad id"] == nil)
     end},
+    -- Dormant polling and wake: a host view driven through the same selection functions host.luau calls.
+    {"a dormant view schedules a slow poll (30 s), never none, and a fresh lease returns it to the 5 s poll", function()
+        local view = { panel = 5, hadWait = true, discover_pid = 9, leases = {} }
+        local none = { ok = true, state = "none" }
+        local timers = {}
+        local timer = function(ms, fn) table.insert(timers, { ms = ms, fn = fn }) end
+        local outcome = selection.discoveryStep(0, true, none, selection.patience(view, 1000), view.hadWait)
+        local delay = selection.settle(view, outcome)
+        selection.schedule(view, timer, delay :: number, function() end)
+        assert(selection.DORMANT_POLL_MS == 30000 and view.dormant == true and timers[1].ms == 30000, tostring(timers[1] and timers[1].ms))
+        selection.applyLease(view, { on = true, rid = "w1" }, 2000)
+        outcome = selection.discoveryStep(0, true, none, selection.patience(view, 2000), view.hadWait)
+        assert(selection.settle(view, outcome) == selection.WAIT_MS and view.dormant == false)
+    end},
+    {"a dormant view picks up a plan published later on its slow tick (Sync Off, hadWait true)", function()
+        local view = { panel = 5, hadWait = true, discover_pid = 9, leases = { w1 = 1000 } }
+        local none = { ok = true, state = "none" }
+        local published = { ok = true, state = "active", source = { path = "/p.md", plan_id = "plan-abc", publication = { k = 1 } } }
+        local now, ticks, refreshed = 1000, {}, 0
+        local timer = function(_ms, fn) table.insert(ticks, fn) end
+        local function tick(envelope)
+            refreshed += 1
+            now += selection.DORMANT_POLL_MS
+            local outcome = selection.discoveryStep(0, true, envelope, selection.patience(view, now), view.hadWait)
+            local delay = selection.settle(view, outcome)
+            if delay then selection.schedule(view, timer, delay, function() end) end
+            return outcome
+        end
+        assert(tick(none).action == "dormant" and view.dormant)
+        assert(tick(none).action == "dormant", "Sync Off: nothing renews, the view stays dormant and keeps polling")
+        assert(#ticks == 2)
+        assert(tick(published).action == "active", "the slow tick found the plan with no user action")
+    end},
+    {"a slow tick drops the instance of a closed dormant pane and withdraws its publication", function()
+        local view = { panel = 5, dormant = true, hadWait = true, discover_pid = 9 }
+        local instances, withdrawn = { [5] = view }, 0
+        local publish = function(_state, plan) if plan == nil then withdrawn += 1 end end
+        assert(selection.live(view, instances, { { pane = 5, program = "todo.list" } }, "todo.list", publish) == true)
+        assert(instances[5] == view)
+        assert(selection.live(view, instances, { { pane = 6, program = "todo.list" } }, "todo.list", publish) == false)
+        assert(instances[5] == nil and withdrawn == 1, "the closed pane's entry leaked")
+    end},
+    {"a dormant view whose process ended is ended by the slow tick (terminal helper answer)", function()
+        local ended = { ok = false, terminal = true, error = "The selected process ended." }
+        local outcome = selection.discoveryStep(1, true, ended, false, true)
+        assert(outcome.action == "terminal", tostring(outcome.action))
+        assert(selection.settle({ hadWait = true }, outcome) == nil, "a terminal answer schedules no more polls")
+    end},
+    {"re-selecting the same session wakes a dormant view for an immediate refresh; only the window's event does", function()
+        local view = { panel = 5, dormant = true, hadWait = true, discover_pid = 9 }
+        assert(selection.wakeEvent({ ev = "action", id = "main", act = "sync-wake", value = "" }))
+        assert(not selection.wakeEvent({ ev = "action", id = "main", act = "sync-wait", value = "on" }))
+        assert(not selection.wakeEvent({ ev = "key", id = "main", act = "sync-wake" }))
+        local timers = {}
+        local timer = function(ms, fn) table.insert(timers, { ms = ms, fn = fn }) end
+        selection.schedule(view, timer, selection.DORMANT_POLL_MS, function() error("the old slow tick must not run after a wake") end)
+        assert(selection.wake(view) and view.dormant == false)
+        local ran = 0
+        selection.schedule(view, timer, 1, function() ran += 1 end)
+        assert(timers[2].ms == 1)
+        timers[1].fn(); timers[2].fn()
+        assert(ran == 1, "the superseded slow timer still fired or the wake never refreshed")
+        assert(not selection.wake({ source = { path = "/p" } }), "a view that serves a source has nothing to discover")
+    end},
 }

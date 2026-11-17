@@ -252,6 +252,9 @@ selection.WAITING = "No plan is published for this session yet. This view keeps 
 -- are kept; the oldest is dropped first.
 selection.PATIENCE_MS = 15000
 selection.MAX_LEASES = 16
+-- A dormant view keeps one SLOW discovery poll (DORMANT_POLL_MS) instead of no timer: it still picks up a plan
+-- published later, notices a closed pane (its host entry is dropped) and an ended process (the view ends).
+selection.DORMANT_POLL_MS = 30000
 selection.DORMANT = "Waiting for a plan is paused because no window asked recently. It resumes when a window asks again."
 local LEGACY = "legacy"
 -- Renew (on) or revoke (off) one requester's lease. Returns whether the view's patience changed.
@@ -302,6 +305,47 @@ function selection.discoveryStep(status: number, decoded: boolean, envelope: any
         if hadWait then return { action = "dormant", message = selection.DORMANT } end
     end
     return outcome
+end
+-- Apply a waiting or dormant discovery outcome to the view and return the delay of its next discovery poll
+-- (nil for any other outcome). A fresh lease turns a dormant view back to the fast WAIT_MS poll.
+function selection.settle(state: any, outcome: any): number?
+    if outcome.action == "wait" then
+        state.plan = nil; state.error = outcome.message; state.failures = 0; state.dormant = false
+        return selection.WAIT_MS
+    end
+    if outcome.action == "dormant" then
+        state.plan = nil; state.error = outcome.message; state.failures = 0; state.dormant = true
+        return selection.DORMANT_POLL_MS
+    end
+    return nil
+end
+-- One live discovery timer per view: scheduling bumps a generation, so an older pending timer (a slow dormant tick
+-- after a wake or renewal) fires into nothing and the poll chain never doubles.
+function selection.schedule(state: any, timer: (number, () -> ()) -> any, ms: number, fn: () -> ())
+    state.gen = (state.gen or 0) + 1
+    local mine = state.gen
+    timer(ms, function() if state.gen == mine then fn() end end)
+end
+-- Is this view still the live one of its pane? A dropped or closed one is removed from `instances`, and the
+-- plan it published is withdrawn.
+function selection.live(state: any, instances: { [number]: any }, panes: { any }, kind: string, publish: (any, any) -> ()): boolean
+    if state.finished or instances[state.panel] ~= state then publish(state, nil); return false end
+    for _, pane in panes do
+        if pane.pane == state.panel then return pane.program == kind end
+    end
+    instances[state.panel] = nil
+    publish(state, nil)
+    return false
+end
+-- The window's explicit re-attach of the session this view already serves: look again now.
+function selection.wakeEvent(event: any): boolean
+    return type(event) == "table" and event.ev == "action" and event.id == "main" and event.act == "sync-wake"
+end
+-- A wake resumes a dormant view; true when the view has a session to discover and should refresh at once.
+function selection.wake(state: any): boolean
+    if state.discover_pid == nil then return false end
+    state.dormant = false
+    return true
 end
 -- What a view persists across a plugin reload (`cx:save`). A view that is still waiting for its session's plan keeps
 -- the native session it serves (discover_pid) and its label, so after a reload it resumes waiting instead of

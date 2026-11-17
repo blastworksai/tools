@@ -72,4 +72,15 @@ return {
         assert(kind=="other" and panel==11)
         assert(f.controller.viewFor(f.cx,10,function() return nil end)=="other","an unrecorded view is not trusted")
     end},
+    {"selecting the session a view already serves wakes that view instead of only toasting",function()
+        local f=fixture()
+        local woke={}
+        local api={wake=function(cx,panel,target) table.insert(woke,panel..":"..target) end,plugin={id="todo"},json=tern.json,now=function()return 1 end,timer=function(_,fn)table.insert(f.timers,fn)end}
+        local controller=attach.new(api)
+        controller.start(f.cx,false,10)
+        assert(#woke==0,"a fresh attach is not a wake")
+        controller.start(f.cx,false,10)
+        assert(#woke==1 and woke[1]=="11:10",table.concat(woke,","))
+        assert(f.toasts[#f.toasts].text:find("already has a plan view",1,true))
+    end},
 }

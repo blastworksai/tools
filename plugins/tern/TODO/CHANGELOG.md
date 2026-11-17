@@ -2,7 +2,7 @@
 
 ## 0.7.3
 
-- Fix: a plan view's wait is held per requesting window (one window's revoke no longer cancels another's), and a wait that lapses leaves the view open and dormant until a window asks again, instead of closing it.
+- Fix: a plan view's wait is held per requesting window (one window's revoke no longer cancels another's), and a wait that lapses leaves the view open and dormant instead of closing it. A dormant view looks again every 30 seconds: it finds a plan published later, drops itself when its pane is closed and ends when its session ends. A window asking again, or selecting the same session again, resumes it at once; the owner never has to close the view.
 - Fix: a plan with several `active` entities (parallel builders) is no longer refused with "at most one active entity, named by current". Every active entity shows as active. `current` may be null or name one active or blocked entity; naming a pending, done or unknown entity, and every other shape rule (states, ids, duplicates, bounds, reasons), still refuses.
 
 - Fix: turning **Sync Glitch Plan to Tern Board?** On no longer empties **Attach to**. Sessions on other hosts were dropped for sync as well as for the native board, so with every session remote the list vanished and the attach was cleared.

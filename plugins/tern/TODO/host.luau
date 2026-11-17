@@ -59,14 +59,9 @@ end
 -- A failed read, a closed panel or a fresh start removes it, so a window never syncs a stale success.
 local function publish(state: State, plan: Plan?) state.publisher.publish(plan) end
 local function live(state: State): boolean
-    if state.finished or instances[state.panel] ~= state then publish(state, nil); return false end
-    for _, pane in tern.pane.list() do
-        if pane.pane == state.panel then return pane.program == KIND end
-    end
-    instances[state.panel] = nil
-    publish(state, nil)
-    return false
+    return selection.live(state, instances, tern.pane.list(), KIND, publish)
 end
+local function later(state: State, ms: number, fn: () -> ()) selection.schedule(state, function(delay: number, f: () -> ()) tern.timer(delay, f) end, ms, fn) end
 local function redraw(state: State, cx: BlockCx)
     if live(state) then pcall(function() cx:render() end) end
 end
@@ -99,7 +94,7 @@ local function refresh(state: State, cx: BlockCx)
             state.error = problem or "Could not start the read-only source reader. Tern 0.9.8+ and Python 3 are required."
             state.failures = (state.failures or 0) + 1
             redraw(state, cx)
-            tern.timer(polling.delay(state.source ~= nil and state.source.ssh ~= nil, state.failures), function() refresh(state, cx) end)
+            later(state, polling.delay(state.source ~= nil and state.source.ssh ~= nil, state.failures), function() refresh(state, cx) end)
             return
         end
         local decoded, envelope = pcall(tern.json.decode, result.stdout or "")
@@ -110,18 +105,21 @@ local function refresh(state: State, cx: BlockCx)
             -- Sync on and this view serves the attached session: wait for the plan instead of closing. The window says
             -- so by event (it holds the settings and the binding; this machine's plugin store is not the window's).
             local outcome = selection.discoveryStep(result.status, decoded, envelope, selection.patience(state, tern.now()), state.hadWait)
+            local delay = selection.settle(state, outcome)
             if outcome.action == "wait" then
-                state.plan = nil; publish(state, nil); state.error = outcome.message; state.failures = 0
+                publish(state, nil)
                 -- Persist the waiting view (selection.saveState) so a plugin reload resumes it.
                 if not state.waitSaved then state.waitSaved = pcall(function() cx:save() end) end
                 redraw(state, cx)
-                tern.timer(selection.WAIT_MS, function() refresh(state, cx) end)
+                later(state, delay :: number, function() refresh(state, cx) end)
                 return
             end
             if outcome.action == "dormant" then
-                -- No window asked recently: keep the binding and the open view, stop polling, say so; a renewal resumes (event).
-                state.plan = nil; publish(state, nil); state.error = outcome.message; state.failures = 0; state.dormant = true
+                -- No window asked recently: keep the binding and the open view, say so, and poll slowly (the same
+                -- discovery step) so a later plan is found, a closed pane is dropped and an ended process ends the view.
+                publish(state, nil)
                 redraw(state, cx)
+                later(state, delay :: number, function() refresh(state, cx) end)
                 return
             end
             if outcome.action == "none" then
@@ -134,7 +132,7 @@ local function refresh(state: State, cx: BlockCx)
                 discovered.label = state.discovery_label
                 state.source = discovered
                 state.plan_id = discovered.plan_id; state.discover_pid = nil
-                state.error = nil; state.terminal = false; state.failures = 0
+                state.error = nil; state.terminal = false; state.failures = 0; state.dormant = false
                 refresh(state, cx); return
             end
             local message = outcome.error or "Could not resolve this session's plan publication."
@@ -147,7 +145,7 @@ local function refresh(state: State, cx: BlockCx)
             state.terminal = false
             state.failures = (state.failures or 0) + 1
             redraw(state, cx)
-            tern.timer(polling.delay(false, state.failures), function() refresh(state, cx) end)
+            later(state, polling.delay(false, state.failures), function() refresh(state, cx) end)
             return
         end
         state.terminal = decoded and type(envelope) == "table" and envelope.terminal == true
@@ -175,7 +173,7 @@ local function refresh(state: State, cx: BlockCx)
         state.failures = if state.error then (state.failures or 0) + 1 else 0
         redraw(state, cx)
         if not state.terminal then
-            tern.timer(polling.delay(state.source ~= nil and state.source.ssh ~= nil, state.failures), function() refresh(state, cx) end)
+            later(state, polling.delay(state.source ~= nil and state.source.ssh ~= nil, state.failures), function() refresh(state, cx) end)
         end
     end)
 end
@@ -213,7 +211,7 @@ tern.block.define("list", {
                 end
             end)
         end
-        tern.timer(1, function() refresh(state, cx) end)
+        later(state, 1, function() refresh(state, cx) end)
         return state
     end,
     view = function(state: State, _cx: BlockCx): BlockView
@@ -233,10 +231,14 @@ tern.block.define("list", {
                 local changed = selection.applyLease(state, lease, tern.now())
                 if lease.on and state.dormant then
                     state.dormant = false; state.error = selection.WAITING; changed = true
-                    tern.timer(1, function() refresh(state, cx) end)
+                    later(state, 1, function() refresh(state, cx) end)
                 end
                 if changed then redraw(state, cx) end
             end
+            return
+        end
+        if selection.wakeEvent(event) then
+            if live(state) and selection.wake(state) then later(state, 1, function() refresh(state, cx) end) end
             return
         end
         local selected = state.selection
