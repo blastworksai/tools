@@ -263,4 +263,18 @@ do
 	check(problem and metadata.context == "catalog" and metadata.code == "catalog_unconfirmed" and not failed.ui.active(),
 		"failed read-only load settles caller with typed catalog failure context")
 end
+do
+	-- Backlog 8: Tern gives plugins no usage read API, so without USAGE the row only POINTS at Tern's own widget.
+	local HINT = "Tern's own usage widget (widget bar › AI usage limits) shows per-provider limits. Install USAGE for per-account figures."
+	local function detail(f) return f.form.spec.items[1].detail end
+	local absent = fixture(); absent.no_usage = true; absent:open(); absent:settle(page({ record("a") })); absent:tick()
+	check(detail(absent):find("Usage unavailable\n" .. HINT, 1, true) == 1, "USAGE absent: Usage unavailable keeps its text and one muted hint follows")
+	check(absent:percentage(1) == nil and not detail(absent):find("%d+%%"), "USAGE absent: no number is shown or inferred")
+	local present = fixture(); present:open(); present:settle(page({ record("a") })); present:tick()
+	check(detail(present):find("Usage unavailable", 1, true) ~= nil and detail(present):find("Tern's own usage widget", 1, true) == nil, "USAGE installed but silent: no hint")
+	present:usage({ present:reading("a") }, true); present:tick(); present:usage({}, true)
+	check(present:percentage(1) == 42 and detail(present):find("Tern's own usage widget", 1, true) == nil, "USAGE installed with data: no hint")
+	local off = fixture(); off:open(); off:settle(page({ record("a") })); off:tick(); off:usage({}, nil, nil, "display_disabled")
+	check(detail(off):find("enable Show usage in ORCH+ in USAGE", 1, true) ~= nil and detail(off):find("Tern's own usage widget", 1, true) == nil, "USAGE installed but disabled: old text, no hint")
+end
 return "picker_ui: " .. checks .. " checks"
