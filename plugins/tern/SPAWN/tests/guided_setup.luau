@@ -218,13 +218,71 @@ section('single approval in the window',function()
  local window=tern.fs.read(root..'/window.luau')
  check(window:find('Review the complete submitted configuration',1,true)==nil,'no floating review popup is built for a submitted setup result')
  check(window:find('Save and prepare these agents',1,true)==nil and window:find('Save settings only',1,true)==nil,'no second Save and prepare choice exists in the window')
- check(window:find('Review.automatic_plan(pending.review.records)',1,true)~=nil,'a bound submission is turned into an automatic plan, not a prompt')
+ check(window:find('Review.automatic_plan(pending.review.records, pending.review.paid_checks)',1,true)~=nil,'a bound submission is turned into an automatic plan, not a prompt')
  local body=window:match('local function commit_setup.-\nlocal function review_setup') or ''
  check(body:find('"import_records"',1,true)~=nil and body:find('pending_digest = pending.digest',1,true)~=nil and body:find('pending_setup(check_cx, run, value, pending)',1,true)~=nil,'the automatic save keeps the exact run, result digest and last-moment source fence')
  check(body:find('start_reviewed',1,true)~=nil and body:find('capture_reviewed',1,true)~=nil,'preparation stays bound to the saved revision through the existing once-only capture')
  check(body:find('managed-exercise',1,true)==nil and body:find('exercise',1,true)==nil,'optional provider-backed exercises are never started by the automatic flow')
  local skill=tern.fs.read(root..'/skills/setup/SKILL.md')
  check(skill:find('Save and prepare these agents',1,true)==nil,'the setup skill no longer promises a second approval action')
+end)
+pause()
+section('paid scope in the window',function()
+ local window=tern.fs.read(root..'/window.luau')
+ local body=window:match('local function commit_setup.-\nlocal function review_setup') or ''
+ check(body:find('plan.prepare_ids',1,true)~=nil and body:find('selected_records',1,true)~=nil and body:find('capture_reviewed(cx, run.origin.pane, run.bootstrap.host_config_pane, selected_records',1,true)~=nil,'only the plan\'s records, never the whole roster, are captured for preparation')
+ check(window:find('Not checked (no paid check was disclosed)',1,true)~=nil,'the owner is told which native accounts were not checked')
+end)
+pause()
+section('disclosed prepare action',function()
+ state.intents={}
+ local omp={id='omp-a',provider='OMP',account_label='Work',backend='native-agent',command='omp',arguments={},enabled=true,placement='tab',cwd='/fixture',prompt='Begin.',model='model-x'}
+ pause()
+ check(A.edit(state.binding,state.snapshot.config_revision,'replace-records',{records={omp}}),'seed one unprepared native OMP account')
+ pause()
+ definition.event(state,{ev='action',act='refresh'},cx)
+ pause()
+ local rows=rows_of('setup')
+ local action=rows['setup-managed']
+ check(action~=nil and action.control.k=='action','the single Prepare action is offered for the native account')
+ local hint=(action and action.hint or '')
+ check(action~=nil and action.label:find('uses model credits',1,true)~=nil,'the label says the click uses model credits')
+ check(hint:find('Work',1,true)~=nil and hint:find('model-x',1,true)~=nil and hint:find('credits',1,true)~=nil and hint:find('not a sandbox',1,true)~=nil,'the hint names the account, model, credits and sandbox before the click')
+ local terminal={id='term-a',provider='custom',account_label='term-a',backend='local-terminal',command='ordinary-cli',arguments={},enabled=true,placement='tab',cwd='/fixture'}
+ pause()
+ check(A.edit(state.binding,state.snapshot.config_revision,'replace-records',{records={terminal}}),'seed a terminal-only roster')
+ pause()
+ definition.event(state,{ev='action',act='refresh'},cx)
+ pause()
+ action=rows_of('setup')['setup-managed']
+ check(action~=nil and action.label=='Prepare agents for ORCH+' and action.hint:find('credits',1,true)==nil and action.hint:find('offline',1,true)~=nil,'terminal-only work stays offline and mentions no credits')
+end)
+pause()
+section('stale preparation',function()
+ local base={id='prep-c',provider='custom',account_label='prep-c',backend='local-terminal',command='ordinary-cli',arguments={},enabled=true,placement='tab',cwd='/fixture',
+  mailbox={permitted_root='/mailboxes',helper_path='/tools/mailbox_target.sh',producer_helper_path='/tools/mailbox_worker.sh',worker_identity='worker',producer={read=true,write=true,hash=true,journal=true,poll=true},capabilities={'report-files-v1','worker-poll-v1','argv-v1'},wake='worker-poll-v1',verified=false,evidence_ref='fixture-unverified'}}
+ pause()
+ check(A.edit(state.binding,state.snapshot.config_revision,'replace-records',{records={base}}),'seed a record with a mailbox')
+ pause()
+ definition.event(state,{ev='action',act='refresh'},cx)
+ local agent=state.config.agents[1]
+ agent.mailbox.verified=true
+ check(rows_of('setup')['setup-managed']==nil,'a verified record with no contract change counts as prepared')
+ agent.user='someone-else'
+ pause()
+ local rows=rows_of('setup')
+ check(rows['setup-managed']~=nil and rows['setup-managed'].control.k=='action' and rows['setup-managed-state']==nil,'a saved OS account that differs from the verified worker identity is not prepared')
+ agent.user=nil
+ -- Editing a contract field of a prepared record withdraws the preparation.
+ local revision=state.snapshot.config_revision
+ pause()
+ definition.event(state,{ev='change',item='agent:prep-c:cwd:'..revision,value='/fixture/other'},cx)
+ pause()
+ local saved_record=A.snapshot(state.binding).records[1]
+ check(saved_record.cwd=='/fixture/other' and saved_record.mailbox.verified==false,'changing a prepared record\'s folder withdraws its verification')
+ pause()
+ definition.event(state,{ev='action',act='refresh'},cx)
+ check(rows_of('setup')['setup-managed']~=nil,'the withdrawn preparation is offered again as missing work')
 end)
 assert(#failures==0,'guided_setup FAILED sections: '..table.concat(failedSections,', ')..' || '..(table.concat(failures,' | '):gsub('[%c"]',' ')))
 return 'PASS guided_setup '..checks

@@ -1378,9 +1378,14 @@ if section==nil or section=='window' then
     if opts.root=='main.spawn-managed-route' and world.route then return node('spawn-managed-route','spawn.managed.route',runtime.json.encode(world.route))end
     if opts.root=='main.spawn-setup-result' and b.selected==world.job.id and world.pending then
      world.result_read_limit=opts.max_chars
+     -- Numbered reads let a test change the source at an exact stage of the automatic save:
+     -- 1 = result collection, 2 = the commit's own source check (before capture),
+     -- 3 = the dispatch preflight (after capture, while the import waits to be sent).
+     world.result_reads=(world.result_reads or 0)+1
+     local hook=if world.result_hooks then world.result_hooks[world.result_reads] else nil
+     if hook then world.result_hooks[world.result_reads]=nil;hook() end
      local result=node('spawn-setup-result','spawn.setup.result',world.pending)
      if world.clipped_result then result.more=1 end
-     if world.after_result_read then local hook=world.after_result_read;world.after_result_read=nil;hook() end
      return result
     end
     return nil
@@ -1477,6 +1482,7 @@ if section==nil or section=='window' then
        local decoded=assert(load_pure('config').decode_setup_json(world.pending))
        local review=assert(load_pure('setup_review').prepare(decoded,r.data.setup_run_id))
        a.records=review.records;a.config_revision+=1;world.job.setup_consumed=true;world.imports=(world.imports or 0)+1;result={imported=#review.records}
+       if world.after_import then local hook=world.after_import;world.after_import=nil;hook() end
       elseif r.op=='discard_setup_result' then
        assert(r.data.confirmed==true and r.data.attempt_id==world.job.id and r.data.setup_run_id==world.job.setup_run_id and r.data.pending_digest==world.job.pending_digest and not world.job.setup_consumed)
        world.job.setup_consumed=true;world.job.setup_discarded=true;world.discards=(world.discards or 0)+1;result={discarded=true}
@@ -1822,7 +1828,7 @@ if section==nil or section=='window' then
   elseif mutation=='run' then world.job.setup_run_id='different-run'
   elseif mutation=='binding' then world.job.setup.binding='different-binding'
   -- Changes only after the result was read and reviewed, so the commit's exact-source fence must catch it.
-  elseif mutation=='attempt-sequence' then world.after_result_read=function()world.attempt.sequence+=1 end
+  elseif mutation=='attempt-sequence' then world.result_hooks={[1]=function()world.attempt.sequence+=1 end}
   elseif mutation=='bytes' then world.pending=world.pending:gsub('ordinary%-cli','differentcli')
   elseif mutation=='consumed' then world.job.setup_consumed=true
   elseif mutation=='duplicate' then world.duplicate_agent=true
@@ -1834,6 +1840,62 @@ if section==nil or section=='window' then
   -- The helper's approval is the only one: a changed source is refused before the automatic save.
   review(world,view,pane,mutate)
   check(#view.picks==0 and world.imports==nil and #world.authority.records==0 and world.starts==1 and #world.requests==4,'automatic save rechecks a changed source before any import request: '..mutation)
+ end
+ -- The same fences, but changed AFTER a successful capture, while the saved import still waits
+ -- to be dispatched: the preflight must refuse it, nothing is saved or prepared, and the captured
+ -- approval is cancelled (a fresh review of the restored source can then be captured again).
+ do
+  local late={
+   {'attempt-sequence',2,function(w)local old=w.attempt.sequence;w.attempt.sequence+=1;return function()w.attempt.sequence=old end end},
+   {'native-pane',2,function(w)local old=w.job.native_pane;w.job.native_pane=7002;return function()w.job.native_pane=old end end},
+   {'sdk-pane',2,function(w)local old=w.job.setup.agent_pane;w.job.setup.agent_pane=902;return function()w.job.setup.agent_pane=old end end},
+   {'run',2,function(w)local old=w.job.setup_run_id;w.job.setup_run_id='different-run';return function()w.job.setup_run_id=old end end},
+   {'binding',2,function(w)local old=w.job.setup.binding;w.job.setup.binding='different-binding';return function()w.job.setup.binding=old end end},
+   {'consumed',2,function(w)w.job.setup_consumed=true;return function()w.job.setup_consumed=false end end},
+   {'delivery-error',2,function(w)w.agents[901].delivery_error='native delivery failed';return function()w.agents[901].delivery_error=nil end end},
+   {'bytes',3,function(w)local old=w.pending;w.pending=w.pending:gsub('ordinary%-cli','differentcli');return function()w.pending=old end end},
+  }
+  for _,case in ipairs(late)do
+   local name,read,apply=case[1],case[2],case[3]
+   local world,view,pane=setup_world();submit(world)
+   local restore
+   world.result_hooks={[read]=function()restore=apply(world)end}
+   review(world,view,pane)
+   check(restore~=nil,'the late change was applied after a successful capture: '..name)
+   check(world.imports==nil and #world.authority.records==0 and world.preparation_calls==nil and #view.picks==0,'late source change is refused before the import is dispatched: '..name)
+   restore();world.result_hooks=nil;world.result_reads=0
+   review(world,view,pane);view.round(4)
+   check(world.imports==1 and world.preparation_calls==1,'the cancelled approval does not block a fresh capture of the restored source: '..name)
+  end
+  -- The native window changes after the capture, before the dispatch is accepted.
+  local moved,movedView,movedPane=setup_world();submit(moved)
+  moved.result_hooks={[2]=function()movedView.cx.window_key=function()return 'different-native-window'end end}
+  review(moved,movedView,movedPane)
+  check(moved.imports==nil and moved.preparation_calls==nil,'a window change after capture refuses the dispatch and never reaches preparation')
+  movedView.cx.window_key=function()return 'win' end
+  moved.result_hooks=nil;moved.result_reads=0
+  review(moved,movedView,movedPane);movedView.round(4)
+  check(moved.imports==1 and moved.preparation_calls==1,'the window-change refusal cancelled its captured approval, so a fresh review can capture again')
+  -- The window changes after the save, before preparation starts: saved, never retargeted.
+  local after,afterView,afterPane=setup_world();submit(after)
+  after.after_import=function()afterView.cx.window_key=function()return 'different-native-window'end end
+  review(after,afterView,afterPane);afterView.round(4)
+  check(after.imports==1 and after.preparation_calls==nil,'a window change after the save never retargets the captured preparation')
+  -- A native account the helper did not disclose a paid check for is saved but never prepared.
+  local scoped,scopedView,scopedPane=setup_world()
+  local omp=spawn_record('omp-a');omp.provider='OMP';omp.backend='native-agent';omp.command='omp';omp.prompt='Begin.'
+  local function submit_scope(world,paid)
+   local value={schema=2,setup_run_id=world.job.setup_run_id,confirmed=true,agents={spawn_record('reviewed'),omp}}
+   if paid then value.paid_checks=paid end
+   world.pending=runtime.json.encode(value)
+   world.job.pending_bytes=#world.pending;world.job.pending_digest=load_pure('wire/codec').sha256(world.pending);world.job.setup_consumed=false
+  end
+  submit_scope(scoped,nil);review(scoped,scopedView,scopedPane);scopedView.round(4)
+  local ids={};for _,entry in ipairs(scoped.preparation_input and scoped.preparation_input.entries or {})do table.insert(ids,entry.record_id)end
+  check(scoped.imports==1 and #scoped.authority.records==2 and #ids==1 and ids[1]=='reviewed','an undisclosed native account is saved but not part of the automatic preparation')
+  local disclosed,disclosedView,disclosedPane=setup_world();submit_scope(disclosed,{'omp-a'});review(disclosed,disclosedView,disclosedPane);disclosedView.round(4)
+  ids={};for _,entry in ipairs(disclosed.preparation_input and disclosed.preparation_input.entries or {})do table.insert(ids,entry.record_id)end
+  check(disclosed.imports==1 and #ids==2,'a native account the helper listed in paid_checks is prepared with the roster')
  end
  local automatic,automaticView,automaticPane=setup_world();submit(automatic)
  automatic.focus=901;automaticView.round(4)

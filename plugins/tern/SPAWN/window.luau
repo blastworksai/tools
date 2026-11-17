@@ -1374,11 +1374,19 @@ local function commit_setup(cx: any, run: any, pending: any, action: string, pla
 		if skip_preparation == nil then
 			local begin_required = latest.setup.state == "not_started" or latest.setup.state == "dismissed"
 			local capture_error
-			captured, capture_error = ManagedRoute.capture_reviewed(cx, run.origin.pane, run.bootstrap.host_config_pane, pending.review.records, latest.config_revision + (if added then 1 else 0), begin_required, route_hooks)
+			-- Only the plan's records: a native account the helper did not disclose a paid
+			-- model check for is saved but never checked here.
+			local selected_records = {}
+			local chosen: { [string]: boolean } = {}
+			for _, id in ipairs(plan.prepare_ids) do chosen[id] = true end
+			for _, record in ipairs(pending.review.records) do
+				if record.enabled and chosen[record.id] then table.insert(selected_records, record) end
+			end
+			captured, capture_error = ManagedRoute.capture_reviewed(cx, run.origin.pane, run.bootstrap.host_config_pane, selected_records, latest.config_revision + (if added then 1 else 0), begin_required, route_hooks)
 			if not captured then skip_preparation = tostring(capture_error) end
 		end
 		if skip_preparation ~= nil then
-			plan = { action = "save_only", enabled = plan.enabled, native = plan.native, reason = "Preparation could not start: " .. skip_preparation }
+			plan = { action = "save_only", enabled = plan.enabled, native = plan.native, withheld = plan.withheld, prepare_ids = {}, reason = "Preparation could not start: " .. skip_preparation }
 			cx:toast("error", "SPAWN", "Preparation did not start (" .. skip_preparation .. "). Saving your approved agents anyway; use Prepare agents for ORCH+ afterwards.")
 		end
 	end
@@ -1413,13 +1421,14 @@ end
 local function review_setup(cx: any, run: any, pending: any)
 	local Review = require("./setup_review")
 	run.reviewing = true
-	local plan = Review.automatic_plan(pending.review.records)
+	local plan = Review.automatic_plan(pending.review.records, pending.review.paid_checks)
 	if plan.action == "prepare" then
 		local scope = ""
 		if #plan.native > 0 then scope = " The helper's approval disclosed one harmless model message each for: " .. table.concat(plan.native, ", ") .. ". May cost credits; not a sandbox." end
+		if #plan.withheld > 0 then scope ..= " Not checked (no paid check was disclosed): " .. table.concat(plan.withheld, ", ") .. ". Use Prepare agents for ORCH+ to review its cost and run it." end
 		cx:toast("info", "SPAWN", "Saving " .. tostring(plan.enabled) .. " approved agents, then preparing and verifying them. No further click is needed." .. scope)
 	else
-		cx:toast("info", "SPAWN", "Saving your approved agents without preparation: " .. tostring(plan.reason) .. ".")
+		cx:toast("info", "SPAWN", "Saving your approved agents without preparation: " .. tostring(plan.reason) .. "." .. (if #plan.withheld > 0 then " Not checked: " .. table.concat(plan.withheld, ", ") .. "; Prepare agents for ORCH+ shows its cost first." else ""))
 	end
 	commit_setup(cx, run, pending, plan.action, plan)
 end

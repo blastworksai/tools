@@ -439,10 +439,21 @@ local function child(row)
 	row.indent=1
 	return row
 end
+local managed_candidates,native_check_scope
+-- Preparation counts only while it still matches the record's launch/account contract.
+-- Editing a contract field of a prepared record invalidates it (see update_record); a
+-- saved OS account that no longer matches the verified worker identity is stale too.
+local CONTRACT_FIELDS={provider=true,backend=true,command=true,arguments=true,cwd=true,host=true,user=true,key_path=true,prompt=true}
+local function preparation_current(record)
+	local mailbox=record.mailbox
+	if type(mailbox)~="table" or mailbox.verified~=true then return false end
+	if type(record.user)=="string" and record.user~="" and record.backend~="ssh-command" and record.user~=mailbox.worker_identity then return false end
+	return true
+end
 local function unprepared_ids(state)
 	local ids={}
 	for _,record in ipairs(state.config.agents) do
-		if record.enabled and not (type(record.mailbox)=="table" and record.mailbox.verified==true) then table.insert(ids,record.id) end
+		if record.enabled and not preparation_current(record) then table.insert(ids,record.id) end
 	end
 	return ids
 end
@@ -545,7 +556,7 @@ local function prepare_manual_review(state,revision)
 	state.import_review=nil
 	local payload,err=Config.decode_setup_json(state.import_text)
 	if not payload or type(payload)~="table" or payload.schema~=2 or type(payload.agents)~="table" then state.notice=err or "Expected current-schema {schema:2,agents:[...]} JSON";return end
-	for key in pairs(payload) do if key~="schema" and key~="agents" and key~="setup_run_id" and key~="confirmed" then state.notice="Unexpected setup JSON field: "..tostring(key);return end end
+	for key in pairs(payload) do if key~="schema" and key~="agents" and key~="setup_run_id" and key~="confirmed" and key~="paid_checks" then state.notice="Unexpected setup JSON field: "..tostring(key);return end end
 	if payload.setup_run_id~=nil or payload.confirmed~=nil then
 		if type(payload.setup_run_id)~="string" or #payload.setup_run_id==0 or #payload.setup_run_id>256 or payload.setup_run_id:find("%c") or payload.confirmed~=true then state.notice="Guided setup recovery requires a valid setup_run_id and confirmed:true; otherwise paste a manual schema/agents object";return end
 	end
@@ -588,9 +599,29 @@ local function setup_sections(state)
 	if #state.config.agents>0 then
 		local missing=unprepared_ids(state)
 		if #missing>0 then
-			local prepare=action_row("setup-managed","Prepare agents for ORCH+",action(state,"managed-prepare-missing"),tostring(#missing).." saved agent(s) still need preparation. Already prepared agents are reused, not repeated. Terminal checks are offline; native checks disclose model costs.")
-			if state.managed_busy or (state.managed_batch and state.managed_batch.status~="completed" and state.managed_batch.status~="failed") then prepare.disabled="Setup is already running." end
-			table.insert(rows,prepare)
+			-- The one action names exactly what a click may run, before the click.
+			local candidates,blocked=managed_candidates(state,true,missing)
+			local scopes={}
+			if candidates then
+				for _,candidate in ipairs(candidates) do
+					if candidate.draft.backend=="native-agent" then table.insert(scopes,native_check_scope(candidate.draft)) end
+				end
+			end
+			if not candidates then
+				table.insert(rows,static_row("setup-managed","Prepare agents for ORCH+","Setup required",tostring(blocked)))
+			else
+				local label="Prepare agents for ORCH+"
+				local hint=tostring(#missing).." saved agent(s) still need preparation. Already prepared agents are reused, not repeated."
+				if #scopes>0 then
+					label..=" — uses model credits"
+					hint..=" Paid native checks, one harmless model message each: "..table.concat(scopes," | ").." May cost model credits; not a sandbox. Other agents are checked offline."
+				else
+					hint..=" All checks are offline; no model is called."
+				end
+				local prepare=action_row("setup-managed",label,action(state,"managed-prepare-missing"),hint)
+				if state.managed_busy or (state.managed_batch and state.managed_batch.status~="completed" and state.managed_batch.status~="failed") then prepare.disabled="Setup is already running." end
+				table.insert(rows,prepare)
+			end
 		else
 			table.insert(rows,text_row("setup-managed-state","Agents prepared for ORCH+","All saved agents are prepared","Preparation is current. Nothing more to click.","Already prepared"))
 		end
@@ -688,7 +719,7 @@ end
 local function managed_record_idle(state,id)
 	return Authority.record_preparation_available(state.host_key,id)
 end
-local function managed_candidates(state,all,selected)
+function managed_candidates(state,all,selected)
 	local candidates={}
 	local function add(draft,existing)
 		if draft.preparation_error then return nil,draft.account_label..": "..draft.preparation_error end
@@ -722,7 +753,7 @@ local function managed_candidates(state,all,selected)
 	if #candidates==0 then return nil,if all and #state.config.agents>0 then "No enabled agents are selected. Choose an agent and use Enable agent before preparation." else "Save at least one agent, or review a new agent's settings first." end
 	return candidates
 end
-local function native_check_scope(draft)
+function native_check_scope(draft)
 	local source=draft.source_record or {}
 	return draft.provider.." — "..draft.account_label.." (model: "..tostring(source.model or "saved CLI settings/default")..(if source.profile then "; profile: "..source.profile else "").."; existing account: "..(if draft.user~="" then draft.user else "current OS account").."; arguments: "..(if draft.arguments~="" then draft.arguments else "none")..")"
 end
@@ -1333,6 +1364,15 @@ local function view(state,cx)
 	end
 	return {main=ui.col(children)}
 end
+-- A prepared record whose launch/account contract changed is no longer prepared: the
+-- verification was made for the old contract, so it is withdrawn, never silently kept.
+local function withdraw_stale_preparation(old,new)
+	if type(new.mailbox)~="table" or new.mailbox.verified~=true then return false end
+	for field in pairs(CONTRACT_FIELDS) do
+		if not Dispatch.protocol.equal(old[field],new[field]) then new.mailbox.verified=false;return true end
+	end
+	return false
+end
 local function update_record(state,cx,id,field,value,revision)
 	local record,index=record_by_id(state,id);if not record then return end
 	if field=="json" then
@@ -1344,6 +1384,7 @@ local function update_record(state,cx,id,field,value,revision)
 		if canonical.id~=id then state.notice="Stable ids are immutable; full-record JSON must keep this record's ID";return end
 		if Dispatch.protocol.equal(canonical,record) then state.notice="Record unchanged. No agents were launched.";return end
 		if canonical.mailbox and (canonical.mailbox.verified==true or canonical.mailbox.evidence_ref~=nil) and not Dispatch.protocol.equal(canonical.mailbox,record.mailbox) then state.notice="Managed readiness cannot be supplied by JSON. Use Prepare agents for ORCH+; unchanged previously verified helpers are preserved.";return end
+		withdraw_stale_preparation(record,canonical)
 		canonical.review_required=true
 		canonical.review_reason=record.review_reason or "Review all launch, mailbox and selector settings after editing this record's JSON"
 		local next_records=Authority.clone(state.config.agents);next_records[index]=canonical
@@ -1360,6 +1401,7 @@ local function update_record(state,cx,id,field,value,revision)
 	candidate[field]=value
 	if field=="backend" and value~=record.backend then candidate.review_required=true;candidate.review_reason="Review this account's launch command and routing after changing launch mode" end
 	local canonical,err=Config.validate_record(candidate);if not canonical then state.notice=err;return end
+	if withdraw_stale_preparation(record,canonical) then state.notice="This agent's launch settings changed, so its ORCH+ preparation was withdrawn. Prepare agents for ORCH+ to check it again." end
 	local next_records=Authority.clone(state.config.agents);next_records[index]=canonical
 	mutate(state,cx,revision,"replace-records",{records=next_records})
 end
