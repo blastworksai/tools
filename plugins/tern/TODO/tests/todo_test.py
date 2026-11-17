@@ -839,13 +839,12 @@ class DetailedSchema(unittest.TestCase):
         self.assertEqual(states, {'done', 'active', 'pending'})  # only the leaf being worked is active
 
     def test_schema_one_block_published_before_this_change_still_parses(self):
-        # A real schema-1 block, as /opt/glitch/plans/tern-plugins-review-and-retire-cmdr.md carries.
+        # A schema-1 block, as published before this change; the committed fixture carries one.
         legacy = {'schema': 1, 'plan_id': 'plan-4d31a4dc1f2e', 'title': 'Old', 'current': None,
                   'checkpoints': [{'id': 'a', 'text': 'A', 'state': 'pending'}, {'id': 'b', 'text': 'B', 'state': 'done'}]}
         self.assertEqual(self.reader.validate(legacy), legacy)
-        real = Path('/opt/glitch/plans/tern-plugins-review-and-retire-cmdr.md')
-        if real.exists():
-            self.assertEqual(self.reader.read_plan(real)['schema'], 1)
+        fixture = Path(__file__).resolve().parent/'fixtures/schema1_plan.md'
+        self.assertEqual(self.reader.read_plan(fixture)['schema'], 1)
         self.rejects(mutated(legacy, lambda v: v['checkpoints'][0].update(tasks=[])), 'checkpoint needs')
 
     def test_template_is_a_valid_schema_two_block(self):

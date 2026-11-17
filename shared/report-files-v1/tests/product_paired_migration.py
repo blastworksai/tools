@@ -11,6 +11,7 @@ an authority, grant, peer proof or successful effect. Evidence is private.
 import copy
 import hashlib
 import json
+import os
 from pathlib import Path
 import shutil
 import tarfile
@@ -26,7 +27,9 @@ from product_scenario import TESTS, instrument, read_json, registry, trace
 
 
 LEGACY_COMMIT = '97689168b1d12c22407fbb5f8cdd025445eeb682'
-LEGACY_DIRECTORY = Path('/opt/glitch/_local/orchplus-adversarial-review-20261106')
+# Private reference data is never committed: ORCHPLUS_REFERENCE_DIR points at it. Unset, every source
+# below resolves under a path that names the missing variable, so the existing unavailable path reports why.
+LEGACY_DIRECTORY = Path(os.environ.get('ORCHPLUS_REFERENCE_DIR') or 'unavailable: ORCHPLUS_REFERENCE_DIR is not set')
 FROZEN = LEGACY_DIRECTORY/'build-c2-frozen-9768916'
 DEFAULT_ARCHIVE = LEGACY_DIRECTORY/'build-c2-9768916.tar'
 V4_FROZEN = LEGACY_DIRECTORY/'platform-completion/cp2-recovery-reference-source-20261109'

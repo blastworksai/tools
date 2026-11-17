@@ -1,6 +1,6 @@
 # rocket-fuel: full report
 
-/opt/glitch/workspaces/tools--publish-rocket-fuel/skills/rocket-fuel | retrieved 2026-11-09 | sha256 cb838e6fbce026fbcdc7b0271f4a582efe7544e5014ddb5bc7966abd539161c9
+skills/rocket-fuel | retrieved 2026-11-09 | sha256 cb838e6fbce026fbcdc7b0271f4a582efe7544e5014ddb5bc7966abd539161c9
 Run 2026-11-09_cb838e6 | Walkdown 0.3.1+blastworks.1
 Static examination only. Nothing executed. Every finding below is a location to look at; none is a verdict. Stage order; nothing is ranked.
 

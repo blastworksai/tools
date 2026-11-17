@@ -6,7 +6,7 @@
    "check": "inv.pin",
    "file": null,
    "line": null,
-   "source": "/opt/glitch/workspaces/tools--publish-rocket-fuel/skills/rocket-fuel",
+   "source": "skills/rocket-fuel",
    "hash": "cb838e6fbce026fbcdc7b0271f4a582efe7544e5014ddb5bc7966abd539161c9",
    "hash_kind": "sha256",
    "files": 4,

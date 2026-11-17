@@ -20,7 +20,8 @@ from product_c2 import (Product, additional_window, ensure_fixture_coordinator, 
 from product_c3 import EventLoss, initialize, select_runtime_cases, write_json
 from product_scenario import TESTS, registry, read_json, trace
 
-REFERENCE = Path('/opt/glitch/_local/orchplus-adversarial-review-20261106')
+# Private reference data is never committed: ORCHPLUS_REFERENCE_DIR points at it; unset, its receipts are skipped.
+REFERENCE = Path(os.environ['ORCHPLUS_REFERENCE_DIR']) if os.environ.get('ORCHPLUS_REFERENCE_DIR') else None
 OPEN = '<!-- orchplus-operator-rulings v1 -->'
 CLOSE = '<!-- /orchplus-operator-rulings v1 -->'
 QUESTION = 'Which path should this exact ruling fixture take?'
@@ -778,12 +779,16 @@ def observed_code(product, gid, code):
 
 
 def source_receipts(product):
-    sources = [TESTS/'product_rulings.py', TESTS/'ruling_worker.py', TESTS/'product_c3.py', TESTS/'product_recovery.py',
-               REFERENCE/'build-native-docs-probe.py', REFERENCE/'build-native-docs-probe-r5.json']
+    sources = [TESTS/'product_rulings.py', TESTS/'ruling_worker.py', TESTS/'product_c3.py', TESTS/'product_recovery.py']
+    if REFERENCE is None:
+        product.result['primitive_reference_scope'] = 'skipped: ORCHPLUS_REFERENCE_DIR is not set'
+    else:
+        sources += [REFERENCE/'build-native-docs-probe.py', REFERENCE/'build-native-docs-probe-r5.json']
     product.result['ruling_sources'] = {str(path): sha(path.read_bytes()) for path in sources}
-    reference = json.loads(sources[-1].read_text())
-    assert reference['passed'] and 'not integrated' in reference['scope']
-    product.result['primitive_reference_scope'] = reference['scope']
+    if REFERENCE is not None:
+        reference = json.loads(sources[-1].read_text())
+        assert reference['passed'] and 'not integrated' in reference['scope']
+        product.result['primitive_reference_scope'] = reference['scope']
     product.result['shipping_source_hashes'] = {
         str(path.relative_to(product.root)): sha(path.read_bytes())
         for package in ('ORCH+', 'SPAWN')

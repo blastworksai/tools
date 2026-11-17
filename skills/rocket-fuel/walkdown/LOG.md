@@ -1,6 +1,6 @@
 # rocket-fuel run 2026-11-09_cb838e6
 
-Source: /opt/glitch/workspaces/tools--publish-rocket-fuel/skills/rocket-fuel | channel: directory | pinned: sha256 cb838e6fbce026fbcdc7b0271f4a582efe7544e5014ddb5bc7966abd539161c9
+Source: skills/rocket-fuel | channel: directory | pinned: sha256 cb838e6fbce026fbcdc7b0271f4a582efe7544e5014ddb5bc7966abd539161c9
 Walkdown: 0.3.1+blastworks.1 | optional deps: see data/07-limits.md
 Expected context: 32,000 tokens
 Target hosts: none named
