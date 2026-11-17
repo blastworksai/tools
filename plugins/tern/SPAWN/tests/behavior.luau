@@ -226,6 +226,22 @@ for _, bad in ipairs({
 }) do
 	check(select(2, config.validate_record(bad)) ~= nil, "a record whose program name starts with - is refused at validation: " .. bad.id)
 end
+-- The leading-dash check reads sudo only up to sudo's own target, with the same parser launch uses.
+for _, good in ipairs({
+	record("printf-sep-args", { command = "sudo -n -u seat /usr/bin/printf", arguments = { "--", "-x" }, user = "seat" }),
+	record("printf-sep-literal", { command = "sudo -n -u seat -- /usr/bin/printf", arguments = { "--", "-x" }, user = "seat" }),
+	record("printf-sep-unconfigured", { command = "sudo -n -u seat /usr/bin/printf", arguments = { "--", "-x" } }),
+}) do
+	local valid, why = config.validate_record(good)
+	check(valid ~= nil, "a valid record whose target program has its own -- is accepted: " .. good.id .. " " .. tostring(why))
+end
+check(select(2, config.validate_record(record("sudo-dash-target", { command = "sudo -n -u seat -- -a", user = "seat" }))) ~= nil, "a target after sudo's own -- that starts with - is refused")
+-- `sudo -n -u seat -a`: -a is a sudo option SPAWN does not know. Validation leaves it to launch, as before; launch
+-- refuses it for a configured user and keeps the argv unchanged without one (same parser, so they cannot disagree).
+local unknown_option = record("sudo-unknown-option", { command = "sudo -n -u seat -a", user = "seat" })
+check(config.parse_sudo ~= nil and select(4, config.parse_sudo({ "-n", "-u", "seat", "-a" })) ~= nil, "the shared parser reports sudo's unknown option")
+local resolved_unknown = { record = unknown_option, executable = "sudo", arguments = { "-n", "-u", "seat", "-a" } }
+check(not load("launch_resolution").select_user(resolved_unknown, "posix", true), "launch refuses a configured user's unknown sudo option")
 local dash_guard = load("launch_resolution")
 for _, guarded in ipairs({ { executable = "sudo", arguments = { "-n", "-u", "seat", "--", "-a" }, user = "seat" }, { executable = "-a", arguments = {}, user = "seat" } }) do
 	local resolved = { record = { backend = "local-terminal", user = guarded.user }, executable = guarded.executable, arguments = table.clone(guarded.arguments) }

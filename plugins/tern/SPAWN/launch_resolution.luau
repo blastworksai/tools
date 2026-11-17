@@ -82,28 +82,8 @@ local function login_wrap(argv: {string}, at: number)
 	for index = #argv, at, -1 do argv[index] = nil end
 	for _, word in ipairs({ "/bin/sh", "-c", LOGIN_SCRIPT, "spawn-login", 'cd -- "$0" || exit 1; exec ' .. table.concat(quoted, " ") }) do table.insert(argv, word) end
 end
-local SUDO_FLAGS = { ["-H"] = true, ["-n"] = true, ["-E"] = true, ["-i"] = true, ["-s"] = true, ["-S"] = true, ["-k"] = true, ["-K"] = true, ["-b"] = true, ["-P"] = true }
--- Literal sudo argv: the selected account, the index of the target program, whether it is already a login shell.
-local function parse_sudo(argv: {string}): (string?, number, boolean, string?)
-	local selected, index, login = nil, 1, false
-	while index <= #argv do
-		local argument = argv[index]
-		if argument == "--" then index += 1; break end
-		if argument:sub(1, 1) ~= "-" then break end
-		local selector = argument:match("^%-%-user=(.+)$") or argument:match("^%-u(.+)$")
-		if argument == "-u" or argument == "--user" then index += 1; selector = argv[index] end
-		if selector ~= nil then
-			if selected ~= nil then return nil, index, login, "Configured sudo has ambiguous OS-user selectors" end
-			selected = selector
-		elseif not SUDO_FLAGS[argument] then
-			return nil, index, login, "Configured sudo identity options require review"
-		elseif argument == "-i" or argument == "-s" then
-			login = true
-		end
-		index += 1
-	end
-	return selected, index, login, nil
-end
+-- One parser for literal sudo forms, shared with record validation so the two cannot disagree.
+local parse_sudo = Config.parse_sudo
 function Resolution.select_user(resolved: any, shell: string, noninteractive: boolean?): (boolean, string?)
 	local record, executable, argv = resolved.record, resolved.executable, resolved.arguments
 	if record.backend == "ssh-command" then return true, nil end

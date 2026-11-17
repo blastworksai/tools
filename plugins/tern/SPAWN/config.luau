@@ -298,6 +298,28 @@ local function managed_fields(source: any, record: any): string?
 	return nil
 end
 
+local SUDO_FLAGS = { ["-H"] = true, ["-n"] = true, ["-E"] = true, ["-i"] = true, ["-s"] = true, ["-S"] = true, ["-k"] = true, ["-K"] = true, ["-b"] = true, ["-P"] = true }
+-- Literal sudo argv, read only up to sudo's own target (the first non-option word or the word after its `--`): the selected account, the index of the target program, whether it is already a login shell.
+function Config.parse_sudo(argv: {string}): (string?, number, boolean, string?)
+	local selected, index, login = nil, 1, false
+	while index <= #argv do
+		local argument = argv[index]
+		if argument == "--" then index += 1; break end
+		if argument:sub(1, 1) ~= "-" then break end
+		local selector = argument:match("^%-%-user=(.+)$") or argument:match("^%-u(.+)$")
+		if argument == "-u" or argument == "--user" then index += 1; selector = argv[index] end
+		if selector ~= nil then
+			if selected ~= nil then return nil, index, login, "Configured sudo has ambiguous OS-user selectors" end
+			selected = selector
+		elseif not SUDO_FLAGS[argument] then
+			return nil, index, login, "Configured sudo identity options require review"
+		elseif argument == "-i" or argument == "-s" then
+			login = true
+		end
+		index += 1
+	end
+	return selected, index, login, nil
+end
 local function normalize(source: any, legacy: boolean): (any?, string?)
 	if type(source) ~= "table" then return nil, "Record must be an object" end
 	for field in pairs(source) do
@@ -352,9 +374,9 @@ local function normalize(source: any, legacy: boolean): (any?, string?)
 				local rest = {}
 				for index = 2, #words do table.insert(rest, words[index]) end
 				for _, argument in ipairs(argv) do table.insert(rest, argument) end
-				for index, argument in ipairs(rest) do
-					if argument == "--" then target = rest[index + 1] or ""; break end
-				end
+				-- Unknown or ambiguous sudo options are launch's concern; only a target named like an option is refused here.
+				local selected, index, _, problem = Config.parse_sudo(rest)
+				target = if problem == nil and rest[index] ~= nil then rest[index] else ""
 			end
 			if target:sub(1, 1) == "-" then return nil, "The program name must not start with -" end
 		end
