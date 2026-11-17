@@ -7,6 +7,7 @@ local selection = require("./lib/host_selection")
 local plan_publish = require("./lib/plan_publish")
 local status_prompt = require("./status/status_prompt")
 local board_claim = require("./lib/board_claim")
+local settings = require("./lib/settings")
 local KIND = tern.plugin.id .. ".list"
 
 type Source = {
@@ -94,7 +95,16 @@ local function refresh(state: State, cx: BlockCx)
         end
         local decoded, envelope = pcall(tern.json.decode, result.stdout or "")
         if state.discover_pid then
-            local outcome = selection.discoveryOutcome(result.status, decoded, envelope)
+            -- Sync on and this view serves the attached session: wait for the plan instead of closing.
+            local okBound, bound = pcall(tern.kv.get, "target/" .. string.format("%.0f", state.panel))
+            local patient = settings.waitsForPublication(settings.load(tern.kv), if okBound then bound else nil)
+            local outcome = selection.discoveryStep(result.status, decoded, envelope, patient)
+            if outcome.action == "wait" then
+                state.plan = nil; publish(state, nil); state.error = outcome.message; state.failures = 0
+                redraw(state, cx)
+                tern.timer(selection.WAIT_MS, function() refresh(state, cx) end)
+                return
+            end
             if outcome.action == "none" then
                 state.finished = true; instances[state.panel] = nil
                 pcall(function() cx:toast("info", "No active plan is published for this session.") end)

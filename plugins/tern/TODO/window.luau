@@ -7,6 +7,7 @@ local plan_view = require("./lib/plan_view")
 local board_claim = require("./lib/board_claim")
 local sync_gate = require("./lib/sync_gate")
 local sync_status = require("./lib/sync_status")
+local sync_pane = require("./lib/sync_pane")
 local KIND = tern.plugin.id .. ".list"
 local TITLE = "TODO Settings"
 local SYNC_MS, RETRY_MS = 2000, 10000
@@ -53,16 +54,15 @@ local synced = sync_gate.new()
 local failedAt = -RETRY_MS
 local busy = false
 
-local syncedBoard: any = nil -- { title, path } of the board the last successful sync wrote, for the pane
-local function drawExtra(s: any, cands: { any }): any
-    return { hidden = settings.hiddenCount(s, cands), board = if settings.mode(s) == "glitch-sync" then syncedBoard else nil }
-end
+local boardMemo = sync_pane.new() -- the board this window last synced, shown only while its session is still attached
+local function drawExtra(s: any, cands: { any }): any return boardMemo.extra(s, cands) end
 local function paint(cx: any, pane: number)
     local s = settings.load(tern.kv)
     local before = settings.load(tern.kv)
     local cands = candidates(cx)
     local eligible = settings.eligible(s, cands)
     if s.attach and not settings.isEligible(s, eligible, s.attach) then s.attach = nil; settings.save(tern.kv, s, before) end
+    boardMemo.observe(s, if s.attach then true else nil)
     cx.canvas:set(pane, { view = settings.draw(tern.ui, s, eligible, syncStatus.get(), drawExtra(s, cands)) })
 end
 local function settingsPane(cx: any): number?
@@ -143,14 +143,15 @@ end
 tern.on("canvas_action", function(ev: any, cx: any): boolean?
     if ev.owner ~= tern.plugin.id or ev.title ~= TITLE then return nil end
     if ev.act == "openboard" then
-        if syncedBoard then cx.board:open(syncedBoard.path) end
+        local shown = boardMemo.boardFor(settings.load(tern.kv))
+        if shown then cx.board:open(shown.path) end
         return true
     end
     local before = settings.load(tern.kv)
     local after = settings.apply(before, ev.act, ev.value, candidates(cx))
     synced.settingsChanged(before, after)
     settings.save(tern.kv, after, before)
-    if settings.mode(after) ~= "glitch-sync" or before.attach ~= after.attach then syncStatus.set(nil); syncedBoard = nil end
+    if settings.mode(after) ~= "glitch-sync" or before.attach ~= after.attach then syncStatus.set(nil); boardMemo.forget() end
     paint(cx, ev.pane)
     changed(cx, before, after, ev.act)
     return true
@@ -163,6 +164,7 @@ local function syncTick(cx: any)
     local s = settings.load(tern.kv)
     if settings.mode(s) ~= "glitch-sync" then return end
     local target = attached(cx, s)
+    boardMemo.observe(s, target)
     local view, panel = "none", nil
     if target then view, panel = viewPanel(cx, target.pane) end
     local entry: any = nil
@@ -204,7 +206,7 @@ local function syncTick(cx: any)
             busy = false
             if ok then
                 synced.passed(key, entry.rev, gen, count, tern.now())
-                syncedBoard = { title = title, path = path }
+                boardMemo.record(target.pane, title, path)
                 syncStatus.set("Board \"" .. title .. "\" synced · " .. tostring(count) .. " change(s)")
             elseif stillOn() then
                 failedAt = tern.now(); syncStatus.set(problem)

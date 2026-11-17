@@ -82,14 +82,21 @@ function settings.hiddenCount(s: any, candidates: { any }): number
     for _, c in candidates do if c.live then live += 1 end end
     return live - #settings.eligible(s, candidates)
 end
-settings.OTHER_HOST = "This session runs on another host. Its plan stays on that host and this window cannot read it, so no board is made. Board sync works for sessions on this computer."
+settings.OTHER_HOST = "This session runs on another host. Its plan is published into that host's own plugin store, and board sync reads this window's store, so no board is made for it today."
+settings.NO_VIEW = "No plan view is open for this session. Pick the session again under Attach to to open it."
+-- Should a plan view that finds no published plan keep waiting (instead of closing with a notice)?
+-- Only when sync is on and this view serves the attached session: the plan may be published later, and the
+-- board must then start without the owner selecting the session again. `bound` = the session this view was opened for.
+function settings.waitsForPublication(s: any, bound: any): boolean
+    return settings.mode(s) == "glitch-sync" and type(bound) == "number" and s.attach == bound
+end
 -- Why sync is not producing a board right now, in plain words; nil when nothing blocks it.
 -- target: the attached candidate (or nil); view: "none" | "match" | "other"; planSeen: this window holds a valid plan.
 function settings.syncBlocker(s: any, target: any, view: string, planSeen: boolean): string?
     if not s.attach then return "Sync is on. Pick a session under Attach to; its plan goes to the board." end
     if not target then return "The attached session is no longer open. Pick another under Attach to." end
     if view == "other" then return "This tab's plan view serves another session. Select the session again in TODO Settings." end
-    if view ~= "match" then return "Waiting for this session's plan view to open." end
+    if view ~= "match" then return settings.NO_VIEW end
     if not planSeen then
         if target.remote then return settings.OTHER_HOST end
         return "Waiting for this session to publish a plan (/glitch-plan)."

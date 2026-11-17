@@ -128,7 +128,7 @@ return {
         assert(settings.syncBlocker(s, local1, "none", false):find("plan view", 1, true))
         assert(settings.syncBlocker(s, local1, "match", false):find("/glitch-plan", 1, true))
         local r = settings.syncBlocker(s, remote2, "match", false)
-        assert(r:find("another host", 1, true) and r:find("this computer", 1, true), r)
+        assert(r:find("another host", 1, true) and r:find("own plugin store", 1, true) and not r:find("never", 1, true), r)
         assert(settings.syncBlocker(s, local1, "match", true) == nil)
     end},
 }

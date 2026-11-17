@@ -240,6 +240,16 @@ function selection.new(api: SelectionApi): Resolver
     end
     return resolver
 end
+-- What the host does with one discovery answer. "none" (no plan published yet) closes the view with a
+-- notice, unless `patient`: then the view stays and asks again on the next wait tick, so a plan published
+-- later is found without the owner selecting the session again. Every other outcome is unchanged.
+selection.WAIT_MS = 5000
+selection.WAITING = "No plan is published for this session yet. This view keeps looking and opens the plan when it appears."
+function selection.discoveryStep(status: number, decoded: boolean, envelope: any, patient: boolean): any
+    local outcome = selection.discoveryOutcome(status, decoded, envelope)
+    if outcome.action == "none" and patient then return { action = "wait", message = selection.WAITING } end
+    return outcome
+end
 function selection.resolve(panel: number, window: string, alive: () -> boolean, callback: (pid: number?, problem: string?) -> ())
     return selection.new({
         native = Native,
