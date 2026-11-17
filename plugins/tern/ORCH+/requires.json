@@ -2,6 +2,6 @@
   "schema": 1,
   "tern": "0.9.10",
   "plugins": {
-    "spawn": "0.4.0"
+    "spawn": "0.8.0"
   }
 }

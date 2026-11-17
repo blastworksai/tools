@@ -1,6 +1,6 @@
 -- Exercise real conversation-window choices and one-shot submissions through native API boundaries.
 local root, section = ...
-assert(section == nil or table.find({ "conversation", "association", "projects", "creation", "presentation" }, section), "unknown conversation UI section")
+assert(section == nil or table.find({ "conversation", "association", "projects", "creation", "presentation", "selectors" }, section), "unknown conversation UI section")
 local runtime, environment = tern, getfenv()
 local checks = 0
 local function check(value, message) assert(value, message); checks += 1 end
@@ -393,6 +393,64 @@ if section == nil or section == "creation" then
 	incomplete.form.done(incomplete:context(), nil, "cancel")
 	check(incomplete.form == nil and #incomplete.events == 0, "Back from incomplete setup closes its owned form without creating or launching anything")
 end
+if section == nil or section == "selectors" then
+	-- After the owner picks an agent, optional Model and Effort fields follow, shaped by that CLI's capability table.
+	local function picked(provider, model, coordinator)
+		local f = fixture(); f.record.provider, f.record.model_variant = provider, model
+		if coordinator then f:start("start_orchestrator") else f:start("new_conversation") end
+		f:choose("project_id", "p1"); f:agent_choice()
+		return f
+	end
+	local function field(f, id) for _, row in f.form.spec.fields do if row.id == id then return row end end end
+	local function submit(f, values, action) local form = f.form; form.done(f:context(), values, action or "start") end
+	-- Claude: Model empty (saved model named in the hint), Effort limited to the CLI's verified values plus Agent default.
+	local claude = picked("claude", "claude-opus-5-5")
+	check(#claude.sent == 0 and claude.form ~= nil, "nothing launches until the optional form is answered")
+	check(field(claude, "model").value == "" and field(claude, "model").description:find("claude-opus-5-5", 1, true) ~= nil and field(claude, "effort") ~= nil, "Model starts empty, names the saved model in its hint, and Effort is offered")
+	local labels = {}
+	for _, option in field(claude, "effort").options do table.insert(labels, option.value) end
+	check(table.concat(labels, ",") == ",low,medium,high,xhigh,max" and field(claude, "effort").options[1].label == "Agent default",
+		"Effort lists Agent default and exactly the CLI's verified values: " .. table.concat(labels, ","))
+	submit(claude, { model = "", effort = "" })
+	check(#claude.sent == 1 and claude.sent[1].fields.launch_model == nil and claude.sent[1].fields.launch_effort == nil and claude.form == nil,
+		"leaving the model empty and Agent default sends no choice, so the saved settings apply")
+	local chosen = picked("claude", "claude-opus-5-5")
+	submit(chosen, { model = "  claude-sonnet-5-5 ", effort = "high" })
+	check(chosen.sent[1].fields.launch_model == "claude-sonnet-5-5" and chosen.sent[1].fields.launch_effort == "high" and chosen.sent[1].command == "queue",
+		"a changed model and an effort travel with that one queue request")
+	local effort_only = picked("claude"); submit(effort_only, { model = "", effort = "max" })
+	check(effort_only.sent[1].fields.launch_model == nil and effort_only.sent[1].fields.launch_effort == "max", "an effort alone is sent without a model")
+	-- Codex and Kimi: a model flag but no verified effort flag, so no Effort field.
+	for _, provider in { "codex", "kimi", "grok" } do
+		local f = picked(provider)
+		check(f.form ~= nil and field(f, "model") ~= nil and field(f, "effort") == nil, provider .. " shows Model and hides Effort")
+		submit(f, { model = "some-model" })
+		check(f.sent[1].fields.launch_model == "some-model" and f.sent[1].fields.launch_effort == nil, provider .. " sends only the model")
+	end
+	for _, provider in { "agy", "muse", "omp" } do
+		local f = picked(provider); check(field(f, "effort") ~= nil, provider .. " shows Effort")
+	end
+	-- An orchestrator start gets the same form.
+	local orchestrator = picked("omp", nil, true)
+	check(orchestrator.form.spec.title:find("Orchestrator", 1, true) ~= nil, "the orchestrator start shows the same optional form")
+	submit(orchestrator, { model = "anthropic/claude-sonnet-5-5", effort = "medium" })
+	check(orchestrator.sent[1].fields.coordinator == true and orchestrator.sent[1].fields.launch_model == "anthropic/claude-sonnet-5-5"
+		and orchestrator.sent[1].fields.launch_effort == "medium", "an orchestrator start carries its own model and effort")
+	-- Invalid choices are refused in the form; nothing is sent or substituted.
+	for _, case in { { { model = "-x", effort = "" }, "model" }, { { model = "a\nb", effort = "" }, "model" }, { { model = "", effort = "turbo" }, "effort" } } do
+		local f = picked("claude"); submit(f, case[1])
+		check(#f.sent == 0 and f.form ~= nil and f.feedback.errors[case[2]] ~= nil, "an invalid " .. case[2] .. " stays in the form with its reason and sends nothing")
+	end
+	local back = picked("claude"); submit(back, nil, "cancel")
+	check(#back.sent == 0, "Back launches nothing")
+	-- A CLI the table does not know shows no form, and a saved preferred agent keeps its zero-prompt start.
+	local unknown = picked("mystery-cli")
+	check(unknown.form == nil and #unknown.sent == 1 and unknown.sent[1].fields.launch_model == nil, "an unknown CLI starts directly with no Model or Effort field")
+	local preferred = fixture(); preferred.record.provider = "claude"
+	preferred.policy.preferred_worker_record = "preferred"
+	preferred:start("new_conversation"); preferred:choose("project_id", "p1")
+	check(preferred.form == nil and #preferred.sent == 1 and preferred.sent[1].fields.launch_model == nil, "a saved preferred agent starts without the form, on its saved settings")
+end
 if section == nil or section == "presentation" then
 	local chunk = assert(loadstring(runtime.fs.read(root .. "/tests/dispatch.luau"), "conversation-view-fixture"))
 	setfenv(chunk, setmetatable({}, { __index = environment }))
@@ -601,5 +659,25 @@ if section == nil or section == "presentation" then
 	projection.dispatch.workers[worker.worker_id] = nil
 	views.render(view, projection, "ready")
 	check(not start_offered(), "missing lifecycle evidence cannot enable duplicate coordinator startup")
+	-- The agent row shows the owner's per-launch choice as requested, never as confirmed.
+	local function row_texts(node, found)
+		found = found or {}
+		if type(node) ~= "table" then return found end
+		if type(node.t) == "string" then table.insert(found, node.t) end
+		if type(node.p) == "table" and type(node.p.text) == "string" then table.insert(found, node.p.text) end
+		for _, value in node do if type(value) == "table" then row_texts(value, found) end end
+		return found
+	end
+	local function mentions(text)
+		for _, shown in row_texts(views.render(view, projection, "ready")) do if shown:find(text, 1, true) then return true end end
+		return false
+	end
+	projection.dispatch.workflow.workers[1].requested_model, projection.dispatch.workflow.workers[1].requested_effort = nil, nil
+	check(not mentions("requested model"), "no choice: the agent row shows no requested model or effort")
+	projection.dispatch.workflow.workers[1].requested_model, projection.dispatch.workflow.workers[1].requested_effort = "m-view", "high"
+	check(mentions("requested model m-view, effort high"), "a chosen model and effort show as requested on the agent row")
+	local row_text
+	for _, shown in row_texts(views.render(view, projection, "ready")) do if shown:find("requested model", 1, true) then row_text = shown end end
+	check(row_text ~= nil and not row_text:lower():find("confirm", 1, true) and not row_text:lower():find("running on", 1, true), "the row never claims the CLI confirmed the choice")
 end
 return string.format("conversation_ui/%s: %d checks", section or "all", checks)

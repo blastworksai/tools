@@ -223,9 +223,14 @@ local function launch_request(w: any, handle: string): any
 			enrolment = { worker_id = w.worker_id, worker_generation = w.worker_generation, enrolment_token = w.enrolment_token, assignment_sha256 = w.assignment_sha256 },
 			pane_binding = clone(w.adopt_pane_binding), attestation = ADOPT_ATTESTATION }
 	end
+	-- The owner's model/effort choice for THIS launch rides only on the record it was chosen for: routing to
+	-- another record never carries it over, and a request without a choice is byte for byte unchanged.
+	local selectors = w.launch_selectors
+	local chosen = selectors ~= nil and selectors.record_id == w.record_id
 	return { schema = 2, origin = "orchplus", op = "launch", request_id = w.launch_request_id, action_id = w.launch_action_id,
 		origin_binding = clone(w.origin_binding), controller_pane = w.controller_pane, controller_generation = w.origin_binding.owner_generation,
 		record_id = w.record_id, record_revision = w.record_revision, work_id = w.work_id, prompt = w.prompt,
+		model = if chosen then selectors.model else nil, effort = if chosen then selectors.effort else nil,
 		cwd = w.execution_cwd or w.cwd, placement = if w.presentation == "user_new_tab" or w.presentation == "coordinator_adjacent"
 			or (w.presentation == "background" and w.handover_id ~= nil and w.placement == "replace_if_alone"
 				and w.selected_record and w.selected_record.backend ~= "native-agent") then "tab" else w.placement,
@@ -237,6 +242,7 @@ local function launch_request(w: any, handle: string): any
 			coordinator_owner_id = if w.coordinator_protocol == 1 then w.coordinator_owner_id else nil,
 			coordinator_generation = if w.coordinator_protocol == 1 then w.coordinator_generation else nil } }
 end
+M.launch_request = launch_request -- exported so tests can prove what a launch carries after routing changes its record
 -- `retained_reads`: an uncertain read-only action is retained evidence, not a pending effect
 -- (explicit attachment supersedes it on the attached route; see resolve_read).
 local function pending(d: any, w: any, watermark: boolean?, retained_reads: boolean?): boolean
@@ -303,7 +309,7 @@ end
 local request_fields = {
 	catalog = "cursor",
 	declare_provider_families = "record_revision declarations",
-	launch = "record_id record_revision work_id prompt cwd placement fresh mailbox_handle enrolment presentation execution_cwd",
+	launch = "record_id record_revision work_id prompt cwd placement fresh mailbox_handle enrolment presentation execution_cwd model effort",
 	adopt = "record_id record_revision work_id prompt mailbox_handle enrolment pane_binding attestation",
 	enrol = "record_id record_revision work_id prompt mailbox_handle enrolment pane_binding delivery preserve_context",
 	stop = "target_request_id target_action_id pane_binding worker_id worker_generation enrolment_token work_id",
@@ -321,6 +327,7 @@ local request_fields = {
 -- adoption `refused` result is reported before the ask), so no pane exists and no producer ever
 -- ran: its mailbox retires without a native stop when the owner cancels the work (cancel_work).
 local config: any = require("./policy_validation")
+config.selectors = require("./selectors") -- the CLI model/effort capability table, vendored from SPAWN
 local function launch_rejected(d: any, w: any, legacy: boolean?): boolean
 	local action = if legacy then d.actions[w.launch_action_id] else nil
 	local refused = w.launch_refused == true or (legacy and action and action.phase == "complete" and action.response and action.response.status == "rejected")
@@ -1545,7 +1552,7 @@ end
 -- shared_acked lists the "peer:<worker>:<path>" keys of acknowledged post-launch shared_checkout
 -- gates, so a reclaimed acknowledgement is never asked again. Restore default: absent; neither
 -- is inherited by a successor (its own CHECKOUT is judged and accepted afresh).
-config.WORKER_FIELDS = "role family class template_id files scope checks source base_ref manifest_sha256 checkout check_results usage_before usage_after launch_gates review_id check_rework scope_accepted shared_acked mailbox_allocation launch_refused_op"
+config.WORKER_FIELDS = "launch_selectors role family class template_id files scope checks source base_ref manifest_sha256 checkout check_results usage_before usage_after launch_gates review_id check_rework scope_accepted shared_acked mailbox_allocation launch_refused_op"
 config.SUCCESSOR_FIELDS = { "role", "class", "template_id", "files", "scope", "checks", "source", "base_ref", "manifest_sha256", "ruling_document" }
 config.SOURCE_KINDS = { "manual", "plan", "board", "inbox", "template" }
 function config.usage(v: any): boolean return v == nil or quota.valid_usage(v) end
@@ -2521,6 +2528,13 @@ function config.valid_worker(d: any, w: any, key: any, registry: any, legacy_cat
 			if not closed(row, "id revision provider account_label model backend") or row.id ~= w.record_id or row.revision ~= w.record_revision
 				or not str(row.provider, 96) or not str(row.backend, 96) or (row.account_label ~= nil and not str(row.account_label, 160, true))
 				or (row.model ~= nil and not str(row.model, 160, true)) then return false end
+		end
+		if w.launch_selectors ~= nil then
+			local choice = w.launch_selectors
+			if type(choice) ~= "table" or not closed(choice, "record_id model effort") or not str(choice.record_id, 96)
+				or (choice.model == nil and choice.effort == nil)
+				or (choice.model ~= nil and config.selectors.model_error(choice.model) ~= nil)
+				or (choice.effort ~= nil and (not str(choice.effort, 32) or not choice.effort:match("^[a-z]+$"))) then return false end
 		end
 		if (w.orch_project_id ~= nil and not id(w.orch_project_id)) or (registry.version == 5 and not id(w.orch_project_id))
 			or (w.execution_cwd ~= nil and not rulings.absolute(w.execution_cwd))
@@ -9037,7 +9051,7 @@ function M.apply(registry: any, event: any, clock: any, reserve: any): (any?, an
 		ruling_prepare = "gate_id gate_revision writer evidence", ruling_observe = "gate_id gate_revision writer evidence",
 		ruling_reissue = "gate_id gate_revision writer evidence", ruling_remote = "gate_id gate_revision worker_id",
 		associate_document = "worker_id path evidence", close_handover = "worker_id",
-		catalog = "bytes decision_context", queue = "record_id record_revision catalog_revision prompt cwd placement coordinator role class template_id files scope checks source base_ref orch_project_id presentation execution_cwd open_conversation",
+		catalog = "bytes decision_context", queue = "record_id record_revision catalog_revision prompt cwd placement coordinator role class template_id files scope checks source base_ref orch_project_id presentation execution_cwd open_conversation launch_model launch_effort",
 		enrol = "record_id record_revision catalog_revision orch_project_id pane_binding delivery",
 		new_project = "name source decision_context", project_start = "orch_project_id project_revision decision_context checks_reviewed",
 		project_start_retry = "orch_project_id start_id project_revision decision_context",
@@ -9691,9 +9705,23 @@ function M.apply(registry: any, event: any, clock: any, reserve: any): (any?, an
 		if event.presentation ~= nil and not table.find({ "user_new_tab", "coordinator_adjacent", "background" }, event.presentation) then return fail("invalid_task", "Unsupported conversation presentation.") end
 		if event.open_conversation ~= nil and (event.open_conversation ~= true or event.coordinator or event.prompt ~= codec.OPEN_CONVERSATION_ASSIGNMENT
 			or event.presentation ~= "user_new_tab") then return fail("invalid_task", "Opening a conversation uses only the canonical enrollment assignment in a new tab.") end
+		-- Owner's model/effort for THIS launch only. Same rules as SPAWN's saved fields (one shared table); an
+		-- invalid choice is refused here, never replaced. SPAWN re-validates it and never edits the saved record.
+		local launch_model, launch_effort = event.launch_model, event.launch_effort
+		if launch_model ~= nil or launch_effort ~= nil then
+			local choices = config.selectors.picker_choices(selected.provider)
+			local why = nil
+			if choices == nil then why = "This agent's CLI has no model or effort setting to choose."
+			else
+				if launch_model ~= nil then why = config.selectors.model_error(launch_model) end
+				if why == nil and launch_effort ~= nil then why = config.selectors.effort_error(choices.key, launch_effort) end
+			end
+			if why ~= nil then return fail("invalid_task", why .. " Nothing was started.") end
+		end
 		if count(d.workers) >= 32 then return fail("full", "Managed generation capacity is full; no unresolved worker was removed.") end
 		local w = config.new_worker(d, event, event.orch_session_id, selected, event.prompt, event.request_id .. ":", if event.coordinator then "coordinator" else "builder")
 		if event.coordinator then w.project_start_protocol = 1 end
+		if launch_model ~= nil or launch_effort ~= nil then w.launch_selectors = { record_id = w.record_id, model = launch_model, effort = launch_effort } end
 		if event.execution_cwd ~= nil and (not w.execution_cwd or event.execution_cwd ~= w.execution_cwd) then return fail("repository_unverified", "Execution cwd must equal this project's host-verified checkout.") end
 		w.open_conversation = event.open_conversation
 		config.bind_family(d, w) -- Declared family of the requested record; recomputed if routing selects another.
@@ -10684,6 +10712,8 @@ function M.project(registry: any, session_id: string, origin_nonce: string, curr
 				selected_record = clone(w.selected_record), provider = if w.selected_record then w.selected_record.provider else nil,
 				account_label = if w.selected_record then w.selected_record.account_label else nil,
 				model = if w.selected_record then w.selected_record.model else nil, backend = if w.selected_record then w.selected_record.backend else nil,
+				requested_model = if w.launch_selectors and w.launch_selectors.record_id == w.record_id then w.launch_selectors.model else nil,
+				requested_effort = if w.launch_selectors and w.launch_selectors.record_id == w.record_id then w.launch_selectors.effort else nil,
 				cwd = w.cwd, placement = w.placement, execution_cwd = w.execution_cwd, presentation = w.presentation,
 				origin_binding = clone(control_origin(w)), pane_binding = clone(control_binding(w)),
 				launch_origin_binding = clone(w.origin_binding), launch_pane_binding = clone(w.pane_binding),

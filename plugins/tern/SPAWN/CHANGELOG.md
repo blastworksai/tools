@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.8.0
+
+- **A launch can carry its own model and effort.** The managed `launch` request now accepts optional `model` and `effort` (ORCH+ 0.7.0 sends them when the owner chooses them for one start). They follow the 0.7.0 rules exactly: the model is an exact id and becomes a flag as an explicit selector, an effort comes only from the CLI's verified list, and the CLI is the program the fresh launch runs (sudo unwrapped; a provider naming another CLI, or an unknown program, is refused). The launch's arguments are built from a copy of the record; the saved record is never edited, and a request without either field launches byte for byte as before.
+- An override whose flag already sits in the program's option region (before its own `--`) is refused, never silently dropped: the typed flag would win. A refusal names the reason and nothing is reserved or started.
+- Wire: only `launch` gains the two optional fields. An older SPAWN refuses such a request as an invalid schema instead of ignoring the fields.
+
 ## 0.7.0
 
 - **Choose the model and the effort per agent.** An agent's model and a new `effort` field now reach the CLI's argv, derived from one per-CLI capability table (`selectors.luau`). Set them on **Agent settings** (a Model text box, and an Effort drop-down for CLIs that have one) or on the **Setup** form. Nothing chosen adds no flag: a record without them launches byte for byte as before.

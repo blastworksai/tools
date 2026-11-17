@@ -159,6 +159,8 @@ The flags are derived from `model` and `effort` through one table (`selectors.lu
 | muse | `--model <id>` | `--reasoning-effort`: none, minimal, low, medium, high, xhigh, max, ultra |
 | omp | `--model=<id>` | `--thinking=`: off, minimal, low, medium, high, xhigh, max, auto |
 
+A managed launch from ORCH+ may carry its own `model` and/or `effort` for that one start. They are checked by the same table and rules, replace the saved value for that launch only, and never change the saved record. A typed flag in the saved arguments makes the override impossible, so it is refused.
+
 A native OMP fresh default may carry `model` and `effort`; `profile` is still refused there. The CLI is the program the launch runs (ordinary and fresh each; a literal `sudo` form is unwrapped), never the provider label. A provider and a program naming different CLIs, or an unknown program, are refused when model or effort is set.
 
 Advanced manual import example (**Agent settings → Advanced → Setup → Paste setup JSON**):

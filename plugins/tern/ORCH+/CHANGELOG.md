@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.7.0
+
+- **Choose the model and the effort when you start an orchestrator or an agent.** After you pick an agent in the compact picker, an optional form offers **Model** (an exact id; starts empty and names the agent's saved model in its hint) and **Effort** (that CLI's verified values plus **Agent default**; no Effort field for a CLI without a verified effort flag). Nothing chosen starts the agent exactly as before, on its saved settings.
+- The choice rides on that one launch request (new optional `model` and `effort` on a `launch`; no other request changes). SPAWN 0.8.0 checks it with the same rules as the saved fields, builds that launch's arguments from it and never edits the saved agent. An invalid choice is refused, never replaced. An older SPAWN refuses such a request as an invalid schema, so this ORCH+ now requires SPAWN 0.8.0.
+- The agent row shows the choice as "requested": it is not proof the CLI used it.
+- The CLI table is read from SPAWN's `selectors.luau` through a vendored copy (`shared/report-files-v1/sync.py` keeps the two identical).
+- Not covered: an agent saved as the preferred orchestrator or worker still starts without the form; a rollover successor and a quota-routed substitute start on their record's saved settings.
+
 ## 0.6.2
 
 - A saved store whose board path is longer than 512 bytes loads again; the 512-byte limit applies only when the board path is changed, so other settings still save (SKILLS-181).

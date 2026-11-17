@@ -485,6 +485,13 @@ local function launch_prepare(root,entry,binding,snapshot)
  local r=entry.request
  local record,caps,brief=enrolment_brief(root,r,snapshot)
  if not record then return finish(root,entry,P.reject(r,caps,brief),false) end
+ -- A per-launch model/effort override applies to a COPY of the record: the saved record is never edited,
+ -- and an override the CLI table refuses is rejected, never replaced by another value.
+ if r.model~=nil or r.effort~=nil then
+  local copy,why=Config.override_record(record,r.model,r.effort)
+  if not copy then return finish(root,entry,P.reject(r,'unsupported_capability',why),false) end
+  record=copy
+ end
  local built,build_error=Backend.build(record,snapshot,{fresh=true,prompt=brief,cwd=r.cwd,placement=r.placement})
  if not built then return finish(root,entry,P.reject(r,'unsupported_capability',build_error),false) end
  entry.launch=built;entry.identity=identity(record);entry.capabilities=caps;entry.binding=P.clone(binding)

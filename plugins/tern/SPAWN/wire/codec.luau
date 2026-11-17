@@ -1209,6 +1209,10 @@ local function request_schema(r: any, shapes: any): (boolean, string?)
 			required.cwd, required.placement, required.fresh = bounded(2048), enum("tab", "split", "replace_if_alone"), yes
 			optional.presentation = enum("user_new_tab", "coordinator_adjacent", "background")
 			optional.execution_cwd = absolute
+			-- Per-launch model/effort override. Present only when the owner chose one; a request without
+			-- either is byte for byte what it was. SPAWN applies the CLI capability table to both.
+			optional.model = function(v: any): boolean return bounded(200)(v) and not v:find("%c") and v:sub(1, 1) ~= "-" end
+			optional.effort = function(v: any): boolean return bounded(32)(v) and v:match("^[a-z]+$") ~= nil end
 		elseif r.op == "enrol" then
 			required.pane_binding, required.delivery, required.preserve_context = pane, enum("native_ask", "clipboard"), yes
 		else required.pane_binding = pane; required.attestation = enum("operator_verified_exact_agent_pane") end
