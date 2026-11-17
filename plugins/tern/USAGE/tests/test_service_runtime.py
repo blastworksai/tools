@@ -204,12 +204,46 @@ class RuntimeBoundaryTests(unittest.TestCase):
         venv = self._failed_pip(debian, step="venv")
         self.assertEqual(venv.state, "python_venv_unavailable")
         self.assertNotIn("apt", json.dumps(venv.public()))
+        # Windows and macOS wording: pip's own network errors and a Python without venv.
+        for wording in (b"WARNING: Retrying after connection broken by 'NewConnectionError(<pip._vendor.urllib3."
+                        b"connection.HTTPSConnection>: Failed to resolve): [Errno 11001] getaddrinfo failed'\n",
+                        b"ERROR: Could not install: [WinError 10060] A connection attempt failed\n",
+                        b"SSLError(SSLCertVerificationError(1, '[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed'))\n"
+                        b"ERROR: No matching distribution found for aiohttp==3.14.5\n",
+                        b"[Errno 8] nodename nor servname provided, or not known\n"):
+            self.assertEqual(self._failed_pip(wording).state, "dependency_network_failed", wording)
+        self.assertEqual(self._failed_pip(b"/x/python.exe: No module named venv\n", step="venv").state,
+                         "python_venv_unavailable")
         self.assertEqual(self._failed_pip(b"something unknown").state, "dependency_install_failed")
         self.assertEqual(self._failed_pip(None).state, "dependency_install_failed")
         # Only a package pin shape ever becomes a field.
         hostile = self._failed_pip(b"No matching distribution found for x;rm -rf /\n")
         self.assertEqual(hostile.public().get("package"), "x")
         self.assertFalse((self.root / "state.sqlite3").exists())
+
+    def test_a_refused_environment_rename_is_a_named_install_failure(self):
+        # Windows refuses os.replace while a scanner holds a file in the new environment.
+        private_directory(self.root)
+        stamp = runtime.source_stamp()
+        release = runtime._stage_release(self.root, runtime._sources(PACKAGE), stamp)
+        real_replace = os.replace
+
+        def refuse_environment(source, target, *args, **kwargs):
+            if Path(target).parent.name == "environments":
+                raise PermissionError(13, "Access is denied")
+            return real_replace(source, target, *args, **kwargs)
+
+        def fake_run(argv, **kwargs):
+            if "venv" in argv:
+                Path(argv[-1]).mkdir(mode=0o700, exist_ok=True)
+            return subprocess.CompletedProcess(argv, 0, b"", None)
+
+        with patch.object(runtime.subprocess, "run", side_effect=fake_run), \
+                patch.object(runtime.os, "replace", side_effect=refuse_environment):
+            with self.assertRaises(runtime.RuntimeFailure) as caught:
+                runtime._stage_environment(self.root, release, stamp, True)
+        self.assertEqual(caught.exception.state, "dependency_install_failed")
+        self.assertEqual(list((self.root / "environments").iterdir()), [])
 
     def test_no_console_detached_spawn_options_on_current_platform(self):
         options = runtime.detached_options()

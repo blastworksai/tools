@@ -209,7 +209,8 @@ local function candidates(): ({ { string } }?, string?)
 		end
 		return nil, "invalid_request"
 	end
-	if os == "macos" then return { { "python3" }, { "/opt/homebrew/bin/python3" }, { "/usr/local/bin/python3" } }, nil end
+	if os == "macos" then return { { "python3" }, { "/opt/homebrew/bin/python3" }, { "/usr/local/bin/python3" },
+		{ "/Library/Frameworks/Python.framework/Versions/Current/bin/python3" } }, nil end
 	if os == "linux" then return { { "python3" } }, nil end
 	local paths = { { "py", "-3" }, { "python3" }, { "python" } }
 	-- Standard python.org per-user and all-user installs work without GUI PATH.
@@ -362,10 +363,9 @@ function companion.ensure(callback: Callback, options: any?)
 		end
 	end
 	local install = options ~= nil and options.install_dependencies == true
-	-- The owner's install of the plugin is the request: the host half bootstraps once, on Linux,
-	-- the only qualified source-host platform. Setup stays the retry road.
-	if options ~= nil and options.auto_install == true and clientKind == "host" and tern.runtime.os == "linux"
-		and not autoInstallTried then
+	-- The owner's install of the plugin is the request: the host half bootstraps once per plugin
+	-- load on Linux, Windows and macOS (an unsupported OS fails in candidates()). Setup stays the retry road.
+	if options ~= nil and options.auto_install == true and clientKind == "host" and not autoInstallTried then
 		autoInstallTried = true
 		install = true
 		bootstrapNote = { code = "setup_required", message = INSTALLING, specific = true }

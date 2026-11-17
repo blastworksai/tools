@@ -285,7 +285,9 @@ def _child_environment(root: Path) -> dict[str, str]:
 _PIN = r"[A-Za-z0-9][A-Za-z0-9._-]{0,60}(?:==[A-Za-z0-9.!+_-]{1,30})?"
 _NETWORK = re.compile(r"Failed to establish a new connection|Temporary failure in name resolution|"
                       r"Name or service not known|Max retries exceeded|Could not fetch URL|Network is unreachable|"
-                      r"ProxyError|SSLError|Connection (?:refused|timed out|reset)|Read timed out|ConnectTimeout", re.I)
+                      r"ProxyError|SSLError|CERTIFICATE_VERIFY_FAILED|Connection (?:refused|timed out|reset|aborted)|"
+                      r"Read timed out|ConnectTimeout|getaddrinfo failed|nodename nor servname|"
+                      r"WinError (?:10051|10053|10054|10060|10061|11001)", re.I)
 _WHEEL = (re.compile(r"No matching distribution found for (" + _PIN + ")"),
           re.compile(r"Could not find a version that satisfies the requirement (" + _PIN + ")"))
 
@@ -293,7 +295,8 @@ _WHEEL = (re.compile(r"No matching distribution found for (" + _PIN + ")"),
 def _classify_setup_failure(output: bytes | None) -> tuple[str, dict]:
     """Map a failed venv/pip child's output to a fixed state. Raw text never leaves this function."""
     text = (output or b"")[-65536:].decode("utf-8", "replace")
-    if "ensurepip" in text or "python3-venv" in text or "python3-full" in text:
+    if ("ensurepip" in text or "python3-venv" in text or "python3-full" in text
+            or "No module named venv" in text):
         return "python_venv_unavailable", {}
     if "DO NOT MATCH THE HASHES" in text:
         return "dependency_hash_mismatch", {}
@@ -342,7 +345,11 @@ def _stage_environment(root: Path, release: Path, stamp: dict, consent: bool) ->
         _run_setup([python, "-I", "-B", "-c", "import aiohttp, cryptography, tzdata"], root, 30)
         write_private(staging / "environment.json", encode({"lock_digest": stamp["lock_digest"],
                       "interpreter": _interpreter(), "installed_with": stamp}))
-        os.replace(staging, directory)
+        try:
+            os.replace(staging, directory)
+        except OSError:
+            # Windows refuses the rename while a scanner holds a file; the cause is not the network.
+            raise RuntimeFailure("setup_required", "dependency_install_failed") from None
         return name
     finally:
         if staging.exists():

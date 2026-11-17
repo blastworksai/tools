@@ -464,6 +464,30 @@ test("Windows launcher and GUI installation paths are argv not shell", function(
 	assert(#calls == 1 and calls[1].err == nil)
 end)
 
+test("Windows Store python stubs and missing interpreters end in python_required, not a hang", function()
+	local f = fixture({ os = "windows", env = { LOCALAPPDATA = "C:/Local" } })
+	local calls, done = recorder()
+	f.bridge.request("inventory", {}, done)
+	for index = 1, 8 do
+		assert(f.processes[index] ~= nil, "candidate " .. index)
+		-- The App Execution Alias stub prints "Python was not found" and exits 9009.
+		f.raw(index, "Python was not found; run without arguments to install from the Microsoft Store.", 9009)
+	end
+	f.advance(0)
+	oneError(calls, "python_required")
+end)
+
+test("macOS also tries the python.org framework install", function()
+	local f = fixture({ os = "macos" })
+	local calls, done = recorder()
+	f.bridge.request("inventory", {}, done)
+	f.raw(1, "", 1); f.raw(2, "", 1); f.raw(3, "", 1)
+	assert(f.processes[4].argv[1] == "/Library/Frameworks/Python.framework/Versions/Current/bin/python3")
+	f.probe(4, 13)
+	f.resolve(5, { ok = true })
+	assert(#calls == 1 and calls[1].err == nil)
+end)
+
 test("configured executable is validated without default fallback", function()
 	for _, configured in { "/Python With Spaces/python3", { "py", "-3" } } do
 		local f = fixture({ python = configured })
@@ -545,7 +569,7 @@ test("every companion service code keeps its own fixed message", function()
 	assert(codes >= 30, "protocol MESSAGES parsed")
 end)
 
-test("the host bootstraps once on Linux and never on another client or platform", function()
+test("the host bootstraps once per load on Linux, Windows and macOS, never for another client", function()
 	local f = fixture({ context = "host" })
 	local calls, done = recorder()
 	f.bridge.set_client("host", "host")
@@ -559,13 +583,27 @@ test("the host bootstraps once on Linux and never on another client or platform"
 	f.advance(0)
 	local last = f.processes[#f.processes]
 	assert(real.json.decode(last.opts.stdin).install_dependencies == false, "a second start never installs again")
-	for _, case in { { context = "window", os = "linux" }, { context = "host", os = "macos" }, { context = "host", os = "windows" } } do
+	for _, case in { { context = "window", os = "linux" }, { context = "window", os = "macos" }, { context = "window", os = "windows" } } do
 		local g = fixture({ context = case.context, os = case.os })
 		local _, cb = recorder()
-		g.bridge.set_client(case.context == "host" and "host" or "window:1", case.context == "host" and "host" or "window")
+		g.bridge.set_client("window:1", "window")
 		g.bridge.ensure(cb, { auto_install = true })
 		g.probe()
 		assert(real.json.decode(g.processes[2].opts.stdin).install_dependencies == false, case.os .. "/" .. case.context)
+	end
+	for _, osName in { "macos", "windows" } do
+		local g = fixture({ context = "host", os = osName, env = { LOCALAPPDATA = "C:/Local" } })
+		local gCalls, cb = recorder()
+		g.bridge.set_client("host", "host")
+		g.bridge.ensure(cb, { auto_install = true })
+		g.probe()
+		assert(real.json.decode(g.processes[2].opts.stdin).install_dependencies == true, osName .. " host installs")
+		g.resolve(2, ready())
+		assert(#gCalls == 1 and gCalls[1].err == nil, osName)
+		local _, cb2 = recorder()
+		g.bridge.ensure(cb2, { auto_install = true })
+		g.advance(0)
+		assert(real.json.decode(g.processes[#g.processes].opts.stdin).install_dependencies == false, osName .. " second start never installs")
 	end
 	local bad = fixture({ context = "host" })
 	local badCalls, badDone = recorder()
