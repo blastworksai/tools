@@ -117,10 +117,17 @@ function Selectors.duplicate(key: string?, words: { string }, model: any, effort
 end
 -- Insert flags into argv at the task slot (or the end), before any `--` that follows the
 -- program. `first` is the index where the program's own arguments start (after a sudo
--- wrapper). Returns the new argv and the task slot moved to match.
+-- wrapper). If the word just before the task slot is an option (--prompt, -p), the task is
+-- that option's value, so the flags go BEFORE that option and the pair stays adjacent. A
+-- positional task, or one after `--`, has no such option and is unchanged. Returns the new
+-- argv and the task slot moved to match.
 function Selectors.apply(argv: { string }, flags: { string }, slot: number?, first: number?): ({ string }, number?)
 	if #flags == 0 then return argv, slot end
 	local at = if slot ~= nil then slot else #argv + 1
+	if slot ~= nil and at - 1 >= (first or 1) then
+		local owner = argv[at - 1]
+		if owner:sub(1, 1) == "-" and owner ~= "--" and owner ~= "-" then at = at - 1 end
+	end
 	for index = first or 1, #argv do
 		if argv[index] == "--" then
 			if index < at then at = index end
