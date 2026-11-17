@@ -342,7 +342,7 @@ backslash or change argument boundaries. Requoting cannot soundly accommodate
 arbitrary shim programs.
 
 The unresolved qualification choice is to verify each actual installed shim's
-intact-forwarding behavior on Odin, or to use a separately reviewed native
+intact-forwarding behavior on a native Windows installation, or to use a separately reviewed native
 executable/per-shim adapter for a shim that rebuilds arguments. There is no generic
 shim-fidelity guarantee or runtime shim-content classifier today. Spaces, Unicode
 and trailing backslashes remain required native cases, not inputs to drop to make
