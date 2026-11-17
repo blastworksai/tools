@@ -1628,14 +1628,29 @@ do
   for _,node in ipairs(definition.view(panel,cx).main.children)do if node.text and node.text:sub(1,15)=='SPAWN_STATE_V2 ' then return runtime.json.decode(node.text:sub(16)) end end
  end
  local refusedState=stateNode()
- check(refusedState and type(refusedState.setup_refusal)=='string' and refusedState.setup_refusal:find('closed, moved or changed',1,true)~=nil,
-  'a refused setup submission is published in the snapshot for the Setup page: '..tostring(refusedState and refusedState.setup_refusal))
+ local mineRefusal
+ for _,entry in ipairs(refusedState and refusedState.setup_refusals or {})do if entry.binding==job.setup.binding and entry.setup_run_id==job.setup_run_id then mineRefusal=entry end end
+ check(mineRefusal and mineRefusal.setup_run_id==job.setup_run_id and mineRefusal.binding==job.setup.binding and mineRefusal.authority_id==panel.snapshot.authority_id
+  and mineRefusal.text:find('closed, moved or changed',1,true)~=nil,
+  'a refused setup submission is published in the snapshot bound to its authority, run and binding: '..tostring(mineRefusal and mineRefusal.text))
+ -- A late submission naming another run is its own entry; it never replaces or relabels this run's refusal.
+ local otherRun=clone(envelope);otherRun.setup_run_id='another-run'
+ check(submit(otherRun),'a submission naming another run is consumed')
+ local bothState=stateNode()
+ local seenMine,seenOther=false,false
+ for _,entry in ipairs(bothState.setup_refusals or {})do
+  if entry.setup_run_id==job.setup_run_id then seenMine=true elseif entry.setup_run_id=='another-run' then seenOther=true end
+ end
+ check(seenMine and seenOther,'refusals of two runs stay separate entries')
  inventory.sessions[1].tabs[1].blocks[2].command=job.setup.command
  -- The helper (OMP) may leave its launch folder after binding; that is not a different pane.
  inventory.sessions[1].tabs[1].blocks[2].cwd='/tmp/omp-auto-switched'
  check(submit() and reads==1 and panel.setup_result_attempt==job.attempt_id and #panel.snapshot.records==0,
   'explicit Config BLOCK paste accepts immutable run-bound bytes once but does not import')
- check(stateNode().setup_refusal==nil,'an accepted submission clears the published refusal')
+ local afterAccept=stateNode()
+ local leftover=false
+ for _,entry in ipairs(afterAccept.setup_refusals or {})do if entry.setup_run_id==job.setup_run_id then leftover=true end end
+ check(not leftover,'an accepted submission clears only its own published refusal')
  journalFiles[resultPath]='changed after submission'
  check(submit() and reads==1,'duplicate submission is consumed and refused without rereading the changed file')
  local pending=assert(A.setup_pending(panel.binding,job.attempt_id))

@@ -136,7 +136,7 @@ These routes run as the selected OS account, **not in a sandbox**. Labels, profi
 | `backend` | `local-terminal`, `ssh-command` or `native-agent` (Terminal, SSH terminal, Native OMP). |
 | `command`, `arguments` | The executable and its separate arguments. SPAWN never guesses a command from a label. |
 | `cwd` | Working directory (default `~`). |
-| `user` | Optional OS user; the command runs through `sudo -n -H -u <user> --` and then that account's login shell (`/bin/sh -c` script with the program and arguments as positional parameters), so its `~/.profile` PATH and tokens apply. |
+| `user` | Optional OS user; the command runs through `sudo -n -H -u <user> --` and then that account's passwd login shell (a constant `/bin/sh -c` script; the program and arguments travel as one quoted command run after the profile, in the launch folder), so its `~/.profile` PATH and tokens apply. |
 | `host`, `key_path` | SSH destination and optional key file path (never the key itself). |
 | `prompt` | OMP startup prompt. Native OMP needs a non-empty prompt. |
 | `enabled` | Whether this account can be started. There is no batch-inclusion setting. |

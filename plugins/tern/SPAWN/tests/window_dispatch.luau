@@ -1781,6 +1781,27 @@ if section==nil or section=='window' then
  check(native.starts==1 and #native.requests==4,'reload observes admitted setup without repeating native start')
  review(native,reloadView,setupPane)
  check(#reloadView.picks==0 and native.imports==nil,'finished/idle native agent with no explicit submission produces no review or import')
+ -- SKILLS-194b: a published refusal is shown only for the run, binding and authority it names.
+ do
+  local world,_,pane=setup_world()
+  local view=window(world);view.round(5)
+  local function refusalToast()
+   for _,toast in ipairs(view.toasts)do local s=tostring(toast.text)..' '..tostring(toast.sub);if s:find('SPAWN refused the helper',1,true) then return s end end
+  end
+  local function refusing(entry)
+   world.authority.extra.setup_refusals=if entry then {entry} else nil;view.toasts={}
+   review(world,view,pane);view.round(8)
+   return refusalToast()
+  end
+  local mine={authority_id=world.authority.authority_id,setup_run_id=world.job.setup_run_id,binding=world.job.setup.binding,text='Record 12: Record contains an unsupported field: startup_prompt'}
+  local function variant(field,value)local copy={};for k,v in pairs(mine)do copy[k]=v end;copy[field]=value;return copy end
+  check(refusing(nil)==nil and #view.toasts>0,'without a published refusal the generic message stands')
+  check(refusing(variant('setup_run_id','another-run'))==nil,"run A's refusal is not shown against run B")
+  check(refusing(variant('binding','another-binding'))==nil,'a refusal for another submission binding is not shown')
+  check(refusing(variant('authority_id','another-authority'))==nil,'a refusal from another authority generation is not shown')
+  local shown=refusing(mine)
+  check(shown and shown:find('startup_prompt',1,true)~=nil,'the refusal bound to this run, binding and authority is shown with its reason')
+ end
  submit(native);review(native,reloadView,setupPane)
  check(#reloadView.picks==0 and native.imports==1 and native.starts==1,'explicit immutable host submission is saved automatically with no review popup and no launch (the helper held the one approval)')
  reloadView.round(4)

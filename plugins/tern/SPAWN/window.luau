@@ -334,7 +334,12 @@ local function validate_snapshot(value: any): (any?, string?)
 	if not identity(value.host_key, 2048) or not identity(value.authority_id, 256) or not identity(value.session_key, 2048) then return nil, "Authority identity is invalid" end
 	if value.namespace ~= nil and not identity(value.namespace, 256) then return nil, "Authority namespace is invalid" end
 	if value.host_cwd~=nil and not identity(value.host_cwd,8192) then return nil,"Execution-host working folder is invalid" end
-	if value.setup_refusal~=nil and (type(value.setup_refusal)~="string" or #value.setup_refusal>600) then return nil,"Setup refusal text is invalid" end
+	if value.setup_refusals~=nil then
+		if type(value.setup_refusals)~="table" or #value.setup_refusals>8 then return nil,"Setup refusal list is invalid" end
+		for _,entry in ipairs(value.setup_refusals) do
+			if type(entry)~="table" or not identity(entry.authority_id,256) or not identity(entry.setup_run_id,256) or not identity(entry.binding,256) or type(entry.text)~="string" or #entry.text>600 then return nil,"Setup refusal is invalid" end
+		end
+	end
 	if not integer(value.config_revision) or not integer(value.attempt_revision) then return nil, "Authority revision is invalid" end
 	local records, err = Config.validate_records(value.records)
 	if records == nil then return nil, "Invalid authority roster: " .. tostring(err) end
@@ -1345,8 +1350,13 @@ local function pending_setup(cx: any, run: any, value: any?, reviewed: any?): (a
 	if job == nil then return nil, err end
 	if run.pane == nil or job.stage ~= "submitted" or job.setup_consumed ~= false or not integer(job.pending_bytes) or job.pending_bytes == 0 or type(job.pending_digest) ~= "string" then
 		-- The host recorded why it refused the helper's submission (for example a record field it does not know).
+		-- Only a refusal bound to THIS authority, run and submission binding is this run's.
 		local latest = if value ~= nil then value else snapshot(cx, run.origin)
-		if run.pane ~= nil and job.stage == "submitted" and type(latest) == "table" and type(latest.setup_refusal) == "string" then return nil, "SPAWN refused the helper's result: " .. latest.setup_refusal end
+		if run.pane ~= nil and job.stage == "submitted" and type(latest) == "table" and type(latest.setup_refusals) == "table" then
+			for _, entry in ipairs(latest.setup_refusals) do
+				if entry.authority_id == latest.authority_id and entry.setup_run_id == run.id and entry.binding == job.setup.binding then return nil, "SPAWN refused the helper's result: " .. entry.text end
+			end
+		end
 		return nil, "No complete explicit submission is available for this bound run"
 	end
 	-- Surface framing needs headroom beyond the raw result's independent byte cap.
