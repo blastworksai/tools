@@ -2,7 +2,7 @@
 
 ## 0.6.3
 
-- When USAGE is not installed, the agent picker adds one muted line under "Usage unavailable" pointing to Tern's own usage widget (widget bar, AI usage limits) and to USAGE for per-account figures. No number is shown, nothing is inferred, and quota routing stays held (SKILLS-195).
+- When Tern reports no USAGE block types (USAGE not installed), the agent picker adds one muted line under "Usage unavailable" pointing to Tern's own usage widget (widget bar, AI usage limits) and to USAGE for per-account figures. No number is shown, nothing is inferred, and quota routing stays held (SKILLS-195).
 
 ## 0.6.2
 

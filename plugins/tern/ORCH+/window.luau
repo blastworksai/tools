@@ -3692,6 +3692,13 @@ local ui_api: any = { id = dispatch_id, node = workflow_node, snapshot = snapsho
 		local origin = captured_origin or (if data then origin_now(cx, source, data) else nil)
 		return if origin then relay_endpoint(cx, source, "usage", "display", origin) else nil
 	end,
+	-- Installation evidence for USAGE: its Ready block types ("usage.*") on this window's host. nil = could not tell.
+	usage_installed = function(cx: WindowCx): boolean?
+		local ok, blocks = pcall(function() return cx.session:block_types() end)
+		if not ok or type(blocks) ~= "table" then return nil end
+		for _, block in blocks do if type(block.kind) == "string" and string.sub(block.kind, 1, 6) == "usage." then return true end end
+		return false
+	end,
 	read_surface = peer_surface,
 	capacity = function(_cx: WindowCx, source: number, origin: any, done: any)
 		start_reader(source, origin, "snapshot", nil, done)

@@ -40,11 +40,12 @@ local function bound(row: any, catalog: any, usage: any): boolean
 		and usage.host_key == catalog.host_key and usage.config_revision == catalog.config_revision
 		and (row.definition_revision == nil or usage.definition_revision == row.definition_revision)
 end
--- One muted line shown only when USAGE is not installed (no usage relay to read). It points at Tern's own
+-- One muted line shown only on installation evidence that USAGE is absent (api.usage_installed() == false, from the
+-- window's block types). A missing relay or an unanswered read is unknown, never "absent". It points at Tern's own
 -- widget and states no number: Tern gives plugins no usage read API, and usage is never inferred.
 local NATIVE_HINT = "Tern's own usage widget (widget bar › AI usage limits) shows per-provider limits. Install USAGE for per-account figures."
-local function usage_hint(text_: string, status: string): string
-	if status == "absent" and text_ == "Usage unavailable" then return text_ .. "\n" .. NATIVE_HINT end
+local function usage_hint(text_: string, installed: boolean?): string
+	if installed == false and text_ == "Usage unavailable" then return text_ .. "\n" .. NATIVE_HINT end
 	return text_
 end
 local function usage_text(row: any, index: any, readings: any, now: number, status: string): string
@@ -103,6 +104,7 @@ function M.new(api: any): any
 			return false
 		end
 		local items = {}
+		local usage_installed = if api.usage_installed then api.usage_installed(cx) else nil
 		local bound_title = s.options.pane_title
 		if s.options.pane_binding and api.pane then
 			bound_title = provider_display.pane_title(api.pane(cx, s.source, tonumber(s.options.pane_binding.pane_id), s.origin))
@@ -113,7 +115,7 @@ function M.new(api: any): any
 				local title = if s.options.pane_binding then bound_title else bound_title or (if api.agent_titles then api.agent_titles(cx, s.source, record.id, s.origin) else nil)
 				table.insert(items, { label = provider_display.name(record.provider) .. " · " .. account .. " — " .. (title or "No active pane"),
 					icon = provider_display.icon(record.provider),
-					detail = usage_hint(usage_text(record, s.index, s.readings, math.floor(os.time() * 1000), s.usage_status), s.usage_status)
+					detail = usage_hint(usage_text(record, s.index, s.readings, math.floor(os.time() * 1000), s.usage_status), usage_installed)
 						.. (if s.options.selected and table.find(s.options.selected, record.id) then " · selected" else ""),
 					position = position, choice_key = "record:" .. record.id })
 			end
@@ -244,8 +246,7 @@ function M.new(api: any): any
 		if tern.now() - reader.started >= POLL_MS then clear_usage(s, "unavailable"); return end
 		if not reader.pane then
 			reader.pane = api.transport(cx, s.source, "usage.display", {}, s.origin)
-			-- No usage relay at all means USAGE is not installed; a relay that answers disabled or empty is "disabled"/"unavailable".
-			if not reader.pane then clear_usage(s, "absent"); return end
+			if not reader.pane then clear_usage(s, "unavailable"); return end
 		end
 		local node, bytes = surface(cx, reader.pane, "usage.display", "usage-display-response", "usage-display-response", 65536)
 		if type(reader.pane) == "table" and reader.pane.peer_changed then

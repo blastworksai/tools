@@ -50,6 +50,7 @@ local function fixture(options)
 		end,
 		catalog = function(_, _, _, cursor) local id = next_id(); table.insert(f.requests, { id = id, cursor = cursor }); return id end,
 		snapshot = function(_, _, action) return if action then f.outcomes[action] else { command_result = f.receipt, driver_result = f.unrelated } end,
+		usage_installed = function() return f.installed end,
 		transport = function() return if f.no_usage then nil elseif f.pane_table then f.pane_table else 30 end,
 		surface = function() return { id = "display" }, if f.response then runtime.json.encode(f.response) else nil end,
 		event = function(_, _, event) table.insert(f.events, runtime.json.decode(event.value)); return true end,
@@ -267,14 +268,21 @@ do
 	-- Backlog 8: Tern gives plugins no usage read API, so without USAGE the row only POINTS at Tern's own widget.
 	local HINT = "Tern's own usage widget (widget bar › AI usage limits) shows per-provider limits. Install USAGE for per-account figures."
 	local function detail(f) return f.form.spec.items[1].detail end
-	local absent = fixture(); absent.no_usage = true; absent:open(); absent:settle(page({ record("a") })); absent:tick()
-	check(detail(absent):find("Usage unavailable\n" .. HINT, 1, true) == 1, "USAGE absent: Usage unavailable keeps its text and one muted hint follows")
-	check(absent:percentage(1) == nil and not detail(absent):find("%d+%%"), "USAGE absent: no number is shown or inferred")
-	local present = fixture(); present:open(); present:settle(page({ record("a") })); present:tick()
-	check(detail(present):find("Usage unavailable", 1, true) ~= nil and detail(present):find("Tern's own usage widget", 1, true) == nil, "USAGE installed but silent: no hint")
+	-- Uninstalled, yet the host still publishes its own relay (transport succeeds) and the read goes unanswered.
+	local gone = fixture(); gone.installed = false; gone.pane_table = {}; gone:open(); gone:settle(page({ record("a") })); gone:tick()
+	check(detail(gone):find("Usage unavailable\n" .. HINT, 1, true) == 1, "USAGE uninstalled with the host relay present: hint shows")
+	gone.clock += 60000; gone:tick()
+	check(detail(gone):find("Usage unavailable\n" .. HINT, 1, true) == 1 and not detail(gone):find("%d+%%"), "after the read times out the hint stays and no number appears")
+	-- Installed but unreachable (no transport / out of scope): unknown, never the hint.
+	local lost = fixture(); lost.installed = true; lost.no_usage = true; lost:open(); lost:settle(page({ record("a") })); lost:tick()
+	check(detail(lost):find("Usage unavailable", 1, true) == 1 and detail(lost):find("Tern's own usage widget", 1, true) == nil, "USAGE installed but unreachable: no hint")
+	local unknown = fixture(); unknown.no_usage = true; unknown:open(); unknown:settle(page({ record("a") })); unknown:tick()
+	check(detail(unknown):find("Tern's own usage widget", 1, true) == nil, "installation unknown (nil) with no transport: no hint")
+	local present = fixture(); present.installed = true; present:open(); present:settle(page({ record("a") })); present:tick()
+	check(detail(present):find("Tern's own usage widget", 1, true) == nil, "USAGE installed but silent: no hint")
 	present:usage({ present:reading("a") }, true); present:tick(); present:usage({}, true)
 	check(present:percentage(1) == 42 and detail(present):find("Tern's own usage widget", 1, true) == nil, "USAGE installed with data: no hint")
-	local off = fixture(); off:open(); off:settle(page({ record("a") })); off:tick(); off:usage({}, nil, nil, "display_disabled")
+	local off = fixture(); off.installed = true; off:open(); off:settle(page({ record("a") })); off:tick(); off:usage({}, nil, nil, "display_disabled")
 	check(detail(off):find("enable Show usage in ORCH+ in USAGE", 1, true) ~= nil and detail(off):find("Tern's own usage widget", 1, true) == nil, "USAGE installed but disabled: old text, no hint")
 end
 return "picker_ui: " .. checks .. " checks"
