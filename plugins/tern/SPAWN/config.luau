@@ -302,7 +302,7 @@ local function normalize(source: any, legacy: boolean): (any?, string?)
 	if type(source) ~= "table" then return nil, "Record must be an object" end
 	for field in pairs(source) do
 		if not FIELDS[field] and not RETIRED_FIELDS[field] and not (legacy and LEGACY_FIELDS[field]) then
-			return nil, "Record contains an unsupported field"
+			return nil, "Record contains an unsupported field: " .. string.sub(string.gsub(tostring(field), "%c", "?"), 1, 40)
 		end
 	end
 	if not text(source.id, 96) or not nonblank(source.id) or string.find(source.id, "%c") ~= nil then

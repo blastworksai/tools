@@ -1291,6 +1291,7 @@ end
 local function view(state,cx)
 	local snapshot=if state.snapshot then Authority.clone(state.snapshot) else {version=2,host_key=state.host_key or "unknown",authority_id="unavailable",session_key="unknown",config_revision=0,records={},attempt_revision=0,attempts={},jobs={},replies={},request_sequences={},host_os=tern.runtime.os,host_shell=tern.getenv("SHELL") or tern.getenv("ComSpec") or "unknown",ready=false}
 	snapshot.host_cwd=state.default_cwd
+	if type(state.setup_refusal)=="string" then snapshot.setup_refusal=string.sub(state.setup_refusal,1,600) end
 	local replies=0;for _ in pairs(snapshot.replies) do replies+=1 end
 	for _,entry in ipairs(state.transient or {}) do
 		local id=entry.reply.request_id
@@ -2142,20 +2143,23 @@ local definition={
 	key=function(state,key,cx)
 		local pasted=if key.name=="paste" and type(key.text)=="string" and #key.text<=4096 then Config.decode_setup_json(key.text) else nil
 		if (type(pasted)=="table" and pasted.kind=="spawn-setup-result") or (pasted==nil and key.name=="paste" and type(key.text)=="string" and key.text:find('"kind"%s*:%s*"spawn%-setup%-result"')) then
-			if #key.text>4096 then state.notice="Setup submission envelope exceeds 4096 bytes";cx:render();return true end
+			-- A refusal is kept in state.setup_refusal as well: the window's Setup page reads it from the snapshot.
+			if #key.text>4096 then state.notice="Setup submission envelope exceeds 4096 bytes";state.setup_refusal=state.notice;cx:render();return true end
 			local envelope,why=Config.decode_setup_json(key.text)
-			if type(envelope)~="table" or envelope.kind~="spawn-setup-result" then state.notice=why or "Invalid setup submission envelope";cx:render();return true end
+			if type(envelope)~="table" or envelope.kind~="spawn-setup-result" then state.notice=why or "Invalid setup submission envelope";state.setup_refusal=state.notice;cx:render();return true end
 			local binding,window=state.binding,state.native_window
 			verify(state,cx,function(session,err)
-				if not session or not binding or state.binding~=binding or state.native_window~=window or not reload(state) then state.notice=err or "Setup submission Config source changed";return end
+				if not session or not binding or state.binding~=binding or state.native_window~=window or not reload(state) then state.notice=err or "Setup submission Config source changed";state.setup_refusal=state.notice;cx:render();return end
 				local accepted,problem=Authority.setup_submission(binding,envelope,{config_pane=cx.pane,window=window,host_window=state.host_window,inventory=state.inventory,epoch=Executor.epoch()})
 				if not reload(state) then return end
 				if accepted then
 					for _,job in ipairs(state.snapshot.jobs) do
 						if job.setup_run_id==envelope.setup_run_id and setup_job(state,cx,job.attempt_id) then state.setup_result_attempt=job.attempt_id end
 					end
+					state.setup_refusal=nil
 					state.notice="Setup result accepted. Review the submitted records, then explicitly import them; no agents were launched."
-				else state.notice=problem or "Setup submission refused; no records imported" end
+				else state.notice=problem or "Setup submission refused; no records imported";state.setup_refusal=state.notice end
+				cx:render()
 			end)
 			return true
 		end

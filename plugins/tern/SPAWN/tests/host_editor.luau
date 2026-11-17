@@ -1623,9 +1623,19 @@ do
  check(submit(wrong) and reads==0,'an alternate filesystem path is refused before reading')
  inventory.sessions[1].tabs[1].blocks[2].command='replacement-source'
  check(submit() and reads==0,'reused native source is refused before any result-file read')
+ -- SKILLS-194b: the refusal is carried in the state snapshot the window reads, not only in a notice nobody sees.
+ local function stateNode()
+  for _,node in ipairs(definition.view(panel,cx).main.children)do if node.text and node.text:sub(1,15)=='SPAWN_STATE_V2 ' then return runtime.json.decode(node.text:sub(16)) end end
+ end
+ local refusedState=stateNode()
+ check(refusedState and type(refusedState.setup_refusal)=='string' and refusedState.setup_refusal:find('closed, moved or changed',1,true)~=nil,
+  'a refused setup submission is published in the snapshot for the Setup page: '..tostring(refusedState and refusedState.setup_refusal))
  inventory.sessions[1].tabs[1].blocks[2].command=job.setup.command
+ -- The helper (OMP) may leave its launch folder after binding; that is not a different pane.
+ inventory.sessions[1].tabs[1].blocks[2].cwd='/tmp/omp-auto-switched'
  check(submit() and reads==1 and panel.setup_result_attempt==job.attempt_id and #panel.snapshot.records==0,
   'explicit Config BLOCK paste accepts immutable run-bound bytes once but does not import')
+ check(stateNode().setup_refusal==nil,'an accepted submission clears the published refusal')
  journalFiles[resultPath]='changed after submission'
  check(submit() and reads==1,'duplicate submission is consumed and refused without rereading the changed file')
  local pending=assert(A.setup_pending(panel.binding,job.attempt_id))

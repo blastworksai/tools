@@ -409,10 +409,10 @@ do
  check(prepared.mailbox.permitted_root==home..'/.local/share/tern-spawn/managed' and prepared.mailbox.producer_helper_path:find(prepared.mailbox.permitted_root..'/helper-bundles/',1,true)==1,'only the generated root relocates to the observed home with account-readable producer helpers')
  check(prepared.id==saved.id and prepared.cwd==saved.cwd and prepared.model==saved.model and prepared.profile==saved.profile and prepared.selector_evidence==saved.selector_evidence and runtime.json.encode(saved)==original,'preparation retains stable identity, folder and selectors without mutating old transport declarations')
  local ordinary=assert(Resolution.resolve(prepared,'ordinary','posix'));assert(Resolution.select_user(ordinary,'posix',true))
- check(ordinary.executable=='sudo' and ordinary.arguments[6]==executable and ordinary.arguments[7]=='--auto-approve' and #ordinary.arguments==9,'ordinary startup wraps the inner executable exactly once, without dropping permission flags')
+ check(ordinary.executable=='sudo' and ordinary.arguments[6]=='/bin/sh' and ordinary.arguments[9]=='spawn-login' and ordinary.arguments[10]==executable and ordinary.arguments[11]=='--auto-approve' and #ordinary.arguments==13,'ordinary startup wraps the inner executable exactly once, without dropping permission flags')
  local fresh=assert(Backend.build(prepared,{host_os='linux',host_shell='sh'},{fresh=true,prompt='literal task',cwd=saved.cwd,placement='tab'}))
  local words=assert(Config.parse_arguments(fresh.command))
- check(words[1]=='sudo' and words[7]==executable and words[#words]=='literal task' and prepared.task_argument_index==4,'managed fresh launch wraps once and inserts the task at the adjusted worker argv slot')
+ check(words[1]=='sudo' and words[7]=='/bin/sh' and words[10]=='spawn-login' and words[11]==executable and words[#words]=='literal task' and prepared.task_argument_index==4,'managed fresh launch wraps once and inserts the task at the adjusted worker argv slot')
  draft.root='/chosen/private/mailbox'
  local custom=assert(prepare(draft))
  check(custom.mailbox.permitted_root==draft.root and custom.mailbox.producer_helper_path:find(draft.root..'/helper-bundles/',1,true)==1,'an explicit custom root is never replaced by account discovery')

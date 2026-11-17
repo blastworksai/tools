@@ -170,15 +170,32 @@ local expected_words = { "/opt/My Tools/custom-cli" }
 for _, value in ipairs(argv) do table.insert(expected_words, value) end
 same(rendered_words, expected_words, "host POSIX rendering preserves empty, quoted, newline and Unicode argv")
 same(ordinary_render, render_before, "host rendering does not mutate the approved record")
+-- SKILLS-194b: an OS-user launch enters the account's own login shell so ~/.profile PATH and tokens apply.
+-- The program and its arguments stay separate positional parameters, never shell text.
+local LOGIN = { "/bin/sh", "-c", [==[case "${SHELL##*/}" in bash|zsh|sh|dash|ksh) exec "$SHELL" -lc 'exec "$@"' spawn-login "$@";; esac; exec "$@"]==], "spawn-login" }
+local function with_login(prefix, rest)
+	local out = {}
+	for _, v in ipairs(prefix) do table.insert(out, v) end
+	for _, v in ipairs(LOGIN) do table.insert(out, v) end
+	for _, v in ipairs(rest) do table.insert(out, v) end
+	return out
+end
 local approved_prompt = "  Exact approved prompt.\nQuotes: ' \" $HOME `literal`  "
 local native_record = record("native-render", { provider = "omp", backend = "native-agent", command = "omp", arguments = { "--profile", "work account" }, prompt = "saved greeting", user = "account" })
 rendered = assert(executor.render(native_record, "/bin/zsh", "macos", approved_prompt))
-same(argv_of(rendered, "omp"), { "sudo", "-u", "account", "-H", "--", "omp", "--profile", "work account", approved_prompt }, "ordinary OMP explicit prompt override remains one exact argv after approved arguments")
+same(argv_of(rendered, "omp"), with_login({ "sudo", "-u", "account", "-H", "--" }, { "omp", "--profile", "work account", approved_prompt }), "ordinary OMP explicit prompt override remains one exact argv after approved arguments")
 check(native_record.prompt == "saved greeting" and #native_record.arguments == 2, "ordinary prompt override does not mutate persisted argv")
 native_record.user = ""
 same(argv_of(assert(executor.render(native_record, "/bin/bash", "linux")), "omp"), { "omp", "--profile", "work account", "saved greeting" }, "ordinary native launch uses its approved stored prompt")
 local wrapped = record("wrapped", { command = "sudo -u explicit -- ordinary-cli", user = "explicit", arguments = { "one" } })
-same(argv_of(assert(executor.render(wrapped, "/bin/bash", "linux")), "custom"), { "sudo", "-u", "explicit", "--", "ordinary-cli", "one" }, "explicit sudo wrapper is preserved rather than nested")
+same(argv_of(assert(executor.render(wrapped, "/bin/bash", "linux")), "custom"), with_login({ "sudo", "-u", "explicit", "--" }, { "ordinary-cli", "one" }), "explicit sudo wrapper is preserved rather than nested, and enters the account's login shell")
+local hostile = record("hostile", { command = "sudo -n -H -u seat -- /usr/bin/claude", user = "seat", arguments = { "--flag", "; touch /tmp/pwned $(id) `id`", "it's" } })
+same(argv_of(assert(executor.render(hostile, "/bin/bash", "linux")), "custom"), with_login({ "sudo", "-n", "-H", "-u", "seat", "--" }, { "/usr/bin/claude", "--flag", "; touch /tmp/pwned $(id) `id`", "it's" }), "the real literal sudo shape keeps -n and every argument exact inside the login wrapper")
+local already = record("already", { command = "sudo -n -i -u seat -- claude", user = "seat" })
+same(argv_of(assert(executor.render(already, "/bin/bash", "linux")), "custom"), { "sudo", "-n", "-i", "-u", "seat", "--", "claude" }, "an explicit sudo -i is already a login shell and is not wrapped again")
+local shelled = record("shelled", { command = "sudo -n -H -u seat -- /bin/bash", user = "seat", arguments = { "-c", "x" } })
+same(argv_of(assert(executor.render(shelled, "/bin/bash", "linux")), "custom"), { "sudo", "-n", "-H", "-u", "seat", "--", "/bin/bash", "-c", "x" }, "an explicit shell target is not wrapped in a second shell")
+
 wrapped.user = "saved-user"
 check(executor.render(wrapped, "/bin/bash", "linux") == nil, "explicit sudo wrapper cannot override the exact configured account identity")
 local remote_record = record("remote-render", { backend = "ssh-command", host = "example.test", user = "remote-user", key_path = "/keys/a key", cwd = "~/project 'quoted'", arguments = { "", "two words", "$HOME" } })

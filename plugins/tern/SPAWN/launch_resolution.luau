@@ -59,6 +59,17 @@ function Resolution.resolve(source: any, mode: string, shell: string): (any?, st
 	end
 	return { record = record, executable = executable, arguments = argv }, nil
 end
+-- A bare `sudo -u account -- cli` reads none of the account's login files, so PATH additions such as
+-- ~/.local/bin and tokens exported in ~/.profile are missing. The account's own login shell is entered
+-- instead. Argv stays exact: the executable and every argument reach the script only as positional
+-- parameters ("$@"), never as shell text. An account whose SHELL is not a known shell (nologin, false) runs
+-- the program directly, as before. The folder is unchanged because no `sudo -i` home reset is used.
+local LOGIN_SCRIPT = [==[case "${SHELL##*/}" in bash|zsh|sh|dash|ksh) exec "$SHELL" -lc 'exec "$@"' spawn-login "$@";; esac; exec "$@"]==]
+local LOGIN_WRAPPER = { "/bin/sh", "-c", LOGIN_SCRIPT, "spawn-login" }
+local SHELL_TARGETS = { sh = true, bash = true, dash = true, zsh = true, ksh = true }
+local function login_wrap(argv: {string}, at: number)
+	for offset, word in ipairs(LOGIN_WRAPPER) do table.insert(argv, at + offset - 1, word) end
+end
 local SUDO_FLAGS = { ["-H"] = true, ["-n"] = true, ["-E"] = true, ["-i"] = true, ["-s"] = true, ["-S"] = true, ["-k"] = true, ["-K"] = true, ["-b"] = true, ["-P"] = true }
 function Resolution.select_user(resolved: any, shell: string, noninteractive: boolean?): (boolean, string?)
 	local record, executable, argv = resolved.record, resolved.executable, resolved.arguments
@@ -67,7 +78,7 @@ function Resolution.select_user(resolved: any, shell: string, noninteractive: bo
 	if executable:match("([^/]+)$") == "sudo" then
 		-- Stop at the target executable: its arguments are not sudo options.
 		-- Unknown options can consume argv or change identity, so require review.
-		local selected, index = nil, 1
+		local selected, index, login = nil, 1, false
 		while index <= #argv do
 			local argument = argv[index]
 			if argument == "--" then index += 1; break end
@@ -79,15 +90,20 @@ function Resolution.select_user(resolved: any, shell: string, noninteractive: bo
 				selected = selector
 			elseif not SUDO_FLAGS[argument] then
 				return false, "Configured sudo identity options require review"
+			elseif argument == "-i" or argument == "-s" then
+				login = true
 			end
 			index += 1
 		end
 		if selected ~= record.user or argv[index] == nil or argv[index] == "" or argv[index]:find("=", 1, true) then
 			return false, "Configured sudo does not explicitly select the configured OS user"
 		end
+		if not login and not SHELL_TARGETS[argv[index]:match("([^/]+)$")] then login_wrap(argv, index) end
 		if noninteractive then table.insert(argv,1,"-n") end
 	else
-		local wrapped = { "-u", record.user, "-H", "--", executable }
+		local wrapped = { "-u", record.user, "-H", "--" }
+		if not SHELL_TARGETS[executable:match("([^/]+)$")] then login_wrap(wrapped, #wrapped + 1) end
+		table.insert(wrapped, executable)
 		if noninteractive then table.insert(wrapped,1,"-n") end
 		for _, argument in ipairs(argv) do table.insert(wrapped, argument) end
 		resolved.executable, resolved.arguments = "sudo", wrapped

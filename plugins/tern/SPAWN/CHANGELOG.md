@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.6
+
+- **A helper result that SPAWN refuses is no longer silent.** Guided setup could finish with 0 agents saved and no message. Cause 1: the helper (OMP) moved itself out of its launch folder after SPAWN bound it, and SPAWN refused the result because the pane's folder no longer equalled the launch folder; the pane is now identified by its id, session, command and window incarnation only. Cause 2: the helper wrote the OMP startup prompt as `startup_prompt` instead of `prompt`; that refusal is legitimate, now names the field, and the setup skill names `prompt` exactly. Every refusal is also published to the window, so Recover setup result shows "SPAWN refused the helper's result: ..." instead of "No complete explicit submission is available".
+- The OMP helper stays in the folder SPAWN started it in. OMP silently switches to a temp folder when started in a home folder; SPAWN now adds `--allow-home` for an OMP helper only when the chosen folder is a home folder.
+- Agents run as another OS account now enter that account's login shell: `sudo -n -H -u <account> -- /bin/sh -c <script> spawn-login <program> <arguments...>`. The account's `~/.profile` PATH (`~/.local/bin`) and exported login tokens apply. The program and each argument are positional parameters, never shell text, `-n` is kept (no password prompt) and the folder is unchanged. An explicit `sudo -i`/`-s`, a shell target, or an account whose SHELL is not a known shell is run as before. If your sudoers rules allow only specific programs, they must also allow `/bin/sh`.
+
 ## 0.6.5
 
 - **Guided setup is one flow with one approval.** On Setup, **Guided setup** is now a heading with helper text, not a button. Its device choices (**Single device** by default, or **Multi device**) and **Find execution machine(s)** are shown by default and indented beneath it; discovery is grey and disabled while Single device is selected. Exactly one action follows, **Start Guided setup — may use model credits**, and Single device needs no discovery step.

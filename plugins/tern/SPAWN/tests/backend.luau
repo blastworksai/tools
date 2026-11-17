@@ -140,9 +140,13 @@ local user_record = managed({ user = "worker-account", fresh_executable = "worke
 local user_resolution = assert(Resolution.resolve(user_record, "ordinary", "posix"))
 check(Resolution.select_user(user_resolution, "posix"), "shared resolver selects configured local OS user")
 same(user_resolution.executable, "sudo", "unwrapped local identity uses sudo")
-same(table.concat(user_resolution.arguments, "|"), "-u|worker-account|-H|--|worker", "shared sudo wrapper keeps exact identity and command")
-same(Executor.render(user_record, "/bin/bash", "linux"), "SPAWN_PROVIDER=custom sudo -u worker-account -H -- worker", "ordinary host uses the shared exact user wrapper")
-same(assert(Backend.build(user_record, host, options())).command, "'sudo' '-n' '-u' 'worker-account' '-H' '--' 'worker' " .. Backend.posix_quote(task), "managed backend never asks interactively for cross-user credentials")
+same(table.concat({ table.unpack(user_resolution.arguments, 1, 5) }, "|"), "-u|worker-account|-H|--|/bin/sh", "shared sudo wrapper keeps the exact identity before the login shell")
+same(table.concat({ user_resolution.arguments[6], user_resolution.arguments[8], user_resolution.arguments[9] }, "|"), "-c|spawn-login|worker", "shared sudo wrapper enters the account's login shell and keeps the exact command")
+check(#user_resolution.arguments == 9, "the login wrapper adds exactly its four words")
+local login_script = user_resolution.arguments[7]
+check(login_script:find('exec "$SHELL" -lc', 1, true) ~= nil and login_script:find("worker", 1, true) == nil, "the login script never carries the program as shell text")
+same(Executor.render(user_record, "/bin/bash", "linux"), "SPAWN_PROVIDER=custom sudo -u worker-account -H -- /bin/sh -c " .. Backend.posix_quote(login_script) .. " spawn-login worker", "ordinary host uses the shared exact user wrapper")
+same(assert(Backend.build(user_record, host, options())).command, "'sudo' '-n' '-u' 'worker-account' '-H' '--' '/bin/sh' '-c' " .. Backend.posix_quote(login_script) .. " 'spawn-login' 'worker' " .. Backend.posix_quote(task), "managed backend never asks interactively for cross-user credentials")
 for _, selector in ipairs({ { "-u", "worker-account" }, { "--user", "worker-account" }, { "-uworker-account" }, { "--user=worker-account" } }) do
 	local argv = table.clone(selector)
 	for _, value in ipairs({ "-H", "--", "worker", "-u", "provider-option" }) do table.insert(argv, value) end
@@ -151,7 +155,14 @@ for _, selector in ipairs({ { "-u", "worker-account" }, { "--user", "worker-acco
 		local resolved = assert(Resolution.resolve(wrapped, mode, "posix"))
 		check(Resolution.select_user(resolved, "posix"), mode .. " matching sudo selector remains accepted")
 		same(resolved.executable, "/usr/bin/sudo", mode .. " existing sudo is not nested")
-		same(table.concat(resolved.arguments, "|"), table.concat(argv, "|"), mode .. " provider user-like flags are not sudo selectors")
+		-- The four login-shell words sit right after "--"; with them removed the argv is exactly the configured one.
+		local split = 0
+		for index, value in ipairs(argv) do if value == "--" then split = index; break end end
+		local stripped = {}
+		for index, value in ipairs(resolved.arguments) do if index <= split or index > split + 4 then table.insert(stripped, value) end end
+		same(table.concat(resolved.arguments, "|", split + 1, split + 2), "/bin/sh|-c", mode .. " enters the account's login shell")
+		same(resolved.arguments[split + 4], "spawn-login", mode .. " names the login script")
+		same(table.concat(stripped, "|"), table.concat(argv, "|"), mode .. " provider user-like flags are not sudo selectors")
 	end
 	check(Executor.render(wrapped, "/bin/bash", "linux") ~= nil, "ordinary matching sudo stays launchable")
 	check(Backend.build(wrapped, host, options()) ~= nil, "managed matching sudo stays launchable")
@@ -514,7 +525,7 @@ do
  check(selected.mailbox.permitted_root=="/fixture/selected-home/.local/share/tern-spawn/managed" and selected.mailbox.helper_path:find(selected.mailbox.permitted_root.."/helper-bundles/",1,true)==1,"selected account receives stable home-local mailbox/helper paths, not another user's plugin data")
  check(draft.root=="/fixture/data/managed" and draft.executable=="omp","preparation cannot mutate the reviewed draft while resolving the selected executable/root")
  local launch=assert(Backend.build(selected,{host_os="linux",host_shell="sh"},{fresh=true,prompt="explicit consent diagnostic",cwd=selected.cwd,placement="tab"}))
- same(launch.command,"'sudo' '-n' '-u' 'selected' '-H' '--' '/fixture/selected-home/.local/bin/native'","native projection uses exactly the observed executable under the selected account, not the current-user PATH")
+ same(launch.command,"'sudo' '-n' '-u' 'selected' '-H' '--' '/bin/sh' '-c' "..Backend.posix_quote([==[case "${SHELL##*/}" in bash|zsh|sh|dash|ksh) exec "$SHELL" -lc 'exec "$@"' spawn-login "$@";; esac; exec "$@"]==]).." 'spawn-login' '/fixture/selected-home/.local/bin/native'","native projection uses exactly the observed executable under the selected account, not the current-user PATH")
  check(launch.cwd=="/fixture/repository" and launch.prompt=="explicit consent diagnostic","selected-account native startup retains exact cwd and separate prompt channel")
  local diagnostic=assert(setup.route(selected,{record_sha256=string.rep("a",64)},{host_os="linux",host_shell="sh"},9,"","selected-diagnostic"))
  check(diagnostic.user=="selected" and diagnostic.worker_identity=="selected" and diagnostic.command:find("'/fixture/selected-home/.local/share/tern-spawn/managed/selected-diagnostic-native'",1,true),"consented native diagnostic binds its exact selected account and owned session directory for existing cleanup machinery")

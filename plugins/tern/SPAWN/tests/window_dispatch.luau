@@ -1797,6 +1797,16 @@ if section==nil or section=='window' then
   check(remote.starts==1 and remote.started.cwd=='/fixture','a Windows desktop starts setup in the actual POSIX execution-host folder, not its displayed path')
   remote.agents[901].cwd='\\fixture';submit(remote);review(remote,view,pane);view.round(4)
   check(remote.imports==1 and remote.starts==1,'desktop-formatted remote agent folders do not strand a host-bound proposal or repeat startup')
+  -- SKILLS-194b: OMP moves itself to a temp folder when started in a home folder; only then does it get --allow-home.
+  local home=new_world({});home.setup_enabled=true;home.default_command='omp';home.host_cwd='/home/demo'
+  local homePane=add_block(home);local homeView=window(home);homeView.approve_setup(homePane);homeView.round(16)
+  check(home.starts==1 and home.started.command=='omp --allow-home' and home.started.cwd=='/home/demo','OMP started in a home folder keeps that folder through --allow-home: '..tostring(home.started and home.started.command))
+  local work=new_world({});work.setup_enabled=true;work.default_command='omp';work.host_cwd='/opt/demo'
+  local workPane=add_block(work);local workView=window(work);workView.approve_setup(workPane);workView.round(16)
+  check(work.starts==1 and work.started.command=='omp' and work.started.cwd=='/opt/demo','OMP started in a chosen working folder is passed through untouched')
+  local other=new_world({});other.setup_enabled=true;other.default_command='claude';other.host_cwd='/home/demo'
+  local otherPane=add_block(other);local otherView=window(other);otherView.approve_setup(otherPane);otherView.round(16)
+  check(other.starts==1 and other.started.command=='claude','a non-OMP default is never given --allow-home')
   local absent=new_world({});absent.setup_enabled=true;absent.default_command='native-default';absent.host_cwd=false
   local missingPane=add_block(absent);local missingView=window(absent);missingView.approve_setup(missingPane);missingView.round(5)
   check(absent.starts==0 and #absent.requests==0,'missing host-folder evidence cannot fall back to the desktop folder or start a helper')
