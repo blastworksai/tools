@@ -164,20 +164,10 @@ local function default_link(state: State, item: any, agent: any): any
 	return launch_link("agent:configured", "Work On", url, "Start the configured " .. string.upper(agent.kind) .. " agent on this WORK host")
 end
 
-local function spawn_link(_state: State, _item: any, agent: any): any
-	local reason = agent.disabled or "Launch held: SPAWN has no supported fresh host-owned read and native single-winner claim for WORK"
-	return ui.node("row", { key = "spawn-agent:" .. agent.id, role = "work.spawn-hold" }, {
-		ui.text({ ui.span(agent.label .. " — " .. reason, "muted") }),
-	})
-end
-
 local function plan_row(state: State, item: any, agent: any): any
 	local selected = state.selection.workspace_id == item.id
 	local select_token = action(state, "select", item.id)
 	local launchers = { default_link(state, item, agent) }
-	if state.roster ~= nil then
-		for _, saved in ipairs(state.roster.agents) do table.insert(launchers, spawn_link(state, item, saved)) end
-	end
 	return ui.el("div", {
 		key = "workspace:" .. item.id,
 		class = if selected then "glitch-plan-row glitch-plan-row-selected" else "glitch-plan-row",

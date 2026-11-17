@@ -400,8 +400,18 @@ walk(panel.view(state, block_cx).main, function(node: any)
 	if type(node.p) == "table" and type(node.p.key) == "string" and (string.match(node.p.key, "^agent:") ~= nil or string.match(node.p.key, "^spawn%-agent:") ~= nil) then launch_keys[node.p.key] = true end
 	if type(node.href) == "string" then table.insert(launch_hrefs, node.href) end
 end)
-check(launch_keys["agent:configured"] == true and launch_keys["spawn-agent:default"] == true, "default SPAWN id uses a disjoint namespace")
-check(launch_keys["spawn-agent:configured"] == true and launch_keys["agent:default"] == nil, "configured SPAWN id cannot collide with the configured agent key")
+check(launch_keys["agent:configured"] == true, "the configured Work On launcher is drawn")
+local launcher_count, held_text = 0, false
+for key in pairs(launch_keys) do
+	launcher_count += 1
+	check(string.match(key, "^spawn%-agent:") == nil, "held SPAWN agents draw no launcher row: " .. key)
+end
+check(launcher_count == 1, "a workspace card shows exactly one launcher, Work On")
+walk(panel.view(state, block_cx).main, function(node: any)
+	if type(node.p) == "table" and node.p.role == "work.spawn-hold" then held_text = true end
+	if type(node.t) == "string" and string.find(node.t, "Launch held", 1, true) ~= nil then held_text = true end
+end)
+check(not held_text, "no held SPAWN row or Launch held text is drawn")
 check(#launch_hrefs >= 1 and string.find(launch_hrefs[1], "cwd=%2Fglitch%2F", 1, true) ~= nil, "launch links retain the Glitch root cwd")
 for _, href in ipairs(launch_hrefs) do
 	if string.find(href, "tern://work", 1, true) == 1 then check(string.find(href, "workspaces", 1, true) == nil, "workspace path never becomes launch cwd") end

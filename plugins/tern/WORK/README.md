@@ -24,7 +24,7 @@ This revision does **not** yet claim qualified real-device support on macOS, Win
 - Opens the repository's GitHub URL through Tern's normal link handling.
 - **Refresh** rereads the host configuration and registry without reopening the pane. A read/configuration error is shown separately from a valid registry with no active workspaces.
 - **Setup** configures the ACP or CLI agent on the execution host. **Work On** uses that host-owned configuration, not a desktop client's Coding agents preference.
-- **Work On** starts one configured agent beside the clicking WORK pane and prepares the prompt below. Optional SPAWN records add visible hold rows, not launch actions.
+- **Work On** starts one configured agent beside the clicking WORK pane and prepares the prompt below. WORK cannot start SPAWN agents, and saved SPAWN agents add nothing to the workspace cards.
 
   ```text
   /work-on <workspace-slug>
@@ -121,15 +121,15 @@ WORK never waits for an unchanged screen, types into the agent, or presses Enter
 
 ### With SPAWN (optional)
 
-WORK does not need [SPAWN](https://github.com/blastworksai/tools/blob/main/plugins/tern/SPAWN/README.md). When SPAWN has saved agents on the same host, WORK shows one noninteractive hold row per saved agent, labelled `Provider — suffix`, alongside **Work On** for the configured WORK host agent. Existing disabled or review-required reasons are shown; every other record carries the general launch hold. The roster is reread for display when WORK initializes, refreshes or receives an event. A missing roster leaves only the configured host agent; an unreadable roster adds a visible explanation.
+WORK does not need [SPAWN](https://github.com/blastworksai/tools/blob/main/plugins/tern/SPAWN/README.md). Each workspace card shows only **Work On** for the configured WORK host agent. Saved SPAWN agents draw no rows, because WORK cannot start them. The roster is still reread when WORK initializes, refreshes or receives an event; a missing roster changes nothing and an unreadable roster adds a visible explanation.
 
-Action keys use disjoint namespaces: the configured host action is `agent:configured`, while each SPAWN hold row is `spawn-agent:<id>`. A SPAWN record named `default`, or any other valid record ID, cannot collide with the configured action.
+The only launch action on a workspace card is `agent:configured`.
 
 SPAWN launches are held on every host OS. WORK does not treat a rendered SPAWN Config surface as fresh authority and does not read one to authorize a click. SPAWN's fresh catalog is managed ORCH+-only and is not a supported authority path for ordinary WORK. Legacy or crafted WORK URLs selecting a SPAWN agent receive a visible refusal before any agent start, terminal split, clipboard write or rendered-surface read. The configured WORK ACP/CLI action remains available with or without SPAWN.
 
-WORK reads SPAWN's saved roster only to display these holds and never writes it. No SPAWN launch, reservation, duplicate-policy or Running-agents action is performed by WORK.
+WORK reads SPAWN's saved roster only to report an unreadable roster and never writes it. No SPAWN launch, reservation, duplicate-policy or Running-agents action is performed by WORK.
 
-On a Windows host every SPAWN row remains disabled and greyed out, as on other hosts under the current launch hold. The separately configured WORK ACP/CLI host agent remains available; this does not enable or change SPAWN itself.
+On a Windows host SPAWN launches stay held, as on other hosts. The separately configured WORK ACP/CLI host agent remains available; this does not enable or change SPAWN itself.
 
 #### Required future native single-winner claim
 
@@ -141,7 +141,7 @@ Enabling SPAWN launches from ordinary WORK requires a future native claim that d
 4. Create exactly one immutable launch projection from that same claimed authority snapshot, so later roster or revision changes cannot alter the command being launched.
 5. Refuse every stale, unavailable, foreign-host or revision/record-mismatched request before any external effect.
 
-Until that claim is implemented and its native behavior passes acceptance, SPAWN rows remain visible holds and legacy SPAWN URLs remain refused.
+Until that claim is implemented and its native behavior passes acceptance, SPAWN launches stay held and legacy SPAWN URLs remain refused.
 
 ## Install
 
@@ -154,7 +154,7 @@ tern plugin reload tern-work --json
 
 Then run **WORK** from Tern's command palette. The plugin can run locally on the same machine as Glitch or with Tern connected to a remote Glitch host. In either case, the host half must be attached to the Glitch root containing `workspaces/registry.json`. Install or update WORK on every machine you use it from (the host and each desktop client): the host supplies configuration and registry data, while the clicking window performs the configured-agent launch through its execution-host connection.
 
-SPAWN is optional. To display its saved-agent hold rows, install SPAWN on the same host and save at least one agent in SPAWN Config; no WORK setting edits that roster.
+SPAWN is optional. WORK does not need it and no WORK setting edits SPAWN's roster.
 
 ### Update
 
@@ -218,7 +218,7 @@ Full multi-window and real platform support remain unclaimed until supervised na
 - **Exited pane:** the new pane is rechecked immediately before delivery; no prompt is copied or typed into an exited/replaced pane.
 - **Trust/password prompt:** WORK sends no automatic terminal text or Enter, and manual clipboard guidance does not claim the agent is ready.
 - **ACP readiness:** the native queue delivers once only at actual provider readiness; an unchanged screen is never treated as readiness.
-- **SPAWN holds:** rows are noninteractive and legacy/crafted SPAWN URLs cause no agent start, split, clipboard write or rendered-surface authority read. Any future single-winner claim requires separate native proof of its complete identity, atomic durable-authority reread, current-record checks and immutable projection before SPAWN launches can be enabled.
+- **SPAWN holds:** workspace cards draw no SPAWN rows and legacy/crafted SPAWN URLs cause no agent start, split, clipboard write or rendered-surface authority read. Any future single-winner claim requires separate native proof of its complete identity, atomic durable-authority reread, current-record checks and immutable projection before SPAWN launches can be enabled.
 - **Mixed-OS host command behavior:** macOS, Windows and remote client/host combinations execute the execution host's configured argv and path semantics, never rewrite them from the client, with empty arguments, spaces, quotes, Unicode and trailing backslashes preserved. Real Windows `.exe`/PowerShell-script launches and fail-closed resolved-batch behavior also require native evidence.
 
 The component verification above does not close these native GUI or installed-package gates.
@@ -231,12 +231,12 @@ The component verification above does not close these native GUI or installed-pa
 - `projects.luau` — configuration/registry loading, validation and workspace view model
 - `launch.luau` — execution-host command construction for POSIX and Windows
 - `window.luau` — status-bar WORK segment, `WORK` palette command, direct-origin configured ACP/CLI launch, clicking-window clipboard delivery and legacy-SPAWN refusal
-- `spawn.luau` — read-only SPAWN roster decoding and held-row view data
-- `blocks/panel.luau` — native root/agent Setup, stable workspace rows, configured launch link and SPAWN hold rows
+- `spawn.luau` — read-only SPAWN roster decoding
+- `blocks/panel.luau` — native root/agent Setup, stable workspace rows, configured launch link
 - `styles.css` — WORK row and launch-link styling
 - `tests/projects.luau` — registry/configuration and installed/linked host-root regression fixtures
 - `tests/spawn.luau` — SPAWN roster decoding and retained pure launch-line fixtures
-- `tests/window.luau` — status segment (icon, command, no Files button), route, origin, argv, Setup, SPAWN-hold/refusal and clipboard fixtures
+- `tests/window.luau` — status segment (icon, command, no Files button), route, origin, argv, Setup, legacy-SPAWN refusal, single-launcher card and clipboard fixtures
 - `tests/run.txt` — runs all three groups: `env WORK_PACKAGE_DIR=<package> tern shot <package>/tests/run.txt` (failures print `run(s) failed`)
 - `assets/screenshots/` — README screenshots
 
