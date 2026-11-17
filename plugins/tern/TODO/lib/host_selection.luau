@@ -319,6 +319,12 @@ function selection.settle(state: any, outcome: any): number?
     end
     return nil
 end
+-- Delay before retrying after a nonterminal discovery or startup failure. A dormant view with no fresh lease keeps
+-- its slow DORMANT_POLL_MS poll (a failure must not turn it into a fast poller); any other view keeps `normal`.
+function selection.retryDelay(state: any, normal: number, now: number): number
+    if state.dormant and not selection.patience(state, now) then return selection.DORMANT_POLL_MS end
+    return normal
+end
 -- One live discovery timer per view: scheduling bumps a generation, so an older pending timer (a slow dormant tick
 -- after a wake or renewal) fires into nothing and the poll chain never doubles.
 function selection.schedule(state: any, timer: (number, () -> ()) -> any, ms: number, fn: () -> ())

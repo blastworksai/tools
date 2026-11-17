@@ -385,6 +385,14 @@ return {
         outcome = selection.discoveryStep(0, true, none, selection.patience(view, 2000), view.hadWait)
         assert(selection.settle(view, outcome) == selection.WAIT_MS and view.dormant == false)
     end},
+    {"a nonterminal error keeps a dormant view on its slow poll until a fresh lease; other views are unchanged", function()
+        local view = { panel = 5, dormant = true, hadWait = true, leases = {} }
+        assert(selection.retryDelay(view, 1500, 1000) == selection.DORMANT_POLL_MS, "dormant + error stays slow")
+        assert(selection.retryDelay({ panel = 6, leases = {} }, 1500, 1000) == 1500, "non-dormant unchanged")
+        assert(selection.retryDelay({ panel = 6, leases = {} }, 15000, 1000) == 15000, "non-dormant ssh unchanged")
+        selection.applyLease(view, { on = true, rid = "w1" }, 2000)
+        assert(selection.retryDelay(view, 1500, 2000) == 1500, "fresh lease: fast")
+    end},
     {"a dormant view picks up a plan published later on its slow tick (Sync Off, hadWait true)", function()
         local view = { panel = 5, hadWait = true, discover_pid = 9, leases = { w1 = 1000 } }
         local none = { ok = true, state = "none" }

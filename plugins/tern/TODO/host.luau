@@ -94,7 +94,7 @@ local function refresh(state: State, cx: BlockCx)
             state.error = problem or "Could not start the read-only source reader. Tern 0.9.8+ and Python 3 are required."
             state.failures = (state.failures or 0) + 1
             redraw(state, cx)
-            later(state, polling.delay(state.source ~= nil and state.source.ssh ~= nil, state.failures), function() refresh(state, cx) end)
+            later(state, selection.retryDelay(state, polling.delay(state.source ~= nil and state.source.ssh ~= nil, state.failures), tern.now()), function() refresh(state, cx) end)
             return
         end
         local decoded, envelope = pcall(tern.json.decode, result.stdout or "")
@@ -145,7 +145,7 @@ local function refresh(state: State, cx: BlockCx)
             state.terminal = false
             state.failures = (state.failures or 0) + 1
             redraw(state, cx)
-            later(state, polling.delay(false, state.failures), function() refresh(state, cx) end)
+            later(state, selection.retryDelay(state, polling.delay(false, state.failures), tern.now()), function() refresh(state, cx) end)
             return
         end
         state.terminal = decoded and type(envelope) == "table" and envelope.terminal == true
