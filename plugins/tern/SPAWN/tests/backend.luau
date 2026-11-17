@@ -360,6 +360,11 @@ same(diagnostic.expected_arguments[2],"selected/model","diagnostic keeps explici
 same(diagnostic.expected_arguments[4],"selected-profile","diagnostic keeps explicitly selected profile")
 same(#diagnostic.expected_arguments,#routeRecord.fresh_arguments+2,"only owned diagnostic session storage is added; no tool/rule/model/time flags are injected")
 for index,word in ipairs(routeRecord.fresh_arguments) do same(diagnostic.expected_arguments[index],word,"every selected CLI argument is preserved verbatim") end
+do -- a chosen thinking level is part of the argv the diagnostic expects the started process to carry
+ local chosen=table.clone(routeRecord);chosen.fresh_arguments={"--keep"};chosen.effort="high"
+ local expectedRoute=assert(Setup.route(chosen,routeProbe,host,7,"","effort-consent"))
+ same(table.concat(expectedRoute.expected_arguments,"|"),"--keep|--session-dir|/fixture/mail/effort-consent-native|--model=configured-model|--thinking=high","diagnostic expects the derived flag after owned session storage: "..table.concat(expectedRoute.expected_arguments,"|"))
+end
 local secondDiagnostic=assert(Setup.route(routeRecord,routeProbe,host,7,"","another-consent"))
 check(diagnostic.expected_arguments[#diagnostic.expected_arguments]~=secondDiagnostic.expected_arguments[#secondDiagnostic.expected_arguments],"separate consents never share diagnostic session storage")
 same(routeRecord.fresh_arguments[#routeRecord.fresh_arguments],"selected-profile","diagnostic controls never rewrite saved argv")
@@ -476,7 +481,7 @@ do
   as_user=Prereq.as_user,
   probe=function(canonical,_,done)prepared=canonical;done({passed=true})end,
  }
- local dependencies={["./config"]=Config,["./wire/codec"]=load("wire/codec"),["./backend"]=wrappedBackend,["./prereq"]=fixturePrereq,["./mailbox_adapter"]=Adapter,["./native_cli"]=Native,["./terminal_identity"]=load("terminal_identity")}
+ local dependencies={["./config"]=Config,["./wire/codec"]=load("wire/codec"),["./backend"]=wrappedBackend,["./launch_resolution"]=Resolution,["./prereq"]=fixturePrereq,["./mailbox_adapter"]=Adapter,["./native_cli"]=Native,["./terminal_identity"]=load("terminal_identity")}
  local function isolated(name)
   local chunk=assert(loadstring(runtime.fs.read(root.."/"..name..".luau"),name))
   setfenv(chunk,setmetatable({tern=fake,require=function(dependency)return assert(dependencies[dependency])end},{__index=environment}))
@@ -580,4 +585,70 @@ do
  prerequisite.account("-invalid","native","/work",function(account,why)check(account==nil and why~=nil,"invalid OS user refuses")end)
  check(#calls==0,"invalid OS user cannot reach a process")
 end
+-- Model and effort selectors: flags are derived from the record's fields (backlog 1).
+do
+ local function argv_of(fields,mode) local r=assert(Resolution.resolve(record(fields),mode or "ordinary","posix"));return table.concat(r.arguments,"|") end
+ local function fresh_of(fields) local r=assert(Resolution.resolve(managed(fields),"fresh","posix"));return table.concat(r.arguments,"|"),r.task_argument_index end
+ -- records without the fields keep their argv byte for byte
+ for _,provider in ipairs({"claude","codex","kimi","grok","agy","muse","omp"}) do
+  same(argv_of({provider=provider,command=provider,arguments={"--keep","x y"}}),"--keep|x y","no model or effort adds no flag for "..provider)
+ end
+ same(fresh_of({provider="claude",fresh_executable="claude",fresh_arguments={"--keep"},task_argument_index=2}),"--keep","fresh argv unchanged without fields")
+ -- per-CLI argv with model and effort
+ same(argv_of({provider="claude",command="claude",model="claude-opus-5-5",effort="high"}),"--model|claude-opus-5-5|--effort|high","claude model and effort")
+ same(argv_of({provider="claude",command="claude",model="claude-opus-5-5"}),"--model|claude-opus-5-5","claude model only")
+ same(argv_of({provider="claude",command="claude",effort="max"}),"--effort|max","claude effort only")
+ same(argv_of({provider="codex",command="codex",model="gpt-5.6-sol"}),"-m|gpt-5.6-sol","codex model flag")
+ same(argv_of({provider="kimi",command="kimi",model="kimi-k3"}),"-m|kimi-k3","kimi model flag")
+ same(argv_of({provider="grok",command="grok",model="grok-4.6"}),"-m|grok-4.6","grok model flag")
+ same(argv_of({provider="agy",command="agy",model="m1",effort="xhigh"}),"--model|m1|--effort|xhigh","agy model and effort")
+ same(argv_of({provider="muse",command="muse",model="m2",effort="ultra"}),"--model|m2|--reasoning-effort|ultra","muse model and effort")
+ same(argv_of({provider="omp",command="omp",model="anthropic/claude-sonnet-5-5",effort="medium"}),"--model=anthropic/claude-sonnet-5-5|--thinking=medium","omp joined model and thinking")
+ same(argv_of({provider="Antigravity",command="agy",model="m1"}),"--model|m1","provider alias antigravity maps to agy")
+ same(argv_of({provider="Claude Work",command="claude",model="m"}),"--model|m","provider label falls back to the executable name")
+ -- existing arguments stay exactly, flags are added after them; the task slot moves with them
+ same(argv_of({provider="claude",command="claude",arguments={"--keep"},model="m"}),"--keep|--model|m","existing args kept, flags appended")
+ local a,slot=fresh_of({provider="claude",fresh_executable="claude",fresh_arguments={"--keep"},task_argument_index=2,model="m",effort="low"})
+ same(a,"--keep|--model|m|--effort|low","fresh flags go at the task slot");same(slot,6,"task slot moves past the derived flags")
+ local launch=assert(Backend.build(managed({provider="claude",fresh_executable="claude",fresh_arguments={"--keep"},task_argument_index=2,model="m"}),host,options()))
+ same(launch.command,"'claude' '--keep' '--model' 'm' "..Backend.posix_quote(task),"managed terminal inserts the task after the derived flags")
+ a,slot=fresh_of({provider="claude",fresh_executable="claude",fresh_arguments={"--keep","--"},task_argument_index=3,model="m"})
+ same(a,"--keep|--model|m|--","derived flags stay before a -- separator");same(slot,5,"task slot still follows the --")
+ a,slot=fresh_of({provider="claude",fresh_executable="sudo",fresh_arguments={"-u","other","--","claude","--keep"},task_argument_index=6,model="m"})
+ same(a,"-u|other|--|claude|--keep|--model|m","sudo wrapper keeps its own -- and flags follow the program")
+ -- native OMP fresh default may now carry model and effort, and nothing else changes
+ local native_chosen=record({provider="omp",backend="native-agent",command="omp --resume old",fresh_native_default=true,model="anthropic/claude-sonnet-5-5",effort="high"})
+ check(Resolution.fresh_available(native_chosen),"native default allows model and effort")
+ same(assert(Backend.build(native_chosen,host,options())).command,"'omp' '--model=anthropic/claude-sonnet-5-5' '--thinking=high'","native fresh launch carries only the two derived flags")
+ same(assert(Backend.build(record({provider="omp",backend="native-agent",command="omp",fresh_native_default=true}),host,options())).command,"'omp'","native default without fields stays bare omp")
+ native_chosen.profile="other"
+ check(Backend.build(native_chosen,host,options())==nil,"native default still refuses a profile")
+ -- ordinary resume of a chosen record gets the flags too
+ same(Executor.render(record({provider="claude",command="claude",arguments={"--resume"},model="m"}),"/bin/bash","linux"),"SPAWN_PROVIDER=claude claude --resume --model m","ordinary render carries the derived flags")
+ -- validation refusals
+ check(Config.validate_record(record({provider="claude",command="claude",effort="ultra"}))==nil,"effort outside the CLI's list is refused")
+ check(Config.validate_record(record({provider="codex",command="codex",effort="high"}))==nil,"effort on a CLI with no verified effort flag is refused")
+ check(Config.validate_record(record({provider="custom",command="worker",effort="high"}))==nil,"effort on an unknown CLI is refused")
+ check(Config.validate_record(record({provider="claude",command="claude",effort=""}))==nil,"empty effort is refused")
+ check(Config.validate_record(record({provider="claude",command="claude",effort="max"}))~=nil,"valid effort is accepted")
+ for _,bad in ipairs({"-x","a\nb","a\0b",string.rep("m",201)," "}) do
+  local why=Config.selector_error(record({provider="claude",command="claude",model=bad}))
+  check(why~=nil,"model id refused: "..string.format("%q",bad):sub(1,24))
+  check(Resolution.resolve(record({provider="claude",command="claude",model=bad}),"ordinary","posix")==nil,"launch refuses an invalid model id")
+ end
+ check(Config.selector_error(record({provider="claude",command="claude",model="claude-opus-5-5"}))==nil,"exact model id is accepted")
+ -- no double flags
+ for _,case in ipairs({{"claude",{"--model","x"},"m",nil},{"claude",{"--model=x"},"m",nil},{"claude",{"--effort","low"},nil,"high"},{"codex",{"-m","x"},"m",nil},{"codex",{"--model=x"},"m",nil},{"omp",{"--thinking=low"},nil,"high"},{"omp",{"--model","x"},"m",nil},{"muse",{"--effort","low"},nil,"low"}}) do
+  local fields={provider=case[1],command=case[1],arguments=case[2],model=case[3],effort=case[4]}
+  local why=Config.selector_error(record(fields))
+  check(why~=nil and why:find("Remove one",1,true),"setup and editor refuse a duplicate hand-typed flag: "..case[2][1])
+  same(argv_of(fields),table.concat(case[2],"|"),"launch never doubles a typed flag, the typed one wins: "..case[2][1])
+  fields.fresh_executable=case[1];fields.fresh_arguments=case[2];fields.arguments={};fields.task_argument_index=#case[2]+1
+  same(fresh_of(fields),table.concat(case[2],"|"),"fresh launch never doubles a typed flag: "..case[2][1])
+ end
+ check(Config.selector_error(record({provider="claude",command="claude",arguments={"--model","x"}}))==nil,"hand-typed flag alone stays valid without the fields")
+ check(Config.selector_error(record({provider="claude",command="claude",arguments={"--model","x"},effort="low"}))==nil,"a typed model flag does not clash with a chosen effort")
+ same(argv_of({provider="custom",command="worker",model="display text",arguments={"--a"}}),"--a","unknown CLI never gets flags; stored display model keeps loading")
+end
+
 return string.format("PASS %d SPAWN backend checks", checks)

@@ -424,6 +424,17 @@ do
  local nativeDefault=table.clone(native);nativeDefault.fresh_executable=nil;nativeDefault.fresh_arguments=nil;nativeDefault.fresh_native_default=true;nativeDefault.model=nil;nativeDefault.profile=nil;nativeDefault.user='selected'
  local defaultPrepared=assert(prepare(Setup.from_record(nativeDefault)))
  check(#defaultPrepared.fresh_arguments==0 and defaultPrepared.arguments[1]=='--restore','selected-account native default never inherits ordinary continuation flags')
+ do -- model and effort chosen on the setup draft reach the saved record; a new typed-flag clash is refused
+  local chosen=Setup.from_record(nativeDefault);chosen.model='anthropic/claude-sonnet-5-5';chosen.effort='high'
+  local chosenPrepared=assert(prepare(chosen))
+  check(chosenPrepared.model=='anthropic/claude-sonnet-5-5' and chosenPrepared.effort=='high','native default preparation keeps a chosen model and effort')
+  local clash=Setup.from_record(native);clash.model='other/model'
+  local _,_,clashWhy=prepare(clash)
+  check(clashWhy and clashWhy:find('Remove one',1,true),'a newly chosen model refuses a record whose arguments already type --model')
+  local blank=Setup.from_record(nativeDefault);blank.model='';blank.effort=''
+  local blankPrepared=assert(prepare(blank))
+  check(blankPrepared.model==nil and blankPrepared.effort==nil,'empty setup fields add no selectors')
+ end
  local wrapped=Setup.defaults(saved.cwd);wrapped.backend='local-terminal';wrapped.executable='sudo'
  wrapped.arguments=Config.render_arguments(saved.arguments);wrapped.task_argument_index='9'
  local direct=assert(prepare(wrapped))

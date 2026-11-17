@@ -2,6 +2,7 @@
 -- Ordinary resume and managed fresh contracts are explicit; prompts and quoting
 -- belong to their executors. Select the local user after inserting any prompt.
 local Config = require("./config")
+local Selectors = require("./selectors")
 local Resolution = {}
 local function nonblank(value: any): boolean
 	return type(value) == "string" and value:find("%S") ~= nil
@@ -36,19 +37,46 @@ function Resolution.setup_default(command: any, cwd: any, host_os: any): (any?, 
 end
 function Resolution.fresh_available(record: any): boolean
 	if record.fresh_native_default == true then
-		return record.backend == "native-agent" and string.lower(record.provider) == "omp" and record.model == nil and record.profile == nil
+		return record.backend == "native-agent" and string.lower(record.provider) == "omp" and record.profile == nil
 	end
 	return record.fresh_executable ~= nil and record.fresh_arguments ~= nil
+end
+-- Model and effort flags come from the record's fields through one capability table.
+-- A record with neither field keeps its argv exactly. The flags go at the task slot (or the
+-- end), after any sudo wrapper, and move the slot so the task text still lands where it was set.
+local function derive(record: any, executable: string, argv: { string }, slot: number?): ({ string }, number?)
+	local key = Selectors.record_key(record)
+	-- A flag the saved arguments already carry wins: never a second copy.
+	local model, effort = record.model, record.effort
+	if model ~= nil and Selectors.duplicate(key, argv, model, nil) then model = nil end
+	if effort ~= nil and Selectors.duplicate(key, argv, nil, effort) then effort = nil end
+	local flags = Selectors.flags(key, model, effort)
+	if #flags == 0 then return argv, slot end
+	local first = 1
+	if executable:match("([^/]+)$") == "sudo" then
+		local _, index, _, problem = Config.parse_sudo(argv)
+		if problem == nil and argv[index] ~= nil then first = index + 1 end
+	end
+	return Selectors.apply(argv, flags, slot, first)
+end
+-- Fresh terminal argv with the derived flags and the matching task slot, for callers that
+-- insert the task themselves and compare what actually started.
+function Resolution.fresh_argv(record: any): ({ string }, number?)
+	return derive(record, record.fresh_executable or "", table.clone(record.fresh_arguments or {}), if record.backend == "native-agent" then nil else record.task_argument_index)
 end
 function Resolution.resolve(source: any, mode: string, shell: string): (any?, string?)
 	if mode ~= "ordinary" and mode ~= "fresh" then return nil, "Choose ordinary or fresh launch resolution explicitly" end
 	local record, err = Config.validate_record(source)
 	if record == nil then return nil, err end
 	if record.review_required then return nil, record.review_reason end
-	local executable, argv
+	local selector_problem = Config.selector_error(record, true)
+	if selector_problem ~= nil then return nil, selector_problem end
+	local executable, argv, slot
 	if mode == "fresh" then
 		if not Resolution.fresh_available(record) then return nil, "No explicit fresh executable/argv contract for this record" end
 		if record.fresh_native_default then executable, argv = "omp", {} else executable, argv = record.fresh_executable, table.clone(record.fresh_arguments) end
+		if record.backend ~= "native-agent" then slot = record.task_argument_index end
+		argv, slot = derive(record, executable, argv, slot)
 	else
 		if not nonblank(record.command) then return nil, "Review this account's launch command" end
 		local words, parse_error = command_words(record.command, if record.backend == "ssh-command" then "posix" else shell)
@@ -56,8 +84,9 @@ function Resolution.resolve(source: any, mode: string, shell: string): (any?, st
 		executable = table.remove(words, 1)
 		argv = words
 		for _, argument in ipairs(record.arguments) do table.insert(argv, argument) end
+		argv = derive(record, executable, argv, nil)
 	end
-	return { record = record, executable = executable, arguments = argv }, nil
+	return { record = record, executable = executable, arguments = argv, task_argument_index = slot }, nil
 end
 -- A bare `sudo -u account -- cli` reads none of the account's login files, so PATH additions such as
 -- ~/.local/bin and tokens exported in ~/.profile are missing. The account's login shell is entered, chosen

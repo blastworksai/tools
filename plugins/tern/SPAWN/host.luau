@@ -1,6 +1,7 @@
 -- The execution host is the only durable writer. Config is saved records only.
 local ui = tern.ui
 local Config = require("./config")
+local Selectors = require("./selectors")
 local Authority = require("./authority")
 local Review = require("./setup_review")
 local Native = require("./native_cli")
@@ -672,7 +673,7 @@ local function setup_sections(state)
 		{id="setup-guide",page="setup",title="Agent setup",rows=rows},
 	}
 end
-local MANAGED_FIELDS={id=true,provider=true,provider_family=true,account_label=true,backend=true,executable=true,arguments=true,task_argument_index=true,cwd=true,root=true,user=true}
+local MANAGED_FIELDS={id=true,provider=true,provider_family=true,account_label=true,backend=true,executable=true,arguments=true,task_argument_index=true,cwd=true,root=true,user=true,model=true,effort=true}
 local function managed_draft(state)
 	if not state.managed_draft then
 		state.managed_draft=ManagedSetup.defaults(state.default_cwd);state.managed_draft_revision=state.snapshot.config_revision
@@ -759,7 +760,7 @@ function managed_candidates(state,all,selected)
 end
 function native_check_scope(draft)
 	local source=draft.source_record or {}
-	return draft.provider.." — "..draft.account_label.." (model: "..tostring(source.model or "saved CLI settings/default")..(if source.profile then "; profile: "..source.profile else "").."; existing account: "..(if draft.user~="" then draft.user else "current OS account").."; arguments: "..(if draft.arguments~="" then draft.arguments else "none")..")"
+	return draft.provider.." — "..draft.account_label.." (model: "..tostring((if draft.model~=nil and draft.model~="" then draft.model else source.model) or "saved CLI settings/default")..(if draft.effort~=nil and draft.effort~="" then "; effort: "..draft.effort elseif source.effort then "; effort: "..source.effort else "")..(if source.profile then "; profile: "..source.profile else "").."; existing account: "..(if draft.user~="" then draft.user else "current OS account").."; arguments: "..(if draft.arguments~="" then draft.arguments else "none")..")"
 end
 local function managed_batch_offer(state,cx,expected,all,plan,missing)
 	if state.managed_busy or (state.managed_batch and state.managed_batch.status~="failed" and state.managed_batch.status~="completed") then state.notice="Setup is already running; no second preparation was requested.";return end
@@ -897,6 +898,18 @@ local function managed_sections(state)
 		local hints={provider_family="Configured underlying provider for OMP/wrappers; not runtime identity.",arguments="Literal argv. Configure explicit fresh-session flags. No shell command string.",task_argument_index="Terminal only: one-based insertion position; empty appends the task after fresh arguments. Native OMP uses its native prompt channel.",root="Current-user default is stable plugin data; selected-account default uses its verified home. Existing explicit roots are preserved; no permissions or Git trust are changed.",user="Empty uses the current account. An existing same-host account requires already-authorized noninteractive sudo access; its actual home and executable are observed before helper installation. No account, credentials or permissions are created.",executable=if state.snapshot.host_os=="windows" then "Choose an installed native .exe using Windows CRT arguments." else "Installed command name or absolute executable path."}
 		table.insert(rows,text_row("managed:"..field,labels[field],text(draft[field]),hints[field]))
 	end
+	do
+		local key=Selectors.cli_key(draft.provider,draft.executable)
+		if Selectors.supports_model(key) then
+			table.insert(rows,text_row("managed:model","Model",draft.model or "","Exact model id passed to the CLI. Empty keeps the CLI's own default. SPAWN never guesses an alias."))
+			local values=Selectors.efforts(key)
+			if values then
+				local options={{value="",label="CLI default"}}
+				for _,value in ipairs(values) do table.insert(options,{value=value,label=value}) end
+				table.insert(rows,choice_row("managed:effort","Effort",draft.effort or "",options,"Only the values this CLI lists. CLI default adds no effort flag."))
+			end
+		end
+	end
 	table.insert(rows,choice_row("managed:backend","Launch route",draft.backend,if state.snapshot.host_os=="windows" then {{value="local-terminal",label="Local terminal"}} else {{value="native-agent",label="Native agent"},{value="local-terminal",label="Local terminal"}},"Use this machine's configured native agent integration or a terminal; a provider label does not verify native recognition."))
 	if state.advanced and (not state.managed_probe or not state.managed_probe.passed or (state.managed_route and state.managed_route.cleanup_pending==false)) then
 		table.insert(rows,action_row("managed-probe","Check resources only",action(state,"managed-probe"),"Advanced resource diagnostic only. Use Prepare and save for the complete required setup."))
@@ -966,6 +979,18 @@ local function record_sections(state)
 		if state.advanced then
 			if record.backend=="native-agent" or record.backend=="ssh-command" or record.host then table.insert(rows,text_row(prefix("host"),"Host",text(record.host),"Native host identity or explicit SSH destination.")) end
 			if record.backend=="ssh-command" then table.insert(rows,text_row(prefix("key_path"),"Key path",text(record.key_path),"Path only; never paste private key contents.")) end
+		end
+		do
+			local key=Selectors.record_key(record)
+			if Selectors.supports_model(key) then
+				table.insert(rows,text_row(prefix("model"),"Model",text(record.model),"Exact model id passed to the CLI at launch. Empty keeps the CLI's own default. Do not also type the model flag in Arguments."))
+				local values=Selectors.efforts(key)
+				if values then
+					local options={{value="",label="CLI default"}}
+					for _,value in ipairs(values) do table.insert(options,{value=value,label=value}) end
+					table.insert(rows,choice_row(prefix("effort"),"Effort",record.effort or "",options,"Only the values this CLI lists. CLI default adds no effort flag."))
+				end
+			end
 		end
 		if string.lower(record.provider)=="omp" then
 			table.insert(rows,text_row(prefix("prompt"),"Approved startup prompt",text(record.prompt),"Delivered once per new Native OMP launch; never on reload. A custom nonempty prompt is preserved."))
@@ -1401,7 +1426,7 @@ local function update_record(state,cx,id,field,value,revision)
 		local next_records=Authority.clone(state.config.agents);next_records[index]=canonical
 		mutate(state,cx,revision,"replace-records",{records=next_records});return
 	end
-	local allowed={provider=true,provider_family=true,account_label=true,host=true,user=true,key_path=true,command=true,arguments=true,cwd=true,prompt=true,placement=true,backend=true,enabled=true}
+	local allowed={provider=true,provider_family=true,account_label=true,host=true,user=true,key_path=true,command=true,arguments=true,cwd=true,prompt=true,placement=true,backend=true,enabled=true,model=true,effort=true}
 	if not allowed[field] then return end
 	local candidate=Authority.clone(record)
 	if field=="arguments" then
@@ -1409,9 +1434,11 @@ local function update_record(state,cx,id,field,value,revision)
 	elseif field=="enabled" then
 		if type(value)~="boolean" then state.notice="Expected a switch value";return end
 	elseif type(value)~="string" or #value>32000 then state.notice="Invalid or oversized field";return end
+	if (field=="model" or field=="effort") and value=="" then value=nil end
 	candidate[field]=value
 	if field=="backend" and value~=record.backend then candidate.review_required=true;candidate.review_reason="Review this account's launch command and routing after changing launch mode" end
 	local canonical,err=Config.validate_record(candidate);if not canonical then state.notice=err;return end
+	local selector_problem=Config.selector_error(canonical,canonical.model==record.model and canonical.effort==record.effort and Config.selector_error(record)~=nil);if selector_problem then state.notice=selector_problem;return end
 	if withdraw_stale_preparation(record,canonical) then state.notice="This agent's launch settings changed, so its ORCH+ preparation was withdrawn. Prepare agents for ORCH+ to check it again." end
 	local next_records=Authority.clone(state.config.agents);next_records[index]=canonical
 	mutate(state,cx,revision,"replace-records",{records=next_records})

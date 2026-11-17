@@ -427,6 +427,41 @@ check(spawnRows['spawn-launch:custom:other'].hint=='ordinary-cli · default fold
 check(spawnRows['spawn-launch:custom:off'].disabled=='Disabled in Config','disabled record is shown greyed with its reason')
 check(spawnRows['spawn-launch:custom:needs'].disabled=='Needs settings review: Review the new command','needs-review record is shown greyed with its reason')
 check(spawnRows['spawn-launch:custom:off'].reason=='  · Disabled in Config' and spawnRows['spawn-launch:kimi:argsy'].reason==nil,'a blocked agent shows its reason in the row, a ready one shows none')
+-- Model and effort rows on Agent settings: only for CLIs that have the flags, only real values.
+do
+ local sel=record('selclaude');sel.provider='claude';sel.command='claude';sel.account_label='Sel'
+ local plain=record('selcodex');plain.provider='codex';plain.command='codex';plain.account_label='Sel2'
+ local unknown=record('selunknown')
+ local prior=clone(snapshot().records);local list=clone(prior);table.insert(list,sel);table.insert(list,plain);table.insert(list,unknown)
+ check(A.edit(state.binding,snapshot().config_revision,'replace-records',{records=list}),'seed claude, codex and unknown-CLI records')
+ refresh()
+ local function rid(id,field)return 'agent:'..id..':'..field..':'..tostring(state.snapshot.config_revision) end
+ local function saved_record(id)for _,item in ipairs(snapshot().records)do if item.id==id then return item end end end
+ local rows=rows_of('agents')
+ check(rows[rid('selclaude','model')]~=nil and rows[rid('selclaude','effort')]~=nil and rows[rid('selclaude','effort')].control.k=='choice','a CLI with model and effort flags shows both controls')
+ local values={}
+ for _,option in ipairs(rows[rid('selclaude','effort')].control.options) do table.insert(values,option.value) end
+ check(table.concat(values,',')==',low,medium,high,xhigh,max','effort dropdown lists the CLI default and only the real values')
+ check(rows[rid('selcodex','model')]~=nil and rows[rid('selcodex','effort')]==nil,'a CLI without a verified effort flag shows a model control and no effort control')
+ check(rows[rid('selunknown','model')]==nil and rows[rid('selunknown','effort')]==nil,'an unknown CLI shows neither control')
+ definition.event(state,{ev='change',item=rid('selclaude','model'),value='claude-opus-5-5'},cx)
+ check(saved_record('selclaude').model=='claude-opus-5-5','the model is saved exactly as typed')
+ definition.event(state,{ev='change',item=rid('selclaude','effort'),value='high'},cx)
+ check(saved_record('selclaude').effort=='high','a listed effort is saved')
+ definition.event(state,{ev='change',item=rid('selclaude','effort'),value='ultra'},cx)
+ check(saved_record('selclaude').effort=='high' and type(state.notice)=='string','an effort outside the list is refused and nothing changes')
+ definition.event(state,{ev='change',item=rid('selclaude','model'),value='-bad'},cx)
+ check(saved_record('selclaude').model=='claude-opus-5-5' and state.notice:find('must not start with -',1,true)~=nil,'a model id starting with - is refused')
+ definition.event(state,{ev='change',item=rid('selclaude','arguments'),value='--effort low'},cx)
+ check(saved_record('selclaude').arguments[1]==nil or saved_record('selclaude').arguments[1]~='--effort','arguments are not edited into a clash')
+ local with_arg=clone(saved_record('selclaude'))
+ definition.event(state,{ev='change',item=rid('selclaude','arguments'),value='--model other'},cx)
+ definition.event(state,{ev='change',item=rid('selclaude','effort'),value=''},cx)
+ check(saved_record('selclaude').effort==nil,'an empty effort clears back to the CLI default')
+ definition.event(state,{ev='change',item=rid('selclaude','model'),value=''},cx)
+ check(saved_record('selclaude').model==nil,'an empty model clears back to the CLI default')
+ check(A.edit(state.binding,snapshot().config_revision,'replace-records',{records=prior}),'selector fixtures removed');refresh();state.page='spawn'
+end
 -- Every agent row carries Tern's own provider icon cell: the right name per provider, a fallback for an unknown one.
 do
  local Icons=load('provider_icons')
@@ -574,6 +609,15 @@ definition.event(state,{ev='change',item='managed-existing',value=''},cx)
 local managedRows=rows_of('managed')
 check(managedRows['managed-begin']==nil and managedRows['managed-attest']==nil and managedRows['managed-cli-attest']==nil,'cold setup cannot attest readiness or manufacture setup completion')
 check(managedRows['managed:root']==nil and managedRows['managed:user']~=nil and managedRows['managed:id']==nil,'normal managed setup exposes existing POSIX account selection without transport-path or stable-ID internals')
+do -- model and effort on the managed setup form
+ check(managedRows['managed:model']~=nil and managedRows['managed:effort']~=nil and managedRows['managed:effort'].control.k=='choice','setup form offers model and effort for a CLI that has both flags (omp)')
+ local before=state.managed_draft.model
+ definition.event(state,{ev='change',item='managed:model',value='anthropic/claude-sonnet-5-5'},cx)
+ definition.event(state,{ev='change',item='managed:effort',value='medium'},cx)
+ check(state.managed_draft.model=='anthropic/claude-sonnet-5-5' and state.managed_draft.effort=='medium','typed model and chosen effort land on the setup draft')
+ definition.event(state,{ev='change',item='managed:model',value=before or ''},cx)
+ definition.event(state,{ev='change',item='managed:effort',value=''},cx)
+end
 do
  local baseline=clone(saved);local request=assert(state.managed_native_request)
  state.managed_draft_touched=nil

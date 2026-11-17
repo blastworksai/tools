@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.7.0
+
+- **Choose the model and the effort per agent.** An agent's `model` (already stored, until now display text only) and a new `effort` field now reach the CLI's argv, derived from one per-CLI capability table (`selectors.luau`). Set them on **Agent settings** (a Model text box, and an Effort drop-down for CLIs that have one) or on the **Setup** form. Nothing chosen adds no flag: a record without `model` or `effort` launches byte for byte as before.
+- Model is an exact typed id, never an alias SPAWN invents: not empty, no control characters, no leading `-`, at most 200 bytes. Effort is a drop-down limited to the values that CLI's own `--help` lists; a CLI with no verified effort flag shows no Effort control, and `effort` on it is refused.
+- Flags added: claude `--model`, `--effort`; codex `-m`; kimi `-m`; grok `-m`; agy `--model`, `--effort`; muse `--model`, `--reasoning-effort`; OMP `--model=`, `--thinking=`. Not supported yet: codex, kimi and grok effort (values not verified from `--help`).
+- A native OMP fresh default may now carry `model` and `effort` (only those two derived flags; `profile` is still refused), so a coordinator can start on a chosen model.
+- No double flags. The Setup form and Agent settings refuse a model or effort change while the arguments already type the same flag. A saved record that already holds both keeps launching: the typed flag wins and SPAWN adds none.
+- The model and effort show where SPAWN already showed the record's model label (setup review and the paid-check scope).
+
 ## 0.6.6
 
 - **A helper result that SPAWN refuses is no longer silent.** Guided setup could finish with 0 agents saved and no message. Cause 1: the helper (OMP) moved itself out of its launch folder after SPAWN bound it, and SPAWN refused the result because the pane's folder no longer equalled the launch folder; the pane is now identified by its id, session, command and window incarnation only. Cause 2: the helper wrote the OMP startup prompt as `startup_prompt` instead of `prompt`; that refusal is legitimate, now names the field, and the setup skill names `prompt` exactly. Every refusal is also published to the window, so Recover setup result shows "SPAWN refused the helper's result: ..." instead of "No complete explicit submission is available".

@@ -95,7 +95,7 @@ An enabled ordinary roster record is not necessarily a managed worker. Managed s
 
 **Advanced** exposes the stable ID, task argument position, mailbox folder, detailed observations and full-record JSON. Choosing another existing POSIX OS user is available on the normal preparation page. For exceptional manual record changes use **Advanced → Configured agents → Full record JSON**, then **Approve reviewed command and settings**. Do not set `mailbox.verified` merely to make a record selectable.
 
-Adopting an existing Native OMP record with `fresh_native_default:true` keeps its fresh contract (`omp` with no arguments) separate from its ordinary resume command and arguments. A native default combined with model/profile selectors remains unsupported: review an explicit fresh executable/argv contract in the full record editor first. Adoption retains explicit execution-host bindings rather than silently retargeting the record.
+Adopting an existing Native OMP record with `fresh_native_default:true` keeps its fresh contract (`omp` with no arguments) separate from its ordinary resume command and arguments. A native default may carry `model` and `effort` (SPAWN adds only those two derived flags to the bare `omp`); combined with a `profile` it remains unsupported: review an explicit fresh executable/argv contract in the full record editor first. Adoption retains explicit execution-host bindings rather than silently retargeting the record.
 
 Managed setup runs on the execution host, not through an SSH hop. For a remote machine, run ORCH+ and SPAWN on that target host with same-host records. On POSIX, leaving the Unix-user field empty uses the current account; an explicit user uses existing noninteractive `sudo -n -u <user> -H --` access, even if the name matches the current account. Before preparation, SPAWN checks the actual selected identity and home, resolves its executable and checks access to the working folder. An implicit cross-user mailbox root uses that verified home at `.local/share/tern-spawn/managed`; explicit saved roots remain unchanged. Probes require the selected account's helper tools and durable mailbox access. SPAWN does not create OS accounts, grant sudo access, copy credentials or repair PATH, authentication, Git trust or permissions.
 
@@ -141,7 +141,25 @@ These routes run as the selected OS account, **not in a sandbox**. Labels, profi
 | `prompt` | OMP startup prompt. Native OMP needs a non-empty prompt. |
 | `enabled` | Whether this account can be started. There is no batch-inclusion setting. |
 | `placement` | `tab`, `split` or `replace_if_alone`. |
+| `model` | Optional exact model id. When set, SPAWN adds the CLI's own model flag (table below). Empty adds no flag, so the CLI keeps its own default. No alias is ever guessed. |
+| `effort` | Optional effort level, only for a CLI with a verified effort flag and only its listed values. Empty adds no flag. |
 | `provider_family` | Optional explicit underlying AI provider for wrappers, OMP and review policy. Configure it in Advanced agent settings; the display name is not identity proof. |
+
+### Model and effort per CLI
+
+The flags are derived from `model` and `effort` through one table (`selectors.luau`), taken from each CLI's own `--help`. They go after the saved arguments (at the task slot for a fresh launch, before any `--`). If the arguments already type the same flag, the typed flag wins and none is added; the Setup form and Agent settings refuse a new model or effort that clashes.
+
+| CLI | Model flag | Effort flag and values |
+| --- | --- | --- |
+| claude | `--model <id>` | `--effort`: low, medium, high, xhigh, max |
+| codex | `-m <id>` | not supported yet (values not verified from `--help`) |
+| kimi | `-m <id>` | not supported yet (no effort flag in `--help`) |
+| grok | `-m <id>` | not supported yet (`--help` lists no values) |
+| agy | `--model <id>` | `--effort`: low, medium, high, xhigh, max |
+| muse | `--model <id>` | `--reasoning-effort`: none, minimal, low, medium, high, xhigh, max, ultra |
+| omp | `--model=<id>` | `--thinking=`: off, minimal, low, medium, high, xhigh, max, auto |
+
+A native OMP fresh default may carry `model` and `effort`; `profile` is still refused there. The CLI is found from the provider name, else from the executable name.
 
 Advanced manual import example (**Agent settings → Advanced → Setup → Paste setup JSON**):
 
@@ -247,6 +265,7 @@ Mailbox helper regressions run outside Tern: `python3 tests/mailbox_posix.py` on
 - `authority.luau`: saved configuration, reservations and request handling (the only writer of SPAWN's state)
 - `host_executor.luau`: tickets, shell detection, command rendering and submission, outcome observation
 - `launch_state.luau`: launch phases, automatic settlement and history trimming
+- `selectors.luau`: the per-CLI model and effort capability table and flag derivation
 - `launch_resolution.luau`: shared record validation, ordinary/fresh argv selection, OS-user and SSH identity resolution
 - `config.luau`: record validation, migration and the guided-setup prompt
 - `native_cli.luau`: bounded calls to Tern's own CLI; pure executable discovery comes from `updater/discovery.luau`

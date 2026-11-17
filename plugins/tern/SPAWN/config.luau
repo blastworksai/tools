@@ -1,6 +1,7 @@
 -- Pure configuration boundary. The caller owns backup and durable replacement:
 -- when changed is true, preserve the original store before committing result.store.
 -- No discovery, process launch, credential access or persistence belongs here.
+local Selectors = require("./selectors")
 local Config = {}
 local MAX_RECORDS = 32
 local MAX_TEXT = 32000
@@ -14,7 +15,7 @@ local FIELDS = {
 	host = true, user = true, key_path = true, review_required = true, review_reason = true,
 	fresh_executable = true, fresh_arguments = true, fresh_native_default = true, task_argument_index = true,
 	host_shell = true, target_os = true, target_shell = true, mailbox = true,
-	model = true, profile = true, variant_id = true, capacity_binding = true, capacity_limit = true,
+	model = true, effort = true, profile = true, variant_id = true, capacity_binding = true, capacity_limit = true,
 	selector_evidence = true,
 	argv_contract = true,
 }
@@ -212,12 +213,18 @@ end
 -- Managed declarations are configuration, not evidence collected by SPAWN.
 -- Absence stays absent: neither migration nor normalization grants a capability.
 local function managed_fields(source: any, record: any): string?
-	for _, field in ipairs({ "fresh_executable", "host_shell", "target_shell", "model", "profile", "variant_id", "capacity_binding", "selector_evidence" }) do
+	for _, field in ipairs({ "fresh_executable", "host_shell", "target_shell", "model", "effort", "profile", "variant_id", "capacity_binding", "selector_evidence" }) do
 		local value = source[field]
 		if value ~= nil then
 			if not text(value, 4096) or not nonblank(value) then return field .. " must be nonempty bounded text" end
 			record[field] = value
 		end
+	end
+	if record.effort ~= nil then
+		-- Effort is new and strict: only values this CLI's own --help lists, only on a CLI that has the flag.
+		local key = Selectors.cli_key(record.provider, record.fresh_executable or (if type(record.command) == "string" then record.command:match("^%s*(%S+)") else nil))
+		local effort_error = Selectors.effort_error(key, record.effort)
+		if effort_error ~= nil then return effort_error end
 	end
 	if source.target_os ~= nil then
 		if source.target_os ~= "linux" and source.target_os ~= "macos" and source.target_os ~= "windows" then return "Unsupported target OS" end
@@ -319,6 +326,39 @@ function Config.parse_sudo(argv: {string}): (string?, number, boolean, string?)
 		index += 1
 	end
 	return selected, index, login, nil
+end
+-- Strict check of the model/effort selectors a launch would use. It is not part of loading a
+-- saved roster (an older record may hold display text in `model`, or both the field and a typed
+-- flag). The setup form and the record editor refuse a duplicate flag; a launch (launching=true)
+-- checks only the id and effort, and a flag the arguments already carry wins, so nothing is doubled
+-- and no saved roster stops launching.
+function Config.selector_error(record: any, launching: boolean?): string?
+	if record.model == nil and record.effort == nil then return nil end
+	local key = Selectors.record_key(record)
+	if record.model ~= nil then
+		local why = Selectors.model_error(record.model)
+		if why ~= nil then return why end
+	end
+	if record.effort ~= nil then
+		local why = Selectors.effort_error(key, record.effort)
+		if why ~= nil then return why end
+	end
+	local words = {}
+	if type(record.command) == "string" then
+		local parsed = Config.parse_arguments(record.command)
+		if parsed ~= nil then
+			for index = 2, #parsed do table.insert(words, parsed[index]) end
+		end
+	end
+	for _, list in ipairs({ record.arguments or {}, record.fresh_arguments or {} }) do
+		for _, word in ipairs(list) do table.insert(words, word) end
+	end
+	if launching then return nil end
+	local hit = Selectors.duplicate(key, words, record.model, record.effort)
+	if hit ~= nil then
+		return "This record sets model or effort and its arguments also contain " .. hit .. ". Remove one of them: the flag is added from the record's model and effort fields."
+	end
+	return nil
 end
 local function normalize(source: any, legacy: boolean): (any?, string?)
 	if type(source) ~= "table" then return nil, "Record must be an object" end

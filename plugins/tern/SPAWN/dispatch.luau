@@ -3,6 +3,7 @@ local P=require('./bridge_protocol')
 local Codec=require('./wire/codec')
 local Authority=require('./authority')
 local Backend=require('./backend')
+local Resolution=require('./launch_resolution')
 local Mailbox=require('./mailbox')
 local Capabilities=require('./mailbox_capabilities')
 local State=require('./dispatch_state')
@@ -495,8 +496,8 @@ local function launch_prepare(root,entry,binding,snapshot)
    if not retained or retained.stop_request_id or retained.terminal_process or retained.body.status=='rejected' then terminal_starts[id]=nil else active+=1 end
   end
   if active<64 then
-   local argv=table.clone(record.fresh_arguments or {})
-   table.insert(argv,record.task_argument_index,brief)
+   local argv,slot=Resolution.fresh_argv(record)
+   table.insert(argv,slot,brief)
    terminal_starts[key(r)]={logical=r.logical_session_id,request_id=r.request_id,command=built.command,cwd=built.cwd,session=binding.native_session,expected={executable=record.fresh_executable,arguments=argv}}
   end
  end
