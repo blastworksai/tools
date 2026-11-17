@@ -545,4 +545,88 @@ test("every companion service code keeps its own fixed message", function()
 	assert(codes >= 30, "protocol MESSAGES parsed")
 end)
 
+test("the host bootstraps once on Linux and never on another client or platform", function()
+	local f = fixture({ context = "host" })
+	local calls, done = recorder()
+	f.bridge.set_client("host", "host")
+	f.bridge.ensure(done, { auto_install = true })
+	f.probe()
+	assert(real.json.decode(f.processes[2].opts.stdin).install_dependencies == true, "first host start installs")
+	f.resolve(2, ready())
+	assert(#calls == 1 and calls[1].err == nil)
+	local again, done2 = recorder()
+	f.bridge.ensure(done2, { auto_install = true })
+	f.advance(0)
+	local last = f.processes[#f.processes]
+	assert(real.json.decode(last.opts.stdin).install_dependencies == false, "a second start never installs again")
+	for _, case in { { context = "window", os = "linux" }, { context = "host", os = "macos" }, { context = "host", os = "windows" } } do
+		local g = fixture({ context = case.context, os = case.os })
+		local _, cb = recorder()
+		g.bridge.set_client(case.context == "host" and "host" or "window:1", case.context == "host" and "host" or "window")
+		g.bridge.ensure(cb, { auto_install = true })
+		g.probe()
+		assert(real.json.decode(g.processes[2].opts.stdin).install_dependencies == false, case.os .. "/" .. case.context)
+	end
+	local bad = fixture({ context = "host" })
+	local badCalls, badDone = recorder()
+	bad.bridge.set_client("host", "host")
+	bad.bridge.ensure(badDone, { auto_install = "yes" })
+	bad.advance(0)
+	oneError(badCalls, "invalid_request")
+end)
+
+test("a bootstrap failure names its cause and later requests report it", function()
+	local f = fixture({ context = "host" })
+	local calls, done = recorder()
+	f.bridge.set_client("host", "host")
+	f.bridge.ensure(done, { auto_install = true })
+	f.probe()
+	-- While the install runs, a request says so instead of "unavailable".
+	local early, earlyDone = recorder()
+	f.bridge.request("diagnostics", {}, earlyDone)
+	f.raw(3, real.json.encode({ ok = false, error = { code = "companion_unavailable", message = "SECRET" } }), 1)
+	assert(#early == 1 and early[1].err.code == "setup_required" and early[1].err.message:find("installing", 1, true))
+	f.raw(2, real.json.encode({ ok = false, error = { code = "setup_required", message = "SECRET" },
+		state = "dependency_wheel_unavailable", package = "frozenlist==1.8.0", python = "3.14" }), 1)
+	assert(#calls == 1 and calls[1].err.code == "setup_required")
+	assert(calls[1].err.message:find("Python 3.14 has no prebuilt wheel for frozenlist==1.8.0", 1, true), calls[1].err.message)
+	assert(calls[1].err.message:find("3.12", 1, true) and not calls[1].err.message:find("SECRET", 1, true))
+	local later, laterDone = recorder()
+	f.bridge.request("diagnostics", {}, laterDone)
+	f.raw(4, real.json.encode({ ok = false, error = { code = "companion_unavailable", message = "SECRET" } }), 1)
+	assert(#later == 1 and later[1].err.message:find("frozenlist==1.8.0", 1, true), "request keeps the bootstrap cause")
+	-- A later success clears it.
+	local ok, okDone = recorder()
+	f.bridge.ensure(okDone, { auto_install = true })
+	f.advance(0)
+	f.resolve(5, ready())
+	local plain, plainDone = recorder()
+	f.bridge.request("diagnostics", {}, plainDone)
+	f.raw(6, real.json.encode({ ok = false, error = { code = "companion_unavailable", message = "SECRET" } }), 1)
+	assert(plain[1].err.code == "companion_unavailable" and plain[1].err.message == "The local USAGE companion is unavailable.")
+end)
+
+test("failure states use fixed text and only a checked package pin", function()
+	local f = fixture({ context = "host" })
+	local first = true
+	local function launched(value)
+		local calls, done = recorder()
+		f.bridge.ensure(done)
+		if first then f.probe(); first = false end
+		f.raw(#f.processes, real.json.encode(value), 1)
+		return calls
+	end
+	f.bridge.set_client("host", "host")
+	for state in ("dependency_consent_required dependency_install_failed dependency_network_failed dependency_hash_mismatch python_venv_unavailable python_311_required"):gmatch("%S+") do
+		local calls = launched({ ok = false, error = { code = "setup_required", message = "SECRET" }, state = state })
+		assert(calls[1].err.code == "setup_required" and calls[1].err.message ~= "USAGE setup is required.", state)
+		assert(not calls[1].err.message:find("SECRET", 1, true))
+	end
+	local hostile = launched({ ok = false, error = { code = "setup_required", message = "x" },
+		state = "dependency_wheel_unavailable", package = "x; rm -rf /", python = "3.14" })
+	assert(not hostile[1].err.message:find("rm -rf", 1, true) and hostile[1].err.message:find("no prebuilt wheel", 1, true))
+	local unknown = launched({ ok = false, error = { code = "setup_required", message = "x" }, state = "SECRET weird" })
+	assert(unknown[1].err.message == "USAGE setup is required.")
+end)
+
 return "PASS " .. tostring(tests) .. " companion asynchronous boundary fixtures"

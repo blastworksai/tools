@@ -160,9 +160,46 @@ class RuntimeBoundaryTests(unittest.TestCase):
         self.assertNotIn("shell", options)
         self.assertEqual(options["stdin"], subprocess.DEVNULL)
         self.assertEqual(options["stdout"], subprocess.DEVNULL)
-        self.assertEqual(options["stderr"], subprocess.DEVNULL)
+        self.assertEqual(options["stderr"], subprocess.PIPE)
         self.assertEqual(options["env"]["TMPDIR"], str(self.root / "tmp"))
         self.assertEqual(list((self.root / "environments").iterdir()), [])
+
+    def _failed_pip(self, stderr):
+        private_directory(self.root)
+        stamp = runtime.source_stamp()
+        release = runtime._stage_release(self.root, runtime._sources(PACKAGE), stamp)
+
+        def run(argv, **kwargs):
+            return subprocess.CompletedProcess(argv, 1 if "pip" in argv else 0, b"", stderr)
+
+        with patch.object(runtime.subprocess, "run", side_effect=run):
+            with self.assertRaises(runtime.RuntimeFailure) as caught:
+                runtime._stage_environment(self.root, release, stamp, True)
+        return caught.exception
+
+    def test_failed_install_names_its_cause_without_echoing_child_output(self):
+        python = "%d.%d" % sys.version_info[:2]
+        wheel = self._failed_pip(b"ERROR: Could not find a version that satisfies the requirement "
+                                 b"frozenlist==1.8.0 (from versions: none)\nSECRET token\n"
+                                 b"ERROR: No matching distribution found for frozenlist==1.8.0\n")
+        self.assertEqual(wheel.state, "dependency_wheel_unavailable")
+        self.assertEqual(wheel.public()["package"], "frozenlist==1.8.0")
+        self.assertEqual(wheel.public()["python"], python)
+        self.assertNotIn("SECRET", json.dumps(wheel.public()))
+        # An unreachable index also says "from versions: none"; the network cause wins.
+        network = self._failed_pip(b"WARNING: Retrying (Retry(total=4)) after connection broken by "
+                                   b"'NewConnectionError(Failed to establish a new connection)'\n"
+                                   b"ERROR: No matching distribution found for aiohttp==3.14.5\n")
+        self.assertEqual(network.state, "dependency_network_failed")
+        self.assertNotIn("package", network.public())
+        self.assertEqual(self._failed_pip(b"THESE PACKAGES DO NOT MATCH THE HASHES").state, "dependency_hash_mismatch")
+        self.assertEqual(self._failed_pip(b"The virtual environment was not created successfully because "
+                                          b"ensurepip is not available").state, "python_venv_unavailable")
+        self.assertEqual(self._failed_pip(b"something unknown").state, "dependency_install_failed")
+        self.assertEqual(self._failed_pip(None).state, "dependency_install_failed")
+        # Only a package pin shape ever becomes a field.
+        hostile = self._failed_pip(b"No matching distribution found for x;rm -rf /\n")
+        self.assertEqual(hostile.public().get("package"), "x")
         self.assertFalse((self.root / "state.sqlite3").exists())
 
     def test_no_console_detached_spawn_options_on_current_platform(self):

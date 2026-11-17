@@ -46,12 +46,15 @@ _BACKUP = re.compile(r"upgrade-[0-9a-f]{32}\.sqlite3\Z")
 
 
 class RuntimeFailure(ServiceError):
-    def __init__(self, code: str, state: str):
+    def __init__(self, code: str, state: str, detail: dict | None = None):
         super().__init__(code, 503)
         self.state = state
+        self.detail = detail or {}
 
     def public(self) -> dict:
-        return dict(super().public(), state=self.state)
+        # `detail` holds only pattern-checked fields (package pin, interpreter version),
+        # never raw child output.
+        return dict(super().public(), state=self.state, **self.detail)
 
 
 class OSLock:
@@ -279,16 +282,42 @@ def _child_environment(root: Path) -> dict[str, str]:
     return result
 
 
+_PIN = r"[A-Za-z0-9][A-Za-z0-9._-]{0,60}(?:==[A-Za-z0-9.!+_-]{1,30})?"
+_NETWORK = re.compile(r"Failed to establish a new connection|Temporary failure in name resolution|"
+                      r"Name or service not known|Max retries exceeded|Could not fetch URL|Network is unreachable|"
+                      r"ProxyError|SSLError|Connection (?:refused|timed out|reset)|Read timed out|ConnectTimeout", re.I)
+_WHEEL = (re.compile(r"No matching distribution found for (" + _PIN + ")"),
+          re.compile(r"Could not find a version that satisfies the requirement (" + _PIN + ")"))
+
+
+def _classify_setup_failure(stderr: bytes | None) -> tuple[str, dict]:
+    """Map a failed venv/pip child's stderr to a fixed state. Raw text never leaves this function."""
+    text = (stderr or b"")[-65536:].decode("utf-8", "replace")
+    if "ensurepip" in text or "python3-venv" in text or "python3-full" in text:
+        return "python_venv_unavailable", {}
+    if "DO NOT MATCH THE HASHES" in text:
+        return "dependency_hash_mismatch", {}
+    if _NETWORK.search(text):
+        return "dependency_network_failed", {}
+    for pattern in _WHEEL:
+        found = pattern.search(text)
+        if found:
+            return "dependency_wheel_unavailable", {"package": found.group(1),
+                    "python": "%d.%d" % sys.version_info[:2]}
+    return "dependency_install_failed", {}
+
+
 def _run_setup(argv: list[str], root: Path, timeout: int) -> None:
     try:
         result = subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                stderr=subprocess.DEVNULL, cwd=root, env=_child_environment(root),
+                                stderr=subprocess.PIPE, cwd=root, env=_child_environment(root),
                                 close_fds=True, timeout=timeout, check=False,
                                 **({"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}))
     except (OSError, subprocess.SubprocessError):
         raise RuntimeFailure("setup_required", "dependency_install_failed") from None
     if result.returncode:
-        raise RuntimeFailure("setup_required", "dependency_install_failed")
+        state, detail = _classify_setup_failure(getattr(result, "stderr", None))
+        raise RuntimeFailure("setup_required", state, detail)
 
 
 def _stage_environment(root: Path, release: Path, stamp: dict, consent: bool) -> str:

@@ -70,7 +70,23 @@ local MESSAGES: { [string]: string } = {
 	binding_unavailable = "This SPAWN account has no current headless reading with a provider identity; refresh, then bind it.",
 	binding_changed = "The SPAWN account or its reading changed; choose Bind SPAWN accounts again.",
 }
-type Failure = { code: string, message: string }
+-- Why a first-start bootstrap failed, keyed by the launcher's fixed `state` value. The
+-- launcher never supplies text; only a pattern-checked package pin and interpreter
+-- version may be interpolated.
+local STATES: { [string]: string } = {
+	dependency_consent_required = "USAGE has not installed its private dependencies yet. Open USAGE Setup and choose Install private dependencies.",
+	dependency_install_failed = "USAGE could not install its private dependencies. Check Python and PyPI access, then retry in USAGE Setup.",
+	dependency_network_failed = "USAGE could not reach PyPI to install its private dependencies. Check the network or proxy, then retry in USAGE Setup.",
+	dependency_hash_mismatch = "A downloaded dependency did not match USAGE's pinned hash, so nothing was installed. Retry in USAGE Setup; report it if it repeats.",
+	dependency_wheel_unavailable = "This Python has no prebuilt wheel for a USAGE dependency. Install Python 3.12, then choose Select existing Python interpreter in USAGE Setup (usage_python).",
+	python_venv_unavailable = "This Python cannot create a private environment (venv or ensurepip is missing). Install the python3-venv package, or choose another interpreter in USAGE Setup (usage_python).",
+	python_311_required = "Python 3.11 or newer is required; choose a newer interpreter in USAGE Setup (usage_python).",
+	platform_unsupported = "The USAGE companion is unavailable on this platform.",
+	start_failed = "The USAGE companion process could not start. Open USAGE Diagnostics.",
+	start_timeout = "The USAGE companion process did not become ready in time. Open USAGE Diagnostics.",
+}
+local INSTALLING = "USAGE is installing its private dependencies for the first time; this can take a few minutes."
+type Failure = { code: string, message: string, specific: boolean? }
 type Callback = (any?, Failure?, any?) -> ()
 type Job = {
 	generation: number, deadline: number, callback: Callback, done: boolean,
@@ -84,10 +100,33 @@ local clientKind: string? = nil
 local leaseId: string? = nil
 local leasePrefix: { string }? = nil
 local closed = false
+-- Cause of the latest bootstrap outcome in this VM, so later requests report it instead of
+-- the generic "unavailable"; one automatic install per VM, so a failure is never a retry loop.
+local bootstrapNote: Failure? = nil
+local autoInstallTried = false
 
 local function failure(code: string): Failure
 	local known = if MESSAGES[code] ~= nil then code else "internal_error"
 	return { code = known, message = MESSAGES[known] }
+end
+
+local function validPin(value: any): boolean
+	return type(value) == "string" and #value <= 100
+		and (value:match("^[%w][%w%._%-]*$") ~= nil or value:match("^[%w][%w%._%-]*==[%w%.!%+_%-]+$") ~= nil)
+end
+
+-- The code stays the service's own; only the message is refined, and only from fixed text.
+local function failureOf(code: string, value: any): Failure
+	local base = failure(code)
+	if (code ~= "setup_required" and code ~= "companion_unavailable") or type(value.state) ~= "string" then return base end
+	local text = STATES[value.state]
+	if text == nil then return base end
+	if value.state == "dependency_wheel_unavailable" and validPin(value.package)
+		and type(value.python) == "string" and value.python:match("^%d+%.%d+$") ~= nil then
+		text = string.format("Python %s has no prebuilt wheel for %s. Install Python 3.12, then choose Select existing Python interpreter in USAGE Setup (usage_python).",
+			value.python, value.package)
+	end
+	return { code = base.code, message = text, specific = true }
 end
 
 local function finish(job: Job, value: any?, err: Failure?, cx: any?)
@@ -219,6 +258,15 @@ local function discover(job: Job, done: ({ string }, any?) -> ())
 end
 
 local function launch(job: Job, command: string, input: any)
+	if command == "rpc" then
+		local inner = job.callback
+		job.callback = function(value: any?, err: Failure?, cx: any?)
+			if err ~= nil and err.code == "companion_unavailable" and not err.specific and bootstrapNote ~= nil then
+				err = bootstrapNote
+			end
+			inner(value, err, cx)
+		end
+	end
 	local encoded, stdin = pcall(tern.json.encode, input)
 	if not encoded then deferFailure(job, "invalid_request"); return end
 	if #stdin > MAX_BODY then deferFailure(job, "snapshot_too_large"); return end
@@ -245,7 +293,7 @@ local function launch(job: Job, command: string, input: any)
 			end
 			if not value.ok then
 				local code = if type(value.error) == "table" and type(value.error.code) == "string" then value.error.code else "internal_error"
-				finish(job, nil, failure(code), cx)
+				finish(job, nil, failureOf(code, value), cx)
 			elseif result.status ~= 0 then finish(job, nil, failure("companion_unavailable"), cx)
 			elseif command == "ensure" and (value.protocol ~= 1 or value.schema ~= 1) then
 				finish(job, nil, failure("incompatible_version"), cx)
@@ -308,11 +356,29 @@ function companion.ensure(callback: Callback, options: any?)
 	if options ~= nil then
 		if type(options) ~= "table" then deferFailure(job, "invalid_request"); return end
 		for key, value in options do
-			if key ~= "install_dependencies" or type(value) ~= "boolean" then deferFailure(job, "invalid_request"); return end
+			if (key ~= "install_dependencies" and key ~= "auto_install") or type(value) ~= "boolean" then
+				deferFailure(job, "invalid_request"); return
+			end
 		end
 	end
-	launch(job, "ensure", { client_id = clientLease(), client_kind = clientKind,
-		install_dependencies = options ~= nil and options.install_dependencies == true })
+	local install = options ~= nil and options.install_dependencies == true
+	-- The owner's install of the plugin is the request: the host half bootstraps once, on Linux,
+	-- the only qualified source-host platform. Setup stays the retry road.
+	if options ~= nil and options.auto_install == true and clientKind == "host" and tern.runtime.os == "linux"
+		and not autoInstallTried then
+		autoInstallTried = true
+		install = true
+		bootstrapNote = { code = "setup_required", message = INSTALLING, specific = true }
+	end
+	local inner = job.callback
+	job.callback = function(value: any?, err: Failure?, cx: any?)
+		if value ~= nil then bootstrapNote = nil
+		elseif err ~= nil and err.code ~= "cancelled" then
+			bootstrapNote = if err.specific then err else nil
+		end
+		inner(value, err, cx)
+	end
+	launch(job, "ensure", { client_id = clientLease(), client_kind = clientKind, install_dependencies = install })
 end
 
 function companion.renew(callback: Callback)
