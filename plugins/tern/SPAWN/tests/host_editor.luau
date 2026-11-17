@@ -642,7 +642,7 @@ state.managed_record=clone(snapshot().records[1])
 state.managed_probe={schema=1,passed=true,record_sha256=string.rep('a',64),observations={},provision_handle='setup-fixture-native'}
 state.managed_probe_revision=state.snapshot.config_revision
 local nativeRevision=state.snapshot.config_revision
-local consentRecipient={window='',native_namespace='desktop-odin',native_conn=11,native_since=1700000000011}
+local consentRecipient={window='',native_namespace='desktop-alpha',native_conn=11,native_since=1700000000011}
 local function consentEvent(challenge,extra)
  local value=clone(consentRecipient);value.nonce=challenge.nonce;value.config_revision=challenge.revision;value.window_consent='window-consent-'..challenge.nonce
  for key,item in pairs(extra or {}) do value[key]=item end
@@ -684,7 +684,7 @@ end
 routeEvent('managed-route-preflight',{pane=0})
 check(nativeRoute.launch_ready and nativeRoute.launch_ready.native_conn==11 and nativeRoute.launch_ready.native_since==1700000000011,'fresh preflight authorizes the exact consenting desktop incarnation despite duplicate remote window keys')
 table.insert(inventory.sessions[1].tabs[1].blocks,{id=9,command=nativeRoute.command,cwd=nativeRoute.cwd})
-for _,extra in ipairs({{native_namespace='desktop-thor'},{native_conn=12},{native_since=1700000000012}}) do
+for _,extra in ipairs({{native_namespace='desktop-beta'},{native_conn=12},{native_since=1700000000012}}) do
  before=clone(saved)
  routeEvent('managed-route-started',extra)
  check(P.equal(before,saved) and saved.authority.setup_probe.window_pane==nil and not nativeRoute.observing,'foreign desktop incarnation cannot bind or observe a diagnostic')
@@ -1392,7 +1392,7 @@ do
  check(persisted.admin_pending==nil and persisted.admin_observation==nil and persisted.admin_qualification==nil,'reload never persists a stale administrative challenge or completed source-proof history')
  end
  do
- -- A remote HOST inventory has no desktop key: Odin and Thor both use "".
+ -- A remote HOST inventory has no desktop key: Both hosts use "".
  local priorWindow=admin.native_window
  admin.native_window=''
  inventory={clients={{kind='remote',window='',conn=21,since=1700000000021},

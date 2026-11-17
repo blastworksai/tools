@@ -1235,7 +1235,7 @@ def recovery(base, root, evidence, processes, lib, args):
         ['spawn-rollback-'+phase for phase in phases]+[name for name, _, _ in cases])
     result = {'status': 'not_run', 'mode': 'recovery', 'cases': {}, 'selection': selection,
               'qualification_complete': False, 'limits': [
-                  'Owned Linux native desktop only; no Odin scripts-disabled or Thor locked session is launched.',
+                  'Owned Linux native desktop only; no scripts-disabled or locked-session host is launched.',
                   'Private receipts contain capabilities and original events; never publish raw evidence.',
                   'Deterministic native effects and actual provider responses are separate evidence classes.',
                   'Native owner suites remain required for full preflight/every-persisted-phase reload and migration grids.']}

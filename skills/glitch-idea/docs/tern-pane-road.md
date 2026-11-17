@@ -127,7 +127,7 @@ The "page beside" outcome lives in the service, not in a window timer, because n
 
 ## Agents whose commands do not run under the pane
 
-Measured 14 Nov 2026 on codexbwai (Codex 0.167.2): the TUI runs on the pane's terminal, but commands are children of the account's long-lived app-server daemon, which has no terminal.
+Measured 14 Nov 2026 on a seat account (Codex 0.167.2): the TUI runs on the pane's terminal, but commands are children of the account's long-lived app-server daemon, which has no terminal.
 The ancestor walk therefore finds nothing, and before SKILLS-160 the helper answered `browser_mode_required`.
 Codex sets `CODEX_THREAD_ID` for its commands; nothing found ties that id to a TUI process.
 `/proc/<pid>/stat` is world-readable and its `tty_nr` names the process's controlling terminal.
