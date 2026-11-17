@@ -1,4 +1,4 @@
--- One-way Glitch plan -> Tern board projection. CodexBWAI; MIT.
+-- One-way Glitch plan -> Tern board projection. Blastworks.ai; MIT.
 -- Pure model (desired/diff/initialMarkdown) plus one serialized effect (apply).
 -- Identity is the canonical entity id carried in a `todo-id-<id>` tag, never the card
 -- title or a native card id (those are invalid after a board reload). Only cards that

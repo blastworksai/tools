@@ -1,5 +1,5 @@
 --!strict
--- Interactive-plan view. CodexBWAI, COMMANDER-993, MIT.
+-- Interactive-plan view. Blastworks.ai, COMMANDER-993, MIT.
 -- Identity is the explicitly selected source + immutable plan_id, never another pane number.
 local view = require("./lib/plan_view")
 local polling = require("./lib/polling")

@@ -1,7 +1,7 @@
 --!strict
 -- The window half's read of a TODO plan view's plan: the hidden `plan-sync` node of that pane (lib/plan_publish),
 -- read through the pane surface. One path for a session on this machine and on another (the node travels with the
--- pane; plugin KV does not). Adapted from ORCH+'s keyed-node surface read. CodexBWAI; MIT.
+-- pane; plugin KV does not). Adapted from ORCH+'s keyed-node surface read. Blastworks.ai; MIT.
 local plan_view = require("./plan_view")
 local plan_publish = require("./plan_publish")
 local read = {}

@@ -1,6 +1,6 @@
 # Upstream source review
 
-CodexBWAI, COMMANDER-993. Source: felipevdc1/tern-session-list at f5920de0cc1018fa9814e5f0c6cca83a7ddf34dc, MIT. DANGER PROTOCOL: isolated qgit clone with no inherited config/hooks/filters; source treated as data and not executed during review. Four slices covered install/supply-chain, runtime, egress and provenance. Three auditor agents and the parent provenance/sweep joined the result.
+Blastworks.ai, COMMANDER-993. Source: felipevdc1/tern-session-list at f5920de0cc1018fa9814e5f0c6cca83a7ddf34dc, MIT. DANGER PROTOCOL: isolated qgit clone with no inherited config/hooks/filters; source treated as data and not executed during review. Four slices covered install/supply-chain, runtime, egress and provenance. Three auditor agents and the parent provenance/sweep joined the result.
 
 Verdict: **try only in an isolated sandbox**, not approval to install across the estate. No malicious payload observed. Legitimate documented mechanisms require estate adaptation:
 

@@ -1,5 +1,5 @@
 -- English-first native checklist, derived from Felipe Carneiro's MIT session-list renderer.
--- Interactive plans only. CodexBWAI, COMMANDER-993.
+-- Interactive plans only. Blastworks.ai, COMMANDER-993.
 -- Schema 1 is checkpoints only. Schema 2 nests checkpoint -> task -> file/step/validation item.
 -- validate() is the host-side twin of bin/todo.py validate(): the host draws only a plan that
 -- passes it, so a helper that drifts cannot put an unchecked shape on screen.

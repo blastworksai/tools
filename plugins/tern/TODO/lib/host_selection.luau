@@ -1,6 +1,6 @@
 --!strict
 -- Resolve only through the owning host's native split and process inventory.
--- CodexBWAI; MIT. Native CLI transport is shared with the estate's SPAWN design.
+-- Blastworks.ai; MIT. Native CLI transport is shared with the estate's SPAWN design.
 local Native=require("./native_cli")
 local binding=require("./selected_binding")
 local selection={}

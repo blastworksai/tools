@@ -1,4 +1,4 @@
-# Interactive plan publication — CodexBWAI
+# Interactive plan publication — Blastworks.ai
 
 Use TODO for visible interactive `/glitch-plan (Codex: $glitch-plan)` work. Unviewed fleet/BWPM/FORGE work is outside it.
 

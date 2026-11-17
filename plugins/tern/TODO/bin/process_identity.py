@@ -1,4 +1,4 @@
-"""Native process birth/ownership facts, no provider or pane input. CodexBWAI; MIT.
+"""Native process birth/ownership facts, no provider or pane input. Blastworks.ai; MIT.
 
 Uses existing OS interfaces only: Linux procfs, macOS libproc's public
 proc_bsdinfo ABI, and Windows Toolhelp/GetProcessTimes/token APIs.

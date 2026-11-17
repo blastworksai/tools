@@ -1,6 +1,6 @@
 # TODO 0.6.0+ — validation
 
-CodexBWAI · 9 November 2026. This receipt supersedes the older 0.5.x validation headings for the current TODO reliability lane. Earlier 0.5.0, 0.5.1 and 0.5.2 receipts are historical and are not carried forward as evidence for this source.
+Blastworks.ai · 9 November 2026. This receipt supersedes the older 0.5.x validation headings for the current TODO reliability lane. Earlier 0.5.0, 0.5.1 and 0.5.2 receipts are historical and are not carried forward as evidence for this source.
 
 ## Source and helper receipt
 
@@ -36,7 +36,7 @@ After all three CP1 writers stopped, the owner ran this selected batch from the 
 env PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=tests python3 -m unittest todo_test.SourceContract todo_test.ProcessIdentityContract todo_test.WindowsReadContract todo_test.PublicationContract
 ```
 
-The actual `bin/todo.py template --title Qualification --step First` → `source --plan <owned-private-file>` roundtrip returned the identical generated plan ID, title and checkpoint. A real hardlinked lock was refused before entering the writer body; canonical bytes, mode, owner and group remained unchanged, and no publication was created. Evidence: `_local/orchplus-adversarial-review-20261106/platform-completion/cp1-todo-smoke-20261109.json` in the private Brain evidence home. The owned throwaway fixture was removed after success. These checks made no network connection or publication into a real agent. The publication probe and `todo_smoke.py --contracts-only` remain separate supervised native operations; no install/link/reload or companion rollout occurred.
+The actual `bin/todo.py template --title Qualification --step First` → `source --plan <owned-private-file>` roundtrip returned the identical generated plan ID, title and checkpoint. A real hardlinked lock was refused before entering the writer body; canonical bytes, mode, owner and group remained unchanged, and no publication was created. The owner holds the receipt privately. The owned throwaway fixture was removed after success. These checks made no network connection or publication into a real agent. The publication probe and `todo_smoke.py --contracts-only` remain separate supervised native operations; no install/link/reload or companion rollout occurred.
 
 ### Native Mac discovery and installed-helper immutability
 
@@ -44,7 +44,7 @@ Mac a12 exercised the actual Files-header hover, TODO button and picker, then fa
 
 That run also created two helper bytecode files inside the installed plugin. The shared CLI entrypoint now sets `sys.dont_write_bytecode` before importing its helpers. Actual Mac CLI-only discovery with Python `-I`, without `-B`, preserved exact writable-install membership and bytes. The full isolated Python suite passed **38 tests** after supplying a private OS identity fixture required by offline OpenSSH configuration expansion; the earlier runner failure remains retained, and the fixture was removed. Neither result qualifies native pane environment forwarding or the GUI.
 
-Evidence in the private Brain evidence home: `cp2m-adapter-a12-receipts-20261109.json`, `cp2m-a12-external-pointer-cleanup-20261109.json`, `cp2m-a12-installed-package-delta-20261109.json`, `cp1t-bytecode-actual-mac-cli-smoke-20261109.json`, and `cp1t-bytecode-isolated-regression-suite-with-identity-20261109.json`.
+The owner holds these receipts privately: `cp2m-adapter-a12-receipts-20261109.json`, `cp2m-a12-external-pointer-cleanup-20261109.json`, `cp2m-a12-installed-package-delta-20261109.json`, `cp1t-bytecode-actual-mac-cli-smoke-20261109.json`, and `cp1t-bytecode-isolated-regression-suite-with-identity-20261109.json`.
 
 Mac a15 subsequently **passed the selected cold publication/discovery and native checkpoint-refresh case** against the corrected helpers. The actual durable publisher and host reader used the reviewed private roots, the real Files-header button/picker selected the plan, and the rendered rows changed to a completed first checkpoint and current second checkpoint. The retained 1280×800 native screenshot was viewed and matches the machine readback. Installed/source/input preservation, the specified production-preservation projection, original deadline, observed-owned-zero and endpoint cleanup passed. This is a selected real-GUI case, not a full Mac, connected, provider or estate qualification.
 

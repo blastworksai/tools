@@ -1,6 +1,6 @@
 # Interactive plan checkpoint contract
 
-CodexBWAI, COMMANDER-993. English-first integration contract for the existing `/glitch-plan` and `/glitch-execute` workflows. This is documentation for integrating the existing workflows, not a separate installable skill or an override of managed files.
+Blastworks.ai, COMMANDER-993. English-first integration contract for the existing `/glitch-plan` and `/glitch-execute` workflows. This is documentation for integrating the existing workflows, not a separate installable skill or an override of managed files.
 
 ## When writing or deliberately revising an interactive plan
 

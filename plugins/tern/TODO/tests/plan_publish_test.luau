@@ -1,4 +1,4 @@
--- The plan-sync node text: one JSON document, never a cut one. CodexBWAI; MIT.
+-- The plan-sync node text: one JSON document, never a cut one. Blastworks.ai; MIT.
 local publication = require("../lib/plan_publish")
 local clock = 40
 local function new() return publication.new(tern.json.encode, function() clock += 1; return clock end) end

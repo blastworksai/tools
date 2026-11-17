@@ -1,4 +1,4 @@
-"""Interactive source/CLI/SSH boundaries. CodexBWAI, COMMANDER-993."""
+"""Interactive source/CLI/SSH boundaries. Blastworks.ai, COMMANDER-993."""
 import contextlib
 import copy
 import ctypes

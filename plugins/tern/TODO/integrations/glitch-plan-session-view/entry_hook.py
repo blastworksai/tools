@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Deliver the TODO companion at actual workflow entry; CodexBWAI, MIT.
+"""Deliver the TODO companion at actual workflow entry; Blastworks.ai, MIT.
 
 Instruction delivery only: no plan/publication writes, prompts, shell execution,
 transcript reads, authentication or blocking exit codes. The owning planning

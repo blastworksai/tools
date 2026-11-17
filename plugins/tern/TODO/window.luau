@@ -1,5 +1,5 @@
 -- English-first native connection detection, status entry, settings pane and optional board sync.
--- CodexBWAI; MIT.
+-- Blastworks.ai; MIT.
 local status_prompt = require("./status/status_prompt")
 local settings = require("./lib/settings")
 local board_sync = require("./lib/board_sync")

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read explicit interactive-plan checkpoints locally or over SSH. CodexBWAI; MIT."""
+"""Read explicit interactive-plan checkpoints locally or over SSH. Blastworks.ai; MIT."""
 import argparse
 import json
 import os
