@@ -502,6 +502,68 @@ do
  definition.event(state,{ev='action',act='advanced-close'},cx)
  check(A.edit(state.binding,snapshot().config_revision,'replace-records',{records=prior}),'selector fixtures removed');refresh();state.page='spawn'
 end
+-- Model choices come from the CLI's own headless listing when it has one; otherwise free text with the CLI's flags.
+do
+ local Sel=load('selectors')
+ local json=runtime.json
+ check(Sel.lister('grok')[2]=='models' and Sel.lister('claude')==nil and Sel.lister('codex')==nil and Sel.lister('kimi')==nil and Sel.lister('muse')==nil,'only grok, agy and omp have a documented headless listing')
+ for _,cli in ipairs({'claude','codex','kimi','grok','agy','muse','omp'}) do check(type(Sel.helper(cli))=='string' and Sel.helper(cli):find('Empty keeps',1,true)~=nil,'helper text for '..cli) end
+ check(Sel.helper('claude'):find('--model',1,true)~=nil and Sel.helper('claude'):find('--effort',1,true)~=nil and Sel.helper('muse'):find('--reasoning-effort',1,true)~=nil and Sel.helper('omp'):find('--thinking=',1,true)~=nil and Sel.helper('codex'):find('-m',1,true)~=nil,'helper text names the real flags')
+ local grok_out='You are not authenticated.\n\nDefault model: grok-4.6\n\nAvailable models:\n  * grok-4.6 (default)\n  - grok-4.5\n'
+ local ids=Sel.parse_models('grok',grok_out)
+ check(#ids==2 and ids[1]=='grok-4.6' and ids[2]=='grok-4.5','grok listing parsed to its ids, notes dropped')
+ check(#Sel.parse_models('agy','Fetching available models...\nError: Please sign in to view available models.\n')==0,'a not-signed-in agy answer yields no ids')
+ check(#Sel.parse_models('grok','  * bad id with spaces\n  - -dash\n  * ok.model\n')==1,'ids the editor would refuse are never offered')
+ check(#Sel.parse_models('omp','{"models":[]}',json.decode)==0,'an empty omp catalog yields no ids')
+ local omp=Sel.parse_models('omp','{"models":["openai/gpt-5.2",{"id":"x-1"},{"nope":1}]}',json.decode)
+ check(#omp==2 and omp[1]=='openai/gpt-5.2' and omp[2]=='x-1','omp listing accepts id strings and id tables')
+ check(#Sel.parse_models('omp','not json',json.decode)==0 and #Sel.parse_models('grok',nil)==0,'garbage yields no ids')
+ local g=record('listgrok');g.provider='grok';g.command='grok';g.account_label='G'
+ local c=record('listclaude');c.provider='claude';c.command='claude';c.account_label='C'
+ local prior=clone(snapshot().records);local list=clone(prior);table.insert(list,g);table.insert(list,c)
+ check(A.edit(state.binding,snapshot().config_revision,'replace-records',{records=list}),'seed grok and claude records');refresh()
+ local function rid(id,field)return 'agent:'..id..':'..field..':'..tostring(state.snapshot.config_revision) end
+ local function saved_record(id)for _,item in ipairs(snapshot().records)do if item.id==id then return item end end end
+ local rows=rows_of('agents')
+ check(rows[rid('listgrok','model')].control.k=='text' and rows['model-list-listgrok']~=nil,'before listing, grok model is free text with a List models action')
+ check(rows[rid('listgrok','model')].hint:find('-m / --model',1,true)~=nil,'free-text hint names the CLI flags')
+ check(rows[rid('listclaude','model')].control.k=='text' and rows['model-list-listclaude']==nil,'a CLI with no listing has free text and no list action')
+ local ran
+ fake.process.run=function(argv,options,callback) ran=argv;callback({status=0,timed_out=false,stdout=grok_out,stderr=''}) end
+ definition.event(state,{ev='action',act='model-list:listgrok@'..state.snapshot.config_revision},cx)
+ check(ran~=nil and ran[1]=='grok' and ran[2]=='models' and #ran==2,'List models runs the CLI listing argv and nothing else: '..tostring(ran and table.concat(ran,' ')))
+ rows=rows_of('agents')
+ local choice=rows[rid('listgrok','model')]
+ check(choice.control.k=='choice' and #choice.control.options==3 and choice.control.options[1].value=='' and choice.control.options[2].value=='grok-4.6','listed models become choices after a CLI default entry')
+ definition.event(state,{ev='change',item=rid('listgrok','model'),value='grok-4.5'},cx)
+ check(saved_record('listgrok').model=='grok-4.5' and saved_record('listgrok').model_selector==true,'a chosen listed model is saved as a selector')
+ definition.event(state,{ev='change',item=rid('listgrok','model'),value=''},cx)
+ check(saved_record('listgrok').model==nil,'choosing CLI default clears the model')
+ -- a failed or empty listing keeps free text and says why
+ state.model_lists={}
+ fake.process.run=function(_,_,callback) callback({status=1,timed_out=false,stdout='',stderr='Please sign in'}) end
+ definition.event(state,{ev='action',act='model-list:listgrok@'..state.snapshot.config_revision},cx)
+ rows=rows_of('agents')
+ check(rows[rid('listgrok','model')].control.k=='text' and rows['model-list-listgrok'].hint:find('Please sign in',1,true)~=nil,'a failed listing keeps the free-text field and shows the reason')
+ -- listing never writes configuration and never starts a pane
+ local writes_before=writes
+ fake.process.run=function(_,_,callback) callback({status=0,timed_out=false,stdout=grok_out,stderr=''}) end
+ definition.event(state,{ev='action',act='model-list:listgrok@'..state.snapshot.config_revision},cx)
+ check(writes==writes_before,'listing models writes no configuration')
+ -- another account lists through its own login route; an SSH agent has no list action
+ local other=clone(saved_record('listgrok'));other.id='listother';other.user='otheracct';other.account_label='O'
+ local ssh=clone(saved_record('listgrok'));ssh.id='listssh';ssh.backend='ssh-command';ssh.host='box';ssh.account_label='S'
+ local more=clone(snapshot().records);table.insert(more,other);table.insert(more,ssh)
+ check(A.edit(state.binding,snapshot().config_revision,'replace-records',{records=more}),'seed other-account and ssh records');refresh()
+ rows=rows_of('agents')
+ check(rows['model-list-listother']~=nil and rows['model-list-listssh']==nil,'an ssh agent offers no listing')
+ ran=nil
+ fake.process.run=function(argv,_,callback) ran=argv;callback({status=0,timed_out=false,stdout=grok_out,stderr=''}) end
+ definition.event(state,{ev='action',act='model-list:listother@'..state.snapshot.config_revision},cx)
+ check(ran~=nil and ran[1]=='sudo' and table.concat(ran,' '):find('otheracct',1,true)~=nil,'another account lists through the sudo login route: '..tostring(ran and table.concat(ran,' ')))
+ fake.process.run=function()error('Editor attempted a real subprocess') end
+ check(A.edit(state.binding,snapshot().config_revision,'replace-records',{records=prior}),'listing fixtures removed');refresh();state.page='spawn'
+end
 -- Every agent row carries Tern's own provider icon cell: the right name per provider, a fallback for an unknown one.
 do
  local Icons=load('provider_icons')

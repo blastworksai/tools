@@ -25,6 +25,26 @@ local CLIS = {
 		effort = { flag = "--thinking", joined = true, values = { "off", "minimal", "low", "medium", "high", "xhigh", "max", "auto" } },
 	},
 }
+-- Per CLI: the helper text for the free-text Model and Effort fields (the CLI's own flags), and, only
+-- where the CLI's own --help documents a headless read-only listing, the argv that lists its models.
+-- Findings (18 Nov 2026, each CLI's --help and a read-only run): grok `models` lists offline; agy
+-- `models` needs a signed-in account; omp `models --json` lists the account's catalog; claude, codex,
+-- kimi and muse have no model-list command (claude lists models only inside a session, codex has no
+-- list subcommand, kimi `provider list` shows counts only, muse `model-profile` needs an id).
+local HELP = {
+	claude = "Passed as --model (an alias such as sonnet or a full model name); effort is --effort. Empty keeps Claude's own default.",
+	codex = "Passed as -m / --model. Codex has no verified effort flag here. Empty keeps Codex's own default.",
+	kimi = "Passed as -m / --model (a model alias from your Kimi config). Kimi has no effort flag. Empty keeps Kimi's own default.",
+	grok = "Passed as -m / --model. Grok's --reasoning-effort is not offered yet. Empty keeps Grok's own default.",
+	agy = "Passed as --model; effort is --effort. Empty keeps Agy's own default.",
+	muse = "Passed as --model; effort is --reasoning-effort. Empty keeps Muse's own default.",
+	omp = "Passed as --model= (fuzzy, or provider/id); effort is --thinking=. Empty keeps OMP's own default.",
+}
+local LISTERS = {
+	grok = { "grok", "models" },
+	agy = { "agy", "models" },
+	omp = { "omp", "models", "--json", "--no-extensions" },
+}
 local ALIASES = { antigravity = "agy" }
 -- The ONE program-name normalization (also used by config.luau for ordinary launches): lower case,
 -- last path part, launcher suffix removed. Ordinary launch detection (ACP servers, sudo) strips the
@@ -65,6 +85,40 @@ function Selectors.efforts(key: string?): { string }?
 	local cli = if key ~= nil then CLIS[key] else nil
 	if cli == nil or cli.effort == nil then return nil end
 	return table.clone(cli.effort.values)
+end
+-- Helper text naming this CLI's model and effort flags (free-text field), or nil for an unknown CLI.
+function Selectors.helper(key: string?): string?
+	return if key ~= nil then HELP[key] else nil
+end
+-- The read-only argv that lists this CLI's models headlessly, or nil when it has none.
+function Selectors.lister(key: string?): { string }?
+	local argv = if key ~= nil then LISTERS[key] else nil
+	return if argv ~= nil then table.clone(argv) else nil
+end
+-- Model ids from a listing's stdout, in order, deduplicated; empty when nothing usable was printed
+-- (not signed in, an error, an unknown format); `decode` is the JSON decoder for omp. Only ids passing model_error are kept, so a listing
+-- can never offer a value the editor would refuse. Pure.
+function Selectors.parse_models(key: string?, output: any, decode: ((string) -> any)?): { string }
+	local ids, seen = {}, {}
+	if type(output) ~= "string" or #output > 262144 then return ids end
+	local function add(value: any)
+		if type(value) == "string" and Selectors.model_error(value) == nil and not seen[value] then seen[value] = true; table.insert(ids, value) end
+	end
+	if key == "omp" then
+		-- omp --json prints {"models":[...]}; an entry is an id string or a table with `id`.
+		if decode == nil then return ids end
+		local ok, data = pcall(decode, output)
+		if ok and type(data) == "table" and type(data.models) == "table" then
+			for _, entry in ipairs(data.models) do add(if type(entry) == "table" then entry.id else entry) end
+		end
+		return ids
+	end
+	for line in string.gmatch(output, "[^\r\n]+") do
+		-- grok: "  * grok-4.6 (default)" and "  - grok-4.5": a bullet, one id, an optional note.
+		local id = string.match(line, "^%s*[%*%-]%s+([^%s]+)%s*$") or string.match(line, "^%s*[%*%-]%s+([^%s]+)%s+%b()%s*$")
+		add(id)
+	end
+	return ids
 end
 function Selectors.model_error(model: any): string?
 	if type(model) ~= "string" or model:find("%S") == nil then return "Model must be an exact model id, not empty" end

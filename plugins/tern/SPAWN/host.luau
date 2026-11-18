@@ -907,7 +907,7 @@ local function managed_sections(state)
 		local program=Config.program_of(draft.executable,(Config.parse_arguments(draft.arguments)) or {})
 		local key=Selectors.program_key(program)
 		if Selectors.supports_model(key) then
-			table.insert(rows,text_row("managed:model","Model",draft.model or "","Exact model id passed to the CLI. Empty keeps the CLI's own default. SPAWN never guesses an alias."))
+			table.insert(rows,text_row("managed:model","Model",draft.model or "","Exact model id passed to the CLI. Empty keeps the CLI's own default. SPAWN never guesses an alias. "..(Selectors.helper(key) or "")))
 			local values=Selectors.efforts(key)
 			if values then
 				local options={{value="",label="CLI default"}}
@@ -954,6 +954,39 @@ local function managed_sections(state)
 	table.insert(rows,action_row("managed-exercise","Check provider readiness…",action(state,"managed-exercise"),"Optional real task/report/check exercise in ORCH+, with separate consent."))
 	return {{id="managed-setup",page="managed",title="Prepare agents for ORCH+",rows=rows}}
 end
+-- Model choices from the CLI's own headless listing. A listing runs only when the person asks (the
+-- "List models" action), read-only, as the agent's own OS account on this machine; nothing starts an
+-- agent and nothing is saved. An unknown listing, a failed run or an empty answer keeps the free-text field.
+local function model_list_key(record,key)
+	return (if record.user~=nil and record.user~="" then record.user else "")..":"..tostring(key)
+end
+local function can_list_models(state,record,key)
+	if Selectors.lister(key)==nil then return false end
+	if record.backend=="ssh-command" or (record.host~=nil and record.host~="") then return false end
+	if state.snapshot.host_os=="windows" and record.user~=nil and record.user~="" then return false end
+	return true
+end
+local function model_rows(state,record,id,key)
+	local current=if record.model_selector then text(record.model) else ""
+	local legacy=record.model~=nil and record.model_selector~=true
+	local listed=if state.model_lists then state.model_lists[model_list_key(record,key)] else nil
+	local helper=Selectors.helper(key) or ""
+	local rows={}
+	if listed and #listed>0 then
+		local options={{value="",label="CLI default"}}
+		local seen={}
+		for _,value in ipairs(listed) do seen[value]=true;table.insert(options,{value=value,label=value}) end
+		if current~="" and not seen[current] then table.insert(options,{value=current,label=current.." (saved)"}) end
+		table.insert(rows,choice_row(id,"Model",current,options,"Models the CLI itself lists. CLI default adds no model flag. "..(if legacy then "Saved label, display only, not sent to the CLI: "..record.model.."." else "")))
+	else
+		table.insert(rows,text_row(id,"Model",current,(if legacy then "Saved label, display only, not sent to the CLI: "..record.model..". Type an exact model id here to send it as the CLI's model flag. " else "Exact model id, never an alias SPAWN invents. ")..helper.." Do not also type the model flag in Arguments."))
+	end
+	if can_list_models(state,record,key) then
+		local busy=state.model_list_busy~=nil and state.model_list_busy[record.id]
+		table.insert(rows,action_row("model-list-"..record.id,if busy then "Listing models..." else "List models",action(state,"model-list:"..record.id),"Runs "..table.concat(Selectors.lister(key)," ").." read-only as this agent's account. It starts no agent and saves nothing; if the CLI cannot list (not signed in, no listing) the Model field stays free text."..(if state.model_list_notes and state.model_list_notes[record.id] then " Last result: "..state.model_list_notes[record.id] else "")))
+	end
+	return rows
+end
 local function record_sections(state)
 	local sections={
 		{id="agent-overview",page="agents",title="Overview",rows={static_row("agents-configured","Agents configured",tostring(#state.config.agents),"Saved provider records only.")}},
@@ -990,7 +1023,7 @@ local function record_sections(state)
 			local key=Config.record_cli(record)
 			if Selectors.supports_model(key) then
 				local legacy=record.model~=nil and record.model_selector~=true
-				table.insert(rows,text_row(prefix("model"),"Model",if record.model_selector then text(record.model) else "",if legacy then "Saved label, display only, not sent to the CLI: "..record.model..". Type an exact model id here to send it as the CLI's model flag." else "Exact model id passed to the CLI at launch. Empty keeps the CLI's own default. Do not also type the model flag in Arguments."))
+				for _,row in ipairs(model_rows(state,record,prefix("model"),key)) do table.insert(rows,row) end
 				local values=Selectors.efforts(key)
 				if values then
 					local options={{value="",label="CLI default"}}
@@ -1964,6 +1997,25 @@ local definition={
 			local op,rev=event.act:match("^(.*)@(%d+)$");local expected=tonumber(rev)
 			if not op or not state.snapshot then return end
 			if expected~=state.snapshot.config_revision then reload(state);state.notice="stale-config: review the refreshed settings and repeat your action";return end
+			local list_id=op:match("^model%-list:(.+)$")
+			if list_id then
+				local record=record_by_id(state,list_id)
+				local key=if record then Config.record_cli(record) else nil
+				if not record or not can_list_models(state,record,key) then state.notice="This agent has no headless model listing";return end
+				state.model_list_busy=state.model_list_busy or {};state.model_list_notes=state.model_list_notes or {};state.model_lists=state.model_lists or {}
+				if state.model_list_busy[list_id] then return end
+				state.model_list_busy[list_id]=true
+				local list_key=model_list_key(record,key)
+				Prereq.run(Prereq.as_user(Selectors.lister(key),record.user),"",function(stdout,why)
+					state.model_list_busy[list_id]=nil
+					if state.closed then return end
+					local ids=if stdout then Selectors.parse_models(key,stdout,tern.json.decode) else {}
+					if #ids>0 then state.model_lists[list_key]=ids;state.model_list_notes[list_id]=tostring(#ids).." models listed"
+					else state.model_lists[list_key]=nil;state.model_list_notes[list_id]="the CLI listed no models ("..(if stdout then "empty or unrecognised output" else tostring(why or "failed"):sub(1,160))..")" end
+					cx:render()
+				end)
+				return
+			end
 			if op=="managed-open" then state.page="managed";return end
 			local review_id=op:match("^managed%-review:(.+)$")
 			if review_id then

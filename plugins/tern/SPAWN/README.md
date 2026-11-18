@@ -159,6 +159,8 @@ The flags are derived from `model` and `effort` through one table (`selectors.lu
 | muse | `--model <id>` | `--reasoning-effort`: none, minimal, low, medium, high, xhigh, max, ultra |
 | omp | `--model=<id>` | `--thinking=`: off, minimal, low, medium, high, xhigh, max, auto |
 
+**Model choices (Agent settings).** Where a CLI's own `--help` documents a headless, read-only model listing, the agent's Model row offers **List models**: `grok models`, `agy models` (needs a signed-in account) and `omp models --json --no-extensions`, run as that agent's OS account, only when you click, never for an SSH agent, saving nothing. The listed ids become a drop-down (CLI default first). Claude, Codex, Kimi and Muse have no such command, and a listing that fails or prints nothing usable keeps the free-text field; either way the field carries helper text naming that CLI's model and effort flags. Empty means the CLI's own default.
+
 A native OMP fresh default may carry `model` and `effort`; `profile` is still refused there. The CLI is the program the launch runs (ordinary and fresh each; a literal `sudo` form is unwrapped), never the provider label. A provider and a program naming different CLIs, or an unknown program, are refused when model or effort is set.
 
 Advanced manual import example (**Agent settings → Advanced → Setup → Paste setup JSON**):
