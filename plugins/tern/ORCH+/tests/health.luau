@@ -1,6 +1,6 @@
 -- Deterministic real reducer/host/window coverage. Run bounded sections in native host callbacks.
 local root, section = ...
-assert(section == nil or table.find({ "clock", "form_hold_notice", "form_hold_capacity", "form_hold_rearm", "native", "controls", "status_launcher", "timer", "epoch_window", "epoch_host", "finish", "continuation", "alias_recovery", "held_report", "sweep_schedule", "readable_views", "cp2_controls", "guided_recovery", "guided_recovery_empty", "guided_recovery_host_restart", "stopped_worker_view", "expired_wake", "revoked_authorization", "observe_retention", "uncertain_read", "quota_reader", "bridge_lifecycle", "withdraw_fenced", "config_cards", "work_picker", "inbox_window", "usage_row",
+assert(section == nil or table.find({ "clock", "form_hold_notice", "form_hold_capacity", "form_hold_rearm", "form_hold_isolation", "native", "controls", "status_launcher", "timer", "epoch_window", "epoch_host", "finish", "continuation", "alias_recovery", "held_report", "sweep_schedule", "readable_views", "cp2_controls", "guided_recovery", "guided_recovery_empty", "guided_recovery_host_restart", "stopped_worker_view", "expired_wake", "revoked_authorization", "observe_retention", "uncertain_read", "quota_reader", "bridge_lifecycle", "withdraw_fenced", "config_cards", "work_picker", "inbox_window", "usage_row",
 	"reconnect_stale", "reconnect_missing", "reconnect_unknown", "reconnect_unrelated", "worker_attachment", "worker_attachment_form",
 	"driver_admission_noop", "driver_admission_refused", "driver_retry_original", "driver_retry_unrelated", "driver_retry_absent",
 	"driver_deadline_absent", "driver_deadline_unrelated", "driver_missing", "driver_suspension", "driver_fence_origin", "driver_fence_claim",
@@ -2564,7 +2564,7 @@ if section == nil or section == "guided_recovery_host_restart" then
 	local mailbox = w.f.authority.registry.dispatch.workers[id].mailbox_handle
 	w.f.authority = shared.host.new_authority(w.f.memory, function() return { now_ms = 1700000000000, mono_ms = 5000, epoch = "health-host-restarted" } end)
 	assert(w.f.authority:load().ok)
-	for _ = 1, 16 do w:tick() end
+	for _ = 1, 8 do w:tick() end
 	local current = w.f.authority.registry.sessions[sid]
 	check(current.controller.owner_id == owner and current.controller.generation == generation and current.admission_seq == admission,
 		"host restart reconnects the existing owner and admission rather than creating replacements")
@@ -3160,26 +3160,17 @@ if section == nil or section == "form_hold_capacity" then
 	check(holds(before) == 1 and claims(action_id) == 1,
 		"a capacity-refused launch with no driver announces its form hold once when the backoff is due")
 end
+-- One driver stays ready across a form closing and reopening: its reset after the form guard
+-- (the action then waits on SPAWN reconciliation) must let the next hold post its own notice.
 if section == nil or section == "form_hold_rearm" then
 	local WAIT = "Launch waits until you close Orchestration"
-	local w = window_fixture({ commit_results = true })
+	local w = window_fixture()
 	w:bridge({ placeholder = true })
-	-- Four running effects owned by this window fill every host effect slot, so the next claim is refused "full".
-	local occupied = {}
-	local function occupy()
-		for index = #occupied + 1, 4 do
-			local queued = w.f:apply("catalog"); assert(queued.ok)
-			assert(w.f:apply("claim", { action_id = queued.action_id, executor = w.f.origin.window_epoch }).ok)
-			occupied[index] = queued.action_id
-		end
-	end
-	local function free_one()
-		local id = table.remove(occupied, 1)
-		local grant = w.f:action(id).claim
-		assert(w.f:apply("lost", { action_id = id, executor = grant.executor, grant_id = grant.grant_id }).ok)
-	end
-	occupy()
-	local claims = function(id) local n = 0; for _, e in w.events do if e.command == "claim" and e.action_id == id then n += 1 end end return n end
+	w:click("poll", { worker_id = w.id, bytes = "watermark" })
+	local action_id = assert(w:worker().active_action_id)
+	assert(w.f:action(action_id).phase == "ready")
+	-- The action waits on peer reconciliation: past the form guard the driver returns and stays alive.
+	w.f.authority.registry.dispatch.actions[action_id].retry_after_serial = 1
 	local function holds(from)
 		local n = 0
 		for index = from + 1, #w.notice_events do
@@ -3187,27 +3178,64 @@ if section == nil or section == "form_hold_rearm" then
 		end
 		return n
 	end
-	local function run(ticks) for _ = 1, ticks do w:tick(2500); w.api.schedule(w.cx) end end
-	w:click("poll", { worker_id = w.id, bytes = "watermark" })
-	local action_id = assert(w:worker().active_action_id)
+	local function retry_waits(from)
+		local n = 0
+		for index = from + 1, #w.notice_events do
+			local message = w.notice_events[index].message
+			if type(message) == "string" and message:find("Retry waits", 1, true) then n += 1 end
+		end
+		return n
+	end
+	w:click("orchestration_menu")
+	local first = #w.notice_events
 	for _ = 1, 4 do w:tick() end
-	assert(w.f:action(action_id).phase == "ready" and claims(action_id) == 1, "the full host refuses the claim before any effect")
-	-- The refused claim has no driver while its backoff runs. A form opened meanwhile must still announce the hold.
-	w:click("orchestration_menu")
-	free_one()
-	local before = #w.notice_events
-	run(6)
-	assert(holds(before) == 1 and claims(action_id) == 1)
-	-- Closing the form issues the claim; the still-full host refuses it again, and a new hold re-arms the notice once.
+	check(holds(first) == 1 and retry_waits(first) == 0, "the first hold posts one notice")
 	w:pick(nil)
-	occupy() -- The host fills again before the held claim goes out, so it is refused once more.
-	run(3)
-	check(claims(action_id) == 2 and w.f:action(action_id).phase == "ready", "the held launch is claimed once the form closes")
+	local closed = #w.notice_events
+	for _ = 1, 4 do w:tick() end
+	check(holds(closed) == 0 and retry_waits(closed) == 1 and w.f:action(action_id).claim == nil,
+		"after the form closes the same driver passes the form guard and waits on reconciliation")
 	w:click("orchestration_menu")
-	free_one()
 	local second = #w.notice_events
-	run(6)
-	check(holds(second) == 1 and claims(action_id) == 2, "a later second hold re-arms the notice exactly once")
+	for _ = 1, 4 do w:tick() end
+	check(holds(second) == 1, "a later hold on the same ready driver posts its own notice")
+end
+-- Two capacity-refused actions of ONE window module (a worker's and a worker-less one) wait with no
+-- driver. The source runs one command lane at a time, so a form opened meanwhile gives one of them a
+-- driver: exactly one notice for the source (not one per action, not none), and the action
+-- that waits is held, never dropped.
+if section == nil or section == "form_hold_isolation" then
+	local WAIT = "Launch waits until you close Orchestration"
+	local w = window_fixture({ commit_results = true })
+	w:bridge({ placeholder = true })
+	local occupied = {}
+	for _ = 1, 4 do
+		local queued = w.f:apply("catalog"); assert(queued.ok)
+		assert(w.f:apply("claim", { action_id = queued.action_id, executor = w.f.origin.window_epoch }).ok)
+		table.insert(occupied, queued.action_id)
+	end
+	local function claims(id) local n = 0; for _, e in w.events do if e.command == "claim" and e.action_id == id then n += 1 end end return n end
+	w:click("poll", { worker_id = w.id, bytes = "watermark" })
+	local first = assert(w:worker().active_action_id)
+	for _ = 1, 4 do w:tick() end
+	assert(w.f:action(first).phase == "ready" and claims(first) == 1, "the full host refuses the worker's claim")
+	local other = w.f:apply("catalog"); assert(other.ok, other.message)
+	w:click("execute", { action_id = other.action_id })
+	for _ = 1, 4 do w:tick() end
+	assert(w.f:action(other.action_id).phase == "ready" and claims(other.action_id) == 1, "the full host refuses the worker-less claim")
+	local grant = w.f:action(occupied[1]).claim
+	assert(w.f:apply("lost", { action_id = occupied[1], executor = grant.executor, grant_id = grant.grant_id }).ok)
+	-- Last registry edit: the worker-less action is no longer a form-independent catalog read.
+	w.f.authority.registry.dispatch.actions[other.action_id].request.op = "status"
+	w:click("orchestration_menu")
+	local before = #w.notice_events
+	for _ = 1, 12 do w:tick(); w.api.schedule(w.cx) end
+	local holds = 0
+	for index = before + 1, #w.notice_events do
+		if w.notice_events[index].message == WAIT then holds += 1 end
+	end
+	check(holds == 1 and claims(first) == 1 and claims(other.action_id) == 1,
+		"two capacity-held actions on one source announce the form hold exactly once and issue nothing")
 end
 if section == nil or section == "work_input_priority" then
 	local w = window_fixture()
