@@ -1,6 +1,7 @@
 -- The execution host is the only durable writer. Config is saved records only.
 local ui = tern.ui
 local Config = require("./config")
+local Selectors = require("./selectors")
 local Authority = require("./authority")
 local Review = require("./setup_review")
 local Native = require("./native_cli")
@@ -9,6 +10,8 @@ local Dispatch = require("./dispatch")
 local DispatchState = require("./dispatch_state")
 local ManagedSetup = require("./managed_setup")
 local Prereq = require("./prereq")
+local Backend = require("./backend")
+local Resolution = require("./launch_resolution")
 local PageNavigation = require("./page_navigation")
 local WindowJournal = require("./window_journal")
 local SetupDiscovery = require("./setup_discovery")
@@ -565,6 +568,11 @@ local function prepare_manual_review(state,revision)
 		if type(payload.setup_run_id)~="string" or #payload.setup_run_id==0 or #payload.setup_run_id>256 or payload.setup_run_id:find("%c") or payload.confirmed~=true then state.notice="Guided setup recovery requires a valid setup_run_id and confirmed:true; otherwise paste a manual schema/agents object";return end
 	end
 	local records,why=Config.validate_records(payload.agents);if not records then state.notice=why;return end
+	for _,record in ipairs(records) do
+		local stored=nil
+		for _,saved in ipairs(state.config and state.config.agents or {}) do if saved.id==record.id then stored=saved end end
+		local selector_problem=Config.selector_error(record,stored);if selector_problem then state.notice=record.id..": "..selector_problem;return end
+	end
 	state.import_review={records=records,revision=revision,run=payload.setup_run_id,bytes=state.import_text}
 	state.notice="Validated every record. Review the exact settings on the original host/session, then Import reviewed records. Manual recovery does not prove original automatic-source provenance."
 end
@@ -672,7 +680,7 @@ local function setup_sections(state)
 		{id="setup-guide",page="setup",title="Agent setup",rows=rows},
 	}
 end
-local MANAGED_FIELDS={id=true,provider=true,provider_family=true,account_label=true,backend=true,executable=true,arguments=true,task_argument_index=true,cwd=true,root=true,user=true}
+local MANAGED_FIELDS={id=true,provider=true,provider_family=true,account_label=true,backend=true,executable=true,arguments=true,task_argument_index=true,cwd=true,root=true,user=true,model=true,effort=true}
 local function managed_draft(state)
 	if not state.managed_draft then
 		state.managed_draft=ManagedSetup.defaults(state.default_cwd);state.managed_draft_revision=state.snapshot.config_revision
@@ -759,7 +767,7 @@ function managed_candidates(state,all,selected)
 end
 function native_check_scope(draft)
 	local source=draft.source_record or {}
-	return draft.provider.." — "..draft.account_label.." (model: "..tostring(source.model or "saved CLI settings/default")..(if source.profile then "; profile: "..source.profile else "").."; existing account: "..(if draft.user~="" then draft.user else "current OS account").."; arguments: "..(if draft.arguments~="" then draft.arguments else "none")..")"
+	return draft.provider.." — "..draft.account_label.." (model: "..tostring((if draft.model~=nil and draft.model~="" then draft.model else source.model) or "saved CLI settings/default")..(if draft.effort~=nil and draft.effort~="" then "; effort: "..draft.effort elseif source.effort then "; effort: "..source.effort else "")..(if source.profile then "; profile: "..source.profile else "").."; existing account: "..(if draft.user~="" then draft.user else "current OS account").."; arguments: "..(if draft.arguments~="" then draft.arguments else "none")..")"
 end
 local function managed_batch_offer(state,cx,expected,all,plan,missing)
 	if state.managed_busy or (state.managed_batch and state.managed_batch.status~="failed" and state.managed_batch.status~="completed") then state.notice="Setup is already running; no second preparation was requested.";return end
@@ -897,6 +905,19 @@ local function managed_sections(state)
 		local hints={provider_family="Configured underlying provider for OMP/wrappers; not runtime identity.",arguments="Literal argv. Configure explicit fresh-session flags. No shell command string.",task_argument_index="Terminal only: one-based insertion position; empty appends the task after fresh arguments. Native OMP uses its native prompt channel.",root="Current-user default is stable plugin data; selected-account default uses its verified home. Existing explicit roots are preserved; no permissions or Git trust are changed.",user="Empty uses the current account. An existing same-host account requires already-authorized noninteractive sudo access; its actual home and executable are observed before helper installation. No account, credentials or permissions are created.",executable=if state.snapshot.host_os=="windows" then "Choose an installed native .exe using Windows CRT arguments." else "Installed command name or absolute executable path."}
 		table.insert(rows,text_row("managed:"..field,labels[field],text(draft[field]),hints[field]))
 	end
+	do
+		local program=Config.program_of(draft.executable,(Config.parse_arguments(draft.arguments)) or {})
+		local key=Selectors.program_key(program)
+		if Selectors.supports_model(key) then
+			table.insert(rows,text_row("managed:model","Model",draft.model or "","Exact model id passed to the CLI. Empty keeps the CLI's own default. SPAWN never guesses an alias. "..(Selectors.helper(key) or "")))
+			local values=Selectors.efforts(key)
+			if values then
+				local options={{value="",label="CLI default"}}
+				for _,value in ipairs(values) do table.insert(options,{value=value,label=value}) end
+				table.insert(rows,choice_row("managed:effort","Effort",draft.effort or "",options,"Only the values this CLI lists. CLI default adds no effort flag."))
+			end
+		end
+	end
 	table.insert(rows,choice_row("managed:backend","Launch route",draft.backend,if state.snapshot.host_os=="windows" then {{value="local-terminal",label="Local terminal"}} else {{value="native-agent",label="Native agent"},{value="local-terminal",label="Local terminal"}},"Use this machine's configured native agent integration or a terminal; a provider label does not verify native recognition."))
 	if state.advanced and (not state.managed_probe or not state.managed_probe.passed or (state.managed_route and state.managed_route.cleanup_pending==false)) then
 		table.insert(rows,action_row("managed-probe","Check resources only",action(state,"managed-probe"),"Advanced resource diagnostic only. Use Prepare and save for the complete required setup."))
@@ -935,6 +956,59 @@ local function managed_sections(state)
 	table.insert(rows,action_row("managed-exercise","Check provider readiness…",action(state,"managed-exercise"),"Optional real task/report/check exercise in ORCH+, with separate consent."))
 	return {{id="managed-setup",page="managed",title="Prepare agents for ORCH+",rows=rows}}
 end
+-- Model choices from the CLI's own headless listing. A listing runs only when the person asks (the
+-- "List models" action), read-only, as the agent's own OS account on this machine; nothing starts an
+-- agent and nothing is saved. An unknown listing, a failed run or an empty answer keeps the free-text field.
+-- The listing is the CLI's own listing command run through the SAME route the launch takes: the record is
+-- resolved by launch's resolver, a literal sudo form is read by Backend.same_host_route (the function
+-- launch and preparation use), and the folder is the record's launch folder. Nothing here parses sudo.
+-- No route (not POSIX, SSH, a relative or empty folder, a route launch itself refuses, or a program
+-- that is not the CLI) means no listing and the Model field stays free text.
+local function listing_route(state,record,key)
+	local lister=Selectors.lister(key)
+	if lister==nil or state.snapshot.host_os=="windows" then return nil end
+	if record.backend=="ssh-command" or (record.host~=nil and record.host~="") then return nil end
+	local cwd=record.cwd
+	if type(cwd)~="string" or cwd:sub(1,1)~="/" or cwd:find("%c") then return nil end
+	local resolved=Resolution.resolve(record,if Resolution.fresh_available(record) then "fresh" else "ordinary","posix")
+	if resolved==nil then return nil end
+	local route=Backend.same_host_route(resolved.executable,resolved.arguments,if type(record.user)=="string" then record.user else "")
+	if route==nil or Selectors.program_key(route.executable)~=key then return nil end
+	local argv={route.executable}
+	for index=2,#lister do table.insert(argv,lister[index]) end
+	return {argv=argv,user=route.user,cwd=cwd}
+end
+local function model_list_key(state,record,key)
+	local route=listing_route(state,record,key)
+	if route==nil then return "" end
+	return route.user.."\0"..route.argv[1].."\0"..route.cwd.."\0"..tostring(key)
+end
+local function can_list_models(state,record,key)
+	return listing_route(state,record,key)~=nil
+end
+local function model_rows(state,record,id,key)
+	local current=if record.model_selector then text(record.model) else ""
+	local legacy=record.model~=nil and record.model_selector~=true
+	local listed=if state.model_lists then state.model_lists[model_list_key(state,record,key)] else nil
+	local helper=Selectors.helper(key) or ""
+	local rows={}
+	if listed and #listed>0 then
+		local options={{value="",label="CLI default"}}
+		local seen={}
+		for _,value in ipairs(listed) do seen[value]=true;table.insert(options,{value=value,label=value}) end
+		if current~="" and not seen[current] then table.insert(options,{value=current,label=current.." (saved)"}) end
+		table.insert(rows,choice_row(id,"Model",current,options,"Models the CLI itself lists. CLI default adds no model flag. "..(if legacy then "Saved label, display only, not sent to the CLI: "..record.model.."." else "")))
+	else
+		table.insert(rows,text_row(id,"Model",current,(if legacy then "Saved label, display only, not sent to the CLI: "..record.model..". Type an exact model id here to send it as the CLI's model flag. " else "Exact model id, never an alias SPAWN invents. ")..helper.." Do not also type the model flag in Arguments."))
+	end
+	if can_list_models(state,record,key) then
+		local busy=state.model_list_busy~=nil and state.model_list_busy[record.id]
+		local shown=listing_route(state,record,key)
+		local shown_argv,shown_user=shown.argv,shown.user
+		table.insert(rows,action_row("model-list-"..record.id,if busy then "Listing models..." else "List models",action(state,"model-list:"..record.id),"Runs "..table.concat(shown_argv," ").." read-only as "..(if shown_user~="" then shown_user else "the current account")..". It starts no agent and saves nothing; if the CLI cannot list (not signed in, no listing) the Model field stays free text."..(if state.model_list_notes and state.model_list_notes[record.id] then " Last result: "..state.model_list_notes[record.id] else "")))
+	end
+	return rows
+end
 local function record_sections(state)
 	local sections={
 		{id="agent-overview",page="agents",title="Overview",rows={static_row("agents-configured","Agents configured",tostring(#state.config.agents),"Saved provider records only.")}},
@@ -966,6 +1040,19 @@ local function record_sections(state)
 		if state.advanced then
 			if record.backend=="native-agent" or record.backend=="ssh-command" or record.host then table.insert(rows,text_row(prefix("host"),"Host",text(record.host),"Native host identity or explicit SSH destination.")) end
 			if record.backend=="ssh-command" then table.insert(rows,text_row(prefix("key_path"),"Key path",text(record.key_path),"Path only; never paste private key contents.")) end
+		end
+		do
+			local key=Config.record_cli(record)
+			if Selectors.supports_model(key) then
+				local legacy=record.model~=nil and record.model_selector~=true
+				for _,row in ipairs(model_rows(state,record,prefix("model"),key)) do table.insert(rows,row) end
+				local values=Selectors.efforts(key)
+				if values then
+					local options={{value="",label="CLI default"}}
+					for _,value in ipairs(values) do table.insert(options,{value=value,label=value}) end
+					table.insert(rows,choice_row(prefix("effort"),"Effort",record.effort or "",options,"Only the values this CLI lists. CLI default adds no effort flag."))
+				end
+			end
 		end
 		if string.lower(record.provider)=="omp" then
 			table.insert(rows,text_row(prefix("prompt"),"Approved startup prompt",text(record.prompt),"Delivered once per new Native OMP launch; never on reload. A custom nonempty prompt is preserved."))
@@ -1393,6 +1480,7 @@ local function update_record(state,cx,id,field,value,revision)
 		local canonical,why=Config.validate_record(candidate)
 		if not canonical then state.notice=why;return end
 		if canonical.id~=id then state.notice="Stable ids are immutable; full-record JSON must keep this record's ID";return end
+		local json_selector_problem=Config.selector_error(canonical,record);if json_selector_problem then state.notice=json_selector_problem;return end
 		if Dispatch.protocol.equal(canonical,record) then state.notice="Record unchanged. No agents were launched.";return end
 		if canonical.mailbox and (canonical.mailbox.verified==true or canonical.mailbox.evidence_ref~=nil) and not Dispatch.protocol.equal(canonical.mailbox,record.mailbox) then state.notice="Managed readiness cannot be supplied by JSON. Use Prepare agents for ORCH+; unchanged previously verified helpers are preserved.";return end
 		withdraw_stale_preparation(record,canonical)
@@ -1401,7 +1489,7 @@ local function update_record(state,cx,id,field,value,revision)
 		local next_records=Authority.clone(state.config.agents);next_records[index]=canonical
 		mutate(state,cx,revision,"replace-records",{records=next_records});return
 	end
-	local allowed={provider=true,provider_family=true,account_label=true,host=true,user=true,key_path=true,command=true,arguments=true,cwd=true,prompt=true,placement=true,backend=true,enabled=true}
+	local allowed={provider=true,provider_family=true,account_label=true,host=true,user=true,key_path=true,command=true,arguments=true,cwd=true,prompt=true,placement=true,backend=true,enabled=true,model=true,effort=true}
 	if not allowed[field] then return end
 	local candidate=Authority.clone(record)
 	if field=="arguments" then
@@ -1409,9 +1497,14 @@ local function update_record(state,cx,id,field,value,revision)
 	elseif field=="enabled" then
 		if type(value)~="boolean" then state.notice="Expected a switch value";return end
 	elseif type(value)~="string" or #value>32000 then state.notice="Invalid or oversized field";return end
-	candidate[field]=value
+	if field=="model" then
+		-- Typing an id makes it a selector; a saved display label is left alone by an empty box.
+		if value=="" then if candidate.model_selector then candidate.model=nil;candidate.model_selector=nil end else candidate.model=value;candidate.model_selector=true end
+	elseif field=="effort" then candidate.effort=if value=="" then nil else value
+	else candidate[field]=value end
 	if field=="backend" and value~=record.backend then candidate.review_required=true;candidate.review_reason="Review this account's launch command and routing after changing launch mode" end
 	local canonical,err=Config.validate_record(candidate);if not canonical then state.notice=err;return end
+	local selector_problem=Config.selector_error(canonical,record);if selector_problem then state.notice=selector_problem;return end
 	if withdraw_stale_preparation(record,canonical) then state.notice="This agent's launch settings changed, so its ORCH+ preparation was withdrawn. Prepare agents for ORCH+ to check it again." end
 	local next_records=Authority.clone(state.config.agents);next_records[index]=canonical
 	mutate(state,cx,revision,"replace-records",{records=next_records})
@@ -1926,6 +2019,26 @@ local definition={
 			local op,rev=event.act:match("^(.*)@(%d+)$");local expected=tonumber(rev)
 			if not op or not state.snapshot then return end
 			if expected~=state.snapshot.config_revision then reload(state);state.notice="stale-config: review the refreshed settings and repeat your action";return end
+			local list_id=op:match("^model%-list:(.+)$")
+			if list_id then
+				local record=record_by_id(state,list_id)
+				local key=if record then Config.record_cli(record) else nil
+				if not record or not can_list_models(state,record,key) then state.notice="This agent has no headless model listing";return end
+				state.model_list_busy=state.model_list_busy or {};state.model_list_notes=state.model_list_notes or {};state.model_lists=state.model_lists or {}
+				if state.model_list_busy[list_id] then return end
+				state.model_list_busy[list_id]=true
+				local list_key=model_list_key(state,record,key)
+				local route=listing_route(state,record,key)
+				Prereq.run(Prereq.as_user(route.argv,route.user,route.cwd),"",function(stdout,why)
+					state.model_list_busy[list_id]=nil
+					if state.closed then return end
+					local ids=if stdout then Selectors.parse_models(key,stdout,tern.json.decode) else {}
+					if #ids>0 then state.model_lists[list_key]=ids;state.model_list_notes[list_id]=tostring(#ids).." models listed"
+					else state.model_lists[list_key]=nil;state.model_list_notes[list_id]="the CLI listed no models ("..(if stdout then "empty or unrecognised output" else tostring(why or "failed"):sub(1,160))..")" end
+					cx:render()
+				end,if route.user=="" then route.cwd else nil)
+				return
+			end
 			if op=="managed-open" then state.page="managed";return end
 			local review_id=op:match("^managed%-review:(.+)$")
 			if review_id then
@@ -2088,6 +2201,7 @@ local definition={
 				local candidate=Authority.clone(record)
 				candidate.review_required=nil;candidate.review_reason=nil
 				local validated,why=Config.validate_record(candidate);if not validated then state.notice=why;return end
+				local approve_problem=Config.selector_error(validated);if approve_problem then state.notice=approve_problem;return end
 				local records=Authority.clone(state.config.agents);records[index]=validated;mutate(state,cx,expected,"replace-records",{records=records});return
 			end
 			if op=="launch-setup" then

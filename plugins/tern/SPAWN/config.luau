@@ -1,6 +1,7 @@
 -- Pure configuration boundary. The caller owns backup and durable replacement:
 -- when changed is true, preserve the original store before committing result.store.
 -- No discovery, process launch, credential access or persistence belongs here.
+local Selectors = require("./selectors")
 local Config = {}
 local MAX_RECORDS = 32
 local MAX_TEXT = 32000
@@ -14,7 +15,7 @@ local FIELDS = {
 	host = true, user = true, key_path = true, review_required = true, review_reason = true,
 	fresh_executable = true, fresh_arguments = true, fresh_native_default = true, task_argument_index = true,
 	host_shell = true, target_os = true, target_shell = true, mailbox = true,
-	model = true, profile = true, variant_id = true, capacity_binding = true, capacity_limit = true,
+	model = true, model_selector = true, effort = true, profile = true, variant_id = true, capacity_binding = true, capacity_limit = true,
 	selector_evidence = true,
 	argv_contract = true,
 }
@@ -134,11 +135,8 @@ local function arguments(value: any, legacy: boolean): ({ string }?, string?)
 	return result, nil
 end
 
-local function basename(value: string): string
-	local normalized = string.gsub(value, "\\", "/")
-	local name = string.lower(string.match(normalized, "([^/]+)$") or normalized)
-	return (string.gsub(string.gsub(string.gsub(name, "%.exe$", ""), "%.cmd$", ""), "%.bat$", ""))
-end
+-- Ordinary launch detection keeps the 0.6.6 launcher list (.exe/.cmd/.bat); only selector identity adds .ps1.
+local function basename(value: string): string return Selectors.basename(value) end
 
 local SERVERS = {
 	["claude-agent-acp"] = true, ["claude-code-acp"] = true,
@@ -212,12 +210,19 @@ end
 -- Managed declarations are configuration, not evidence collected by SPAWN.
 -- Absence stays absent: neither migration nor normalization grants a capability.
 local function managed_fields(source: any, record: any): string?
-	for _, field in ipairs({ "fresh_executable", "host_shell", "target_shell", "model", "profile", "variant_id", "capacity_binding", "selector_evidence" }) do
+	for _, field in ipairs({ "fresh_executable", "host_shell", "target_shell", "model", "effort", "profile", "variant_id", "capacity_binding", "selector_evidence" }) do
 		local value = source[field]
 		if value ~= nil then
 			if not text(value, 4096) or not nonblank(value) then return field .. " must be nonempty bounded text" end
 			record[field] = value
 		end
+	end
+	if source.model_selector ~= nil then
+		-- Set only by the 0.7 setup form, editor or setup result: it marks `model` as an exact id to send.
+		-- A `model` without it stays display text and is never turned into a flag.
+		if source.model_selector ~= true then return "model_selector must be true or absent" end
+		if record.model == nil then return "model_selector needs a model" end
+		record.model_selector = true
 	end
 	if source.target_os ~= nil then
 		if source.target_os ~= "linux" and source.target_os ~= "macos" and source.target_os ~= "windows" then return "Unsupported target OS" end
@@ -319,6 +324,154 @@ function Config.parse_sudo(argv: {string}): (string?, number, boolean, string?)
 		index += 1
 	end
 	return selected, index, login, nil
+end
+-- The program a launch really runs and the index in `argv` where its own arguments start,
+-- unwrapping a literal sudo (selected user, optional `--`). nil when it cannot be named.
+function Config.program_of(executable: any, argv: { string }): (string?, number)
+	if type(executable) ~= "string" or executable == "" then return nil, 1 end
+	if basename(executable) == "sudo" then
+		local _, index, _, problem = Config.parse_sudo(argv)
+		if problem ~= nil or argv[index] == nil then return nil, 1 end
+		return argv[index], index + 1
+	end
+	return executable, 1
+end
+-- ONE reading of a command line for validation and for launch: a Windows path stays literal, anything else is POSIX words.
+function Config.command_words(command: string, shell: string): ({string}?, string?)
+	-- Windows paths are literal; POSIX command parsing would eat backslashes.
+	-- Ordinary SSH still targets the released POSIX shell contract.
+	if shell == "powershell" and command:find("\\", 1, true) then
+		local path = command:match('^"(.*)"$') or command:match("^'(.*)'$") or command
+		local lower = path:lower()
+		if lower:match("%.exe$") or lower:match("%.cmd$") or lower:match("%.bat$") or lower:match("%.ps1$") then return { path }, nil end
+		return nil, "Use an exact Windows executable path and put its arguments in Arguments"
+	end
+	return Config.parse_arguments(command)
+end
+local AMBIGUOUS_COMMAND = "This command can be read two ways: as a Windows path and as shell words, and they name different programs or arguments. Remove the backslash, or put only the executable here and the options in Arguments. Model and effort need a command without backslashes; on Windows, use a launcher on PATH (e.g. claude) and put options in Arguments."
+local function same_words(left: {string}, right: {string}): boolean
+	if #left ~= #right then return false end
+	for index, word in ipairs(left) do
+		if right[index] ~= word then return false end
+	end
+	return true
+end
+-- Both readings of a local command that selectors will be added to. Execution parses by the observed shell,
+-- which validation cannot know, so validation never picks one: it returns the words only when every reading
+-- that can apply agrees (byte-identical word lists), else nil and a refusal. There is no one-word exception:
+-- a backslash path can name a different program under each reading.
+local function selector_words(command: string): ({string}?, boolean)
+	local posix = Config.parse_arguments(command)
+	if not command:find("\\", 1, true) then return posix, false end
+	local windows = Config.command_words(command, "powershell")
+	if windows == nil then return posix, false end
+	if posix ~= nil and same_words(windows, posix) then return windows, false end
+	return nil, true
+end
+-- The launches a record can make: ordinary (command + arguments) and fresh. The second result is true when
+-- the ordinary command reads two ways under active selectors.
+local function launch_modes(record: any): ({ any }, boolean)
+	local modes = {}
+	local ambiguous = false
+	if type(record.command) == "string" and nonblank(record.command) then
+		local words
+		if record.backend == "ssh-command" then
+			words = Config.parse_arguments(record.command)
+		elseif Config.selectors_active(record) then
+			words, ambiguous = selector_words(record.command)
+		else
+			words = Config.command_words(record.command, "powershell")
+			if words == nil then words = Config.parse_arguments(record.command) end
+		end
+		if words ~= nil and words[1] ~= nil then
+			local argv = {}
+			for index = 2, #words do table.insert(argv, words[index]) end
+			for _, word in ipairs(record.arguments or {}) do table.insert(argv, word) end
+			table.insert(modes, { name = "ordinary", executable = words[1], argv = argv })
+		end
+	end
+	if record.fresh_native_default then
+		table.insert(modes, { name = "fresh", executable = "omp", argv = {} })
+	elseif record.fresh_executable ~= nil then
+		table.insert(modes, { name = "fresh", executable = record.fresh_executable, argv = record.fresh_arguments or {} })
+	end
+	return modes, ambiguous
+end
+function Config.selectors_active(record: any): boolean
+	return record.model_selector == true or record.effort ~= nil
+end
+-- The CLI the record's own launch runs (fresh first), for forms that show model/effort controls.
+function Config.record_cli(record: any): string?
+	local modes = launch_modes(record)
+	table.sort(modes, function(a, b) return a.name == "fresh" and b.name ~= "fresh" end)
+	local mode = modes[1]
+	if mode == nil then return nil end
+	return Selectors.program_key((Config.program_of(mode.executable, mode.argv)))
+end
+-- Identity and value rules for the selectors a record sets. Only records that set a 0.7 selector
+-- (`model_selector` or `effort`) are checked, so a saved roster with display-text models loads and
+-- launches as before. The CLI is the program each launch really runs, never the provider label.
+function Config.selector_identity_error(record: any): string?
+	if not Config.selectors_active(record) then return nil end
+	if record.model_selector == true then
+		local why = Selectors.model_error(record.model)
+		if why ~= nil then return why end
+	end
+	local provider_key = Selectors.provider_key(record.provider)
+	local seen
+	local modes, ambiguous = launch_modes(record)
+	if ambiguous then return AMBIGUOUS_COMMAND end
+	for _, mode in ipairs(modes) do
+		if basename(mode.executable) == "sudo" then
+			local _, _, login = Config.parse_sudo(mode.argv)
+			if login then return "Model and effort cannot be added to a sudo -i or -s launch: the target's login shell reads the arguments a second time. Remove -i or -s and set the OS user, so SPAWN's own login wrapper enters the login shell." end
+		end
+		local program = Config.program_of(mode.executable, mode.argv)
+		local key = Selectors.program_key(program)
+		if key == nil then
+			return "Model and effort need a known CLI (claude, codex, kimi, grok, agy, muse or omp). The " .. mode.name .. " launch runs " .. tostring(program or mode.executable) .. "; clear model and effort, or run a known CLI."
+		end
+		if provider_key ~= nil and provider_key ~= key then
+			return "Provider " .. tostring(record.provider) .. " names " .. provider_key .. " but the " .. mode.name .. " launch runs " .. key .. ". Fix the provider or the command."
+		end
+		if seen ~= nil and seen ~= key then return "The ordinary and fresh launches run different CLIs (" .. seen .. " and " .. key .. ")." end
+		seen = key
+		if record.effort ~= nil then
+			local why = Selectors.effort_error(key, record.effort)
+			if why ~= nil then return why end
+		end
+	end
+	if seen == nil then return "Model and effort need a launch command to apply to." end
+	return nil
+end
+-- The launch contract a duplicate-flag decision depends on: the selector fields and each
+-- launch's own option region (the program's arguments up to its own `--`).
+local function selector_contract(record: any): string
+	local parts = { tostring(record.model_selector == true and record.model or ""), tostring(record.effort or "") }
+	for _, mode in ipairs((launch_modes(record))) do
+		local program, first = Config.program_of(mode.executable, mode.argv)
+		table.insert(parts, mode.name .. ":" .. tostring(program) .. ":" .. table.concat(Selectors.region(mode.argv, first), "\31"))
+	end
+	return table.concat(parts, "\30")
+end
+-- Full check used by the setup form, the record editor, full-record JSON and approval:
+-- the identity rules plus no flag typed twice. A conflict that `previous` already held with the
+-- same launch contract is preserved; any changed contract must not introduce one.
+function Config.selector_error(record: any, previous: any?): string?
+	if not Config.selectors_active(record) then return nil end
+	local why = Config.selector_identity_error(record)
+	if why ~= nil then return why end
+	if previous ~= nil and Config.selectors_active(previous) and selector_contract(previous) == selector_contract(record) then return nil end
+	for _, mode in ipairs((launch_modes(record))) do
+		local program, first = Config.program_of(mode.executable, mode.argv)
+		local key = Selectors.program_key(program)
+		local model = if record.model_selector == true then record.model else nil
+		local hit = Selectors.duplicate(key, Selectors.region(mode.argv, first), model, record.effort)
+		if hit ~= nil then
+			return "This record sets model or effort and the " .. mode.name .. " arguments also contain " .. hit .. ". Remove one of them: the flag is added from the record's model and effort fields."
+		end
+	end
+	return nil
 end
 local function normalize(source: any, legacy: boolean): (any?, string?)
 	if type(source) ~= "table" then return nil, "Record must be an object" end
@@ -431,6 +584,8 @@ local function normalize(source: any, legacy: boolean): (any?, string?)
 		if legacy then mark_review(record, "Review this account's SSH destination")
 		elseif not record.review_required then return nil, "SSH terminal requires a destination" end
 	end
+	local selector_problem = Config.selector_identity_error(record)
+	if selector_problem ~= nil then return nil, selector_problem end
 	return record, nil
 end
 

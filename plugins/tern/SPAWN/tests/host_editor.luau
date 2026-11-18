@@ -427,6 +427,194 @@ check(spawnRows['spawn-launch:custom:other'].hint=='ordinary-cli · default fold
 check(spawnRows['spawn-launch:custom:off'].disabled=='Disabled in Config','disabled record is shown greyed with its reason')
 check(spawnRows['spawn-launch:custom:needs'].disabled=='Needs settings review: Review the new command','needs-review record is shown greyed with its reason')
 check(spawnRows['spawn-launch:custom:off'].reason=='  · Disabled in Config' and spawnRows['spawn-launch:kimi:argsy'].reason==nil,'a blocked agent shows its reason in the row, a ready one shows none')
+-- Model and effort rows on Agent settings: only for CLIs that have the flags, only real values.
+do
+ local sel=record('selclaude');sel.provider='claude';sel.command='claude';sel.account_label='Sel'
+ local plain=record('selcodex');plain.provider='codex';plain.command='codex';plain.account_label='Sel2'
+ local unknown=record('selunknown')
+ local prior=clone(snapshot().records);local list=clone(prior);table.insert(list,sel);table.insert(list,plain);table.insert(list,unknown)
+ local legacy=record('sellegacy');legacy.provider='claude';legacy.command='claude';legacy.account_label='Old';legacy.model='Claude Opus 4.7'
+ local conflict=record('selconf');conflict.provider='claude';conflict.command='claude';conflict.account_label='Conf';conflict.arguments={'--model','opus'};conflict.model='sonnet';conflict.model_selector=true
+ table.insert(list,legacy);table.insert(list,conflict)
+ check(A.edit(state.binding,snapshot().config_revision,'replace-records',{records=list}),'seed claude, codex and unknown-CLI records')
+ refresh()
+ local function rid(id,field)return 'agent:'..id..':'..field..':'..tostring(state.snapshot.config_revision) end
+ local function saved_record(id)for _,item in ipairs(snapshot().records)do if item.id==id then return item end end end
+ local rows=rows_of('agents')
+ check(rows[rid('selclaude','model')]~=nil and rows[rid('selclaude','effort')]~=nil and rows[rid('selclaude','effort')].control.k=='choice','a CLI with model and effort flags shows both controls')
+ local values={}
+ for _,option in ipairs(rows[rid('selclaude','effort')].control.options) do table.insert(values,option.value) end
+ check(table.concat(values,',')==',low,medium,high,xhigh,max','effort dropdown lists the CLI default and only the real values')
+ check(rows[rid('selcodex','model')]~=nil and rows[rid('selcodex','effort')]==nil,'a CLI without a verified effort flag shows a model control and no effort control')
+ check(rows[rid('selunknown','model')]==nil and rows[rid('selunknown','effort')]==nil,'an unknown CLI shows neither control')
+ definition.event(state,{ev='change',item=rid('selclaude','model'),value='claude-opus-5-5'},cx)
+ check(saved_record('selclaude').model=='claude-opus-5-5','the model is saved exactly as typed')
+ definition.event(state,{ev='change',item=rid('selclaude','effort'),value='high'},cx)
+ check(saved_record('selclaude').effort=='high','a listed effort is saved')
+ definition.event(state,{ev='change',item=rid('selclaude','effort'),value='ultra'},cx)
+ check(saved_record('selclaude').effort=='high' and type(state.notice)=='string','an effort outside the list is refused and nothing changes')
+ definition.event(state,{ev='change',item=rid('selclaude','model'),value='-bad'},cx)
+ check(saved_record('selclaude').model=='claude-opus-5-5' and state.notice:find('must not start with -',1,true)~=nil,'a model id starting with - is refused')
+ definition.event(state,{ev='change',item=rid('selclaude','arguments'),value='--effort low'},cx)
+ check(saved_record('selclaude').arguments[1]==nil or saved_record('selclaude').arguments[1]~='--effort','arguments are not edited into a clash')
+ local with_arg=clone(saved_record('selclaude'))
+ definition.event(state,{ev='change',item=rid('selclaude','arguments'),value='--model other'},cx)
+ definition.event(state,{ev='change',item=rid('selclaude','effort'),value=''},cx)
+ check(saved_record('selclaude').effort==nil,'an empty effort clears back to the CLI default')
+ definition.event(state,{ev='change',item=rid('selclaude','model'),value=''},cx)
+ check(saved_record('selclaude').model==nil,'an empty model clears back to the CLI default')
+ -- a saved display label is shown as display-only and typing an id turns it into a selector
+ rows=rows_of('agents')
+ check(rows[rid('sellegacy','model')].control.value=='' and rows[rid('sellegacy','model')].hint:find('display only',1,true)~=nil and rows[rid('sellegacy','model')].hint:find('Claude Opus 4.7',1,true)~=nil,'a pre-0.7 model label is shown as display text with the way to turn it into a selector')
+ definition.event(state,{ev='change',item=rid('sellegacy','effort'),value='low'},cx)
+ check(saved_record('sellegacy').model=='Claude Opus 4.7' and saved_record('sellegacy').model_selector==nil and saved_record('sellegacy').effort=='low','setting effort leaves the display label a label')
+ definition.event(state,{ev='change',item=rid('sellegacy','model'),value=''},cx)
+ check(saved_record('sellegacy').model=='Claude Opus 4.7','an empty Model box keeps a saved display label')
+ definition.event(state,{ev='change',item=rid('sellegacy','model'),value='claude-opus-4-7'},cx)
+ check(saved_record('sellegacy').model=='claude-opus-4-7' and saved_record('sellegacy').model_selector==true,'typing an id makes it an explicit selector')
+ -- an existing conflict survives only while its launch contract is unchanged
+ definition.event(state,{ev='change',item=rid('selconf','cwd'),value='/else'},cx)
+ check(saved_record('selconf').cwd=='/else','a change outside the launch contract keeps an existing conflict')
+ definition.event(state,{ev='change',item=rid('selconf','arguments'),value='--model other'},cx)
+ check(saved_record('selconf').arguments[2]=='opus' and state.notice:find('Remove one',1,true)~=nil,'editing the typed flag cannot carry a conflict through')
+ local json_candidate=clone(saved_record('selconf'));json_candidate.arguments={'--model','other'}
+ definition.event(state,{ev='action',act='advanced-open'},cx)
+ definition.event(state,{ev='change',item=rid('selconf','json'),value=runtime.json.encode(json_candidate)},cx)
+ definition.event(state,{ev='action',act='advanced-close'},cx)
+ check(saved_record('selconf').arguments[2]=='opus' and state.notice:find('Remove one',1,true)~=nil,'full-record JSON validates a changed conflict too: '..tostring(state.notice)..tostring(saved_record('selconf').arguments[2]))
+ -- approval of a review-required record refuses a conflict
+ local approve=clone(saved_record('selconf'));approve.review_required=true;approve.review_reason='r'
+ local with_review=clone(snapshot().records);for index,item in ipairs(with_review) do if item.id=='selconf' then with_review[index]=approve end end
+ check(A.edit(state.binding,snapshot().config_revision,'replace-records',{records=with_review}),'review-required conflict fixture saved');refresh()
+ definition.event(state,{ev='action',act='approve:selconf@'..state.snapshot.config_revision},cx)
+ check(saved_record('selconf').review_required==true and state.notice:find('Remove one',1,true)~=nil,'Approve refuses a record that carries a duplicate flag: '..tostring(state.notice))
+ -- a backslash path whose two readings name different programs is refused on the host-editor save and approval road
+ local mismatch=clone(approve);mismatch.arguments={};mismatch.command='/tmp/codex\\claude.exe'
+ local with_mismatch=clone(snapshot().records);for index,item in ipairs(with_mismatch) do if item.id=='selconf' then with_mismatch[index]=mismatch end end
+ check(not A.edit(state.binding,snapshot().config_revision,'replace-records',{records=with_mismatch}),'host save/approval refuses /tmp/codex\\claude.exe under selectors')
+ check(saved_record('selconf').command=='claude','refused mismatch leaves the saved record exact')
+ -- manual Setup JSON import refuses a new conflicting record at review
+ local bad=record('selbad');bad.provider='claude';bad.command='claude';bad.account_label='Bad';bad.arguments={'--model','opus'};bad.model='sonnet';bad.model_selector=true
+ definition.event(state,{ev='action',act='advanced-open'},cx)
+ definition.event(state,{ev='change',item='manual-json',value=runtime.json.encode({schema=2,agents={bad}})},cx)
+ definition.event(state,{ev='action',act='manual-review@'..state.snapshot.config_revision},cx)
+ check(state.import_review==nil and state.notice:find('Remove one',1,true)~=nil,'manual import refuses a new selector conflict: '..tostring(state.notice))
+ definition.event(state,{ev='action',act='advanced-close'},cx)
+ check(A.edit(state.binding,snapshot().config_revision,'replace-records',{records=prior}),'selector fixtures removed');refresh();state.page='spawn'
+end
+-- Model choices come from the CLI's own headless listing when it has one; otherwise free text with the CLI's flags.
+do
+ local Sel=load('selectors')
+ local json=runtime.json
+ check(Sel.lister('grok')[2]=='models' and Sel.lister('claude')==nil and Sel.lister('codex')==nil and Sel.lister('kimi')==nil and Sel.lister('muse')==nil,'only grok, agy and omp have a documented headless listing')
+ for _,cli in ipairs({'claude','codex','kimi','grok','agy','muse','omp'}) do check(type(Sel.helper(cli))=='string' and Sel.helper(cli):find('Empty keeps',1,true)~=nil,'helper text for '..cli) end
+ check(Sel.helper('claude'):find('--model',1,true)~=nil and Sel.helper('claude'):find('--effort',1,true)~=nil and Sel.helper('muse'):find('--reasoning-effort',1,true)~=nil and Sel.helper('omp'):find('--thinking=',1,true)~=nil and Sel.helper('codex'):find('-m',1,true)~=nil,'helper text names the real flags')
+ local grok_out='You are not authenticated.\n\nDefault model: grok-4.6\n\nAvailable models:\n  * grok-4.6 (default)\n  - grok-4.5\n'
+ local ids=Sel.parse_models('grok',grok_out)
+ check(#ids==2 and ids[1]=='grok-4.6' and ids[2]=='grok-4.5','grok listing parsed to its ids, notes dropped')
+ check(#Sel.parse_models('agy','Fetching available models...\nError: Please sign in to view available models.\n')==0,'a not-signed-in agy answer yields no ids')
+ check(#Sel.parse_models('grok','  * bad id with spaces\n  - -dash\n  * ok.model\n')==1,'ids the editor would refuse are never offered')
+ check(#Sel.parse_models('omp','{"models":[]}',json.decode)==0,'an empty omp catalog yields no ids')
+ local omp=Sel.parse_models('omp','{"models":["openai/gpt-5.2",{"id":"x-1"},{"nope":1}]}',json.decode)
+ check(#omp==2 and omp[1]=='openai/gpt-5.2' and omp[2]=='x-1','omp listing accepts id strings and id tables')
+ check(#Sel.parse_models('omp','not json',json.decode)==0 and #Sel.parse_models('grok',nil)==0,'garbage yields no ids')
+ local g=record('listgrok');g.provider='grok';g.command='grok';g.account_label='G';g.cwd='/project'
+ local c=record('listclaude');c.provider='claude';c.command='claude';c.account_label='C'
+ local prior=clone(snapshot().records);local list=clone(prior);table.insert(list,g);table.insert(list,c)
+ check(A.edit(state.binding,snapshot().config_revision,'replace-records',{records=list}),'seed grok and claude records');refresh()
+ local function rid(id,field)return 'agent:'..id..':'..field..':'..tostring(state.snapshot.config_revision) end
+ local function saved_record(id)for _,item in ipairs(snapshot().records)do if item.id==id then return item end end end
+ local rows=rows_of('agents')
+ check(rows[rid('listgrok','model')].control.k=='text' and rows['model-list-listgrok']~=nil,'before listing, grok model is free text with a List models action')
+ check(rows[rid('listgrok','model')].hint:find('-m / --model',1,true)~=nil,'free-text hint names the CLI flags')
+ check(rows[rid('listclaude','model')].control.k=='text' and rows['model-list-listclaude']==nil,'a CLI with no listing has free text and no list action')
+ local ran
+ fake.process.run=function(argv,options,callback) ran=argv;callback({status=0,timed_out=false,stdout=grok_out,stderr=''}) end
+ definition.event(state,{ev='action',act='model-list:listgrok@'..state.snapshot.config_revision},cx)
+ check(ran~=nil and ran[1]=='grok' and ran[2]=='models' and #ran==2,'List models runs the CLI listing argv and nothing else: '..tostring(ran and table.concat(ran,' ')))
+ rows=rows_of('agents')
+ local choice=rows[rid('listgrok','model')]
+ check(choice.control.k=='choice' and #choice.control.options==3 and choice.control.options[1].value=='' and choice.control.options[2].value=='grok-4.6','listed models become choices after a CLI default entry')
+ definition.event(state,{ev='change',item=rid('listgrok','model'),value='grok-4.5'},cx)
+ check(saved_record('listgrok').model=='grok-4.5' and saved_record('listgrok').model_selector==true,'a chosen listed model is saved as a selector')
+ definition.event(state,{ev='change',item=rid('listgrok','model'),value=''},cx)
+ check(saved_record('listgrok').model==nil,'choosing CLI default clears the model')
+ -- a failed or empty listing keeps free text and says why
+ state.model_lists={}
+ fake.process.run=function(_,_,callback) callback({status=1,timed_out=false,stdout='',stderr='Please sign in'}) end
+ definition.event(state,{ev='action',act='model-list:listgrok@'..state.snapshot.config_revision},cx)
+ rows=rows_of('agents')
+ check(rows[rid('listgrok','model')].control.k=='text' and rows['model-list-listgrok'].hint:find('Please sign in',1,true)~=nil,'a failed listing keeps the free-text field and shows the reason')
+ -- listing never writes configuration and never starts a pane
+ local writes_before=writes
+ fake.process.run=function(_,_,callback) callback({status=0,timed_out=false,stdout=grok_out,stderr=''}) end
+ definition.event(state,{ev='action',act='model-list:listgrok@'..state.snapshot.config_revision},cx)
+ check(writes==writes_before,'listing models writes no configuration')
+ -- another account lists through its own login route; an SSH agent has no list action
+ local other=clone(saved_record('listgrok'));other.id='listother';other.user='otheracct';other.account_label='O'
+ local ssh=clone(saved_record('listgrok'));ssh.id='listssh';ssh.backend='ssh-command';ssh.host='box';ssh.account_label='S'
+ local more=clone(snapshot().records);table.insert(more,other);table.insert(more,ssh)
+ check(A.edit(state.binding,snapshot().config_revision,'replace-records',{records=more}),'seed other-account and ssh records');refresh()
+ rows=rows_of('agents')
+ check(rows['model-list-listother']~=nil and rows['model-list-listssh']==nil,'an ssh agent offers no listing')
+ ran=nil
+ fake.process.run=function(argv,_,callback) ran=argv;callback({status=0,timed_out=false,stdout=grok_out,stderr=''}) end
+ definition.event(state,{ev='action',act='model-list:listother@'..state.snapshot.config_revision},cx)
+ check(ran~=nil and ran[1]=='sudo' and table.concat(ran,' '):find('otheracct',1,true)~=nil,'another account lists through the sudo login route: '..tostring(ran and table.concat(ran,' ')))
+ -- a literal sudo wrapper selects the account; no record.user is needed
+ local wrap=clone(saved_record('listgrok'));wrap.id='listwrap';wrap.account_label='W';wrap.command='sudo';wrap.arguments={'-n','-H','-u','workeracct','--','grok'}
+ local plain_omp_a=record('listompa');plain_omp_a.provider='omp';plain_omp_a.command='/opt/install-a/bin/omp';plain_omp_a.account_label='A';plain_omp_a.cwd='/project'
+ local plain_omp_b=record('listompb');plain_omp_b.provider='omp';plain_omp_b.command='/opt/install-b/bin/omp';plain_omp_b.account_label='B';plain_omp_b.cwd='/project'
+ local more2=clone(snapshot().records);table.insert(more2,wrap);table.insert(more2,plain_omp_a);table.insert(more2,plain_omp_b)
+ check(A.edit(state.binding,snapshot().config_revision,'replace-records',{records=more2}),'seed sudo-wrapper and custom-executable records');refresh()
+ rows=rows_of('agents')
+ check(rows['model-list-listwrap']~=nil,'a literal sudo-wrapper agent offers listing')
+ ran=nil
+ definition.event(state,{ev='action',act='model-list:listwrap@'..state.snapshot.config_revision},cx)
+ local joined=ran and table.concat(ran,' ') or ''
+ check(ran~=nil and ran[1]=='sudo' and joined:find('workeracct',1,true)~=nil,'the sudo-selected account lists through its own login route, not the current account: '..joined)
+ -- two installations of one CLI list separately and cache separately
+ fake.process.run=function(argv,_,callback)
+  ran=argv
+  local body=if argv[1]=='/opt/install-a/bin/omp' then '{"models":["alpha-1"]}' elseif argv[1]=='/opt/install-b/bin/omp' then '{"models":["beta-2"]}' else '{"models":[]}'
+  callback({status=0,timed_out=false,stdout=body,stderr=''})
+ end
+ definition.event(state,{ev='action',act='model-list:listompa@'..state.snapshot.config_revision},cx)
+ check(ran[1]=='/opt/install-a/bin/omp' and ran[2]=='models','listing runs the own executable of the agent: '..table.concat(ran,' '))
+ definition.event(state,{ev='action',act='model-list:listompb@'..state.snapshot.config_revision},cx)
+ check(ran[1]=='/opt/install-b/bin/omp','the second install lists through its own executable')
+ rows=rows_of('agents')
+ local oa,ob=rows[rid('listompa','model')],rows[rid('listompb','model')]
+ check(oa.control.k=='choice' and oa.control.options[2].value=='alpha-1' and #oa.control.options==2,'install A keeps its own catalog')
+ check(ob.control.k=='choice' and ob.control.options[2].value=='beta-2' and #ob.control.options==2,'install B has a different catalog')
+ -- the listing takes launch's own route: SUDO (not the literal sudo launch reads) is a different program, so no listing
+ local upper=clone(wrap);upper.id='listupper';upper.account_label='U';upper.command='/opt/bin/SUDO'
+ -- relative executables resolve from the record's launch folder, for the current account and across accounts
+ local rel=clone(saved_record('listgrok'));rel.id='listrel';rel.account_label='R';rel.command='bin/grok';rel.cwd='/project'
+ local relx=clone(rel);relx.id='listrelx';relx.account_label='RX';relx.user='otheracct'
+ local nocwd=clone(rel);nocwd.id='listnocwd';nocwd.account_label='NC';nocwd.cwd='project'
+ local more4=clone(snapshot().records);for _,item in ipairs({upper,rel,relx,nocwd}) do table.insert(more4,item) end
+ check(A.edit(state.binding,snapshot().config_revision,'replace-records',{records=more4}),'seed SUDO and relative-path records');refresh()
+ rows=rows_of('agents')
+ check(rows['model-list-listupper']==nil,'/opt/bin/SUDO offers no listing (launch does not treat it as sudo)')
+ check(rows['model-list-listnocwd']==nil,'a relative launch folder offers no listing')
+ local ran_options
+ fake.process.run=function(argv,options,callback) ran=argv;ran_options=options;callback({status=0,timed_out=false,stdout=grok_out,stderr=''}) end
+ definition.event(state,{ev='action',act='model-list:listrel@'..state.snapshot.config_revision},cx)
+ check(ran[1]=='bin/grok' and ran[2]=='models' and ran_options.cwd=='/project','relative executable lists from the record folder: '..table.concat(ran,' ')..' cwd='..tostring(ran_options.cwd))
+ definition.event(state,{ev='action',act='model-list:listrelx@'..state.snapshot.config_revision},cx)
+ local wrapped=table.concat(ran,' ')
+ check(ran[1]=='sudo' and wrapped:find('otheracct',1,true)~=nil and wrapped:find("cd -- '/project'",1,true)~=nil and wrapped:find("'bin/grok'",1,true)~=nil and ran_options.cwd==nil,'cross-account relative executable lists inside the record folder, not /: '..wrapped)
+ rows=rows_of('agents')
+ check(rows[rid('listrel','model')].control.k=='choice','current-account relative record shows its catalog')
+ -- a login sudo cannot be listed
+ local login=clone(wrap);login.id='listlogin';login.account_label='L';login.arguments={'-n','-i','-u','workeracct','--','grok'}
+ local more3=clone(snapshot().records);table.insert(more3,login)
+ check(A.edit(state.binding,snapshot().config_revision,'replace-records',{records=more3}),'seed sudo -i record');refresh()
+ check(rows_of('agents')['model-list-listlogin']==nil,'a sudo -i login record offers no listing')
+ fake.process.run=function()error('Editor attempted a real subprocess') end
+ check(A.edit(state.binding,snapshot().config_revision,'replace-records',{records=prior}),'listing fixtures removed');refresh();state.page='spawn'
+end
 -- Every agent row carries Tern's own provider icon cell: the right name per provider, a fallback for an unknown one.
 do
  local Icons=load('provider_icons')
@@ -574,6 +762,15 @@ definition.event(state,{ev='change',item='managed-existing',value=''},cx)
 local managedRows=rows_of('managed')
 check(managedRows['managed-begin']==nil and managedRows['managed-attest']==nil and managedRows['managed-cli-attest']==nil,'cold setup cannot attest readiness or manufacture setup completion')
 check(managedRows['managed:root']==nil and managedRows['managed:user']~=nil and managedRows['managed:id']==nil,'normal managed setup exposes existing POSIX account selection without transport-path or stable-ID internals')
+do -- model and effort on the managed setup form
+ check(managedRows['managed:model']~=nil and managedRows['managed:effort']~=nil and managedRows['managed:effort'].control.k=='choice','setup form offers model and effort for a CLI that has both flags (omp)')
+ local before=state.managed_draft.model
+ definition.event(state,{ev='change',item='managed:model',value='anthropic/claude-sonnet-5-5'},cx)
+ definition.event(state,{ev='change',item='managed:effort',value='medium'},cx)
+ check(state.managed_draft.model=='anthropic/claude-sonnet-5-5' and state.managed_draft.effort=='medium','typed model and chosen effort land on the setup draft')
+ definition.event(state,{ev='change',item='managed:model',value=before or ''},cx)
+ definition.event(state,{ev='change',item='managed:effort',value=''},cx)
+end
 do
  local baseline=clone(saved);local request=assert(state.managed_native_request)
  state.managed_draft_touched=nil
