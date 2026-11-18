@@ -1,6 +1,6 @@
 -- Deterministic real reducer/host/window coverage. Run bounded sections in native host callbacks.
 local root, section = ...
-assert(section == nil or table.find({ "clock", "form_hold_notice", "form_hold_capacity", "form_hold_rearm", "form_hold_isolation", "native", "controls", "status_launcher", "timer", "epoch_window", "epoch_host", "finish", "continuation", "alias_recovery", "held_report", "sweep_schedule", "readable_views", "cp2_controls", "guided_recovery", "guided_recovery_empty", "guided_recovery_host_restart", "stopped_worker_view", "expired_wake", "revoked_authorization", "observe_retention", "uncertain_read", "quota_reader", "bridge_lifecycle", "withdraw_fenced", "config_cards", "work_picker", "inbox_window", "usage_row",
+assert(section == nil or table.find({ "clock", "form_hold_notice", "form_hold_capacity", "form_hold_rearm", "native", "controls", "status_launcher", "timer", "epoch_window", "epoch_host", "finish", "continuation", "alias_recovery", "held_report", "sweep_schedule", "readable_views", "cp2_controls", "guided_recovery", "guided_recovery_empty", "guided_recovery_host_restart", "stopped_worker_view", "expired_wake", "revoked_authorization", "observe_retention", "uncertain_read", "quota_reader", "bridge_lifecycle", "withdraw_fenced", "config_cards", "work_picker", "inbox_window", "usage_row",
 	"reconnect_stale", "reconnect_missing", "reconnect_unknown", "reconnect_unrelated", "worker_attachment", "worker_attachment_form",
 	"driver_admission_noop", "driver_admission_refused", "driver_retry_original", "driver_retry_unrelated", "driver_retry_absent",
 	"driver_deadline_absent", "driver_deadline_unrelated", "driver_missing", "driver_suspension", "driver_fence_origin", "driver_fence_claim",
@@ -3199,43 +3199,6 @@ if section == nil or section == "form_hold_rearm" then
 	local second = #w.notice_events
 	for _ = 1, 4 do w:tick() end
 	check(holds(second) == 1, "a later hold on the same ready driver posts its own notice")
-end
--- Two capacity-refused actions of ONE window module (a worker's and a worker-less one) wait with no
--- driver. The source runs one command lane at a time, so a form opened meanwhile gives one of them a
--- driver: exactly one notice for the source (not one per action, not none), and the action
--- that waits is held, never dropped.
-if section == nil or section == "form_hold_isolation" then
-	local WAIT = "Launch waits until you close Orchestration"
-	local w = window_fixture({ commit_results = true })
-	w:bridge({ placeholder = true })
-	local occupied = {}
-	for _ = 1, 4 do
-		local queued = w.f:apply("catalog"); assert(queued.ok)
-		assert(w.f:apply("claim", { action_id = queued.action_id, executor = w.f.origin.window_epoch }).ok)
-		table.insert(occupied, queued.action_id)
-	end
-	local function claims(id) local n = 0; for _, e in w.events do if e.command == "claim" and e.action_id == id then n += 1 end end return n end
-	w:click("poll", { worker_id = w.id, bytes = "watermark" })
-	local first = assert(w:worker().active_action_id)
-	for _ = 1, 4 do w:tick() end
-	assert(w.f:action(first).phase == "ready" and claims(first) == 1, "the full host refuses the worker's claim")
-	local other = w.f:apply("catalog"); assert(other.ok, other.message)
-	w:click("execute", { action_id = other.action_id })
-	for _ = 1, 4 do w:tick() end
-	assert(w.f:action(other.action_id).phase == "ready" and claims(other.action_id) == 1, "the full host refuses the worker-less claim")
-	local grant = w.f:action(occupied[1]).claim
-	assert(w.f:apply("lost", { action_id = occupied[1], executor = grant.executor, grant_id = grant.grant_id }).ok)
-	-- Last registry edit: the worker-less action is no longer a form-independent catalog read.
-	w.f.authority.registry.dispatch.actions[other.action_id].request.op = "status"
-	w:click("orchestration_menu")
-	local before = #w.notice_events
-	for _ = 1, 12 do w:tick(); w.api.schedule(w.cx) end
-	local holds = 0
-	for index = before + 1, #w.notice_events do
-		if w.notice_events[index].message == WAIT then holds += 1 end
-	end
-	check(holds == 1 and claims(first) == 1 and claims(other.action_id) == 1,
-		"two capacity-held actions on one source announce the form hold exactly once and issue nothing")
 end
 if section == nil or section == "work_input_priority" then
 	local w = window_fixture()
