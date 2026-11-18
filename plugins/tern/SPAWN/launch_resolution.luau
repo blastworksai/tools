@@ -76,7 +76,7 @@ end
 Resolution.PWD = "\0spawn-pwd"
 local LOGIN_SCRIPT = [==[eval "$(printf "${1}")"]==]
 -- ${1} is the pane folder as \ooo escapes; the sentinel x keeps printf's command substitution from eating a trailing newline.
-local LOGIN_SCRIPT_PWD = [==[d=$(printf "${1}x"); cd -- "${d%x}" || exit 1; eval "$(printf "${2}")"]==]
+local LOGIN_SCRIPT_PWD = [==[d=$(printf "${1}x"); [ "${d}" != x ] || exit 1; cd -- "${d%x}" || exit 1; eval "$(printf "${2}")"]==]
 local function octal(text: string): string
 	return (string.gsub(text, "[\\$%%\n]", function(char) return string.format("\\%03o", string.byte(char)) end))
 end

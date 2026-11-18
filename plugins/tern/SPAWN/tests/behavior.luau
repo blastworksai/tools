@@ -157,7 +157,7 @@ check(config.parse_arguments(table.concat(many, " ")) == nil, "argument count re
 local executor, native = load("host_executor"), load("native_cli")
 local ordinary_render = record("render", { command = "'/opt/My Tools/custom-cli'", arguments = copy(argv), prompt = "not an implicit ordinary-terminal message" })
 local render_before = copy(ordinary_render)
-local PWD_EXPANSION_TEXT = [==["$(printf %s "$PWD" | od -An -v -to1 | tr -d '\n' | sed 's/ /\\/g')"]==]
+local PWD_EXPANSION_TEXT = [==["$(printf %s "$PWD" | od -An -v -to1 | tr -s ' \n' '\n\n' | sed '/^$/d;s/^/\\/' | tr -d '\n')"]==]
 local rendered = assert(executor.render(ordinary_render, "/bin/bash", "linux"))
 -- POSIX lines carry one provider command-name word; the rest is the exact argv.
 local function argv_of(line, provider)
@@ -178,7 +178,7 @@ same(ordinary_render, render_before, "host rendering does not mutate the approve
 -- escapes every byte except letters, digits, `_`, `-` and `$` (and leaves `$` live), so the approved program and
 -- arguments travel as ONE word of octal-encoded shell text that a constant /bin/sh script decodes and evals.
 local LOGIN_SCRIPT = [==[eval "$(printf "${1}")"]==]
-local LOGIN_SCRIPT_PWD = [==[d=$(printf "${1}x"); cd -- "${d%x}" || exit 1; eval "$(printf "${2}")"]==]
+local LOGIN_SCRIPT_PWD = [==[d=$(printf "${1}x"); [ "${d}" != x ] || exit 1; cd -- "${d%x}" || exit 1; eval "$(printf "${2}")"]==]
 -- The pane's folder is octal-encoded by the typing shell itself, before sudo sees it.
 local PWD_EXPANSION = PWD_EXPANSION_TEXT
 local function sq(word) return "'" .. word:gsub("'", "'\\''") .. "'" end
@@ -232,7 +232,7 @@ end
 do
 	local simple = record("simple", { command = "claude", user = "seat", arguments = { "--flag" } })
 	same(argv_of(assert(executor.render(simple, "/bin/bash", "linux")), "custom"),
-		{ "sudo", "-i", "-u", "seat", "--", "/bin/sh", "-c", 'd=$(printf "${1}x"); cd -- "${d%x}" || exit 1; eval "$(printf "${2}")"', "spawn-login", "@PWD@", "exec 'claude' '--flag'" },
+		{ "sudo", "-i", "-u", "seat", "--", "/bin/sh", "-c", 'd=$(printf "${1}x"); [ "${d}" != x ] || exit 1; cd -- "${d%x}" || exit 1; eval "$(printf "${2}")"', "spawn-login", "@PWD@", "exec 'claude' '--flag'" },
 		"a cross-account launch is `sudo -i -u <user> -- /bin/sh -c <script> spawn-login <encoded pane folder> <text>`, with no -H and no forced PATH")
 	local line = assert(executor.render(simple, "/bin/bash", "linux"))
 	check(line:find(" " .. PWD_EXPANSION .. " ", 1, true) ~= nil, "the folder word is the typing shell's own octal encoding of $PWD, computed before sudo sees it")
