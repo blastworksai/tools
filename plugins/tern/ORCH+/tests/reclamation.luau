@@ -253,12 +253,12 @@ if section == nil or section == "host_forget" then
 	-- Window-side progress reaches the actual host view as a closed set of stages and bounded rows.
 	local card = { { kind = "uncertain", agent = "claude-a", host = "7" }, { kind = "unobservable", agent = "omp-b", host = "9" } }
 	local roster = { { agent = "claude-a", host = "7" }, { agent = "worker-c", host = "7" } }
-	f:host_event(42, "forget-state", { stage = "blocked", blockers = card, participants = roster, omitted = 3, pending = false })
-	check(f.views[42].forget ~= nil and f.views[42].forget.stage == "blocked" and #f.views[42].forget.blockers == 2 and #f.views[42].forget.participants == 2 and f.views[42].forget.omitted == 3,
+	f:host_event(42, "forget-state", { stage = "blocked", blockers = card, participants = roster, omitted = 3, blockers_omitted = 4, pending = false })
+	check(f.views[42].forget ~= nil and f.views[42].forget.stage == "blocked" and f.views[42].forget.blockers_omitted == 4 and #f.views[42].forget.blockers == 2 and #f.views[42].forget.participants == 2 and f.views[42].forget.omitted == 3,
 		"the host keeps the blocker rows, the participants and the exact omitted count of the preview")
 	f:host_event(42, "forget-state", { stage = "blocked", blockers = { { kind = "pane", agent = "x", host = "7", pane = "55" }, card[1] }, participants = roster, omitted = 0 })
 	check(#f.views[42].forget.blockers == 1, "an obsolete pane blocker kind is dropped")
-	f:host_event(42, "forget-state", { stage = "blocked", blockers = card, participants = roster, omitted = 3, pending = false })
+	f:host_event(42, "forget-state", { stage = "blocked", blockers = card, participants = roster, omitted = 3, blockers_omitted = 4, pending = false })
 	f:host_event(42, "forget-state", { stage = "exploit", blockers = card })
 	check(f.views[42].forget.stage == "blocked", "an unknown stage is ignored")
 	local function texts(tree, out)
@@ -270,10 +270,11 @@ if section == nil or section == "host_forget" then
 	end
 	local shown = table.concat(texts(f:render(42).main), "\n")
 	for _, expected in { "Cannot forget yet. Review the blockers below.", "claude-a · execution outcome is uncertain on 7", "omp-b · cannot be checked on 9",
-		"Agents whose execution is not checked:", "worker-c · 7", "3 additional participants whose execution is not checked.",
+		"Agents whose execution is not checked:", "worker-c · 7", "3 additional participants whose execution is not checked.", "4 additional blockers.",
 		"Agents still running may continue their assignments and use any approvals already received; Forget neither stops them nor revokes that authority." } do
 		check(shown:find(expected, 1, true) ~= nil, "the blocker card shows: " .. expected)
 	end
+	check(shown:find("4 additional blockers.", 1, true) < shown:find("Agents whose execution is not checked:", 1, true), "the omitted-blockers count follows the blocker rows")
 	local participants_at, residual_at = shown:find("Agents whose execution is not checked:", 1, true), shown:find("Agents still running may continue", 1, true)
 	check(participants_at ~= nil and residual_at ~= nil and residual_at > participants_at, "the residual notice follows the participants")
 	check(shown:find("Close these panes", 1, true) == nil and shown:find("Do not close", 1, true) == nil and shown:find("using Tern", 1, true) == nil, "no row asks the owner to close a pane")
@@ -380,7 +381,16 @@ if section == nil or section == "host_forget_relay" then
 	end
 	roundtrip("discard_capability")
 	roundtrip("discard_preview", { challenge = "forget-0000000000000000" })
-	roundtrip("discard_session", { challenge = "forget-0000000000000000", dispatch_revision = 4, spawn_boot = "boot-1" })
+	-- A discard is forwarded only when these exact bytes are the request this authority persisted for the session.
+	local discard_extra = { challenge = "forget-0000000000000000", dispatch_revision = 4, spawn_boot = "boot-1" }
+	local unpersisted = request("discard_session", discard_extra)
+	event("discard_session", runtime.json.encode(unpersisted), "spawn-fixture-boot")
+	check(#peer.receive(4) == 0, "a discard whose bytes the authority did not persist is never forwarded")
+	local persisted_bytes = runtime.json.encode(request("discard_session", discard_extra))
+	local begun = f.authority:apply(f:state_event("begin_forget", { attempt_id = "relay-attempt", request_bytes = persisted_bytes, preview = { spawn_boot = "boot-1", dispatch_revision = 4 },
+		control_origin = { kind = "closing", binding = clone(f.origin), controller_pane = "42", close_id = "relay-attempt" } }))
+	assert(begun.ok, runtime.json.encode(begun))
+	roundtrip("discard_session", discard_extra)
 	local forged = request("discard_capability", nil, { alias_nonce = "someone-else" })
 	event("discard_capability", runtime.json.encode(forged), "spawn-fixture-boot")
 	check(#peer.receive(4) == 0, "a request whose owner is not the lane's bound source is never forwarded")
@@ -398,7 +408,7 @@ if section == nil or section == "forget_window" then
 		setfenv(chunk, setmetatable({ require = function(path) return load_module((path:gsub("^%./", ""))) end }, { __index = environment }))
 		modules[name] = chunk(); return modules[name]
 	end
-	local function scenario(absent, same_identity, probe)
+	local function scenario(absent, same_identity, probe, blocked)
 		local old = { owner_id = "owner", owner_generation = 1, host_pane_id = "42", alias_nonce = "alias", window_key = "", window_epoch = "epoch-old", native_session_id = "3", window_host_id = "7", logical_session_id = "s1" }
 		local now = clone(old); now.window_epoch = "epoch-new"
 		if not same_identity then now.alias_nonce = "someone-else" end
@@ -426,6 +436,7 @@ if section == nil or section == "forget_window" then
 				local body = { schema = 1, op = r.op, work = "spawn-work-v1", request_id = r.request_id, attempt_id = r.attempt_id, spawn_namespace = r.spawn_namespace, authority_namespace = r.authority_namespace,
 					logical_session_id = r.logical_session_id, admission_seq = r.admission_seq, spawn_boot = "boot-1" }
 				if r.op == "discard_capability" then body.status, body.payload = "capable", { challenge = "forget-0000000000000000", work = "spawn-work-v1", absent = if absent then true else nil }
+				elseif blocked then body.status, body.payload = "blocked", { dispatch_revision = 4, participants = tern.json.array(), omitted = 0, blockers = tern.json.array({ { kind = "uncertain", agent = "claude-a", host = "7" } }), blockers_omitted = 2 }
 				else body.status, body.payload = "clean", { dispatch_revision = 4, inventory = { requests = 0, workers = 0, generations = 0 }, participants = tern.json.array(if probe then { { agent = "claude-a", host = "7" }, { agent = "worker-c", host = "7" } } else nil), omitted = if probe then 2 else 0 } end
 				local encoded, why = codec.encode_forget_response(body); assert(encoded, runtime.json.encode(why) .. runtime.json.encode(body)); last_response = encoded
 			end,
@@ -454,6 +465,9 @@ if section == nil or section == "forget_window" then
 	check(probe.placeholder:sub(-#load_module("forget_text").RESIDUAL) == load_module("forget_text").RESIDUAL and load_module("forget_text").RESIDUAL == "Agents still running may continue their assignments and use any approvals already received; Forget neither stops them nor revokes that authority.",
 		"the residual notice is appended verbatim at the end of the confirmation")
 	check(#probe_calls == 1 and probe_calls[1].kind == "begin_forget", "confirming a ready preview begins the forget")
+	local blocked_probe = {}
+	local _, _, blocked_calls = scenario(false, true, blocked_probe, true)
+	check(blocked_probe.placeholder == nil and #blocked_calls == 0, "a blocked preview with omitted blockers is never ready: no confirmation, no begin")
 	local started3, _, calls3 = scenario(false, false)
 	check(not started3 and #calls3 == 0, "a different owner identity is refused: only the exact retained identity recovers")
 end

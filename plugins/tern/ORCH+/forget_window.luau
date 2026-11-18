@@ -144,7 +144,7 @@ function M.new(api: any): any
 					if body.status == "refused" or body.spawn_boot ~= job.spawn_boot then fail(cx, job, refusal_message(body)); return pending ~= nil end
 					if body.status == "blocked" then
 						job.phase = "blocked"
-						state(cx, source, { stage = "blocked", blockers = body.payload.blockers, participants = body.payload.participants, omitted = body.payload.omitted, pending = pending ~= nil })
+						state(cx, source, { stage = "blocked", blockers = body.payload.blockers, participants = body.payload.participants, omitted = body.payload.omitted, blockers_omitted = body.payload.blockers_omitted, pending = pending ~= nil })
 					else
 						job.preview = body.payload
 						present_confirm(cx, job, data, origin)

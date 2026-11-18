@@ -34,6 +34,10 @@ function M.confirm(name: any, participants: any?, omitted: any?): string
 	table.insert(lines, M.RESIDUAL)
 	return table.concat(lines, "\n")
 end
+-- Proposed verbatim for the owner's approval: "{count} additional blockers."
+function M.additional_blockers(count: any): string
+	return string.format("%d additional blockers.", if type(count) == "number" then count else 0)
+end
 function M.additional(count: any): string
 	return string.format("%d additional participants whose execution is not checked.", if type(count) == "number" then count else 0)
 end

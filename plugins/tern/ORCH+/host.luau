@@ -1570,7 +1570,18 @@ function relay.spawn_event(view: any, input: any)
 			if input.act == "discard_session" and (next(relay.unresolved) ~= nil or view.spawn_relay.held or lane.metadata.held) then
 				relay.failure(view, "relay_held", lane.metadata); return
 			end
-			local sent = relay.send(view, lane, "spawn", "spawn.request", input.relay_endpoint .. ":" .. input.lane_id .. ":" .. input.act .. ":" .. input.peer_boot, input.act, input.bytes, nil)
+			local proof = ""
+			if input.act == "discard_session" then
+				-- The host, not the window, proves the exact bytes are the request this authority persisted for the session.
+				local persisted = authority.registry and view.orch_session_id and authority.registry.sessions[view.orch_session_id]
+				persisted = persisted and persisted.close and persisted.close.forget
+				if not persisted or persisted.request_bytes ~= input.bytes then
+					view.relay_notice = "Forgetting was not forwarded: its request is not the one this orchestration persisted."
+					return
+				end
+				proof = ":" .. codec.sha256(input.bytes)
+			end
+			local sent = relay.send(view, lane, "spawn", "spawn.request", input.relay_endpoint .. ":" .. input.lane_id .. ":" .. input.act .. ":" .. input.peer_boot .. proof, input.act, input.bytes, nil)
 			return
 		else request = codec.decode_dispatch_request(input.bytes) end
 		if not request or (not RELAY_CALLBACKS[input.act] and not migration and request.op ~= input.act) then return end
@@ -2183,7 +2194,8 @@ local function handle(view: any, ev: any, cx: any)
 			rows(input.participants, participants)
 		end
 		local omitted = if type(input.omitted) == "number" and input.omitted >= 0 and input.omitted % 1 == 0 then input.omitted else 0
-		view.forget = if input.stage == "idle" then nil else { stage = input.stage, blockers = blockers, participants = participants, omitted = omitted, pending = input.pending == true }
+		local blockers_omitted = if input.stage == "blocked" and type(input.blockers_omitted) == "number" and input.blockers_omitted >= 0 and input.blockers_omitted % 1 == 0 then input.blockers_omitted else 0
+		view.forget = if input.stage == "idle" then nil else { stage = input.stage, blockers = blockers, participants = participants, omitted = omitted, blockers_omitted = blockers_omitted, pending = input.pending == true }
 		render_all()
 		return
 	end

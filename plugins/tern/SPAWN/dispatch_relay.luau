@@ -37,10 +37,11 @@ local function source_valid(s,endpoint,lane)
 end
 local function binding_parts(value)
  if type(value)~='string' then return nil end
- local endpoint,lane,act,boot=value:match('^([^:]+):([^:]+):([^:]+):([^:]+)$')
+ local endpoint,lane,act,boot,proof=value:match('^([^:]+):([^:]+):([^:]+):([^:]+):([^:]+)$')
+ if not endpoint then endpoint,lane,act,boot=value:match('^([^:]+):([^:]+):([^:]+):([^:]+)$') end
  if not endpoint then endpoint,lane,act=value:match('^([^:]+):([^:]+):([^:]+)$') end
- if not token(endpoint,24) or not token(lane,24) or not token(act,32) or (boot~=nil and not token(boot,64)) then return nil end
- return endpoint,lane,act,boot
+ if not token(endpoint,24) or not token(lane,24) or not token(act,32) or (boot~=nil and not token(boot,64)) or (proof~=nil and not token(proof,64)) then return nil end
+ return endpoint,lane,act,boot,proof
 end
 -- Session-wide observation progress is not this execution's identity. Every
 -- other field (including nonce, claims and source proof) remains exact; the
@@ -324,7 +325,7 @@ local function migration_result(lane,pending,value,problem,disposition,code)
   end
   return true
  end
- local function handle(lane,act,bytes,message)
+ local function handle(lane,act,bytes,message,persisted_proof)
   local source=lane.source
   if not native_source(source) then return false,'source_unavailable' end
   local bridge=tonumber(source.host_pane_id)
@@ -335,6 +336,8 @@ local function migration_result(lane,pending,value,problem,disposition,code)
    local request=Codec.decode_forget_request(bytes)
    local o=source.origin
    if not request or request.op~=act then return false,'invalid_action' end
+   -- A discard deletes state: the live ORCH+ host must prove these exact bytes are the request it persisted for the session.
+   if act=='discard_session' and persisted_proof~=Codec.sha256(bytes) then return false,'forget_unpersisted' end
    for _,name in ipairs({'owner_id','owner_generation','host_pane_id','alias_nonce','window_key','native_session_id','window_host_id'}) do
     if request.owner[name]~=o[name] then return false,'origin_changed' end
    end
@@ -516,7 +519,7 @@ local function migration_result(lane,pending,value,problem,disposition,code)
   end
  end
  local function receive(message)
-  local ep,id,act,target_boot=binding_parts(message.binding)
+  local ep,id,act,target_boot,persisted_proof=binding_parts(message.binding)
   local key=if ep then ep..':'..id else 'spawn-host'
   local message_key=message.incarnation..':'..message.id
   local prior=self.processed[message_key]
@@ -590,7 +593,7 @@ local function migration_result(lane,pending,value,problem,disposition,code)
    local record={key=key,release_lane=lane,settlement=true,outgoing=source_bytes(lane)}
    remember(record)
   else
-   local called,ok,code=pcall(handle,lane,act,message.body,message)
+   local called,ok,code=pcall(handle,lane,act,message.body,message,persisted_proof)
    if not called or code=='storage_error' then
     -- The authority retains its uncertain effect. Settle delivery with an
     -- explicit durable held advisory, never replay this callback to learn more.

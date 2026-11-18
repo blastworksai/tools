@@ -394,6 +394,12 @@ function M.forget_inventory(root,logical,ctx)
   local key=agent..'|'..host
   if not pseen[key] then pseen[key]=true;participants[#participants+1]={agent=agent,host=host} end
  end
+ local journaled={}
+ local function reserve(observer,record,attempt)
+  if type(observer)~='string' or journaled[observer] then return end
+  journaled[observer]=true
+  journal[#journal+1]={observer_id=observer,record_id=record,attempt_id=attempt}
+ end
  local function host_of(origin) return tostring(origin and origin.window_host_id or ctx.host or '') end
  for _,e in pairs(root.requests) do
   local r=e.request
@@ -402,13 +408,14 @@ function M.forget_inventory(root,logical,ctx)
    local host=host_of(r.origin_binding);local agent=r.record_id or ''
    if agent~='' then participate(agent,host) end
    local status=e.body and e.body.status
+   -- A mailbox operation id stays on a successfully settled request; only a still-pending one is open work.
    -- A claim record outlives its settlement (a settled launch keeps it), so only the outcome status says the work is still open.
-   local open_effect=status=='claimed' or status=='launching' or status=='uncertain' or e.operation~=nil or e.attempt_pending
+   local open_effect=status=='claimed' or status=='launching' or status=='uncertain' or status=='pending' and e.operation~=nil or e.attempt_pending
     or e.stop_request_id~=nil and e.retirement_result==nil and status~='stopped' and status~='retired' and status~='rejected'
     or e.authorization~=nil and e.authorization.phase=='consumed' and (status==nil or status=='resolved' or status=='pending' or status=='awaiting_window')
    local wake=e.wake and (e.wake.phase=='claimed' or e.wake.phase=='launching' or e.wake.phase=='uncertain')
    if open_effect or wake then block(agent,host,'uncertain') end
-   if type(e.observer_id)=='string' then journal[#journal+1]={observer_id=e.observer_id,record_id=r.record_id,attempt_id=e.attempt_id} end
+   reserve(e.observer_id,r.record_id,e.attempt_id)
    -- Reservations are ordered by observer for a deterministic journal.
   end
  end
@@ -417,6 +424,8 @@ function M.forget_inventory(root,logical,ctx)
    counts.workers+=1
    local host=host_of(w.origin_binding);local agent=w.record_id or ''
    if agent~='' then participate(agent,host) end
+   -- Acknowledgement moves a launch into a worker, which keeps its reservation identity.
+   reserve(w.observer_id,w.record_id,w.attempt_id)
    if w.phase=='claimed' or w.phase=='launching' or w.phase=='uncertain' then block(agent,host,'uncertain') end
    for _,p in pairs(w.wakes or {}) do
     local phase=p.wake and p.wake.phase

@@ -9,6 +9,7 @@ local State=require('./dispatch_state')
 local MailboxAdapter=require('./mailbox_adapter')
 local Native=require('./native_cli')
 local TerminalIdentity=require('./terminal_identity')
+local Children=require('./children')
 local Config=require('./config')
 local terminal_starts,terminal_checks={},{}
 local valid=State.validate_registry
@@ -215,7 +216,10 @@ local function capture_terminal(logical,id)
  local root=load();local target=root and State.worker(root,logical,id)
  if not target or target.body.status~='accepted' or target.stop_request_id or target.terminal_process then return end
  start.busy=true
+ -- Forget evidence: the capture helper is an outstanding child until its own completion (durable, written before it starts).
+ local child=Children.begin('session:'..logical,'terminal')
  TerminalIdentity.capture(start.route,start.session,start.expected,function(proof)
+  Children.finish(child)
   start.busy=false
   if not proof or not TerminalIdentity.valid(proof) or terminal_starts[k]~=start or start.ambiguous then return end
   local fresh=load();local current=fresh and State.worker(fresh,logical,id)
@@ -240,7 +244,9 @@ local function terminal_reconnect(root,r)
  for id,value in pairs(terminal_checks) do if value.complete and tern.now()-value.at>5000 then terminal_checks[id]=nil else count+=1 end end
  if count>=64 then return false,'Terminal process observations are busy; retain the original request and retry observation later' end
  observed={identity=identity,complete=false};terminal_checks[k]=observed
+ local child=Children.begin('session:'..r.logical_session_id,'terminal')
  TerminalIdentity.verify(target.terminal_process,function(passed,problem)
+  Children.finish(child)
   if terminal_checks[k]~=observed then return end
   if problem then
    problem=tostring(problem):gsub("%z",""):sub(1,512)
@@ -987,7 +993,7 @@ function M.request(r,binding,session,changed,authorization_nonce,authorized_snap
  if not available then return P.reject(r,'target_unavailable',preparation_error) end
  local root,why=load();if not root then return P.reject(r,'storage_error',why) end
  if r.op=='owner_status' then return State.observation(root,r) end
- if r.op~='status' and r.op~='catalog' and r.op~='mailbox_inventory' and fenced(root,r.logical_session_id) then return P.reject(r,'target_unavailable',FENCED_MESSAGE) end
+ if r.op~='status' and r.op~='catalog' and fenced(root,r.logical_session_id) then return P.reject(r,'target_unavailable',FENCED_MESSAGE) end
  local admitted,owner_error=owner(root,r,binding,session,r.op~='catalog' and r.op~='status' and r.op~='mailbox_inventory' and r.op~='mailbox_allocation')
  if not admitted then return if owner_error=='already_consumed' then P.body(r,'already_consumed',nil,nil,'already_consumed') else P.reject(r,owner_error,'Current admitted authority and binding required') end
  local snapshot,snapshot_error=authorized_snapshot,nil
@@ -1323,9 +1329,9 @@ local function forget_inventory(root,r,binding)
  return State.forget_inventory(root,logical,{
   host=r.owner.window_host_id,
   children=function()
-   local handles={}
-   for handle,g in pairs(root.mailboxes.generations) do if g.binding and g.binding.logical_session_id==logical then handles[handle]=true end end
-   return MailboxAdapter.forget_children(handles)
+   local scopes={['session:'..logical]=true}
+   for handle,g in pairs(root.mailboxes.generations) do if g.binding and g.binding.logical_session_id==logical then scopes[handle]=true end end
+   return MailboxAdapter.forget_children(scopes)
   end,
   conflicts=function(journal)
    local count,problem=Authority.forget_reservation_conflicts(binding,journal)
@@ -1337,6 +1343,19 @@ local function forget_rows(list)
  local rows=tern.json.array()
  for index=1,math.min(#list,FORGET_ROWS) do table.insert(rows,list[index]) end
  return rows,#list-#rows
+end
+-- The ENCODED preview must fit the 8192-byte frame whatever the agent and host names are: rows are dropped (participants first,
+-- then blockers, always keeping one) and counted exactly, so overflow can never become a transport failure.
+function M.forget_fit(body,payload)
+ while true do
+  local bytes=Codec.encode_forget_response(body)
+  if bytes then return body end
+  if #payload.participants>0 then
+   table.remove(payload.participants);payload.omitted+=1
+  elseif payload.blockers and #payload.blockers>1 then
+   table.remove(payload.blockers);payload.blockers_omitted+=1
+  else return forget_refuse(body.op and {op=body.op,request_id=body.request_id,attempt_id=body.attempt_id,spawn_namespace=body.spawn_namespace,authority_namespace=body.authority_namespace,logical_session_id=body.logical_session_id,admission_seq=body.admission_seq},'busy','The preview cannot fit its frame') end
+ end
 end
 function M.forget(r,binding,session)
  if hold then return forget_refuse(r,'busy',hold) end
@@ -1374,15 +1393,22 @@ function M.forget(r,binding,session)
   if r.op=='discard_session' then return forget_body(r,'closed',{admission_cursor=root.admission_cursor}) end
   return forget_refuse(r,'not_found','The orchestration is already gone')
  end
+ -- Queued (not yet started) read-only inventory work belongs to this session's token: cancel it before the final check, so no timer
+ -- can start a helper on a retained target after the graph is gone. In-flight helpers are counted by the child accounting.
+ if r.op=='discard_session' then inventories[r.logical_session_id]=nil end
  local inventory=forget_inventory(root,r,binding)
  if r.op=='discard_preview' then
   local participants,omitted=forget_rows(inventory.participants)
   if #inventory.blockers>0 then
    local blockers,blockers_omitted=forget_rows(inventory.blockers)
-   return forget_body(r,'blocked',{dispatch_revision=inventory.dispatch_revision,participants=participants,omitted=omitted,blockers=blockers,blockers_omitted=blockers_omitted})
+   local payload={dispatch_revision=inventory.dispatch_revision,participants=participants,omitted=omitted,blockers=blockers,blockers_omitted=blockers_omitted}
+   return M.forget_fit(forget_body(r,'blocked',payload),payload)
   end
+  local payload={dispatch_revision=inventory.dispatch_revision,inventory=inventory.inventory,participants=participants,omitted=omitted}
+  local body=M.forget_fit(forget_body(r,'clean',payload),payload)
+  -- A preview that had to drop rows is still a complete, ready answer only because the dropped rows are informational and counted.
   current.ready_revision=inventory.dispatch_revision
-  return forget_body(r,'clean',{dispatch_revision=inventory.dispatch_revision,inventory=inventory.inventory,participants=participants,omitted=omitted})
+  return body
  end
  -- discard_session. Unfenced: the checked boot and revision must still hold. Once fenced, the fence is the commitment and only the
  -- owner's fresh challenge is required, so an interrupted forget always resumes.

@@ -240,7 +240,7 @@ do
  check(blocked_by(function(r) r.requests['session/launch'].body.status='claimed' end),'a claimed launch blocks')
  check(blocked_by(function(r) r.requests['session/launch'].body.status='uncertain' end),'an uncertain outcome blocks')
  check(blocked_by(function(r) r.requests['session/launch'].attempt_pending=true end),'a pending reservation write blocks')
- check(blocked_by(function(r) r.requests['session/launch'].operation='op-1' end),'a pending mailbox operation blocks')
+ check(blocked_by(function(r) r.requests['session/launch'].operation='op-1';r.requests['session/launch'].body.status='pending' end),'a pending mailbox operation blocks')
  check(blocked_by(function(r) r.requests['session/launch'].authorization={phase='consumed'};r.requests['session/launch'].body.status='resolved' end),'a consumed authorization without a settled result blocks')
  check(blocked_by(function(r) r.requests['session/launch'].stop_request_id='stop';r.requests['session/launch'].body.status='pending' end),'an unfinished stop blocks')
  check(blocked_by(function(r) r.requests['session/launch'].wake={phase='launching'} end),'a launching wake blocks')
@@ -253,6 +253,15 @@ do
  settled.requests['session/launch'].authorization={phase='consumed'};settled.requests['session/launch'].claim={executor_id='x'};settled.requests['session/launch'].body.status='accepted'
  settled.mailboxes.generations.mine.writes={k={status='settled'}};settled.mailboxes.generations.mine.status='retired'
  check(#State.forget_inventory(settled,'session',{host='7'}).blockers==0,'a settled launch (its claim and consumed grant retained), a settled write and a retired generation do not block')
+ local op_done=build();op_done.requests['session/launch'].operation='op-1';op_done.requests['session/launch'].body.status='published'
+ check(#State.forget_inventory(op_done,'session',{host='7'}).blockers==0,'a successfully settled mailbox operation keeps its id and does not block')
+ local acknowledged=build()
+ acknowledged.requests['session/launch']=nil
+ acknowledged.workers['session/w'].observer_id='managed-aaa';acknowledged.workers['session/w'].attempt_id='attempt-1'
+ local ack=State.forget_inventory(acknowledged,'session',{host='7'})
+ check(#ack.journal==1 and ack.journal[1].observer_id=='managed-aaa' and ack.journal[1].record_id=='claude-a','an acknowledged launch lives on its worker, which keeps its reservation identity in the journal')
+ local both=build();both.workers['session/w'].observer_id='managed-aaa'
+ check(#State.forget_inventory(both,'session',{host='7'}).journal==1,'a reservation retained on a request and its worker is journaled once')
  local helper=State.forget_inventory(build(),'session',{host='7',children=function(l) return if l=='session' then 1 else 0 end})
  check(#helper.blockers==1 and helper.blockers[1].kind=='uncertain' and helper.blockers[1].agent=='mailbox helper','an outstanding helper child blocks')
  local conflict=State.forget_inventory(build(),'session',{host='7',conflicts=function(j) return #j end})

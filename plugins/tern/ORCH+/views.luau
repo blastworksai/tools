@@ -351,6 +351,7 @@ local function forget_view(view: any, projection: any): { any }
 	if type(forget) == "table" and forget.stage == "blocked" then
 		table.insert(card, ui.text(text.BLOCKED))
 		for _, row in forget.blockers do table.insert(card, ui.text(text.row(row))) end
+		if type(forget.blockers_omitted) == "number" and forget.blockers_omitted > 0 then table.insert(card, ui.text(text.additional_blockers(forget.blockers_omitted))) end
 		if type(forget.participants) == "table" and #forget.participants > 0 then
 			table.insert(card, ui.text(text.PARTICIPANTS))
 			for _, row in forget.participants do table.insert(card, ui.text(text.row({ agent = row.agent, host = row.host }))) end

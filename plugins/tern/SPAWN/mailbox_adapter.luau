@@ -6,20 +6,14 @@ local Capabilities = require('./mailbox_capabilities')
 local M = {}
 local active = {}
 local running = 0
--- Forget-only child accounting (SKILLS-205). A helper child is registered before it is spawned and cleared only by its own
--- terminal completion or by a verified failure to start; a watchdog expiry never clears it. Keyed by the generation handle (which
--- belongs to exactly one session/admission) and a per-child invocation id. Independent of the ordinary watchdog, done(), the
--- callbacks and the concurrency counters.
-local children = {}
-local child_seq = 0
-local function child_register(handle) child_seq += 1; children[child_seq] = handle; return child_seq end
-local function child_clear(token) children[token] = nil end
+-- Forget-only child accounting (SKILLS-205): durable per-invocation records (children.luau), written before a child starts and
+-- cleared only by its own terminal completion or a verified failure to start; a watchdog expiry never clears one. Independent
+-- of the ordinary watchdog, done(), the callbacks and the concurrency counters.
+local Children = require('./children')
+local function child_register(handle) return Children.begin(handle, 'mailbox') end
+local function child_clear(token) Children.finish(token) end
 -- handles: a set of generation handles. Returns how many helper children are still outstanding for them.
-function M.forget_children(handles)
- local count = 0
- for _, handle in pairs(children) do if handles[handle] then count += 1 end end
- return count
-end
+function M.forget_children(handles) return Children.outstanding(handles) end
 local assembly_reserved = 0
 -- Codec diagnostics keep their bounded message so the owner sees why bytes were refused.
 local function rejected(code,message) return {status='rejected',error={code=code,message=message}} end
@@ -125,6 +119,7 @@ function M.inventory(target,handle,stale_ms,callback,budget_ms)
   finished=true;running-=1;callback(value,problem)
  end
  local token=child_register(handle)
+ if token==nil then done(nil,'Could not record the helper child; it was not started');return end
  local ok,problem=pcall(tern.process.run,argv,{stdin='',timeout_ms=budget_ms},function(result)
   child_clear(token)
   if result.timed_out or result.status~=0 or type(result.stdout)~='string' or #result.stdout>4096 then done(nil,'Mailbox inventory helper failed or exceeded its bound');return end
@@ -191,6 +186,7 @@ function M.execute(op,callback)
   local input=if bytes then tern.base64.encode(bytes)..'\n' else ''
   if op.manifest and (mode=='provision' or mode=='reconcile_provision') then input..=tern.base64.encode(op.manifest)..'\n' end
   local token=child_register(op.handle)
+  if token==nil then done({status='uncertain'}); return end
   local ok=pcall(function()
    tern.process.run(argv,{stdin=input,timeout_ms=remaining},function(result)
     child_clear(token)

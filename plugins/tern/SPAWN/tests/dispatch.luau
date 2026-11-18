@@ -2522,9 +2522,9 @@ sections.forget_relay=function()
  f.runtime.timer=function()return {cancel=function()end}end
  f.authority.binding=function(session) return f.binding end
  local relay=f.load('dispatch_relay').install()
- local function enqueue(act,bytes)
+ local function enqueue(act,bytes,proof)
   sequence+=1
-  table.insert(inbox,{peer='orchplus',route='spawn.request',incarnation='forget-orch',id='m-'..tostring(sequence),binding='forget:lane:'..act..(if act=='bind' then '' else ':'..relay.boot),body=bytes})
+  table.insert(inbox,{peer='orchplus',route='spawn.request',incarnation='forget-orch',id='m-'..tostring(sequence),binding='forget:lane:'..act..(if act=='bind' then '' else ':'..relay.boot)..(if proof then ':'..proof else ''),body=bytes})
  end
  enqueue('bind',runtime.json.encode({schema=1,relay_endpoint='forget',relay_boot='forget-orch',lane_id='lane',host_pane_id='12',source_nonce=f.origin.alias_nonce,
   origin=copy(f.origin),desktop_proof='delegated_native_window',host_program='orchplus.orchestrator'}))
@@ -2539,7 +2539,8 @@ sections.forget_relay=function()
  end
  local function ask(op,extra)
   local r=request(op,extra);local before=#sent
-  enqueue(op,runtime.json.encode(r));relay.poll();relay.poll()
+  local encoded=runtime.json.encode(r)
+  enqueue(op,encoded,if op=='discard_session' and not (extra and extra.no_proof) then f.c.sha256(encoded) else nil);relay.poll();relay.poll()
   local body
   for index=#sent,before+1,-1 do
    if sent[index].route=='spawn.response' then body=f.c.decode_forget_response(sent[index].body,r);if body then break end end
@@ -2554,13 +2555,117 @@ sections.forget_relay=function()
  local forged=request('discard_capability');forged.owner.alias_nonce='other-owner'
  enqueue('discard_capability',runtime.json.encode(forged));relay.poll()
  check(f.p.equal(before,f.image()),'a request whose owner is not the bound source identity changes nothing and is not answered')
+ -- A valid challenge and exact bytes are not enough: the live host must prove these bytes are the request it persisted.
+ local args={challenge=cap.payload.challenge,dispatch_revision=clean.payload.dispatch_revision,spawn_boot=clean.spawn_boot}
+ local unproven=runtime.json.encode(request('discard_session',args))
+ local sent_before=#sent
+ enqueue('discard_session',unproven,nil);relay.poll();relay.poll()
+ enqueue('discard_session',unproven,f.c.sha256('other bytes'));relay.poll();relay.poll()
+ local answered=false
+ for index=sent_before+1,#sent do if sent[index].route=='spawn.response' and f.c.decode_forget_response(sent[index].body,request('discard_session',args)) then answered=true end end
+ check(not answered and f.saved['dispatch-v1'].sessions.session~=nil and f.saved['dispatch-v1'].sessions.session.forget==nil,'a discard without the host proof of its persisted bytes (absent or for other bytes) is refused and changes nothing')
  local closed=ask('discard_session',{challenge=cap.payload.challenge,dispatch_revision=clean.payload.dispatch_revision,spawn_boot=clean.spawn_boot})
  check(closed and closed.status=='closed' and f.saved['dispatch-v1'].sessions.session==nil,'the relay carries the discard and SPAWN persists exactly one deletion')
+end
+-- Review round: journal covers workers, queued inventory work is fenced, helper evidence is durable, frame budget.
+sections.forget_review=function()
+ local function setup(configure)
+  local f=launched_fixture(true)
+  if configure then configure(f) end
+  local function request(op,attempt,extra)
+   local o=f.origin
+   local r={schema=1,origin='orchplus',op=op,work='spawn-work-v1',request_id='review-'..op..'-'..attempt,attempt_id=attempt,authority_namespace='orch-authority',spawn_namespace='spawn-authority',
+    logical_session_id='session',admission_seq=1,controller_pane='44',
+    owner={owner_id=o.owner_id,owner_generation=o.owner_generation,host_pane_id=o.host_pane_id,alias_nonce=o.alias_nonce,window_key=o.window_key,native_session_id=o.native_session_id,window_host_id=o.window_host_id}}
+   for k,v in pairs(extra or {}) do r[k]=v end
+   return r
+  end
+  local function ask(op,attempt,extra) return f.d.forget(request(op,attempt,extra),f.binding,1) end
+  local function full(attempt)
+   local cap=ask('discard_capability',attempt)
+   local preview=ask('discard_preview',attempt,{challenge=cap.payload.challenge})
+   if preview.status~='clean' then return preview end
+   return ask('discard_session',attempt,{challenge=cap.payload.challenge,dispatch_revision=preview.payload.dispatch_revision,spawn_boot=preview.spawn_boot})
+  end
+  return f,ask,full
+ end
+ -- 2. An acknowledged launch lives on a worker: its reservation is journaled and removed from Authority.
+ do
+  local f,ask,full=setup(function(g)
+   local State=g.load('dispatch_state')
+   local root=g.saved['dispatch-v1']
+   State.preserve_worker(root,root.requests['session/launch']);root.requests['session/launch']=nil
+  end)
+  local worker=next(f.saved['dispatch-v1'].workers)
+  local observer=f.saved['dispatch-v1'].workers[worker].observer_id
+  check(type(observer)=='string','the acknowledged launch keeps its reservation identity on the worker')
+  local done=full('ack')
+  check(done.status=='closed' and f.effects.forget_journal and #f.effects.forget_journal==1 and f.effects.forget_journal[1].observer_id==observer and f.saved['dispatch-v1'].sessions.session==nil,
+   'forgetting an acknowledged launch removes its reservation through the journal, leaving nothing orphaned')
+ end
+ -- 3. Queued (not yet started) inventory work cannot start a helper after the graph is gone; a fenced session accepts no new inventory.
+ do
+  local f,ask,full=setup()
+  local timers,started={},0
+  f.runtime.timer=function(_,callback) table.insert(timers,callback);return {cancel=function()end} end
+  local adapter=f.load('mailbox_adapter')
+  adapter.inventory_capacity=function() return 0 end
+  adapter.inventory=function() started+=1 end
+  f.saved['dispatch-v1'].mailboxes.generations.mine={status='provisioned',binding={logical_session_id='session'},record_id='claude-a',target={},writes={}}
+  local q=f.req('mailbox_inventory','queued',{stale_ms=1800000})
+  q.request_serial=nil;q.next_request_serial=nil;q.settled_before=nil;q.consumed=nil
+  check(f.raw.stage(q,f.binding,1,77).status=='pending' and #timers>=1,'the inventory is queued behind busy executor slots with no child started')
+  local done=full('queued')
+  check(done.status=='closed' and f.saved['dispatch-v1'].sessions.session==nil,'forgetting proceeds because queued work is cancelled under the fence')
+  adapter.inventory_capacity=function() return 4 end
+  for _,timer in ipairs(timers) do timer() end
+  check(started==0,'a timer firing after the forget starts no helper on a retained target')
+ end
+ do
+  local f,ask,full=setup()
+  f.saved['dispatch-v1'].sessions.session.forget={attempt_id='fence',journal={}}
+  local q=f.req('mailbox_inventory','fenced-inventory',{stale_ms=1800000})
+  q.request_serial=nil;q.next_request_serial=nil;q.settled_before=nil;q.consumed=nil
+  check(f.raw.stage(q,f.binding,1,77).status=='rejected','a fenced session accepts no new inventory request')
+ end
+ -- 4. Terminal-observation helpers and mailbox helpers are durable child evidence.
+ do
+  local f,ask,full=setup()
+  local Children=f.load('children')
+  local token=Children.begin('session:session','terminal')
+  local cap=ask('discard_capability','child')
+  local blocked=ask('discard_preview','child',{challenge=cap.payload.challenge})
+  check(blocked.status=='blocked' and blocked.payload.blockers[1].kind=='uncertain','an outstanding terminal-observation helper blocks')
+  Children.finish(token)
+  check(ask('discard_preview','child',{challenge=cap.payload.challenge}).status=='clean','its completion clears the evidence')
+ end
+ -- 6. The ENCODED preview fits the frame: rows are dropped and counted exactly, never an unavailable transport.
+ do
+  local f,ask,full=setup()
+  local function rows(count,kind)
+   local out=runtime.json.array()
+   for index=1,count do table.insert(out,{kind=kind,agent=('"'):rep(96),host=('\\'):rep(256)}) end
+   return out
+  end
+  local participants,blockers=rows(8),rows(8,'uncertain')
+  for _,row in ipairs(participants) do row.kind=nil end
+  local payload={dispatch_revision=3,participants=participants,omitted=0,blockers=blockers,blockers_omitted=0}
+  local body={schema=1,op='discard_preview',request_id='r',attempt_id='a',status='blocked',work='spawn-work-v1',spawn_namespace='spawn-authority',authority_namespace='orch-authority',logical_session_id='session',admission_seq=1,spawn_boot='boot',payload=payload}
+  check(f.c.encode_forget_response(body)==nil,'sixteen maximum-width escaped rows exceed the frame before budgeting')
+  local fitted=f.d.forget_fit(body,payload)
+  local bytes=f.c.encode_forget_response(fitted)
+  check(fitted.status=='blocked' and bytes~=nil and #bytes<=8192,'the budgeted preview encodes within the 8192-byte frame')
+  check(#payload.participants+payload.omitted==8 and #payload.blockers+payload.blockers_omitted==8 and payload.omitted>0 and #payload.blockers>=1,'dropped rows are counted exactly, participants first, and at least one blocker stays')
+  local ready={schema=1,op='discard_preview',request_id='r',attempt_id='a',status='clean',work='spawn-work-v1',spawn_namespace='spawn-authority',authority_namespace='orch-authority',logical_session_id='session',admission_seq=1,spawn_boot='boot',payload={dispatch_revision=3,inventory={requests=1,workers=0,generations=0},participants=rows(8),omitted=0}}
+  for _,row in ipairs(ready.payload.participants) do row.kind=nil end
+  local fitted_ready=f.d.forget_fit(ready,ready.payload)
+  check(f.c.encode_forget_response(fitted_ready)~=nil and fitted_ready.payload.omitted+#fitted_ready.payload.participants==8,'a ready preview also fits and counts its omitted participants')
+ end
 end
 if section then
  assert(sections[section],'unknown dispatch section '..section)
  sections[section]()
 else
- for _,name in ipairs({'launch','allocation','migration','publication','ack_lifecycle','wake_binding','authorization','expired_authorization','recovery','duplex','retirement_binding','retirement_settlement','retirement_producer','unused_retirement','failed_startup','coordinator_launch','wake_capacity','wake_retention','attachment','attachment_recovery','authority_rotation','host_local','rollover_accept','adopt','enrol','presentation','accept_recovery','native_rollback','owner_retention','bootstrap','administration','consumed_status','scope_progress','relay_fence','native_delivery'})do sections[name]()end
+ for _,name in ipairs({'forget_review','launch','allocation','migration','publication','ack_lifecycle','wake_binding','authorization','expired_authorization','recovery','duplex','retirement_binding','retirement_settlement','retirement_producer','unused_retirement','failed_startup','coordinator_launch','wake_capacity','wake_retention','attachment','attachment_recovery','authority_rotation','host_local','rollover_accept','adopt','enrol','presentation','accept_recovery','native_rollback','owner_retention','bootstrap','administration','consumed_status','scope_progress','relay_fence','native_delivery'})do sections[name]()end
 end
 return 'PASS dispatch'..(if section then '/'..section else '')..' '..tostring(checks)
