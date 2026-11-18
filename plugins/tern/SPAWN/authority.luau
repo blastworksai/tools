@@ -1843,6 +1843,44 @@ function M.managed_retire(binding,attempt_id,observer_id,record_id,pane)
 	if not accepted then return false,why end
 	return persist(candidate)
 end
+-- Forget (SKILLS-205): the exact managed reservations a journal names, matched by observer identity and then by record, scope,
+-- purpose and (when recorded) attempt id. A reservation held in any other shape is a conflict, never removed. Never settles or
+-- retires an attempt and never touches the monotonic attempt counter.
+local function forget_find(scope,key,item)
+	for index,a in ipairs(scope.launch.attempts) do
+		if a.observer_id==item.observer_id then
+			if a.purpose~="managed" or a.record_id~=item.record_id or a.scope~=key or item.attempt_id~=nil and a.id~=item.attempt_id then return index,"conflict" end
+			return index,"match"
+		end
+	end
+	return nil,nil
+end
+function M.forget_reservation_conflicts(binding,journal)
+	local root,scope,err=execution_scope(binding);if not root then return nil,err end
+	local conflicts=0
+	for _,item in ipairs(journal) do local _,kind=forget_find(scope,binding.session_key,item);if kind=="conflict" then conflicts+=1 end end
+	return conflicts
+end
+function M.forget_reservations(binding,journal)
+	local root,scope,err=execution_scope(binding);if not root then return false,err end
+	if type(journal)~="table" then return false,"invalid-forget-journal" end
+	local remove={}
+	for _,item in ipairs(journal) do
+		if type(item)~="table" or not text(item.observer_id,256) or not text(item.record_id,96) then return false,"invalid-forget-journal" end
+		local index,kind=forget_find(scope,binding.session_key,item)
+		if kind=="conflict" then return false,"forget-reservation-conflict" end
+		if index then remove[index]=true end
+	end
+	if next(remove)==nil then return true end
+	local candidate=clone(root)
+	local launch=candidate.sessions[binding.session_key].launch
+	local kept={}
+	for index,a in ipairs(launch.attempts) do if not remove[index] then kept[#kept+1]=a end end
+	if launch.revision>=9007199254740991 then return false,"capacity" end
+	launch.attempts=kept;launch.revision+=1
+	retain_jobs(candidate.sessions[binding.session_key])
+	return persist(candidate)
+end
 function M.managed_import(binding,revision,request_id,source_records)
 	if not text(request_id,256) then return nil,"invalid-import-request" end
 	local canonical,why=Config.validate_records(source_records);if not canonical then return nil,why end

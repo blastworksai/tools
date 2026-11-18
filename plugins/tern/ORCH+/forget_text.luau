@@ -5,7 +5,8 @@ local M = {}
 M.MENU = "Forget this orchestration…"
 M.CHECKING = "Checking whether this orchestration can be forgotten…"
 M.BLOCKED = "Cannot forget yet. Review the blockers below."
-M.CLOSE_PANES = "Close these panes using Tern, then check again:"
+M.PARTICIPANTS = "Agents whose execution is not checked:"
+M.RESIDUAL = "Agents still running may continue their assignments and use any approvals already received; Forget neither stops them nor revokes that authority."
 M.CHECK_AGAIN = "Check again"
 M.BACK = "Back"
 M.KEEP = "Keep orchestration"
@@ -22,16 +23,25 @@ local function plain(value: any): string
 	text = text:gsub("%c", " ")
 	return text:sub(1, 256)
 end
-function M.confirm(name: any): string
-	return "Forget “" .. plain(name) .. "”? This discards its saved orchestration state and unfinished obligations. Documents, sources, Git, mailbox files, your SPAWN agent roster and other orchestrations stay. After confirmation, this cannot be cancelled. If execution changes before removal, the orchestration stays fenced until forgetting can finish."
+-- The confirmation: the fixed words, then the informational participants (when there are any), then the residual notice verbatim.
+function M.confirm(name: any, participants: any?, omitted: any?): string
+	local lines = { "Forget “" .. plain(name) .. "”? This discards its saved orchestration state and unfinished obligations. Documents, sources, Git, mailbox files, your SPAWN agent roster and other orchestrations stay. After confirmation, this cannot be cancelled. If execution changes before removal, the orchestration stays fenced until forgetting can finish." }
+	if type(participants) == "table" and #participants > 0 then
+		table.insert(lines, M.PARTICIPANTS)
+		for _, row in participants do table.insert(lines, M.row(row)) end
+		if type(omitted) == "number" and omitted > 0 then table.insert(lines, M.additional(omitted)) end
+	end
+	table.insert(lines, M.RESIDUAL)
+	return table.concat(lines, "\n")
 end
--- One blocker row. Only `pane` rows exclusively owned by this orchestration are told to close through Tern; shared panes
--- carry the explicit instruction not to.
+function M.additional(count: any): string
+	return string.format("%d additional participants whose execution is not checked.", if type(count) == "number" then count else 0)
+end
+-- One blocker row or participant row. No row ever asks the owner to close a pane: Forget does not observe panes.
 function M.row(blocker: any): string
 	local agent, host = plain(blocker.agent), plain(blocker.host)
-	if blocker.kind == "pane" then return agent .. " · pane " .. plain(blocker.pane) .. " · " .. host end
 	if blocker.kind == "unobservable" then return agent .. " · cannot be checked on " .. host end
 	if blocker.kind == "uncertain" then return agent .. " · execution outcome is uncertain on " .. host end
-	return agent .. " · pane " .. plain(blocker.pane) .. " on " .. host .. " is associated with another orchestration. Do not close it for this reset."
+	return agent .. " · " .. host
 end
 return M

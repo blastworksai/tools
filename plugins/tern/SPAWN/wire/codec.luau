@@ -1607,19 +1607,30 @@ end
 M.FORGET = table.freeze({ schema = 1, prefix = "SPAWN_FORGET v1 ", limit = 8192, ops = table.freeze({ "discard_capability", "discard_preview", "discard_session" }) })
 local FORGET_OP = enum("discard_capability", "discard_preview", "discard_session")
 local FORGET_STATUS = enum("capable", "clean", "blocked", "closed", "refused")
-local FORGET_BLOCKER = enum("pane", "unobservable", "uncertain", "shared_pane")
+local FORGET_BLOCKER = enum("unobservable", "uncertain")
+-- Every request, response and capability carries the work model it speaks; a peer without it is unsupported, never legacy.
+local FORGET_WORK = enum("spawn-work-v1")
 local FORGET_REFUSAL = enum("unsupported", "stale_challenge", "owner_mismatch", "changed", "not_found", "busy", "blocked")
 local function forget_owner(v: any, shapes: any?): boolean
 	return fields(v, { owner_id = id, owner_generation = positive, host_pane_id = opaque, alias_nonce = opaque,
 		window_key = emptyopaque, native_session_id = opaque, window_host_id = opaque }, {}, shapes)
 end
 local function forget_blocker(v: any, shapes: any?): boolean
-	return fields(v, { kind = FORGET_BLOCKER, agent = bounded(96, true), host = bounded(256, true) }, { pane = decimal }, shapes)
-		and ((v.kind == "pane" or v.kind == "shared_pane") == (v.pane ~= nil))
+	return fields(v, { kind = FORGET_BLOCKER, agent = bounded(96, true), host = bounded(256, true) }, {}, shapes)
+end
+local function forget_participant(v: any, shapes: any?): boolean
+	return fields(v, { agent = bounded(96, true), host = bounded(256, true) }, {}, shapes)
+end
+-- Bounded rows with an exact omitted count; both lists are deterministic and share one frame, so each is capped at 8 rows.
+local function forget_rows(v: any, row: (any, any?) -> boolean, shapes: any?, minimum: number): boolean
+	if shapes then return array(v, function(x: any): boolean return row(x, shapes) end, shapes, minimum, 8) end
+	if type(v) ~= "table" or #v < minimum or #v > 8 then return false end
+	for _, x in v do if not row(x, nil) then return false end end
+	return true
 end
 local function forget_request_schema(r: any, shapes: any?): boolean
 	if type(r) ~= "table" or (shapes ~= nil and shapes[r] ~= "object") then return false end
-	local required: any = { schema = function(v: any): boolean return v == 1 end, origin = enum("orchplus"), op = FORGET_OP,
+	local required: any = { schema = function(v: any): boolean return v == 1 end, origin = enum("orchplus"), op = FORGET_OP, work = FORGET_WORK,
 		request_id = id, attempt_id = id, authority_namespace = namespace, spawn_namespace = namespace,
 		logical_session_id = id, admission_seq = positive,
 		owner = function(v: any): boolean return forget_owner(v, shapes) end, controller_pane = decimal }
@@ -1637,11 +1648,11 @@ function M.decode_forget_request(bytes: any): (any?, any?)
 end
 local function forget_response_schema(b: any, shapes: any?, request: any?): boolean
 	local required: any = { schema = function(v: any): boolean return v == 1 end, op = FORGET_OP, request_id = id, attempt_id = id,
-		status = FORGET_STATUS, spawn_namespace = namespace, authority_namespace = namespace, logical_session_id = id,
+		status = FORGET_STATUS, work = FORGET_WORK, spawn_namespace = namespace, authority_namespace = namespace, logical_session_id = id,
 		admission_seq = positive, spawn_boot = id }
 	if not fields(b, required, { payload = any_table, error = any_table }, shapes) then return false end
 	if request then
-		for _, key in { "op", "request_id", "attempt_id", "authority_namespace", "spawn_namespace", "logical_session_id", "admission_seq" } do
+		for _, key in { "op", "work", "request_id", "attempt_id", "authority_namespace", "spawn_namespace", "logical_session_id", "admission_seq" } do
 			if b[key] ~= request[key] then return false end
 		end
 	end
@@ -1652,15 +1663,14 @@ local function forget_response_schema(b: any, shapes: any?, request: any?): bool
 	if b.error ~= nil then return false end
 	local inventory = function(v: any): boolean return fields(v, { requests = zero, workers = zero, generations = zero }, {}, shapes) end
 	-- `absent`: SPAWN no longer holds the session (an earlier discard completed). Recovery then skips the preview.
-	if status == "capable" then return b.op == "discard_capability" and fields(p, { challenge = token }, { absent = boolean }, shapes) end
-	if status == "clean" then return b.op == "discard_preview" and fields(p, { dispatch_revision = zero, inventory = inventory }, {}, shapes) end
+	if status == "capable" then return b.op == "discard_capability" and fields(p, { challenge = token, work = FORGET_WORK }, { absent = boolean }, shapes) end
+	local roster = function(v: any): boolean return forget_rows(v, forget_participant, shapes, 0) end
+	if status == "clean" then
+		return b.op == "discard_preview" and fields(p, { dispatch_revision = zero, inventory = inventory, participants = roster, omitted = zero }, {}, shapes)
+	end
 	if status == "blocked" then
-		return b.op == "discard_preview" and fields(p, { dispatch_revision = zero, blockers = function(v: any): boolean
-			if shapes then return array(v, function(x: any): boolean return forget_blocker(x, shapes) end, shapes, 1, 32) end
-			if type(v) ~= "table" or #v < 1 or #v > 32 then return false end
-			for _, x in v do if not forget_blocker(x, nil) then return false end end
-			return true
-		end }, {}, shapes)
+		return b.op == "discard_preview" and fields(p, { dispatch_revision = zero, participants = roster, omitted = zero,
+			blockers = function(v: any): boolean return forget_rows(v, forget_blocker, shapes, 1) end, blockers_omitted = zero }, {}, shapes)
 	end
 	return b.op == "discard_session" and fields(p, { admission_cursor = zero }, {}, shapes)
 end

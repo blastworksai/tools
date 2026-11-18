@@ -1,6 +1,6 @@
 --!strict
 -- "Forget this orchestration…": capability, read-only preview, bound confirmation, durable intent, then completion.
--- The window never closes a pane or stops an agent. It only asks SPAWN (the quiescence authority) and shows its answer.
+-- The window never closes a pane or stops an agent. It only asks SPAWN (which owns the execution evidence) and shows its answer.
 local codec = require("./wire/codec")
 local text = require("./forget_text")
 local M = {}
@@ -18,7 +18,7 @@ function M.new(api: any): any
 	end
 	local function build(job: any, data: any, origin: any, op: string, extra: any?): (string, any)
 		local session = data.session_control
-		local request: any = { schema = 1, origin = "orchplus", op = op, request_id = api.id(), attempt_id = job.attempt,
+		local request: any = { schema = 1, origin = "orchplus", op = op, work = "spawn-work-v1", request_id = api.id(), attempt_id = job.attempt,
 			authority_namespace = data.authority_namespace, spawn_namespace = data.spawn_namespace, logical_session_id = origin.logical_session_id,
 			admission_seq = session.admission_seq, owner = owner_of(origin), controller_pane = tostring(job.source) }
 		for key, value in extra or {} do request[key] = value end
@@ -90,7 +90,7 @@ function M.new(api: any): any
 		job.authority_revision = data.authority_revision
 		if job.recover then return confirmed(cx, job, data, origin) end
 		local source = job.source
-		api.capture(source, origin, cx:pick({ placeholder = text.confirm(data.session_control.name), items = { { label = text.KEEP }, { label = text.FORGET, confirm = true } } }),
+		api.capture(source, origin, cx:pick({ placeholder = text.confirm(data.session_control.name, job.preview.participants, job.preview.omitted), items = { { label = text.KEEP }, { label = text.FORGET, confirm = true } } }),
 			function(choice: any, err: string?, fresh: WindowCx?)
 				if jobs[source] ~= job then return end
 				if not fresh or not choice or err or not choice.confirm then jobs[source] = nil; state(cx, source, { stage = "idle" }); return end
@@ -144,7 +144,7 @@ function M.new(api: any): any
 					if body.status == "refused" or body.spawn_boot ~= job.spawn_boot then fail(cx, job, refusal_message(body)); return pending ~= nil end
 					if body.status == "blocked" then
 						job.phase = "blocked"
-						state(cx, source, { stage = "blocked", blockers = body.payload.blockers, pending = pending ~= nil })
+						state(cx, source, { stage = "blocked", blockers = body.payload.blockers, participants = body.payload.participants, omitted = body.payload.omitted, pending = pending ~= nil })
 					else
 						job.preview = body.payload
 						present_confirm(cx, job, data, origin)

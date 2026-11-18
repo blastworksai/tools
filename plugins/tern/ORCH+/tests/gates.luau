@@ -525,7 +525,7 @@ if section == nil or section == "forget" then
  local function binding(epoch) local o = api.clone(f.origin); o.window_epoch = epoch or o.window_epoch; return o end
  local function request_bytes(attempt, who, revision, boot)
   local o = who or binding()
-  local r = { schema = 1, origin = "orchplus", op = "discard_session", request_id = "forget-" .. attempt, attempt_id = attempt,
+  local r = { schema = 1, origin = "orchplus", op = "discard_session", work = "spawn-work-v1", request_id = "forget-" .. attempt, attempt_id = attempt,
    authority_namespace = f.authority.registry.authority_namespace, spawn_namespace = session().spawn_namespace, logical_session_id = sid,
    admission_seq = session().admission_seq, controller_pane = "9001", challenge = "forget-0000000000000000",
    dispatch_revision = revision or 7, spawn_boot = boot or "boot-1",
@@ -541,7 +541,7 @@ if section == nil or section == "forget" then
  end
  local function closed_bytes(attempt, cursor)
   local request = codec.decode_forget_request(session().close.forget.request_bytes)
-  return codec.encode_forget_response({ schema = 1, op = "discard_session", request_id = request.request_id, attempt_id = attempt, status = "closed",
+  return codec.encode_forget_response({ schema = 1, op = "discard_session", work = "spawn-work-v1", request_id = request.request_id, attempt_id = attempt, status = "closed",
    spawn_namespace = request.spawn_namespace, authority_namespace = request.authority_namespace, logical_session_id = sid, admission_seq = request.admission_seq,
    spawn_boot = "boot-1", payload = { admission_cursor = cursor } })
  end

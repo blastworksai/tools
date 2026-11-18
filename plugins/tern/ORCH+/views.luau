@@ -335,7 +335,7 @@ local function routing_rows(view: any, rows: any, worker: any, admitted: boolean
 	end
 end
 -- "Forget this orchestration…" is visible at the top level, not hidden in Advanced: its blockers and its pending state
--- are owner decisions. Only panes belonging exclusively to this orchestration are told to be closed through Tern.
+-- are owner decisions. No row ever tells the owner to close a pane: Forget checks SPAWN's own work, not panes.
 local function forget_view(view: any, projection: any): { any }
 	local nodes: { any } = {}
 	local control = if projection.dispatch then projection.dispatch.session_control else nil
@@ -350,16 +350,13 @@ local function forget_view(view: any, projection: any): { any }
 	local card: { any } = {}
 	if type(forget) == "table" and forget.stage == "blocked" then
 		table.insert(card, ui.text(text.BLOCKED))
-		local mine, other, shared = {}, {}, {}
-		for _, row in forget.blockers do
-			if row.kind == "pane" then table.insert(mine, row) elseif row.kind == "shared_pane" then table.insert(shared, row) else table.insert(other, row) end
+		for _, row in forget.blockers do table.insert(card, ui.text(text.row(row))) end
+		if type(forget.participants) == "table" and #forget.participants > 0 then
+			table.insert(card, ui.text(text.PARTICIPANTS))
+			for _, row in forget.participants do table.insert(card, ui.text(text.row({ agent = row.agent, host = row.host }))) end
+			if type(forget.omitted) == "number" and forget.omitted > 0 then table.insert(card, ui.text(text.additional(forget.omitted))) end
 		end
-		if #mine > 0 then
-			table.insert(card, ui.text(text.CLOSE_PANES))
-			for _, row in mine do table.insert(card, ui.text(text.row(row))) end
-		end
-		for _, row in other do table.insert(card, ui.text(text.row(row))) end
-		for _, row in shared do table.insert(card, ui.text(text.row(row))) end
+		table.insert(card, ui.text(text.RESIDUAL))
 	end
 	if pending or (type(forget) == "table" and (forget.stage == "pending" or forget.pending == true)) then
 		table.insert(card, ui.text(text.PENDING))

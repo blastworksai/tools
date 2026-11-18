@@ -2167,17 +2167,23 @@ local function handle(view: any, ev: any, cx: any)
 		local input = decode(ev.value)
 		if type(input) ~= "table" or not table.find({ "idle", "checking", "blocked", "pending" }, input.stage) then return end
 		local blockers: { any } = {}
-		if input.stage == "blocked" and type(input.blockers) == "table" then
-			for _, row in input.blockers do
-				if #blockers >= 32 then break end
-				if type(row) == "table" and table.find({ "pane", "unobservable", "uncertain", "shared_pane" }, row.kind)
-					and type(row.agent) == "string" and #row.agent <= 96 and type(row.host) == "string" and #row.host <= 256
-					and (row.pane == nil or (type(row.pane) == "string" and #row.pane <= 32)) then
-					table.insert(blockers, { kind = row.kind, agent = row.agent, host = row.host, pane = row.pane })
+		local participants: { any } = {}
+		local function rows(source: any, out: { any }, kinds: { string }?)
+			if type(source) ~= "table" then return end
+			for _, row in source do
+				if #out >= 8 then break end
+				if type(row) == "table" and (kinds == nil or table.find(kinds, row.kind))
+					and type(row.agent) == "string" and #row.agent <= 96 and type(row.host) == "string" and #row.host <= 256 then
+					table.insert(out, { kind = row.kind, agent = row.agent, host = row.host })
 				end
 			end
 		end
-		view.forget = if input.stage == "idle" then nil else { stage = input.stage, blockers = blockers, pending = input.pending == true }
+		if input.stage == "blocked" then
+			rows(input.blockers, blockers, { "unobservable", "uncertain" })
+			rows(input.participants, participants)
+		end
+		local omitted = if type(input.omitted) == "number" and input.omitted >= 0 and input.omitted % 1 == 0 then input.omitted else 0
+		view.forget = if input.stage == "idle" then nil else { stage = input.stage, blockers = blockers, participants = participants, omitted = omitted, pending = input.pending == true }
 		render_all()
 		return
 	end

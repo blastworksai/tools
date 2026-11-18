@@ -237,7 +237,7 @@ if section == nil or section == "host_forget" then
 	end
 	local function request_bytes(attempt, o)
 		local session = f.authority.registry.sessions[sid]
-		return runtime.json.encode({ schema = 1, origin = "orchplus", op = "discard_session", request_id = "forget-" .. attempt, attempt_id = attempt,
+		return runtime.json.encode({ schema = 1, origin = "orchplus", op = "discard_session", work = "spawn-work-v1", request_id = "forget-" .. attempt, attempt_id = attempt,
 			authority_namespace = f.authority.registry.authority_namespace, spawn_namespace = session.spawn_namespace, logical_session_id = sid,
 			admission_seq = session.admission_seq, controller_pane = "9001", challenge = "forget-0000000000000000", dispatch_revision = 7, spawn_boot = "boot-1",
 			owner = { owner_id = o.owner_id, owner_generation = o.owner_generation, host_pane_id = o.host_pane_id, alias_nonce = o.alias_nonce,
@@ -251,9 +251,14 @@ if section == nil or section == "host_forget" then
 		control_origin = { kind = "closing", binding = clone(f.origin), controller_pane = "9001", close_id = "ordinary" } }))
 	check(not ordinary.ok and ordinary.code == "session_busy", "an ordinary close refuses unconfirmed executor evidence")
 	-- Window-side progress reaches the actual host view as a closed set of stages and bounded rows.
-	local card = { { kind = "pane", agent = "claude-a", host = "7", pane = "55" }, { kind = "unobservable", agent = "omp-b", host = "9" }, { kind = "shared_pane", agent = "x", host = "7", pane = "66" } }
-	f:host_event(42, "forget-state", { stage = "blocked", blockers = card, pending = false })
-	check(f.views[42].forget ~= nil and f.views[42].forget.stage == "blocked" and #f.views[42].forget.blockers == 3, "the host keeps the blocker rows of the preview")
+	local card = { { kind = "uncertain", agent = "claude-a", host = "7" }, { kind = "unobservable", agent = "omp-b", host = "9" } }
+	local roster = { { agent = "claude-a", host = "7" }, { agent = "worker-c", host = "7" } }
+	f:host_event(42, "forget-state", { stage = "blocked", blockers = card, participants = roster, omitted = 3, pending = false })
+	check(f.views[42].forget ~= nil and f.views[42].forget.stage == "blocked" and #f.views[42].forget.blockers == 2 and #f.views[42].forget.participants == 2 and f.views[42].forget.omitted == 3,
+		"the host keeps the blocker rows, the participants and the exact omitted count of the preview")
+	f:host_event(42, "forget-state", { stage = "blocked", blockers = { { kind = "pane", agent = "x", host = "7", pane = "55" }, card[1] }, participants = roster, omitted = 0 })
+	check(#f.views[42].forget.blockers == 1, "an obsolete pane blocker kind is dropped")
+	f:host_event(42, "forget-state", { stage = "blocked", blockers = card, participants = roster, omitted = 3, pending = false })
 	f:host_event(42, "forget-state", { stage = "exploit", blockers = card })
 	check(f.views[42].forget.stage == "blocked", "an unknown stage is ignored")
 	local function texts(tree, out)
@@ -264,13 +269,14 @@ if section == nil or section == "host_forget" then
 		return out
 	end
 	local shown = table.concat(texts(f:render(42).main), "\n")
-	for _, expected in { "Cannot forget yet. Review the blockers below.", "Close these panes using Tern, then check again:", "claude-a · pane 55 · 7",
-		"omp-b · cannot be checked on 9", "x · pane 66 on 7 is associated with another orchestration. Do not close it for this reset." } do
+	for _, expected in { "Cannot forget yet. Review the blockers below.", "claude-a · execution outcome is uncertain on 7", "omp-b · cannot be checked on 9",
+		"Agents whose execution is not checked:", "worker-c · 7", "3 additional participants whose execution is not checked.",
+		"Agents still running may continue their assignments and use any approvals already received; Forget neither stops them nor revokes that authority." } do
 		check(shown:find(expected, 1, true) ~= nil, "the blocker card shows: " .. expected)
 	end
-	local close_at, shared_at = shown:find("Close these panes using Tern", 1, true), shown:find("associated with another orchestration", 1, true)
-	check(close_at ~= nil and shared_at ~= nil and select(1, shown:find("claude-a · pane 55", 1, true)) > close_at and shared_at > close_at
-		and shown:find("Close these panes", shared_at, true) == nil, "only the exclusive pane group carries the close-through-Tern instruction")
+	local participants_at, residual_at = shown:find("Agents whose execution is not checked:", 1, true), shown:find("Agents still running may continue", 1, true)
+	check(participants_at ~= nil and residual_at ~= nil and residual_at > participants_at, "the residual notice follows the participants")
+	check(shown:find("Close these panes", 1, true) == nil and shown:find("Do not close", 1, true) == nil and shown:find("using Tern", 1, true) == nil, "no row asks the owner to close a pane")
 	local begun = forget("begin_forget", "attempt-a", bound()); assert(begun.ok, runtime.json.encode(begun))
 	check(f.authority.registry.sessions[sid].close.forget.attempt_id == "attempt-a", "the owner's confirmed forget fences the session despite unconfirmed executor evidence")
 	f:host_event(42, "forget-state", { stage = "idle" })
@@ -284,7 +290,7 @@ if section == nil or section == "host_forget" then
 	check(f.authority.registry.sessions[sid].close.control_origin.binding.window_epoch == "reloaded-window", "recovery is accepted through the actual host from the reloaded window's origin")
 	local session = f.authority.registry.sessions[sid]
 	local request = codec.decode_forget_request(session.close.forget.request_bytes)
-	local closed = codec.encode_forget_response({ schema = 1, op = "discard_session", request_id = request.request_id, attempt_id = "attempt-b", status = "closed",
+	local closed = codec.encode_forget_response({ schema = 1, op = "discard_session", work = "spawn-work-v1", request_id = request.request_id, attempt_id = "attempt-b", status = "closed",
 		spawn_namespace = request.spawn_namespace, authority_namespace = request.authority_namespace, logical_session_id = sid, admission_seq = request.admission_seq,
 		spawn_boot = "boot-1", payload = { admission_cursor = 9 } })
 	local before_next = f.authority.registry.next_admission_seq
@@ -341,7 +347,7 @@ if section == nil or section == "host_forget_relay" then
 	local session = f.authority.registry.sessions[sid]
 	local o = f.origin
 	local function request(op, extra, owner_patch)
-		local r = { schema = 1, origin = "orchplus", op = op, request_id = "relay-" .. op, attempt_id = "relay-attempt", authority_namespace = f.authority.registry.authority_namespace,
+		local r = { schema = 1, origin = "orchplus", op = op, work = "spawn-work-v1", request_id = "relay-" .. op, attempt_id = "relay-attempt", authority_namespace = f.authority.registry.authority_namespace,
 			spawn_namespace = session.spawn_namespace, logical_session_id = sid, admission_seq = session.admission_seq, controller_pane = "42",
 			owner = { owner_id = o.owner_id, owner_generation = o.owner_generation, host_pane_id = o.host_pane_id, alias_nonce = o.alias_nonce,
 				window_key = o.window_key, native_session_id = o.native_session_id, window_host_id = o.window_host_id } }
@@ -357,10 +363,10 @@ if section == nil or section == "host_forget_relay" then
 		check(#forwarded == 1 and forwarded[1].route == "spawn.request" and forwarded[1].body == runtime.json.encode(r)
 			and forwarded[1].binding:find(":" .. op .. ":", 1, true) ~= nil, "the host forwards " .. op .. " bytes unchanged on the carrier")
 		assert(peer.ack(forwarded[1]))
-		local body = { schema = 1, op = op, request_id = r.request_id, attempt_id = r.attempt_id, spawn_namespace = r.spawn_namespace, authority_namespace = r.authority_namespace,
+		local body = { schema = 1, op = op, work = "spawn-work-v1", request_id = r.request_id, attempt_id = r.attempt_id, spawn_namespace = r.spawn_namespace, authority_namespace = r.authority_namespace,
 			logical_session_id = sid, admission_seq = r.admission_seq, spawn_boot = "boot-1" }
-		if op == "discard_capability" then body.status, body.payload = "capable", { challenge = "forget-0000000000000000" }
-		elseif op == "discard_preview" then body.status, body.payload = "clean", { dispatch_revision = 4, inventory = { requests = 0, workers = 0, generations = 0 } }
+		if op == "discard_capability" then body.status, body.payload = "capable", { challenge = "forget-0000000000000000", work = "spawn-work-v1" }
+		elseif op == "discard_preview" then body.status, body.payload = "clean", { dispatch_revision = 4, inventory = { requests = 0, workers = 0, generations = 0 }, participants = tern.json.array(), omitted = 0 }
 		else body.status, body.payload = "closed", { admission_cursor = 6 } end
 		local bytes = assert(codec.encode_forget_response(body))
 		serial += 1
@@ -392,7 +398,7 @@ if section == nil or section == "forget_window" then
 		setfenv(chunk, setmetatable({ require = function(path) return load_module((path:gsub("^%./", ""))) end }, { __index = environment }))
 		modules[name] = chunk(); return modules[name]
 	end
-	local function scenario(absent, same_identity)
+	local function scenario(absent, same_identity, probe)
 		local old = { owner_id = "owner", owner_generation = 1, host_pane_id = "42", alias_nonce = "alias", window_key = "", window_epoch = "epoch-old", native_session_id = "3", window_host_id = "7", logical_session_id = "s1" }
 		local now = clone(old); now.window_epoch = "epoch-new"
 		if not same_identity then now.alias_nonce = "someone-else" end
@@ -405,7 +411,7 @@ if section == nil or section == "forget_window" then
 		local api = {
 			id = function() serial += 1; return "id-" .. serial end,
 			notice = function() end,
-			current = function() return false end, -- the old window epoch makes the cursor comparison fail after a reload
+			current = function() return probe ~= nil end, -- the old window epoch makes the cursor comparison fail after a reload
 			context = function() return true end,
 			closing = function() return false end,
 			snapshot = function() return data end, origin = function() return now end,
@@ -417,16 +423,16 @@ if section == nil or section == "forget_window" then
 			relay = function(_, _, event)
 				table.insert(sent_ops, event.act)
 				local r = assert(codec.decode_forget_request(event.value))
-				local body = { schema = 1, op = r.op, request_id = r.request_id, attempt_id = r.attempt_id, spawn_namespace = r.spawn_namespace, authority_namespace = r.authority_namespace,
+				local body = { schema = 1, op = r.op, work = "spawn-work-v1", request_id = r.request_id, attempt_id = r.attempt_id, spawn_namespace = r.spawn_namespace, authority_namespace = r.authority_namespace,
 					logical_session_id = r.logical_session_id, admission_seq = r.admission_seq, spawn_boot = "boot-1" }
-				if r.op == "discard_capability" then body.status, body.payload = "capable", { challenge = "forget-0000000000000000", absent = if absent then true else nil }
-				else body.status, body.payload = "clean", { dispatch_revision = 4, inventory = { requests = 0, workers = 0, generations = 0 } } end
-				last_response = assert(codec.encode_forget_response(body))
+				if r.op == "discard_capability" then body.status, body.payload = "capable", { challenge = "forget-0000000000000000", work = "spawn-work-v1", absent = if absent then true else nil }
+				else body.status, body.payload = "clean", { dispatch_revision = 4, inventory = { requests = 0, workers = 0, generations = 0 }, participants = tern.json.array(if probe then { { agent = "claude-a", host = "7" }, { agent = "worker-c", host = "7" } } else nil), omitted = if probe then 2 else 0 } end
+				local encoded, why = codec.encode_forget_response(body); assert(encoded, runtime.json.encode(why) .. runtime.json.encode(body)); last_response = encoded
 			end,
 		}
-		local cx = { session = { event = function(_, _, ev) table.insert(states, ev) end }, pick = function() return {} end }
+		local cx = { session = { event = function(_, _, ev) table.insert(states, ev) end }, pick = function(_, options) if probe then probe.placeholder = options.placeholder end return {} end }
 		local module = load_module("forget_window").new(api)
-		local started = module.start(cx, 42, now, data, true)
+		local started = module.start(cx, 42, now, data, probe == nil)
 		for _ = 1, 8 do if started then module.tick_source(cx, 42, data, now) end end
 		return started, sent_ops, authority_calls
 	end
@@ -441,6 +447,13 @@ if section == nil or section == "forget_window" then
 		"an absent session skips the preview and goes straight to the idempotent discard")
 	local request2 = codec.decode_forget_request(calls2[1].fields.request_bytes)
 	check(request2 ~= nil and request2.dispatch_revision == 0, "the absent-session discard carries no observed revision")
+	local probe = {}
+	local _, _, probe_calls = scenario(false, true, probe)
+	check(probe.placeholder ~= nil and probe.placeholder:find("Agents whose execution is not checked:", 1, true) ~= nil and probe.placeholder:find("claude-a · 7", 1, true) ~= nil
+		and probe.placeholder:find("2 additional participants whose execution is not checked.", 1, true) ~= nil, "the confirmation lists the informational participants and the exact omitted count")
+	check(probe.placeholder:sub(-#load_module("forget_text").RESIDUAL) == load_module("forget_text").RESIDUAL and load_module("forget_text").RESIDUAL == "Agents still running may continue their assignments and use any approvals already received; Forget neither stops them nor revokes that authority.",
+		"the residual notice is appended verbatim at the end of the confirmation")
+	check(#probe_calls == 1 and probe_calls[1].kind == "begin_forget", "confirming a ready preview begins the forget")
 	local started3, _, calls3 = scenario(false, false)
 	check(not started3 and #calls3 == 0, "a different owner identity is refused: only the exact retained identity recovers")
 end

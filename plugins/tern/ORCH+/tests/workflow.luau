@@ -3705,7 +3705,7 @@ if section == nil or section == "s205_forget_refusals" then
 	check(api.dispatch.close_problem(f.authority.registry, sid) == "Dismiss proposal refusals before removing this orchestration.", "ordinary Close is blocked by the notification-only card")
 	local session = f.authority.registry.sessions[sid]
 	local o = api.clone(f.origin)
-	local request = tern.json.encode({ schema = 1, origin = "orchplus", op = "discard_session", request_id = "forget-205", attempt_id = "attempt-205",
+	local request = tern.json.encode({ schema = 1, origin = "orchplus", op = "discard_session", work = "spawn-work-v1", request_id = "forget-205", attempt_id = "attempt-205",
 		authority_namespace = f.authority.registry.authority_namespace, spawn_namespace = session.spawn_namespace, logical_session_id = sid, admission_seq = session.admission_seq,
 		controller_pane = "9001", challenge = "forget-0000000000000000", dispatch_revision = 3, spawn_boot = "boot-1",
 		owner = { owner_id = o.owner_id, owner_generation = o.owner_generation, host_pane_id = o.host_pane_id, alias_nonce = o.alias_nonce,
@@ -3714,7 +3714,7 @@ if section == nil or section == "s205_forget_refusals" then
 		control_origin = { kind = "closing", binding = o, controller_pane = "9001", close_id = "attempt-205" } }))
 	check(begun.ok, "Forget bypasses the notification-only Close block (" .. tostring(begun.code) .. ")")
 	local decoded = api.codec.decode_forget_request(request)
-	local closed = api.codec.encode_forget_response({ schema = 1, op = "discard_session", request_id = "forget-205", attempt_id = "attempt-205", status = "closed",
+	local closed = api.codec.encode_forget_response({ schema = 1, op = "discard_session", work = "spawn-work-v1", request_id = "forget-205", attempt_id = "attempt-205", status = "closed",
 		spawn_namespace = decoded.spawn_namespace, authority_namespace = decoded.authority_namespace, logical_session_id = sid, admission_seq = decoded.admission_seq,
 		spawn_boot = "boot-1", payload = { admission_cursor = 1 } })
 	local done = f.authority:apply(f:state_event("complete_forget", { attempt_id = "attempt-205", response_bytes = closed }))

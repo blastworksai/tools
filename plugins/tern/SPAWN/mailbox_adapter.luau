@@ -6,6 +6,20 @@ local Capabilities = require('./mailbox_capabilities')
 local M = {}
 local active = {}
 local running = 0
+-- Forget-only child accounting (SKILLS-205). A helper child is registered before it is spawned and cleared only by its own
+-- terminal completion or by a verified failure to start; a watchdog expiry never clears it. Keyed by the generation handle (which
+-- belongs to exactly one session/admission) and a per-child invocation id. Independent of the ordinary watchdog, done(), the
+-- callbacks and the concurrency counters.
+local children = {}
+local child_seq = 0
+local function child_register(handle) child_seq += 1; children[child_seq] = handle; return child_seq end
+local function child_clear(token) children[token] = nil end
+-- handles: a set of generation handles. Returns how many helper children are still outstanding for them.
+function M.forget_children(handles)
+ local count = 0
+ for _, handle in pairs(children) do if handles[handle] then count += 1 end end
+ return count
+end
 local assembly_reserved = 0
 -- Codec diagnostics keep their bounded message so the owner sees why bytes were refused.
 local function rejected(code,message) return {status='rejected',error={code=code,message=message}} end
@@ -110,7 +124,9 @@ function M.inventory(target,handle,stale_ms,callback,budget_ms)
   if finished then return end
   finished=true;running-=1;callback(value,problem)
  end
+ local token=child_register(handle)
  local ok,problem=pcall(tern.process.run,argv,{stdin='',timeout_ms=budget_ms},function(result)
+  child_clear(token)
   if result.timed_out or result.status~=0 or type(result.stdout)~='string' or #result.stdout>4096 then done(nil,'Mailbox inventory helper failed or exceeded its bound');return end
   local value=Codec.strict_decode(result.stdout,4096)
   local function integer(v,maximum) return type(v)=='number' and v%1==0 and v>=0 and v<=maximum end
@@ -119,7 +135,7 @@ function M.inventory(target,handle,stale_ms,callback,budget_ms)
   if not integer(value.observed_at_ms,9007199254740991) or not integer(value.open_files,1000000) or not integer(value.stale_files,value.open_files) then done(nil,'Mailbox inventory counters are invalid');return end
   done(value,nil)
  end)
- if not ok then done(nil,'Could not start read-only mailbox inventory: '..tostring(problem):sub(1,512)) end
+ if not ok then child_clear(token);done(nil,'Could not start read-only mailbox inventory: '..tostring(problem):sub(1,512)) end
 end
 -- One overall deadline, including up to 32 chunk reads before a manifest. The
 -- target helper never emits more than one bounded object; stderr is not exposed.
@@ -174,8 +190,10 @@ function M.execute(op,callback)
   -- manifest) one Base64 line of the exact manifest bytes the target writes as manifest.json.
   local input=if bytes then tern.base64.encode(bytes)..'\n' else ''
   if op.manifest and (mode=='provision' or mode=='reconcile_provision') then input..=tern.base64.encode(op.manifest)..'\n' end
+  local token=child_register(op.handle)
   local ok=pcall(function()
    tern.process.run(argv,{stdin=input,timeout_ms=remaining},function(result)
+    child_clear(token)
     if finished then return end
     if result.timed_out or result.status~=0 or type(result.stdout)~='string' or #result.stdout>6000 then done({status='uncertain'}); return end
     local status,payload=result.stdout:match('^([a-z_]+)\n(.*)$')
@@ -219,7 +237,7 @@ function M.execute(op,callback)
     receive({status=status})
    end)
   end)
-  if not ok then done({status='uncertain'}) end
+  if not ok then child_clear(token);done({status='uncertain'}) end
  end
  local function verify_manifest(manifest_bytes,manifest,after)
   -- Reserve slices plus the final contiguous logical string, not just retained

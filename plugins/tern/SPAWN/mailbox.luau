@@ -478,4 +478,5 @@ function M.recover(registry)
  return next
 end
 function M.execute(operation,callback) return Adapter.execute(operation,callback) end
+function M.forget_children(handles) return Adapter.forget_children(handles) end
 return M

@@ -21,7 +21,7 @@ local function fixture(seed,actual_mailbox,setup_only,native_session_id)
  snapshot.setup={schema=1,state='completed',config_revision=0,readiness={state='not_run',config_revision=0,summary=''}}
  local binding={authority_id='host:1',managed_authority_id='host:1',session_key='host/session/1',host_key='host:test',native_session=1}
  local mailbox_binding,mailbox_handover=nil,nil
- local authority={snapshot=function()return copy(snapshot)end,managed_reserve=function(_,_,id,observer)effects.reserves+=1;return {id='attempt-1',record_id=id,observer_id=observer}end,managed_observe=function()effects.observations+=1;return true end,managed_retire=function(...)effects.retire_args={...};effects.retirements=(effects.retirements or 0)+1;return not effects.fail_retire,'injected retirement storage failure' end,managed_import=function()effects.imports+=1;return {imported=1}end}
+ local authority={snapshot=function()return copy(snapshot)end,managed_reserve=function(_,_,id,observer)effects.reserves+=1;return {id='attempt-1',record_id=id,observer_id=observer}end,managed_observe=function()effects.observations+=1;return true end,managed_retire=function(...)effects.retire_args={...};effects.retirements=(effects.retirements or 0)+1;return not effects.fail_retire,'injected retirement storage failure' end,managed_import=function()effects.imports+=1;return {imported=1}end,forget_reservation_conflicts=function(_,journal)return effects.forget_conflicts or 0 end,forget_reservations=function(_,journal)effects.forget_journal=journal;effects.forget_calls=(effects.forget_calls or 0)+1;if effects.fail_forget then return false,'injected cleanup failure' end return true end}
  authority.managed_snapshot=authority.snapshot
  authority.record_launch_available=function(_,id)
   if effects.preparing_record==id or effects.preparing_record=='*' then return false,'Agent is owned by a setup diagnostic' end
@@ -2398,151 +2398,111 @@ sections.allocation=function()
  local missing=fixture(nil,true)
  check(missing.raw.stage(proof,missing.binding,1,77).status=='uncertain','no matching request or generation is unknown, never a fake empty allocation')
 end
--- Explicit forget through the real engine: read-only preview, boot-bound latest-only challenge, quiescence recheck at commit.
+-- Explicit forget through the real engine (spawn-work-v1): read-only preview, boot-bound latest-only challenge, durable fence,
+-- journaled reservation cleanup, one deletion. No pane, command or process evidence is consulted anywhere.
 sections.forget=function()
  local f=launched_fixture(true)
  local root=f.saved['dispatch-v1']
- root.mailboxes.generations.mine={binding={logical_session_id='session'}}
- root.requests['session/launch'].terminal_process={platform='linux',session=1,route={executable='/bin/tern',socket='/tmp/s',window='w',pane=55},root_pid=10,root_identity='boot:10:5',provider_pid=11,provider_identity='boot:11:6',tty='1',group='1',process_session='1',root_argv_sha256=string.rep('a',64),provider_argv_sha256=string.rep('b',64)} -- a retained terminal process proof
- local proc=function() return 'gone' end
+ root.mailboxes.generations.mine={binding={logical_session_id='session'},record_id='claude-a',status='live',writes={}}
  local roster=copy(f.snapshot.records)
  local function request(op,attempt,extra)
   local o=f.origin
-  local r={schema=1,origin='orchplus',op=op,request_id='forget-'..op..'-'..attempt,attempt_id=attempt,authority_namespace='orch-authority',spawn_namespace='spawn-authority',
+  local r={schema=1,origin='orchplus',op=op,work='spawn-work-v1',request_id='forget-'..op..'-'..attempt,attempt_id=attempt,authority_namespace='orch-authority',spawn_namespace='spawn-authority',
    logical_session_id='session',admission_seq=1,controller_pane='44',
    owner={owner_id=o.owner_id,owner_generation=o.owner_generation,host_pane_id=o.host_pane_id,alias_nonce=o.alias_nonce,window_key=o.window_key,native_session_id=o.native_session_id,window_host_id=o.window_host_id}}
   for k,v in pairs(extra or {}) do r[k]=v end
   assert(f.c.decode_forget_request(runtime.json.encode(r)),'fixture request must satisfy the canonical forget schema: '..op)
   return r
  end
- local live=function(b)return 'present' end
- local gone=function(b)return 'absent' end
- local function ask(op,attempt,extra,observe,process)
-  local body=f.d.forget(request(op,attempt,extra),f.binding,1,observe or gone,process or proc)
+ local function ask(op,attempt,extra)
+  local body=f.d.forget(request(op,attempt,extra),f.binding,1)
   assert(f.c.encode_forget_response(body),'response must satisfy the canonical schema: '..runtime.json.encode(body):sub(1,200))
   return body
  end
  local cap=ask('discard_capability','attempt-1')
- check(cap.status=='capable' and ask('discard_capability','attempt-1').payload.challenge==cap.payload.challenge,'the same attempt is idempotent and returns the same challenge')
+ check(cap.status=='capable' and cap.payload.work=='spawn-work-v1' and ask('discard_capability','attempt-1').payload.challenge==cap.payload.challenge,'the capability names the work model and the same attempt is idempotent')
  local older=cap.payload.challenge
  cap=ask('discard_capability','attempt-2')
  check(cap.payload.challenge~=older and ask('discard_preview','attempt-1',{challenge=older}).error.code=='stale_challenge','a replacement attempt invalidates the older challenge')
  local wrong_owner=request('discard_capability','attempt-2');wrong_owner.owner.alias_nonce='someone-else'
- check(f.d.forget(wrong_owner,f.binding,1,gone,proc).error.code=='owner_mismatch','a different retained owner identity is refused')
+ check(f.d.forget(wrong_owner,f.binding,1).error.code=='owner_mismatch','a different retained owner identity is refused')
  local wrong_ns=request('discard_capability','attempt-2');wrong_ns.spawn_namespace='other-spawn'
- check(f.d.forget(wrong_ns,f.binding,1,gone,proc).error.code=='changed','another SPAWN namespace is refused')
+ check(f.d.forget(wrong_ns,f.binding,1).error.code=='changed','another SPAWN namespace is refused')
  local before=f.image();local writes=f.effects.writes
- local blocked=ask('discard_preview','attempt-2',{challenge=cap.payload.challenge},live,function() return 'alive' end)
- check(blocked.status=='blocked' and blocked.payload.blockers[1].kind=='pane' and blocked.payload.blockers[1].pane=='55'
-  and f.p.equal(before,f.image()) and f.effects.writes==writes,'a blocked preview names the pane and writes nothing (no loader recovery, no revocation, no ACK)')
  local clean=ask('discard_preview','attempt-2',{challenge=cap.payload.challenge})
- check(clean.status=='clean' and f.p.equal(before,f.image()) and f.effects.writes==writes,'a clean preview is also read-only')
+ check(clean.status=='clean' and #clean.payload.participants==2 and clean.payload.participants[2].agent==f.snapshot.records[1].id and clean.payload.omitted==0
+  and f.p.equal(before,f.image()) and f.effects.writes==writes,'a ready preview lists the participants (no pane or process is consulted) and writes nothing')
+ -- A blocked preview is also read-only and lists blockers beside the same participants.
+ local entry_observer=f.saved['dispatch-v1'].requests['session/launch'].observer_id
+ local function entry() return f.saved['dispatch-v1'].requests['session/launch'] end
+ local saved_status=entry().body.status;entry().body.status='claimed'
+ local blocked_before=f.image()
+ local blocked=ask('discard_preview','attempt-2',{challenge=cap.payload.challenge})
+ check(blocked.status=='blocked' and blocked.payload.blockers[1].kind=='uncertain' and #blocked.payload.participants==2 and blocked.payload.blockers_omitted==0
+  and f.p.equal(blocked_before,f.image()),'a blocked preview names the open work and the participants and writes nothing')
+ entry().body.status=saved_status
  local bound={challenge=cap.payload.challenge,dispatch_revision=clean.payload.dispatch_revision,spawn_boot=clean.spawn_boot}
  local stale=copy(bound);stale.dispatch_revision+=1
  check(ask('discard_session','attempt-2',stale).error.code=='changed','a changed dispatch revision requires another preview')
  local reboot=copy(bound);reboot.spawn_boot='old-boot'
  check(ask('discard_session','attempt-2',reboot).error.code=='changed','a preview from another SPAWN boot is refused')
- -- Observation bound to the preview: a result that changed (process now alive) between preview and commit is refused.
- local alive_proof=f.d.forget(request('discard_session','attempt-2',bound),f.binding,1,gone,function() return 'alive' end)
- check(alive_proof.status=='refused' and f.p.equal(before,f.image()),'a verification result that changed after the preview refuses the discard and changes nothing')
- local raced=ask('discard_session','attempt-2',bound,live)
- check(raced.error and raced.error.code=='blocked' and f.p.equal(before,f.image()),'execution that reappears before commit blocks it and changes nothing')
- local done=ask('discard_session','attempt-2',bound)
+ check(f.p.equal(before,f.image()) and f.saved['dispatch-v1'].sessions.session.forget==nil,'refused discards leave no fence')
+ -- Execution that appears between preview and commit: the durable fence lands first, the discard is refused, nothing else changes.
+ entry().body.status='claimed'
+ local raced=ask('discard_session','attempt-2',bound)
+ root=f.saved['dispatch-v1']
+ check(raced.error and raced.error.code=='blocked' and root.sessions.session~=nil and root.sessions.session.forget~=nil and root.sessions.session.forget.attempt_id=='attempt-2'
+  and #root.sessions.session.forget.journal==1 and (f.effects.forget_calls or 0)==0,'execution that appears before commit leaves the session fenced with its journal and no Authority change')
+ local fenced_admit=f.req('status','fenced-status',{target_request_id='launch',target_action_id=f.launch('launch').action_id})
+ local later=f.launch('later')
+ check(f.d.stage(later,f.binding,1,77).status=='rejected','a fenced session admits no new work')
+ -- Settlement may still be recorded: the claim settles, then forgetting resumes from the fence without a fresh preview.
+ entry().body.status=saved_status
+ local resume_cap=ask('discard_capability','attempt-3')
+ local fail_before=f.effects.retirements
+ f.effects.fail_forget=true
+ local interrupted=ask('discard_session','attempt-3',{challenge=resume_cap.payload.challenge,dispatch_revision=0,spawn_boot=resume_cap.spawn_boot})
+ root=f.saved['dispatch-v1']
+ check(interrupted.error and interrupted.error.code=='blocked' and root.sessions.session~=nil and root.sessions.session.forget~=nil and f.effects.forget_calls==1,'an Authority cleanup failure leaves the fence, the journal and the graph, and is resumable')
+ f.effects.fail_forget=nil
+ local done=ask('discard_session','attempt-3',{challenge=resume_cap.payload.challenge,dispatch_revision=0,spawn_boot=resume_cap.spawn_boot})
  root=f.saved['dispatch-v1']
  local left=0
  for _,e in pairs(root.requests) do if e.request.logical_session_id=='session' then left+=1 end end
  for _,w in pairs(root.workers) do if w.logical_session_id=='session' then left+=1 end end
  for _,g in pairs(root.mailboxes.generations) do if g.binding.logical_session_id=='session' then left+=1 end end
- check(done.status=='closed' and done.payload.admission_cursor==root.admission_cursor and root.sessions.session==nil and left==0,'dispatch-v1 holds no session, request, worker or mailbox generation of the forgotten session')
+ check(done.status=='closed' and done.payload.admission_cursor==root.admission_cursor and root.sessions.session==nil and left==0,'dispatch-v1 holds no session, request, worker, mailbox generation or journal of the forgotten session')
+ check(f.effects.forget_calls==2 and #f.effects.forget_journal==1 and f.effects.forget_journal[1].observer_id==entry_observer and f.effects.retirements==fail_before,'Authority removed exactly the journaled reservation, and never through retirement')
  check(f.p.equal(f.snapshot.records,roster) and f.effects.reserves==1,'the agent roster is untouched and no native effect ran')
  -- Lost completion: the graph is gone; an authenticated retry with a fresh capability is idempotent.
- check(ask('discard_session','attempt-2',bound).status=='closed','an exact retry of a lost completion answers closed again (design part 7)')
- local wrong=copy(bound);wrong.challenge='forget-ffffffffffffffff'
- check(ask('discard_session','attempt-2',wrong).error.code=='stale_challenge','a different challenge is never accepted for the retry')
+ check(ask('discard_session','attempt-3',{challenge=resume_cap.payload.challenge,dispatch_revision=0,spawn_boot=resume_cap.spawn_boot}).status=='closed','an exact retry of a lost completion answers closed again')
+ local wrong={challenge='forget-ffffffffffffffff',dispatch_revision=0,spawn_boot=resume_cap.spawn_boot}
+ check(ask('discard_session','attempt-3',wrong).error.code=='stale_challenge','a different challenge is never accepted for the retry')
  -- A SPAWN reload (new boot, no in-memory challenge or completion record) with the session already deleted.
  local reloaded=fixture(copy(f.saved))
  local ask2=function(op,attempt,extra)
-  local r=request(op,attempt,extra)
-  local body=reloaded.d.forget(r,reloaded.binding,1,gone,proc)
+  local body=reloaded.d.forget(request(op,attempt,extra),reloaded.binding,1)
   assert(f.c.encode_forget_response(body),runtime.json.encode(body):sub(1,200))
   return body
  end
  local fresh=ask2('discard_capability','attempt-9')
  check(fresh.status=='capable' and fresh.payload.absent==true,'after a reload an absent session is reported absent so recovery can skip the preview')
- local completes=ask2('discard_session','attempt-9',{challenge=fresh.payload.challenge,dispatch_revision=0,spawn_boot=fresh.spawn_boot})
- check(completes.status=='closed','a lost completion with a reload still completes: absent session, matching namespaces, admission within the watermark')
+ check(ask2('discard_session','attempt-9',{challenge=fresh.payload.challenge,dispatch_revision=0,spawn_boot=fresh.spawn_boot}).status=='closed','a lost completion with a reload still completes: absent session, matching namespaces, admission within the watermark')
  check(ask2('discard_preview','attempt-9',{challenge=fresh.payload.challenge}).error.code=='not_found','a preview of an absent session is not offered')
- local again=ask('discard_capability','attempt-3')
- check(again.status=='capable','an absent session whose admission existed can be re-authenticated')
- local retry=ask('discard_session','attempt-3',{challenge=again.payload.challenge,dispatch_revision=0,spawn_boot=again.spawn_boot})
- check(retry.status=='closed','an authenticated retry after SPAWN already deleted the graph returns idempotent completion')
  local never=request('discard_capability','attempt-4');never.admission_seq=99
- check(f.d.forget(never,f.binding,1,gone,proc).error.code=='not_found','an admission SPAWN never recorded is not completed')
- -- Proof-less panes: only a launch recorded under the current Tern host incarnation makes pane absence evidence.
+ check(f.d.forget(never,f.binding,1).error.code=='not_found','an admission SPAWN never recorded is not completed')
+ -- Another-shape Authority reservation is a blocker (cleanup would otherwise guess).
  local g=launched_fixture(true)
- local recorded=g.saved['dispatch-v1'].requests['session/launch'].launch_incarnation
- check(type(recorded)=='string' and #recorded>0,'the launch records the Tern host incarnation from now on')
- local function previewed(h,override,label)
-  local r1=request('discard_capability','pl-'..label)
-  r1.request_id='pl-cap-'..label
-  local c=h.d.forget(r1,h.binding,1,gone,nil,override)
-  local r2=request('discard_preview','pl-'..label,{challenge=c.payload.challenge})
-  return h.d.forget(r2,h.binding,1,gone,nil,override)
- end
- check(previewed(g,nil,'same').status=='clean','same incarnation, launched pane gone: clean')
- local restarted=previewed(g,'linux:other-boot:1:2','restart')
- check(restarted.status=='blocked' and restarted.payload.blockers[1].kind=='unobservable' and restarted.payload.blockers[1].pane==nil,'after a Tern restart the recorded launch reads as cannot be checked, never absent')
- local older=launched_fixture(true)
- older.saved['dispatch-v1'].requests['session/launch'].launch_incarnation=nil
- check(previewed(older,nil,'older').status=='blocked','a binding launched without a recorded incarnation cannot be checked')
- local contradict=launched_fixture(true)
- local r=request('discard_capability','pl-live');local c=contradict.d.forget(r,contradict.binding,1,gone,nil)
- local p=contradict.d.forget(request('discard_preview','pl-live',{challenge=c.payload.challenge}),contradict.binding,1,live,nil)
- check(p.status=='blocked' and p.payload.blockers[1].kind=='pane','the host\'s live pane list contradicting a recorded launch blocks')
- -- The PRODUCTION observer (no injected pane flag): the host pane list AND the live agent list for the retained identity.
- local function production(rows,configure)
-  local h=launched_fixture(true)
-  h.runtime.pane={list=function() if rows==false then error('pane list unavailable') end return rows end}
-  if configure then configure(h) end
-  local c=h.d.forget(request('discard_capability','prod'),h.binding,1,nil,nil)
-  return h.d.forget(request('discard_preview','prod',{challenge=c.payload.challenge}),h.binding,1,nil,nil)
- end
- local agent_still_listed=production({{pane=70,program='/usr/bin/omp',cwd='/work'}})
- check(agent_still_listed.status=='blocked' and agent_still_listed.payload.blockers[1].kind=='unobservable' and agent_still_listed.payload.blockers[1].pane==nil,
-  'the retained pane is missing from the pane list but its agent is still listed: blocks as cannot be checked, with no close-this-pane instruction')
- check(production({{pane=71,program='bash',cwd='/work'},{pane=72,program='omp',cwd='/elsewhere'}}).status=='clean','pane and agent both gone (other programs and other directories do not match): clean')
- local unreadable_agents=production({},function(h) h.authority.setup_snapshot=function() error('agent identity unavailable') end end)
- check(unreadable_agents.status=='blocked' and unreadable_agents.payload.blockers[1].kind=='unobservable','an agent list that cannot be matched to the retained identity is cannot be checked')
- check(production(false).status=='blocked','an unreadable pane list is cannot be checked')
- -- Round 6: unresolved candidates, evidence-only matches, and compaction.
- local nil_cwd=production({{pane=70,program='omp'}})
- check(nil_cwd.status=='blocked' and nil_cwd.payload.blockers[1].kind=='unobservable','a matching program with an unreadable cwd is cannot be checked, never absent')
- local nil_program=production({{pane=71,cwd='/work'}})
- check(nil_program.status=='blocked' and nil_program.payload.blockers[1].kind=='unobservable','a pane whose program cannot be read is an unresolved candidate')
- local compacted=launched_fixture(true)
- do
-  local State=compacted.load('dispatch_state')
-  local root=compacted.saved['dispatch-v1']
-  local entry=root.requests['session/launch']
-  State.preserve_worker(root,entry);root.requests['session/launch']=nil
-  check(root.workers['session/launch'].cwd=='/work' and root.workers['session/launch'].launch_incarnation~=nil,'worker compaction preserves the launch cwd and incarnation')
- end
- local function preview_of(h,rows)
-  h.runtime.pane={list=function() return rows end}
-  local c=h.d.forget(request('discard_capability','cmp'),h.binding,1,nil,nil)
-  return h.d.forget(request('discard_preview','cmp',{challenge=c.payload.challenge}),h.binding,1,nil,nil)
- end
- check(preview_of(compacted,{}).status=='clean','after compaction a gone pane with no live agent is clean (the cwd survived)')
- local old_compacted=launched_fixture(true)
- do
-  local State=old_compacted.load('dispatch_state')
-  local root=old_compacted.saved['dispatch-v1']
-  State.preserve_worker(root,root.requests['session/launch']);root.requests['session/launch']=nil
-  root.workers['session/launch'].cwd=nil
- end
- local older=preview_of(old_compacted,{})
- check(older.status=='blocked' and older.payload.blockers[1].kind=='unobservable','an older compacted worker without a recorded cwd stays cannot be checked')
- check(preview_of(compacted,{{pane=70,program='omp',cwd='/work'}}).payload.blockers[1].kind=='unobservable','a command/cwd match after compaction is evidence only')
+ g.effects.forget_conflicts=1
+ local gr=function(op,attempt,extra) local r=request(op,attempt,extra);return g.d.forget(r,g.binding,1) end
+ local gc=gr('discard_capability','conflict')
+ local gp=gr('discard_preview','conflict',{challenge=gc.payload.challenge})
+ check(gp.status=='blocked' and gp.payload.blockers[1].kind=='unobservable','a reservation Authority holds in another shape blocks')
+ -- A reload clears nothing: a restored session with a persisted fence keeps refusing new work.
+ local fenced=launched_fixture(true)
+ fenced.saved['dispatch-v1'].sessions.session.forget={attempt_id='old',journal={}}
+ local reloaded_fence=fixture(copy(fenced.saved))
+ check(reloaded_fence.d.stage(reloaded_fence.launch('after-reload'),reloaded_fence.binding,1,77).status=='rejected','the fence survives a SPAWN reload')
 end
 -- The actual relay carries the dedicated forget operations on their own protocol, bound to the bound source's identity.
 sections.forget_relay=function()
@@ -2571,7 +2531,7 @@ sections.forget_relay=function()
  relay.poll()
  local o=f.origin
  local function request(op,extra)
-  local r={schema=1,origin='orchplus',op=op,request_id='relay-'..op,attempt_id='relay-attempt',authority_namespace='orch-authority',spawn_namespace='spawn-authority',
+  local r={schema=1,origin='orchplus',op=op,work='spawn-work-v1',request_id='relay-'..op,attempt_id='relay-attempt',authority_namespace='orch-authority',spawn_namespace='spawn-authority',
    logical_session_id='session',admission_seq=1,controller_pane='12',
    owner={owner_id=o.owner_id,owner_generation=o.owner_generation,host_pane_id=o.host_pane_id,alias_nonce=o.alias_nonce,window_key=o.window_key,native_session_id=o.native_session_id,window_host_id=o.window_host_id}}
   for k,v in pairs(extra or {}) do r[k]=v end
