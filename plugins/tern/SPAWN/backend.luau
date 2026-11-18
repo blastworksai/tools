@@ -251,7 +251,7 @@ function Backend.build(record: any, host: any, options: any?): (any?, string?)
 	end
 	local capabilities = {}
 	if record.backend ~= "native-agent" then
-		local slot = record.task_argument_index
+		local slot = resolved.task_argument_index or record.task_argument_index
 		if slot == nil or slot > #resolved.arguments + 1 then return nil, "Terminal prompt requires a configured argv-v1 insertion slot" end
 		table.insert(resolved.arguments, slot, prompt)
 		table.insert(capabilities, "argv-v1")

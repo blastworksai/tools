@@ -16,7 +16,7 @@ local RECORD_FIELDS = {
 	{ "fresh_executable", "Fresh executable" }, { "fresh_arguments", "Fresh arguments" },
 	{ "fresh_native_default", "Fresh native default" }, { "task_argument_index", "Task argument index" },
 	{ "host_shell", "Host shell" }, { "target_os", "Target OS" }, { "target_shell", "Target shell" },
-	{ "argv_contract", "Argument contract" }, { "model", "Model" }, { "profile", "Profile" },
+	{ "argv_contract", "Argument contract" }, { "model", "Model" }, { "effort", "Effort" }, { "profile", "Profile" },
 	{ "variant_id", "Variant ID" }, { "capacity_binding", "Capacity binding" },
 	{ "capacity_limit", "Capacity limit" }, { "selector_evidence", "Selector evidence" },
 }
@@ -122,7 +122,7 @@ function Review.automatic_plan(records: any, paid_checks: any): any
 			end
 			if record.backend == "native-agent" then
 				local label = tostring(record.provider) .. " — " .. tostring(record.account_label)
-					.. " (model: " .. tostring(record.model or "saved CLI settings/default") .. ")"
+					.. " (model: " .. tostring(record.model or "saved CLI settings/default") .. (if record.effort then "; effort: " .. record.effort else "") .. ")"
 				if scope[record.id] == true then
 					table.insert(native, label)
 					table.insert(prepare_ids, record.id)

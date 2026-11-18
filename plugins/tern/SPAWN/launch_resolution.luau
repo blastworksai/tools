@@ -2,23 +2,13 @@
 -- Ordinary resume and managed fresh contracts are explicit; prompts and quoting
 -- belong to their executors. Select the local user after inserting any prompt.
 local Config = require("./config")
+local Selectors = require("./selectors")
 local Resolution = {}
 local function nonblank(value: any): boolean
 	return type(value) == "string" and value:find("%S") ~= nil
 end
 local function text(value: any, limit: number): boolean
 	return type(value) == "string" and #value <= limit and not value:find("%z") and utf8.len(value) ~= nil
-end
-local function command_words(command: string, shell: string): ({string}?, string?)
-	-- Windows paths are literal; POSIX command parsing would eat backslashes.
-	-- Ordinary SSH still targets the released POSIX shell contract.
-	if shell == "powershell" and command:find("\\", 1, true) then
-		local path = command:match('^"(.*)"$') or command:match("^'(.*)'$") or command
-		local lower = path:lower()
-		if lower:match("%.exe$") or lower:match("%.cmd$") or lower:match("%.bat$") or lower:match("%.ps1$") then return { path }, nil end
-		return nil, "Use an exact Windows executable path and put its arguments in Arguments"
-	end
-	return Config.parse_arguments(command)
 end
 -- Setup has no ordinary record or argv reinterpretation. Native agents:start
 -- consumes the effective Tern command verbatim and owns prompt delivery.
@@ -36,28 +26,62 @@ function Resolution.setup_default(command: any, cwd: any, host_os: any): (any?, 
 end
 function Resolution.fresh_available(record: any): boolean
 	if record.fresh_native_default == true then
-		return record.backend == "native-agent" and string.lower(record.provider) == "omp" and record.model == nil and record.profile == nil
+		return record.backend == "native-agent" and string.lower(record.provider) == "omp" and record.profile == nil
 	end
 	return record.fresh_executable ~= nil and record.fresh_arguments ~= nil
+end
+-- Model and effort flags come from the record's fields through one capability table.
+-- A record with neither field keeps its argv exactly. The flags go at the task slot (or the
+-- end), after any sudo wrapper, and move the slot so the task text still lands where it was set.
+local function derive(record: any, executable: string, argv: { string }, slot: number?): ({ string }, number?, string?)
+	if not Config.selectors_active(record) then return argv, slot, nil end
+	-- The CLI is the program this launch actually runs (a literal sudo is unwrapped), never the label.
+	local program, first = Config.program_of(executable, argv)
+	local key = Selectors.program_key(program)
+	-- A requested model or effort is never dropped silently: an unknown program refuses.
+	if key == nil then return argv, slot, "Model and effort need a known CLI (claude, codex, kimi, grok, agy, muse or omp). This launch runs " .. tostring(program or executable) .. "; clear model and effort, or run a known CLI." end
+	-- A flag the saved arguments already carry in the program's option region wins: never a second copy.
+	local region = Selectors.region(argv, first)
+	local model = if record.model_selector == true then record.model else nil
+	local effort = record.effort
+	if model ~= nil and Selectors.duplicate(key, region, model, nil) then model = nil end
+	if effort ~= nil and Selectors.duplicate(key, region, nil, effort) then effort = nil end
+	local flags = Selectors.flags(key, model, effort)
+	if #flags == 0 then return argv, slot, nil end
+	local applied, moved = Selectors.apply(argv, flags, slot, first)
+	return applied, moved, nil
+end
+-- Fresh terminal argv with the derived flags and the matching task slot, for callers that
+-- insert the task themselves and compare what actually started.
+function Resolution.fresh_argv(record: any): ({ string }, number?)
+	local argv, slot = derive(record, record.fresh_executable or "", table.clone(record.fresh_arguments or {}), if record.backend == "native-agent" then nil else record.task_argument_index)
+	return argv, slot
 end
 function Resolution.resolve(source: any, mode: string, shell: string): (any?, string?)
 	if mode ~= "ordinary" and mode ~= "fresh" then return nil, "Choose ordinary or fresh launch resolution explicitly" end
 	local record, err = Config.validate_record(source)
 	if record == nil then return nil, err end
 	if record.review_required then return nil, record.review_reason end
-	local executable, argv
+	local executable, argv, slot
 	if mode == "fresh" then
 		if not Resolution.fresh_available(record) then return nil, "No explicit fresh executable/argv contract for this record" end
 		if record.fresh_native_default then executable, argv = "omp", {} else executable, argv = record.fresh_executable, table.clone(record.fresh_arguments) end
+		if record.backend ~= "native-agent" then slot = record.task_argument_index end
+		local derive_error
+		argv, slot, derive_error = derive(record, executable, argv, slot)
+		if derive_error ~= nil then return nil, derive_error end
 	else
 		if not nonblank(record.command) then return nil, "Review this account's launch command" end
-		local words, parse_error = command_words(record.command, if record.backend == "ssh-command" then "posix" else shell)
+		local words, parse_error = Config.command_words(record.command, if record.backend == "ssh-command" then "posix" else shell)
 		if words == nil or #words == 0 then return nil, parse_error or "Command is empty" end
 		executable = table.remove(words, 1)
 		argv = words
 		for _, argument in ipairs(record.arguments) do table.insert(argv, argument) end
+		local derive_error
+		argv, _, derive_error = derive(record, executable, argv, nil)
+		if derive_error ~= nil then return nil, derive_error end
 	end
-	return { record = record, executable = executable, arguments = argv }, nil
+	return { record = record, executable = executable, arguments = argv, task_argument_index = slot }, nil
 end
 -- A bare `sudo -u account -- cli` reads none of the account's login files, so PATH additions such as
 -- ~/.local/bin, /usr/local/bin and tokens exported in ~/.profile are missing. The launch therefore takes the road

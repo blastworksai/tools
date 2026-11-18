@@ -373,6 +373,11 @@ same(diagnostic.expected_arguments[2],"selected/model","diagnostic keeps explici
 same(diagnostic.expected_arguments[4],"selected-profile","diagnostic keeps explicitly selected profile")
 same(#diagnostic.expected_arguments,#routeRecord.fresh_arguments+2,"only owned diagnostic session storage is added; no tool/rule/model/time flags are injected")
 for index,word in ipairs(routeRecord.fresh_arguments) do same(diagnostic.expected_arguments[index],word,"every selected CLI argument is preserved verbatim") end
+do -- a chosen thinking level is part of the argv the diagnostic expects the started process to carry
+ local chosen=table.clone(routeRecord);chosen.fresh_arguments={"--keep"};chosen.effort="high";chosen.command="omp"
+ local expectedRoute=assert(Setup.route(chosen,routeProbe,host,7,"","effort-consent"))
+ same(table.concat(expectedRoute.expected_arguments,"|"),"--keep|--session-dir|/fixture/mail/effort-consent-native|--thinking=high","diagnostic expects the derived flag after owned session storage: "..table.concat(expectedRoute.expected_arguments,"|"))
+end
 local secondDiagnostic=assert(Setup.route(routeRecord,routeProbe,host,7,"","another-consent"))
 check(diagnostic.expected_arguments[#diagnostic.expected_arguments]~=secondDiagnostic.expected_arguments[#secondDiagnostic.expected_arguments],"separate consents never share diagnostic session storage")
 same(routeRecord.fresh_arguments[#routeRecord.fresh_arguments],"selected-profile","diagnostic controls never rewrite saved argv")
@@ -489,7 +494,7 @@ do
   as_user=Prereq.as_user,
   probe=function(canonical,_,done)prepared=canonical;done({passed=true})end,
  }
- local dependencies={["./config"]=Config,["./wire/codec"]=load("wire/codec"),["./backend"]=wrappedBackend,["./prereq"]=fixturePrereq,["./mailbox_adapter"]=Adapter,["./native_cli"]=Native,["./terminal_identity"]=load("terminal_identity")}
+ local dependencies={["./config"]=Config,["./wire/codec"]=load("wire/codec"),["./backend"]=wrappedBackend,["./launch_resolution"]=Resolution,["./prereq"]=fixturePrereq,["./mailbox_adapter"]=Adapter,["./native_cli"]=Native,["./terminal_identity"]=load("terminal_identity")}
  local function isolated(name)
   local chunk=assert(loadstring(runtime.fs.read(root.."/"..name..".luau"),name))
   setfenv(chunk,setmetatable({tern=fake,require=function(dependency)return assert(dependencies[dependency])end},{__index=environment}))
@@ -593,4 +598,202 @@ do
  prerequisite.account("-invalid","native","/work",function(account,why)check(account==nil and why~=nil,"invalid OS user refuses")end)
  check(#calls==0,"invalid OS user cannot reach a process")
 end
+-- Model and effort selectors: flags are derived from the record's fields (backlog 1).
+do
+ local function argv_of(fields,mode) local r=assert(Resolution.resolve(record(fields),mode or "ordinary","posix"));return table.concat(r.arguments,"|") end
+ local function fresh_of(fields) fields.command=fields.command or fields.provider;local r=assert(Resolution.resolve(managed(fields),"fresh","posix"));return table.concat(r.arguments,"|"),r.task_argument_index end
+ -- records without the fields keep their argv byte for byte
+ for _,provider in ipairs({"claude","codex","kimi","grok","agy","muse","omp"}) do
+  same(argv_of({provider=provider,command=provider,arguments={"--keep","x y"}}),"--keep|x y","no model or effort adds no flag for "..provider)
+ end
+ same(fresh_of({provider="claude",fresh_executable="claude",fresh_arguments={"--keep"},task_argument_index=2}),"--keep","fresh argv unchanged without fields")
+ -- per-CLI argv with model and effort
+ same(argv_of({provider="claude",command="claude",model_selector=true,model="claude-opus-5-5",effort="high"}),"--model|claude-opus-5-5|--effort|high","claude model and effort")
+ same(argv_of({provider="claude",command="claude",model_selector=true,model="claude-opus-5-5"}),"--model|claude-opus-5-5","claude model only")
+ same(argv_of({provider="claude",command="claude",effort="max"}),"--effort|max","claude effort only")
+ same(argv_of({provider="codex",command="codex",model_selector=true,model="gpt-5.6-sol"}),"-m|gpt-5.6-sol","codex model flag")
+ same(argv_of({provider="kimi",command="kimi",model_selector=true,model="kimi-k3"}),"-m|kimi-k3","kimi model flag")
+ same(argv_of({provider="grok",command="grok",model_selector=true,model="grok-4.6"}),"-m|grok-4.6","grok model flag")
+ same(argv_of({provider="agy",command="agy",model_selector=true,model="m1",effort="xhigh"}),"--model|m1|--effort|xhigh","agy model and effort")
+ same(argv_of({provider="muse",command="muse",model_selector=true,model="m2",effort="ultra"}),"--model|m2|--reasoning-effort|ultra","muse model and effort")
+ same(argv_of({provider="omp",command="omp",model_selector=true,model="anthropic/claude-sonnet-5-5",effort="medium"}),"--model=anthropic/claude-sonnet-5-5|--thinking=medium","omp joined model and thinking")
+ same(argv_of({provider="Antigravity",command="agy",model_selector=true,model="m1"}),"--model|m1","provider alias antigravity maps to agy")
+ same(argv_of({provider="Claude Work",command="claude",model_selector=true,model="m"}),"--model|m","provider label falls back to the executable name")
+ -- existing arguments stay exactly, flags are added after them; the task slot moves with them
+ same(argv_of({provider="claude",command="claude",arguments={"--keep"},model_selector=true,model="m"}),"--keep|--model|m","existing args kept, flags appended")
+ local a,slot=fresh_of({provider="claude",fresh_executable="claude",fresh_arguments={"--keep"},task_argument_index=2,model_selector=true,model="m",effort="low"})
+ same(a,"--model|m|--effort|low|--keep","fresh flags go before the option that owns the task slot");same(slot,6,"task slot moves past the derived flags")
+ local launch=assert(Backend.build(managed({provider="claude",command="claude",fresh_executable="claude",fresh_arguments={"--keep"},task_argument_index=2,model_selector=true,model="m"}),host,options()))
+ same(launch.command,"'claude' '--model' 'm' '--keep' "..Backend.posix_quote(task),"managed terminal keeps the task right after its option")
+ a,slot=fresh_of({provider="claude",fresh_executable="claude",fresh_arguments={"--keep","--"},task_argument_index=3,model_selector=true,model="m"})
+ same(a,"--keep|--model|m|--","derived flags stay before a -- separator");same(slot,5,"task slot still follows the --")
+ a,slot=fresh_of({provider="claude",fresh_executable="sudo",fresh_arguments={"-u","other","--","claude","--keep"},task_argument_index=6,model_selector=true,model="m"})
+ same(a,"-u|other|--|claude|--model|m|--keep","sudo wrapper keeps its own -- and flags go in the program region")
+ -- a named task option keeps its value adjacent (review finding P2)
+ a,slot=fresh_of({provider="kimi",fresh_executable="kimi",fresh_arguments={"--prompt"},task_argument_index=2,model_selector=true,model="kimi-k3"})
+ same(a,"-m|kimi-k3|--prompt","kimi --prompt stays adjacent to its task");same(slot,4,"task slot follows --prompt")
+ same(table.concat(assert(Resolution.resolve(managed({provider="kimi",command="kimi",fresh_executable="kimi",fresh_arguments={"--prompt"},task_argument_index=2,model_selector=true,model="kimi-k3"}),"fresh","posix")).arguments,"|"),"-m|kimi-k3|--prompt","resolve agrees")
+ same(assert(Backend.build(managed({provider="kimi",command="kimi",fresh_executable="kimi",fresh_arguments={"--prompt"},task_argument_index=2,model_selector=true,model="kimi-k3"}),host,options())).command,"'kimi' '-m' 'kimi-k3' '--prompt' "..Backend.posix_quote(task),"built command keeps --prompt TASK")
+ a,slot=fresh_of({provider="claude",fresh_executable="claude",fresh_arguments={"-p"},task_argument_index=2,model_selector=true,model="m",effort="low"})
+ same(a,"--model|m|--effort|low|-p","short -p stays adjacent to its task");same(slot,6,"task slot follows -p")
+ a,slot=fresh_of({provider="claude",fresh_executable="claude",fresh_arguments={"exec"},task_argument_index=2,model_selector=true,model="m"})
+ same(a,"exec|--model|m","positional task: flags stay at the slot, after the subcommand");same(slot,4,"positional slot moves")
+ -- native OMP fresh default may now carry model and effort, and nothing else changes
+ local native_chosen=record({provider="omp",backend="native-agent",command="omp --resume old",fresh_native_default=true,model_selector=true,model="anthropic/claude-sonnet-5-5",effort="high"})
+ check(Resolution.fresh_available(native_chosen),"native default allows model and effort")
+ same(assert(Backend.build(native_chosen,host,options())).command,"'omp' '--model=anthropic/claude-sonnet-5-5' '--thinking=high'","native fresh launch carries only the two derived flags")
+ same(assert(Backend.build(record({provider="omp",backend="native-agent",command="omp",fresh_native_default=true}),host,options())).command,"'omp'","native default without fields stays bare omp")
+ native_chosen.profile="other"
+ check(Backend.build(native_chosen,host,options())==nil,"native default still refuses a profile")
+ -- ordinary resume of a chosen record gets the flags too
+ same(Executor.render(record({provider="claude",command="claude",arguments={"--resume"},model_selector=true,model="m"}),"/bin/bash","linux"),"SPAWN_PROVIDER=claude claude --resume --model m","ordinary render carries the derived flags")
+ -- validation refusals
+ check(Config.validate_record(record({provider="claude",command="claude",effort="ultra"}))==nil,"effort outside the CLI's list is refused")
+ check(Config.validate_record(record({provider="codex",command="codex",effort="high"}))==nil,"effort on a CLI with no verified effort flag is refused")
+ check(Config.validate_record(record({provider="custom",command="worker",effort="high"}))==nil,"effort on an unknown CLI is refused")
+ check(Config.validate_record(record({provider="claude",command="claude",effort=""}))==nil,"empty effort is refused")
+ check(Config.validate_record(record({provider="claude",command="claude",effort="max"}))~=nil,"valid effort is accepted")
+ for _,bad in ipairs({"-x","a\nb","a\0b",string.rep("m",201)," "}) do
+  local why=Config.selector_error(record({provider="claude",command="claude",model_selector=true,model=bad}))
+  check(why~=nil,"model id refused: "..string.format("%q",bad):sub(1,24))
+  check(Resolution.resolve(record({provider="claude",command="claude",model_selector=true,model=bad}),"ordinary","posix")==nil,"launch refuses an invalid model id")
+ end
+ check(Config.selector_error(record({provider="claude",command="claude",model_selector=true,model="claude-opus-5-5"}))==nil,"exact model id is accepted")
+ -- round 7: Windows shims (.cmd .bat .ps1, any case) name the same CLI as the bare program
+ for _,case in ipairs({{"codex","codex.cmd","-m|gpt-new"},{"claude","claude.bat","--model|gpt-new"},{"kimi","kimi.ps1","-m|gpt-new"},{"codex","CODEX.CMD","-m|gpt-new"},{"claude","Claude.Bat","--model|gpt-new"},{"kimi","KIMI.PS1","-m|gpt-new"},{"grok","grok.exe","-m|gpt-new"},{"omp","omp.cmd","--model=gpt-new"}}) do
+  local fields={provider=case[1],command=case[2],arguments={"--keep"},model_selector=true,model="gpt-new"}
+  same(argv_of(fields),"--keep|"..case[3],"ordinary shim launch gets flags: "..case[2])
+  check(Config.selector_error(record(fields))==nil,"shim command is a known CLI: "..case[2])
+  check(Config.record_cli(record(fields))==case[1],"record_cli identifies "..case[2])
+  local fresh=table.clone(fields);fresh.fresh_executable=case[2];fresh.fresh_arguments={"--keep"};fresh.task_argument_index=2;fresh.arguments=nil
+  same(fresh_of(fresh),case[3].."|--keep","fresh shim launch gets flags: "..case[2])
+  local plain=record({provider=case[1],command=case[2],arguments={"--keep","x y"}})
+  same(table.concat(assert(Resolution.resolve(plain,"ordinary","posix")).arguments,"|"),"--keep|x y","selector-free shim record unchanged: "..case[2])
+ end
+ check(Config.selector_error(record({provider="codex",command="codex.cmd.txt",model_selector=true,model="m"}))~=nil,"a non-launcher suffix is still an unknown CLI")
+ -- round 7: a model id carries no character cmd.exe or PowerShell acts on, for every CLI and shim
+ for _,bad in ipairs({"m&calc","m|x","m<x","m>x","m^x","m%PATH%","m!x","m\"x","m'x","m`x","m$x","m(x)","m;x","m,x","m x"}) do
+  for _,command in ipairs({"codex.cmd","claude.bat","kimi.ps1","codex"}) do
+   local fields={provider=command:match("^[a-z]+"),command=command,model_selector=true,model=bad}
+   check(Config.selector_error(record(fields))~=nil,"model id refused at edit/import: "..bad.." on "..command)
+   check(Config.validate_record(record(fields))==nil,"model id refused by validate_record: "..bad.." on "..command)
+   check(Resolution.resolve(record(fields),"ordinary","posix")==nil,"model id refused at launch: "..bad.." on "..command)
+  end
+ end
+ for _,good in ipairs({"claude-sonnet-5-5","gpt-5.6-sol","meta/muse-glimmer","kimi-k3","anthropic/claude-sonnet-5-5","opus[1m]","gpt-5:high","name@v1","a+b_c"}) do
+  check(Config.selector_error(record({provider="claude",command="claude.cmd",model_selector=true,model=good}))==nil,"real model id shape accepted: "..good)
+ end
+ -- no double flags
+ for _,case in ipairs({{"claude",{"--model","x"},"m",nil},{"claude",{"--model=x"},"m",nil},{"claude",{"--effort","low"},nil,"high"},{"codex",{"-m","x"},"m",nil},{"codex",{"--model=x"},"m",nil},{"omp",{"--thinking=low"},nil,"high"},{"omp",{"--model","x"},"m",nil},{"muse",{"--effort","low"},nil,"low"}}) do
+  local fields={provider=case[1],command=case[1],arguments=case[2],model_selector=case[3]~=nil or nil,model=case[3],effort=case[4]}
+  local why=Config.selector_error(record(fields))
+  check(why~=nil and why:find("Remove one",1,true),"setup and editor refuse a duplicate hand-typed flag: "..case[2][1])
+  same(argv_of(fields),table.concat(case[2],"|"),"launch never doubles a typed flag, the typed one wins: "..case[2][1])
+  fields.fresh_executable=case[1];fields.fresh_arguments=case[2];fields.arguments={};fields.task_argument_index=#case[2]+1
+  same(fresh_of(fields),table.concat(case[2],"|"),"fresh launch never doubles a typed flag: "..case[2][1])
+ end
+ -- attached short form -mVALUE is a duplicate too, on every CLI with a short flag; long flags stay exact
+ for _,cli in ipairs({"codex","kimi","grok"}) do
+  local fields={provider=cli,command=cli,arguments={"-mgpt-old"},model_selector=true,model="gpt-new"}
+  local why=Config.selector_error(record(fields))
+  check(why~=nil and why:find("Remove one",1,true),"attached -mVALUE refused as a duplicate: "..cli)
+  same(argv_of(fields),"-mgpt-old","launch never doubles an attached -mVALUE: "..cli)
+  fields.fresh_executable=cli;fields.fresh_arguments={"-mgpt-old"};fields.arguments={};fields.task_argument_index=2
+  same(fresh_of(fields),"-mgpt-old","fresh launch never doubles an attached -mVALUE: "..cli)
+  check(Config.selector_error(record({provider=cli,command=cli,arguments={"--modelx"},model_selector=true,model="m"}))==nil,"--modelx is not a duplicate: "..cli)
+  check(Config.selector_error(record({provider=cli,command=cli,arguments={"-m"..cli}}))==nil,"attached form alone stays valid without the fields: "..cli)
+ end
+ check(Config.selector_error(record({provider="claude",command="claude",arguments={"--model","x"}}))==nil,"hand-typed flag alone stays valid without the fields")
+ check(Config.selector_error(record({provider="claude",command="claude",arguments={"--model","x"},effort="low"}))==nil,"a typed model flag does not clash with a chosen effort")
+ same(argv_of({provider="custom",command="worker",model="display text",arguments={"--a"}}),"--a","unknown CLI never gets flags; stored display model keeps loading")
+ -- finding 1: a pre-0.7 model is display text; only an explicit model_selector turns it into a flag
+ for _,label in ipairs({"Claude Opus 4.7",string.rep("L",3000),"-weird label"}) do
+  same(argv_of({provider="claude",command="claude",arguments={"--keep"},model=label}),"--keep","legacy model label stays display-only, argv unchanged")
+  local legacy=assert(Resolution.resolve(record({provider="claude",command="claude",model=label}),"ordinary","posix"))
+  same(#legacy.arguments,0,"legacy label of "..#label.." bytes still loads and launches")
+ end
+ same(fresh_of({provider="claude",fresh_executable="claude",fresh_arguments={"--keep"},task_argument_index=2,model="Claude Opus 4.7"}),"--keep","legacy label adds no fresh flag")
+ check(Config.validate_record(record({provider="claude",command="claude",model="m",model_selector=false}))==nil,"model_selector must be true or absent")
+ check(Config.validate_record(record({provider="claude",command="claude",model_selector=true}))==nil,"model_selector needs a model")
+ check(Config.validate_record(record({provider="claude",command="claude",model_selector=true,model="m"}))~=nil,"explicit selector is accepted")
+ -- finding 2: the CLI is the program this launch runs, not the label
+ check(Config.validate_record(record({provider="claude",command="/usr/bin/codex",effort="high"}))==nil,"effort for a claude label on a codex program is refused")
+ check(Config.validate_record(record({provider="claude",command="/usr/bin/codex",model_selector=true,model="m"}))==nil,"provider and executable naming different CLIs are refused")
+ check(Config.validate_record(record({provider="muse",command="muse",fresh_executable="codex",fresh_arguments={},task_argument_index=1,model_selector=true,model="m"}))==nil,"fresh and ordinary naming different CLIs are refused")
+ check(Config.validate_record(record({provider="x",command="codex",fresh_executable="muse",fresh_arguments={},task_argument_index=1,model_selector=true,model="m"}))==nil,"fresh Muse with ordinary Codex is refused")
+ local unknown_why=Config.selector_identity_error(record({provider="custom",command="worker",model_selector=true,model="m"}))
+ check(unknown_why~=nil and unknown_why:find("known CLI",1,true),"an unknown program refuses model and effort with a clear message")
+ same(argv_of({provider="Work account",command="sudo",arguments={"-n","-u","other","--","/opt/bin/claude","--keep"},model_selector=true,model="m",effort="low"}),"-n|-u|other|--|/opt/bin/claude|--keep|--model|m|--effort|low","descriptive provider with sudo -- /path/claude gets claude flags after the program")
+ same(argv_of({provider="Work",command="/usr/bin/codex",arguments={},model_selector=true,model="m"}),"-m|m","the executable decides, so codex gets -m")
+ -- finding 3: only the program's option region counts as typed flags
+ same(argv_of({provider="claude",command="claude",arguments={"--","--model"},model_selector=true,model="sonnet"}),"--model|sonnet|--|--model","text after -- is positional: the flag is still added, before the --")
+ check(Config.selector_error(record({provider="claude",command="claude",arguments={"--","--model"},model_selector=true,model="sonnet"}))==nil,"positional --model after -- is not a duplicate")
+ check(Config.selector_error(record({provider="claude",command="claude",arguments={"--model","a","--"},model_selector=true,model="sonnet"}))~=nil,"a typed flag before -- is a duplicate")
+ -- finding 4: an existing conflict is preserved only while the launch contract is unchanged
+ local held=record({provider="claude",command="claude",arguments={"--model","opus"},model_selector=true,model="sonnet"})
+ check(Config.selector_error(held)~=nil,"conflict is refused when new")
+ local same_contract=table.clone(held);same_contract.cwd="/elsewhere"
+ check(Config.selector_error(same_contract,held)==nil,"unchanged contract keeps an existing conflict")
+ local changed_args=table.clone(held);changed_args.arguments={"--model","other"}
+ check(Config.selector_error(changed_args,held)~=nil,"changing the typed flag's value is a changed contract and is refused")
+ local changed_effort=table.clone(held);changed_effort.effort="high";changed_effort.arguments={"--model","opus","--effort","low"}
+ check(Config.selector_error(changed_effort,held)~=nil,"adding an effort that clashes is refused")
+ local changed_model=table.clone(held);changed_model.model="haiku"
+ check(Config.selector_error(changed_model,held)~=nil,"changing the selector is a changed contract")
+
+ -- one command reading for validation and launch
+ check(Config.selector_error(record({provider="claude",command="C:\\Tools\\claude.exe",model_selector=true,model="sonnet"}))~=nil,"a Windows path with a backslash cannot carry selectors (readings differ)")
+ check(Config.record_cli(record({provider="claude",command="C:\\Tools\\claude.exe"}))=="claude","record_cli reads the Windows path literally")
+ check(Config.selector_error(record({provider="claude",command="C:\\Tools\\claude.exe",arguments={"--model","a"},model_selector=true,model="sonnet"}))~=nil,"a Windows path launch still refuses a duplicate flag")
+ -- login sudo passes the command through a second shell
+ for _,flag in ipairs({"-i","-s"}) do
+  local why=Config.selector_error(record({provider="claude",command="sudo",arguments={flag,"-u","other","--","claude"},model_selector=true,model="sonnet"}))
+  check(why~=nil and why:find("sudo -i or -s",1,true)~=nil,"selectors are refused on sudo "..flag..": "..tostring(why))
+  check(Config.selector_error(record({provider="claude",command="sudo",arguments={flag,"-u","other","--","claude"}}))==nil,"sudo "..flag.." without selectors stays valid")
+ end
+ check(Config.selector_error(record({provider="claude",command="sudo",arguments={"-u","other","--","claude"},model_selector=true,model="sonnet"}))==nil,"plain sudo keeps selectors (SPAWN quotes it)")
+ -- round 3: a command that reads two ways (Windows path vs POSIX words) is refused, never validated under one reading
+ local sudo_i=record({provider="claude",command="sudo -i -u other -- claude --add-dir /tmp/work\\ dir/claude.exe",model_selector=true,model="sonnet"})
+ local two_ways=Config.selector_error(sudo_i)
+ check(two_ways~=nil and two_ways:find("read two ways",1,true)~=nil,"sudo -i hidden behind a backslash path is refused as ambiguous: "..tostring(two_ways))
+ check(Config.validate_record(sudo_i)==nil,"validate_record refuses the ambiguous sudo -i command")
+ check(Executor.render(sudo_i,"/bin/bash","linux")==nil,"ordinary launch rendering refuses the ambiguous sudo -i command")
+ local dup=record({provider="claude",command="claude --model opus --add-dir /tmp/work\\ dir/claude.exe",model_selector=true,model="sonnet"})
+ check(Config.selector_error(dup)~=nil,"typed --model behind a backslash path is not hidden from the duplicate scan")
+ check(Config.validate_record(dup)==nil,"validate_record refuses the ambiguous duplicate command")
+ check(Executor.render(dup,"/bin/bash","linux")==nil,"ordinary launch rendering refuses the ambiguous duplicate command")
+ check(Config.validate_record(record({provider="claude",command="claude --add-dir /tmp/work\\ dir/claude.exe"}))~=nil,"without selectors the same command still validates")
+ check(Config.validate_record(record({provider="claude",command="C:\\Tools\\claude.exe",model_selector=true,model="sonnet"}))==nil,"a bare Windows path is refused with selectors (intended 0.7.0 change)")
+ check(Config.validate_record(record({provider="claude",command="C:\\Tools\\claude.exe"}))~=nil,"a bare Windows path without selectors is unchanged")
+ local mismatch=record({provider="claude",command="/tmp/codex\\claude.exe",model_selector=true,model="sonnet",effort="high"})
+ local mismatch_why=Config.selector_error(mismatch)
+ check(mismatch_why~=nil and mismatch_why:find("read two ways",1,true)~=nil,"one-word backslash path with different readings is refused: "..tostring(mismatch_why))
+ check(Config.validate_record(mismatch)==nil,"validate_record refuses /tmp/codex\\claude.exe under selectors")
+ check(Executor.render(mismatch,"/bin/bash","linux")==nil,"Executor.render refuses /tmp/codex\\claude.exe under selectors")
+ -- launch time: selectors never silently dropped on an unknown CLI (a record that bypassed validation)
+ local unknown=record({provider="claude",command="/tmp/codexclaude.exe",model_selector=true,model="sonnet"})
+ local real_validate=Config.validate_record
+ Config.validate_record=function(source) return source end -- bypass validation to reach the launch-time guard
+ local resolved,resolve_why=Resolution.resolve(unknown,"ordinary","posix")
+ Config.validate_record=real_validate
+ check(resolved==nil and resolve_why~=nil,"launch resolution refuses selectors on an unknown CLI: "..tostring(resolve_why))
+
+end
+
+do -- records without model or effort behave as at 0.6.6: only .exe/.cmd/.bat are stripped for ACP and sudo detection
+	local function plain(fields) return Config.validate_record(record(fields)) end
+	local r1, w1 = plain({ command = "codex-acp.ps1" })
+	check(r1 ~= nil and r1.review_required ~= true and w1 == nil, "a selector-free codex-acp.ps1 stays an ordinary command, as at 0.6.6: " .. tostring(w1))
+	local r2, w2 = plain({ command = "codex-acp.cmd" })
+	check(r2 == nil and w2 ~= nil, "codex-acp.cmd is still detected as an ACP server")
+	local r3, w3 = plain({ command = "sudo.ps1", arguments = { "codex-acp" } })
+	check(r3 ~= nil and w3 == nil, "a selector-free sudo.ps1 is not a wrapper, as at 0.6.6: " .. tostring(w3))
+	local r4, w4 = plain({ command = "sudo.cmd", arguments = { "codex-acp" } })
+	check(r4 == nil and w4 ~= nil, "sudo.cmd is still a wrapper that blocks a server-shaped argument")
+	local program, index = Config.program_of("sudo.ps1", { "-u", "worker", "--", "claude" })
+	check(program == "sudo.ps1" and index == 1, "sudo.ps1 is not unwrapped by program_of, as at 0.6.6")
+	program = Config.program_of("sudo.cmd", { "-u", "worker", "--", "claude" })
+	check(program == "claude", "sudo.cmd is still unwrapped by program_of")
+end
+
 return string.format("PASS %d SPAWN backend checks", checks)

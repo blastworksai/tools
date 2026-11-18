@@ -427,6 +427,81 @@ check(spawnRows['spawn-launch:custom:other'].hint=='ordinary-cli · default fold
 check(spawnRows['spawn-launch:custom:off'].disabled=='Disabled in Config','disabled record is shown greyed with its reason')
 check(spawnRows['spawn-launch:custom:needs'].disabled=='Needs settings review: Review the new command','needs-review record is shown greyed with its reason')
 check(spawnRows['spawn-launch:custom:off'].reason=='  · Disabled in Config' and spawnRows['spawn-launch:kimi:argsy'].reason==nil,'a blocked agent shows its reason in the row, a ready one shows none')
+-- Model and effort rows on Agent settings: only for CLIs that have the flags, only real values.
+do
+ local sel=record('selclaude');sel.provider='claude';sel.command='claude';sel.account_label='Sel'
+ local plain=record('selcodex');plain.provider='codex';plain.command='codex';plain.account_label='Sel2'
+ local unknown=record('selunknown')
+ local prior=clone(snapshot().records);local list=clone(prior);table.insert(list,sel);table.insert(list,plain);table.insert(list,unknown)
+ local legacy=record('sellegacy');legacy.provider='claude';legacy.command='claude';legacy.account_label='Old';legacy.model='Claude Opus 4.7'
+ local conflict=record('selconf');conflict.provider='claude';conflict.command='claude';conflict.account_label='Conf';conflict.arguments={'--model','opus'};conflict.model='sonnet';conflict.model_selector=true
+ table.insert(list,legacy);table.insert(list,conflict)
+ check(A.edit(state.binding,snapshot().config_revision,'replace-records',{records=list}),'seed claude, codex and unknown-CLI records')
+ refresh()
+ local function rid(id,field)return 'agent:'..id..':'..field..':'..tostring(state.snapshot.config_revision) end
+ local function saved_record(id)for _,item in ipairs(snapshot().records)do if item.id==id then return item end end end
+ local rows=rows_of('agents')
+ check(rows[rid('selclaude','model')]~=nil and rows[rid('selclaude','effort')]~=nil and rows[rid('selclaude','effort')].control.k=='choice','a CLI with model and effort flags shows both controls')
+ local values={}
+ for _,option in ipairs(rows[rid('selclaude','effort')].control.options) do table.insert(values,option.value) end
+ check(table.concat(values,',')==',low,medium,high,xhigh,max','effort dropdown lists the CLI default and only the real values')
+ check(rows[rid('selcodex','model')]~=nil and rows[rid('selcodex','effort')]==nil,'a CLI without a verified effort flag shows a model control and no effort control')
+ check(rows[rid('selunknown','model')]==nil and rows[rid('selunknown','effort')]==nil,'an unknown CLI shows neither control')
+ definition.event(state,{ev='change',item=rid('selclaude','model'),value='claude-opus-5-5'},cx)
+ check(saved_record('selclaude').model=='claude-opus-5-5','the model is saved exactly as typed')
+ definition.event(state,{ev='change',item=rid('selclaude','effort'),value='high'},cx)
+ check(saved_record('selclaude').effort=='high','a listed effort is saved')
+ definition.event(state,{ev='change',item=rid('selclaude','effort'),value='ultra'},cx)
+ check(saved_record('selclaude').effort=='high' and type(state.notice)=='string','an effort outside the list is refused and nothing changes')
+ definition.event(state,{ev='change',item=rid('selclaude','model'),value='-bad'},cx)
+ check(saved_record('selclaude').model=='claude-opus-5-5' and state.notice:find('must not start with -',1,true)~=nil,'a model id starting with - is refused')
+ definition.event(state,{ev='change',item=rid('selclaude','arguments'),value='--effort low'},cx)
+ check(saved_record('selclaude').arguments[1]==nil or saved_record('selclaude').arguments[1]~='--effort','arguments are not edited into a clash')
+ local with_arg=clone(saved_record('selclaude'))
+ definition.event(state,{ev='change',item=rid('selclaude','arguments'),value='--model other'},cx)
+ definition.event(state,{ev='change',item=rid('selclaude','effort'),value=''},cx)
+ check(saved_record('selclaude').effort==nil,'an empty effort clears back to the CLI default')
+ definition.event(state,{ev='change',item=rid('selclaude','model'),value=''},cx)
+ check(saved_record('selclaude').model==nil,'an empty model clears back to the CLI default')
+ -- a saved display label is shown as display-only and typing an id turns it into a selector
+ rows=rows_of('agents')
+ check(rows[rid('sellegacy','model')].control.value=='' and rows[rid('sellegacy','model')].hint:find('display only',1,true)~=nil and rows[rid('sellegacy','model')].hint:find('Claude Opus 4.7',1,true)~=nil,'a pre-0.7 model label is shown as display text with the way to turn it into a selector')
+ definition.event(state,{ev='change',item=rid('sellegacy','effort'),value='low'},cx)
+ check(saved_record('sellegacy').model=='Claude Opus 4.7' and saved_record('sellegacy').model_selector==nil and saved_record('sellegacy').effort=='low','setting effort leaves the display label a label')
+ definition.event(state,{ev='change',item=rid('sellegacy','model'),value=''},cx)
+ check(saved_record('sellegacy').model=='Claude Opus 4.7','an empty Model box keeps a saved display label')
+ definition.event(state,{ev='change',item=rid('sellegacy','model'),value='claude-opus-4-7'},cx)
+ check(saved_record('sellegacy').model=='claude-opus-4-7' and saved_record('sellegacy').model_selector==true,'typing an id makes it an explicit selector')
+ -- an existing conflict survives only while its launch contract is unchanged
+ definition.event(state,{ev='change',item=rid('selconf','cwd'),value='/else'},cx)
+ check(saved_record('selconf').cwd=='/else','a change outside the launch contract keeps an existing conflict')
+ definition.event(state,{ev='change',item=rid('selconf','arguments'),value='--model other'},cx)
+ check(saved_record('selconf').arguments[2]=='opus' and state.notice:find('Remove one',1,true)~=nil,'editing the typed flag cannot carry a conflict through')
+ local json_candidate=clone(saved_record('selconf'));json_candidate.arguments={'--model','other'}
+ definition.event(state,{ev='action',act='advanced-open'},cx)
+ definition.event(state,{ev='change',item=rid('selconf','json'),value=runtime.json.encode(json_candidate)},cx)
+ definition.event(state,{ev='action',act='advanced-close'},cx)
+ check(saved_record('selconf').arguments[2]=='opus' and state.notice:find('Remove one',1,true)~=nil,'full-record JSON validates a changed conflict too: '..tostring(state.notice)..tostring(saved_record('selconf').arguments[2]))
+ -- approval of a review-required record refuses a conflict
+ local approve=clone(saved_record('selconf'));approve.review_required=true;approve.review_reason='r'
+ local with_review=clone(snapshot().records);for index,item in ipairs(with_review) do if item.id=='selconf' then with_review[index]=approve end end
+ check(A.edit(state.binding,snapshot().config_revision,'replace-records',{records=with_review}),'review-required conflict fixture saved');refresh()
+ definition.event(state,{ev='action',act='approve:selconf@'..state.snapshot.config_revision},cx)
+ check(saved_record('selconf').review_required==true and state.notice:find('Remove one',1,true)~=nil,'Approve refuses a record that carries a duplicate flag: '..tostring(state.notice))
+ -- a backslash path whose two readings name different programs is refused on the host-editor save and approval road
+ local mismatch=clone(approve);mismatch.arguments={};mismatch.command='/tmp/codex\\claude.exe'
+ local with_mismatch=clone(snapshot().records);for index,item in ipairs(with_mismatch) do if item.id=='selconf' then with_mismatch[index]=mismatch end end
+ check(not A.edit(state.binding,snapshot().config_revision,'replace-records',{records=with_mismatch}),'host save/approval refuses /tmp/codex\\claude.exe under selectors')
+ check(saved_record('selconf').command=='claude','refused mismatch leaves the saved record exact')
+ -- manual Setup JSON import refuses a new conflicting record at review
+ local bad=record('selbad');bad.provider='claude';bad.command='claude';bad.account_label='Bad';bad.arguments={'--model','opus'};bad.model='sonnet';bad.model_selector=true
+ definition.event(state,{ev='action',act='advanced-open'},cx)
+ definition.event(state,{ev='change',item='manual-json',value=runtime.json.encode({schema=2,agents={bad}})},cx)
+ definition.event(state,{ev='action',act='manual-review@'..state.snapshot.config_revision},cx)
+ check(state.import_review==nil and state.notice:find('Remove one',1,true)~=nil,'manual import refuses a new selector conflict: '..tostring(state.notice))
+ definition.event(state,{ev='action',act='advanced-close'},cx)
+ check(A.edit(state.binding,snapshot().config_revision,'replace-records',{records=prior}),'selector fixtures removed');refresh();state.page='spawn'
+end
 -- Every agent row carries Tern's own provider icon cell: the right name per provider, a fallback for an unknown one.
 do
  local Icons=load('provider_icons')
@@ -574,6 +649,15 @@ definition.event(state,{ev='change',item='managed-existing',value=''},cx)
 local managedRows=rows_of('managed')
 check(managedRows['managed-begin']==nil and managedRows['managed-attest']==nil and managedRows['managed-cli-attest']==nil,'cold setup cannot attest readiness or manufacture setup completion')
 check(managedRows['managed:root']==nil and managedRows['managed:user']~=nil and managedRows['managed:id']==nil,'normal managed setup exposes existing POSIX account selection without transport-path or stable-ID internals')
+do -- model and effort on the managed setup form
+ check(managedRows['managed:model']~=nil and managedRows['managed:effort']~=nil and managedRows['managed:effort'].control.k=='choice','setup form offers model and effort for a CLI that has both flags (omp)')
+ local before=state.managed_draft.model
+ definition.event(state,{ev='change',item='managed:model',value='anthropic/claude-sonnet-5-5'},cx)
+ definition.event(state,{ev='change',item='managed:effort',value='medium'},cx)
+ check(state.managed_draft.model=='anthropic/claude-sonnet-5-5' and state.managed_draft.effort=='medium','typed model and chosen effort land on the setup draft')
+ definition.event(state,{ev='change',item='managed:model',value=before or ''},cx)
+ definition.event(state,{ev='change',item='managed:effort',value=''},cx)
+end
 do
  local baseline=clone(saved);local request=assert(state.managed_native_request)
  state.managed_draft_touched=nil

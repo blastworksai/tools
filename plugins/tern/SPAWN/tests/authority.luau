@@ -1109,6 +1109,16 @@ sections.stale_config = function()
 	local conflict = request(binding, "importer", 4, after.config_revision, "import_records", { setup_run_id = "approved-setup", records = { record("third", { command = "different" }) },manual=true,confirmed=true })
 	check(not submit(authority, binding, conflict).ok, "conflicting import of an existing record is rejected")
 	same(snapshot(authority, binding).records, after.records, "setup replay and conflict preserve exact roster")
+	local clash = record("clash", { provider = "claude", command = "claude", arguments = { "--model", "opus" }, model = "sonnet", model_selector = true })
+	local clash_reply = submit(authority, binding, request(binding, "importer", 5, after.config_revision, "import_records", { setup_run_id = "clash-setup", records = { clash }, manual = true, confirmed = true }))
+	check(not clash_reply.ok, "import of a new record whose flag is also in its arguments is refused")
+	same(snapshot(authority, binding).records, after.records, "refused selector conflict leaves the roster exact")
+	for index, command in ipairs({ "sudo -i -u other -- claude --add-dir /tmp/work\\ dir/claude.exe", "claude --model opus --add-dir /tmp/work\\ dir/claude.exe", "/tmp/codex\\claude.exe" }) do
+		local ambiguous = record("ambiguous" .. index, { provider = "claude", command = command, model = "sonnet", model_selector = true })
+		local admitted = authority.request(binding, request(binding, "importer", 6, after.config_revision, "import_records", { setup_run_id = "ambiguous-setup" .. index, records = { ambiguous }, manual = true, confirmed = true }, { "importer/5" }), setup_context(binding))
+		check(not admitted, "import refuses a command that reads two ways under selectors: " .. command)
+		same(snapshot(authority, binding).records, after.records, "refused ambiguous import leaves the roster exact")
+	end
 end
 
 -- One atomic write commits the mutation, reply and watermark together.
@@ -1737,6 +1747,7 @@ local function host_block(db, authority, config)
 		if name == "./dispatch_state" then return load("dispatch_state") end
 		if name == "./wire/codec" then return load("wire/codec") end
 		if name == "./managed_setup" then return load("managed_setup") end
+		if name == "./selectors" then return load("selectors") end
 		if name == "./status/status_prompt" then return { host_serve = function() end } end
 		if name == "./prereq" then return registration("prereq") end
 		if name == "./page_navigation" then return load("page_navigation") end
