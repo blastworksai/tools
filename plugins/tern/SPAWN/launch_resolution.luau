@@ -100,6 +100,16 @@ local function login_wrap(argv: {string}, at: number, cwd: string?)
 	end
 	for _, word in ipairs(words) do table.insert(argv, word) end
 end
+-- The same login road for a fixed prerequisite or helper command (preparation checks), so a tool found on the
+-- account's login PATH at discovery is the one preparation finds. The folder is the root: these commands read no
+-- relative path, and sudo -i would otherwise start them in the account's home.
+function Resolution.login_argv(user: string, argv: {string}): {string}
+	local wrapped = table.clone(argv)
+	login_wrap(wrapped, 1, "/")
+	local out = { "sudo", "-n", "-i", "-u", user, "--" }
+	for _, word in ipairs(wrapped) do table.insert(out, word) end
+	return out
+end
 -- One parser for literal sudo forms, shared with record validation so the two cannot disagree.
 local parse_sudo = Config.parse_sudo
 function Resolution.select_user(resolved: any, shell: string, noninteractive: boolean?, cwd: string?): (boolean, string?)

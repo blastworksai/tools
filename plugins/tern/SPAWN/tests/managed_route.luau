@@ -357,13 +357,30 @@ do
   fs={read=function(path)return 'packaged fixture bytes: '..path end},
   timer=function(_,callback)callback()end,now=function()return 1000 end,
   process={run=function(argv,options,done)
+   -- Preparation IO rides the launch road: sudo -i, a constant decoder script and ONE octal-encoded word. Decode that word
+   -- back to the checked program and arguments so every selected-account check below still sees them.
+   if argv[1]=='sudo' then
+    check(table.concat(argv,'|',1,6)=='sudo|-n|-i|-u|selected|--' and argv[7]=='/bin/sh' and argv[8]=='-c' and argv[9]=='eval "$(printf "${1}")"' and argv[10]=='spawn-login' and #argv==11,'all preparation/helper/provision IO executes as the selected account through the sudo -i login road, not the host owner')
+    local text=argv[11]:gsub('\\(%d%d%d)',function(octal)return string.char(tonumber(octal,8))end)
+    local body=assert(text:match("^cd %-%- '/' && exec (.*)$"),'login word carries the folder and exec')
+    local inner,word,position={}, nil, 1
+    while position<=#body do
+     if body:sub(position,position)=="'" then
+      local close=body:find("'",position+1,true);word=(word or '')..body:sub(position+1,close-1);position=close+1
+      if body:sub(position,position+1)=="\\'" then word=word.."'";position+=2 end
+     elseif body:sub(position,position)==' ' then table.insert(inner,word or '');word=nil;position+=1
+     else error('unexpected login word character') end
+    end
+    table.insert(inner,word or '')
+    argv={'sudo','-n','-u','selected','-H','--',table.unpack(inner)}
+   end
    table.insert(calls,table.clone(argv))
    local bytes=''
    if argv[1]=='getent' then
     check(argv[3]=='selected','account lookup uses the embedded literal OS selector')
     bytes='selected:x:1001:1001:Selected:'..home..':/bin/sh\n'
    else
-    check(table.concat(argv,'|',1,6)=='sudo|-n|-u|selected|-H|--','all preparation/helper/provision IO executes as the selected account, not the host owner')
+    check(table.concat(argv,'|',1,6)=='sudo|-n|-u|selected|-H|--','every preparation call decodes to the selected account')
     if argv[10]=='spawn-account' then bytes='selected\n'..home..'\n'..executable..'\n'
     elseif argv[#argv]=='--help' then bytes='Usage: omp [options]\n  --help  Show help'
     elseif argv[10]=='spawn-bundle' then bytes=options.stdin

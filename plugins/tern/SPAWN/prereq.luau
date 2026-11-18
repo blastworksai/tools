@@ -12,7 +12,8 @@ local function run(argv,stdin,done)
 end
 local function as_user(argv,user)
  if not user or user=='' then return argv end
- local out={'sudo','-n','-u',user,'-H','--'};for _,v in ipairs(argv) do table.insert(out,v) end;return out
+ -- The launch route (sudo -i login shell, argv carried as encoded data): preparation sees the same PATH as the launch.
+ return Backend.login_argv(user,argv)
 end
 M.run=run
 M.as_user=as_user
