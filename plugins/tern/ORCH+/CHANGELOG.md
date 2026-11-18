@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.4
+
+- When there is nothing to choose between, ORCH+ no longer asks you to "Choose a project". The project menu gains a "Start in another project…" item for starting elsewhere (SKILLS-204).
+- ORCH+ keeps SPAWN's complete roster of agents. A page of results that does not continue the scan where the last one stopped is refused as `catalog_incomplete` instead of being trusted, unless it is a page of the already complete roster at the same identity, which is shown as a page view only (SKILLS-200).
+- When an open menu or form holds a queued launch, ORCH+ now posts "Launch waits until you close <name>" instead of leaving the launch silently pending (SKILLS-202).
+- Coordinators now receive the full list of eligible agents. A proposal that names a wrong record is refused at intake, with the reason and the list of valid choices. Refusals appear as "Proposal refused" cards with a Dismiss button (up to 4 per orchestration and 12 overall). A refused execution is terminal and is shown to its owner. A local backpressure exception at the poll's gate-allocation step no longer escapes (SKILLS-201).
+- New "Forget this orchestration…" action for a stuck orchestration. It shows a read-only preview from SPAWN and waits only for SPAWN's own unfinished work. It never closes panes or stops agents, and it says so: "Agents still running may continue their assignments and use any approvals already received; Forget neither stops them nor revokes that authority." (SKILLS-205).
+
 ## 0.6.3
 
 - When Tern reports no USAGE block types (USAGE not installed), the agent picker adds one muted line under "Usage unavailable" pointing to Tern's own usage widget (widget bar, AI usage limits) and to USAGE for per-account figures. No number is shown, nothing is inferred, and quota routing stays held (SKILLS-195).
