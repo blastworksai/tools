@@ -28,6 +28,7 @@ local STATUS_MESSAGES = {
 	plan_imported = "Plan added.",
 	catalog_cleared = "Agent list inspection closed.",
 	catalog_requested = "Checking available agents.",
+	proposal_retargeted = "Proposal sent again with the agent you chose. It now waits for your decision.",
 }
 local ERROR_RESULTS = { effect_uncertain = true, bridge_rejected = true, transport_backpressure = true,
 	backpressure = true, publication_uncertain = true, project_start_delivery_failed = true }
@@ -624,6 +625,24 @@ local function dispatch_view(view: any, projection: any, selected: any): (any, a
 		end
 	end
 	return ui.card("Managed dispatch", rows), bridge, request_node, scoped_nodes
+end
+-- A proposal ORCH+ refused because its record is unknown or stale stays on the normal surface, with ORCH+'s
+-- reason (it was also sent to the coordinator), until the owner re-targets it through the real agent list.
+local function proposal_refusals(view: any, projection: any, selected: any): any?
+	local flow = if projection.dispatch then projection.dispatch.workflow else nil
+	if not flow then return nil end
+	local _, _, admitted = controller(view, selected)
+	local rows = {}
+	for _, gate in flow.gates do
+		if gate.answer and type(gate.answer.source) == "table" and gate.answer.source.kind == "refusal" and (table.find(gate.evidence or {}, "retarget:open") or table.find(gate.evidence or {}, "notice:open")) then
+			table.insert(rows, ui.text(ui.span("Your orchestrator's proposal was refused (" .. tostring(gate.answer.source.code) .. "): " .. tostring(gate.answer.answer), "warning")))
+			if admitted and table.find(gate.evidence or {}, "retarget:open") then
+				table.insert(rows, dispatch_link(view, "retarget_proposal", "Choose another agent…", { gate_id = gate.id, gate_revision = gate.revision, worker_id = gate.worker_id }))
+			end
+		end
+	end
+	if #rows == 0 then return nil end
+	return ui.card("Proposal refused", rows)
 end
 local function workflow_view(view: any, projection: any, selected: any): (any, any)
 	local flow = if projection.dispatch then projection.dispatch.workflow else nil
@@ -1462,7 +1481,11 @@ function M.render(view: any, projection: any, status: string, diagnostic: string
 		end
 		local card, dispatch_node, request_node, scoped_nodes = dispatch_view(view, projection, selected)
 		local workflow, workflow_nodes = workflow_view(view, projection, selected)
-		if not view.config_open then table.insert(rows, project_panel(view, projection, selected)) end
+		if not view.config_open then
+			local refusals = proposal_refusals(view, projection, selected)
+			if refusals then table.insert(rows, refusals) end
+			table.insert(rows, project_panel(view, projection, selected))
+		end
 		if view.advanced_open then
 			table.insert(rows, owner_card(view, "controller", selected.controller, selected.controller_generation, projection.revision))
 			if selected.controller == nil then

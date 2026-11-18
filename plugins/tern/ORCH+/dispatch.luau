@@ -1299,7 +1299,7 @@ local function reclaim_gates(d: any)
 		for _, item in (d.landing or {}).items or {} do if item.gate_id == key and not LANDING_TERMINAL[item.status] then dependent = true end end
 		for _, rec in d.intakes or {} do if rec.label and rec.label.gate_id == key then dependent = true end end
 		if not dependent and not g.ruling and not gate_open(g) and (not g.delivery or g.delivery.acknowledged)
-			and not g.delivery_uncertain and (not g.execution or g.execution.state ~= "pending") then
+			and not g.delivery_uncertain and (not g.execution or g.execution.state ~= "pending") and not config.kept_open(g) then
 			local w = d.workers[g.worker_id]
 			if w then
 				local entries = flow(w).thread
@@ -6304,6 +6304,28 @@ function config.proposal_question(p: any, scoped: boolean, why: string?): string
 	end
 	return bounded(text, 32768)
 end
+-- Places one coordinator proposal: a definite refusal (paused session, no retained checkpoint scope, or a
+-- record that is unknown or stale in the assembled roster) is settled at once and told to the coordinator;
+-- anything else opens its gate. Owner re-targeting re-enters here with the chosen record.
+function config.place_proposal(d: any, w: any, p: any, bytes: string, clock: any): (string?, any?)
+	local target, target_checkpoint
+	for _, worker in d.workers do if worker.work_id == p.work_id and worker.logical_session_id == w.logical_session_id then target = worker end end
+	for _, cpbytes in (if target and target.workflow then target.workflow.checkpoints else {}) do
+		local cp = codec.decode_report(cpbytes, target)
+		if cp.payload.project_id == p.project_id and (p.checkpoint_id == nil or cp.payload.checkpoint_id == p.checkpoint_id) then target_checkpoint = cp end
+	end
+	-- Paused sessions and proposals naming no retained checkpoint scope are refused definitely.
+	local refused = if p.kind == "new_work" or p.kind == "add_source" then nil
+		elseif p.kind == "review" and not policy(d, w.logical_session_id).require_code_review then "review_disabled"
+		elseif policy(d, w.logical_session_id).paused then "session_paused" elseif not target_checkpoint then "scope_mismatch" else nil
+	if not refused and (p.kind == "dispatch" or p.kind == "new_work") then refused = config.record_refusal(d, w.logical_session_id, p) end
+	if refused then
+		local _, problem = config.refuse_proposal(d, w, p, bytes, refused, clock)
+		return refused, problem
+	end
+	local _, problem = config.open_proposal(d, w, p, bytes, target_checkpoint, clock)
+	return nil, problem
+end
 -- A proposal naming registered session work and a retained CHECKPOINT of its project opens one
 -- coordinator_proposal gate. D8/D9: an in-scope proposal of an auto_approve kind is answered by the
 -- session policy (tagged source); out-of-scope ones always wait for the owner. Rollover never executes.
@@ -6336,16 +6358,88 @@ config.REFUSALS = {
 	review_disabled = "code review is disabled in this session; enable Require code review in Config before proposing review. Nothing was asked of the owner or executed.",
 	session_paused = "the session is paused; nothing was asked of the owner or executed. Propose again after the owner resumes the session.",
 	scope_mismatch = "the named work retains no CHECKPOINT of that project (and checkpoint_id) in this session; nothing was asked of the owner or executed. Propose again after that checkpoint is registered.",
+	unknown_record = "the proposed record_id is not an eligible record of this session's SPAWN roster; nothing was asked of the owner or executed. Propose again with a record_id and record_revision taken exactly from the eligible list.",
+	catalog_changed = "the proposed record_id exists but that record_revision is not current, or the record is disabled or ineligible; nothing was asked of the owner or executed. Propose again with a record_id and record_revision taken exactly from the eligible list.",
+	execution_refused = "the owner approved the proposal, but ORCH+ refused to run it; nothing was executed.",
 }
-function config.refuse_proposal(d: any, w: any, p: any, bytes: string, code: string, clock: any): (nil, any?)
-	local text = "ORCH+ refused proposal " .. p.proposal_id .. " (" .. code .. ", " .. p.kind .. " for " .. p.work_id .. " in " .. p.project_id
-		.. (if p.checkpoint_id then ", checkpoint " .. p.checkpoint_id else "") .. "): " .. config.REFUSALS[code]
+-- The records a coordinator may name: every eligible, enabled row of the assembled roster, as record_id@revision.
+function config.eligible_records(d: any, sid: string): { string }
+	local out = {}
+	for _, row in ((d.catalogs[sid] or {}).records or {}) do
+		if row.eligible and row.enabled == true then table.insert(out, row.id .. "@" .. string.format("%.0f", row.revision)) end
+	end
+	table.sort(out)
+	return out
+end
+function config.eligible_text(d: any, sid: string, maximum: number): string
+	local list = config.eligible_records(d, sid)
+	if #list == 0 then return "none (no eligible record is known yet; the owner must reload the agent list)" end
+	local text, listed = "", 0
+	for index, token in list do
+		local piece = (if index > 1 then ", " else "") .. token
+		if #text + #piece > maximum then break end
+		text ..= piece; listed = index
+	end
+	if listed < #list then text ..= ", and " .. tostring(#list - listed) .. " more" end
+	return text
+end
+-- Nil when the named record and revision are current, eligible and enabled in the roster.
+function config.record_refusal(d: any, sid: string, p: any): string?
+	local seen = false
+	for _, row in ((d.catalogs[sid] or {}).records or {}) do
+		if row.id == p.record_id then
+			seen = true
+			if row.revision == p.record_revision and row.eligible and row.enabled == true then return nil end
+		end
+	end
+	return if seen then "catalog_changed" else "unknown_record"
+end
+-- A refused record proposal stays on the owner's surface (and out of gate reclamation) until the owner
+-- re-targets it; at most the newest seven stay open so the gate table cannot fill with them.
+function config.kept_open(g: any): boolean
+	return table.find(g.evidence or {}, "retarget:open") ~= nil or table.find(g.evidence or {}, "notice:open") ~= nil
+end
+function config.lapse_retargets(d: any, sid: string)
+	local open = {}
+	for key, g in d.gates or {} do
+		if g.logical_session_id == sid and config.kept_open(g) then table.insert(open, key) end
+	end
+	if #open < 8 then return end
+	table.sort(open, function(a: string, b: string): boolean return (tonumber(a:match("%d+$")) or 0) < (tonumber(b:match("%d+$")) or 0) end)
+	for index = 1, #open - 7 do
+		local g = d.gates[open[index]]
+		g.evidence[(table.find(g.evidence, "retarget:open") or table.find(g.evidence, "notice:open")) :: number] = "kept:lapsed"
+	end
+end
+function config.settle_refusal(d: any, w: any, p: any, bytes: string, text: string, code: string, keep: string?, clock: any): (nil, any?)
+	local evidence = { "refused:" .. code }
+	if keep then
+		config.lapse_retargets(d, w.logical_session_id)
+		table.insert(evidence, keep)
+	end
 	local g, err = new_gate(d, w, "coordinator_proposal", bounded(text, 32768), { { id = "approve", label = "Approve proposal" }, { id = "reject", label = "Reject" } },
-		{ "refused:" .. code }, clock, bytes)
+		evidence, clock, bytes)
 	if err then return nil, err end
 	local _, problem = append(d, w, "answer", text, clock, { state = "pending", gate_id = g.id }); if problem then return nil, problem end
-	g.answer = { choice_id = "reject", answer = text, source = { kind = "refusal", code = code }, at_ms = stamp(clock).at_ms }; g.phase = "answered"
+	g.answer = { choice_id = "reject", answer = bounded(text, 32768), source = { kind = "refusal", code = code }, at_ms = stamp(clock).at_ms }; g.phase = "answered"
 	return nil, nil
+end
+function config.refuse_proposal(d: any, w: any, p: any, bytes: string, code: string, clock: any): (nil, any?)
+	local text = "ORCH+ refused proposal " .. p.proposal_id .. " (" .. code .. ", " .. p.kind
+		.. (if p.work_id then " for " .. p.work_id .. " in " .. p.project_id else "")
+		.. (if p.checkpoint_id then ", checkpoint " .. p.checkpoint_id else "") .. "): " .. config.REFUSALS[code]
+	local listed = code == "unknown_record" or code == "catalog_changed"
+	if listed then text ..= " Eligible records (record_id@revision): " .. config.eligible_text(d, w.logical_session_id, 3000) .. "." end
+	return config.settle_refusal(d, w, p, bytes, text, code, if listed and (p.kind == "dispatch" or p.kind == "new_work") then "retarget:open" else nil, clock)
+end
+-- An approved proposal ORCH+ then refused to run is told to the coordinator as one more typed reject, so
+-- it never waits for an effect that will not happen; a stale record stays open for the owner to re-target.
+function config.refuse_execution(d: any, w: any, g: any, p: any, code: string, message: string, clock: any)
+	if code == "gate_cancelled" then return end
+	local text = "ORCH+ refused to run approved proposal " .. p.proposal_id .. " (" .. p.kind .. ", gate " .. g.id .. ", " .. code .. "): " .. message
+	local listed = code == "catalog_changed" and (p.kind == "dispatch" or p.kind == "new_work")
+	if listed then text ..= " Eligible records (record_id@revision): " .. config.eligible_text(d, w.logical_session_id, 3000) .. "." end
+	config.settle_refusal(d, w, p, g.proposal, text, "execution_refused", if listed then "retarget:open" else "notice:open", clock)
 end
 function config.refused_proposal(g: any): boolean
 	return g.answer ~= nil and type(g.answer.source) == "table" and g.answer.source.kind == "refusal"
@@ -6516,6 +6610,7 @@ function config.execute_proposal(registry: any, n: any, gate_id: string, event: 
 	if prior and prior.state == state and prior.effect_ref == ref then return message end
 	g.execution = { state = state, gate_revision = g.revision, effect_ref = bounded(ref, 1024), at_ms = stamp(clock).at_ms }
 	append(d, w, "execution", bounded("Proposal " .. proposal.payload.proposal_id .. " (" .. proposal.payload.kind .. ", gate " .. g.id .. ") " .. state .. ": " .. message, 32768), clock)
+	if state == "refused" then config.refuse_execution(d, w, g, proposal.payload, ref, message, clock) end
 	return message
 end
 -- Runs at the end of every dispatch commit for the event's session. Pause answers nothing by policy:
@@ -7686,6 +7781,7 @@ local function semantic(n: any, w: any, report: any, bytes: string, clock: any):
 	if kind == "REVIEW_RESULT" and w.role ~= "reviewer" then return fail(config.review_refusal(d, w)) end
 	if only and w.role ~= only[1] and not (w.role == "builder" and (kind == "LANDING_RESULT" or kind == "DEPLOY_RESULT")) then return fail(only[2], only[3]) end
 	local correlation, helper_summary
+	local refused -- A coordinator proposal ORCH+ refused definitely (committed, never held).
 	if report.action_id then
 		correlation = correlated(d, w, report, f)
 		if not correlation or correlation.phase == "cancelled" or correlation.phase == "superseded" then return fail("binding_mismatch", "Report action/revision was not issued or is no longer current for this recipient.") end
@@ -7697,7 +7793,6 @@ local function semantic(n: any, w: any, report: any, bytes: string, clock: any):
 		if kind ~= "WAITING" and kind ~= "HEARTBEAT" and kind ~= "CHECKPOINT" then return fail("invalid_schema", "Unexpected report request correlation.") end
 	end
 	local checkpoint = if p.checkpoint_id and f.checkpoints[p.checkpoint_id] then codec.decode_report(f.checkpoints[p.checkpoint_id], w) else nil
-	local refused -- A coordinator proposal ORCH+ refused definitely (committed, never held).
 	if table.find({ "REVIEW_READY", "DONE", "ROLLOVER_REQUEST" }, kind) and (not checkpoint
 		or (p.artifact_revision and p.artifact_revision ~= checkpoint.payload.artifact_revision)) then
 		return fail("checkpoint_mismatch", "Report must reference a retained checkpoint and its exact artifact revision.")
@@ -7728,19 +7823,8 @@ local function semantic(n: any, w: any, report: any, bytes: string, clock: any):
 				if prior.payload.proposal_id == p.proposal_id then return fail("proposal_conflict", "Proposal ID already exists; replay its exact original report instead.") end
 			end
 		end
-		local target, target_checkpoint
-		for _, worker in d.workers do if worker.work_id == p.work_id and worker.logical_session_id == w.logical_session_id then target = worker end end
-		for _, cpbytes in (if target and target.workflow then target.workflow.checkpoints else {}) do
-			local cp = codec.decode_report(cpbytes, target)
-			if cp.payload.project_id == p.project_id and (p.checkpoint_id == nil or cp.payload.checkpoint_id == p.checkpoint_id) then target_checkpoint = cp end
-		end
-		-- Paused sessions and proposals naming no retained checkpoint scope are refused definitely.
-		refused = if p.kind == "new_work" or p.kind == "add_source" then nil
-			elseif p.kind == "review" and not policy(d, w.logical_session_id).require_code_review then "review_disabled"
-			elseif policy(d, w.logical_session_id).paused then "session_paused" elseif not target_checkpoint then "scope_mismatch" else nil
-		local _, problem
-		if refused then _, problem = config.refuse_proposal(d, w, p, bytes, refused, clock)
-		else _, problem = config.open_proposal(d, w, p, bytes, target_checkpoint, clock) end
+		local problem
+		refused, problem = config.place_proposal(d, w, p, bytes, clock)
 		if problem then return nil, problem end
 	elseif kind == "REVIEW_READY" then
 		local problem = config.review_ready(n, w, checkpoint, clock); if problem then return nil, problem end
@@ -8323,7 +8407,8 @@ local function complete(n: any, a: any, body: any, clock: any, response_bytes: s
 				activation_token = codec.sha256(w.enrolment_token .. ":coordinator:" .. w.coordinator_owner_id .. ":" .. tostring(w.coordinator_generation)
 					.. (if w.handover_id then ":handover:" .. w.handover_id .. ":" .. w.handover_token else "")),
 				instructions = (if w.handover_id then "Verified rollover handover " .. w.handover_id .. ": you succeed a stopped and retired coordinator generation; its activation token and proposals are invalid. " else "")
-					.. "Coordinator authority covers only this assignment, not OS/account isolation. Use the issued producer_helper/root/handle/enrolment_token. consume durably records this grant and reply_ack; claim before work. Retain the exact owner_id, owner_generation, activation_token and action_id/action_revision. Never independently orchestrate Tern, start agents or alter accounts. Echo each report_request.request_id once in HEARTBEAT or CHECKPOINT; reply_ack alone is not fulfillment. After activation ACK is accepted, COORDINATOR_PROPOSAL always carries owner_id, owner_generation, activation_token, proposal_id and kind. Existing dispatch/report/review/rollover/landing kinds also require work_id and checkpoint project_id; review/rollover/landing require checkpoint_id; dispatch requires current record_id, record_revision and literal prompt. New passive new_work/add_source variants instead require exactly one of orch_project_id or new_project_name, without work_id/project_id/checkpoint_id. new_work also carries record_id, record_revision, literal prompt, scope {paths,systems}, checks [{check_id,argv}], optional verified repository_id/base_ref and paired target_ref/target_revision. add_source carries source {kind=plan_file|board,path,revision} or {kind=template,template_id,revision,input,custom_fields?}. Derive these from the user's task and observed source; never guess revisions. Both passive variants require owner approval and only add held project work, including during pause. START separately releases that addition after command review. Existing effectful proposals obey pause and checkpoint scope. No proposal is permission for you to perform a native, merge or account action. Only the builder sends LANDING_REQUEST; only the exact eligible merge actor lands (existing builder by default; optional selected release agent). Coordinators never send REVIEW_RESULT or LANDING_RESULT. Retirement/recovery forbids all fresh proposals. Fulfill progress requests and settle owner decisions before release. When finished or retired, quiesce and resolve genuinely completed helper claims; retain uncertainty. Report COORDINATOR_RELEASE with the exact issued action_id/action_revision and payload {owner_id,owner_generation,activation_token,quiescent=true}. A racing retirement is consumed without a second release. Drain final receipts/replies. Native-ask workers return idle for notifications; only worker-poll workers use bounded wait. Unresolved execution blocks retirement. ORCH+/SPAWN alone own exact native stop and mailbox cleanup. DONE, idle and absence are never release." })
+					.. "Coordinator authority covers only this assignment, not OS/account isolation. Use the issued producer_helper/root/handle/enrolment_token. consume durably records this grant and reply_ack; claim before work. Retain the exact owner_id, owner_generation, activation_token and action_id/action_revision. Never independently orchestrate Tern, start agents or alter accounts. Echo each report_request.request_id once in HEARTBEAT or CHECKPOINT; reply_ack alone is not fulfillment. After activation ACK is accepted, COORDINATOR_PROPOSAL always carries owner_id, owner_generation, activation_token, proposal_id and kind. Existing dispatch/report/review/rollover/landing kinds also require work_id and checkpoint project_id; review/rollover/landing require checkpoint_id; dispatch requires current record_id, record_revision and literal prompt. New passive new_work/add_source variants instead require exactly one of orch_project_id or new_project_name, without work_id/project_id/checkpoint_id. new_work also carries record_id, record_revision, literal prompt, scope {paths,systems}, checks [{check_id,argv}], optional verified repository_id/base_ref and paired target_ref/target_revision. add_source carries source {kind=plan_file|board,path,revision} or {kind=template,template_id,revision,input,custom_fields?}. Derive these from the user's task and observed source; never guess revisions. Name only a record from the eligible list at the end of these instructions, exactly as record_id and record_revision: a proposal naming any other record is refused with its reason and the current list. Both passive variants require owner approval and only add held project work, including during pause. START separately releases that addition after command review. Existing effectful proposals obey pause and checkpoint scope. No proposal is permission for you to perform a native, merge or account action. Only the builder sends LANDING_REQUEST; only the exact eligible merge actor lands (existing builder by default; optional selected release agent). Coordinators never send REVIEW_RESULT or LANDING_RESULT. Retirement/recovery forbids all fresh proposals. Fulfill progress requests and settle owner decisions before release. When finished or retired, quiesce and resolve genuinely completed helper claims; retain uncertainty. Report COORDINATOR_RELEASE with the exact issued action_id/action_revision and payload {owner_id,owner_generation,activation_token,quiescent=true}. A racing retirement is consumed without a second release. Drain final receipts/replies. Native-ask workers return idle for notifications; only worker-poll workers use bounded wait. Unresolved execution blocks retirement. ORCH+/SPAWN alone own exact native stop and mailbox cleanup. DONE, idle and absence are never release."
+					.. " Eligible records (record_id@revision): " .. config.eligible_text(d, w.logical_session_id, 6000) .. "." })
 			if err then return nil, err end
 			w.activation = grant
 		end
@@ -9074,7 +9159,7 @@ function M.apply(registry: any, event: any, clock: any, reserve: any): (any?, an
 		source_request = "gate_id gate_revision source_revision cards",
 		claim = "action_id executor capacity_validation", result = "action_id executor grant_id response_bytes", lost = "action_id executor grant_id",
 		read_missing = "action_id executor grant_id query_bytes response_bytes",
-		capacity = "capacity", cancel_work = "worker_id query_bytes response_bytes",
+		capacity = "capacity", retarget_proposal = "gate_id gate_revision record_id record_revision catalog_revision", cancel_work = "worker_id query_bytes response_bytes",
 		poll = "worker_id bytes", reply = "worker_id trigger", retire = "worker_id withdraw_starts", finish = "worker_id", intake = "worker_id bytes", retry = "action_id trigger", readback_publication = "action_id",
 		policy = "policy expected_policy_sha256 template_put template_remove", pause = "", resume = "", observe = "worker_id pane_binding native_state delivery_error observation_seq",
 		answer = "gate_id gate_revision choice_id answer decision_context", cancel_gate = "gate_id gate_revision", recheck_gate = "gate_id gate_revision",
@@ -9689,6 +9774,35 @@ function M.apply(registry: any, event: any, clock: any, reserve: any): (any?, an
 			if (d.catalog_scans or {})[event.orch_session_id] == false and roster and roster.namespace == (n.compatibility or {}).spawn_namespace then config.prune_family_orphans(n, roster) end
 			answer = result("work_cancelled", { worker_id = event.worker_id, work_id = w.work_id })
 		end
+	elseif event.command == "retarget_proposal" then
+		-- The owner picked another real record for a refused proposal: the same proposal id is re-issued on it
+		-- and takes the ordinary path (gate, scope, policy). Nothing is typed; the record comes from the roster.
+		local g = if id(event.gate_id) then (d.gates or {})[event.gate_id] else nil
+		local w = if g then d.workers[g.worker_id] else nil
+		if not g or not w or g.logical_session_id ~= event.orch_session_id or g.revision ~= event.gate_revision or w.worker_generation ~= g.worker_generation
+			or not g.proposal or not table.find(g.evidence, "retarget:open") then
+			return fail("stale_gate", "This refused proposal is no longer open for re-targeting.")
+		end
+		local c = d.catalogs[event.orch_session_id]
+		if c == nil or c.revision ~= event.catalog_revision then return fail("catalog_changed", "Refresh and select the current catalog revision.") end
+		if not str(event.record_id, 96) or type(event.record_revision) ~= "number" then return fail("invalid_task", "Choose an eligible record from the list.") end
+		local refused = config.record_refusal(d, event.orch_session_id, event)
+		if refused then return fail(refused, "That record is not current and eligible; choose one from the refreshed list. Nothing was re-sent.") end
+		local owner = coordinator(n, w)
+		local old = codec.decode_report(g.proposal, w)
+		if not owner or owner.phase ~= "running" or not w.activation or w.retirement or not old
+			or old.payload.activation_token ~= w.activation.activation_token then
+			return fail("proposal_unauthorized", "The proposing coordinator is no longer active; nothing was re-sent.")
+		end
+		local raw = clone(old)
+		raw.payload.record_id, raw.payload.record_revision = event.record_id, event.record_revision
+		local bytes = tern.json.encode(raw)
+		local moved = codec.decode_report(bytes, w)
+		if not moved then return fail("invalid_schema", "The re-targeted proposal could not be formed; nothing was re-sent.") end
+		local _, placed = config.place_proposal(d, w, moved.payload, bytes, clock)
+		if placed then return nil, placed end
+		g.evidence[table.find(g.evidence, "retarget:open") :: number] = "retarget:done"
+		answer = result("proposal_retargeted", { message = "Proposal re-sent with the chosen agent." })
 	elseif config.SOURCE_COMMANDS[event.command] then
 		-- Work sources (Checkpoint 6): non-operator intake commands; the host reads files itself.
 		local handled, err = config.SOURCE_COMMANDS[event.command](registry, n, event, clock, reserve)

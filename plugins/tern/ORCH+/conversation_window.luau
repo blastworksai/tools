@@ -101,7 +101,7 @@ function M.new(api: any): any
 				orch_project_id = project_id, cwd = record.cwd, placement = record.placement,
 				presentation = if coordinator then "coordinator_adjacent" else "user_new_tab",
 				open_conversation = if coordinator then nil else true, coordinator = coordinator == true,
-				prompt = if coordinator then "Act as the orchestrator for this conversation. Discuss the user's goals, propose held projects and sources through the coordinator protocol, and wait for an explicit project START before executing project tasks. Preserve existing work and ask only meaningful decisions."
+				prompt = if coordinator then "Act as the orchestrator for this conversation. Discuss the user's goals, propose held projects and sources through the coordinator protocol (name only records from your activation's eligible list), and wait for an explicit project START before executing project tasks. Preserve existing work and ask only meaningful decisions."
 					else codec.OPEN_CONVERSATION_ASSIGNMENT,
 				execution_cwd = if project.repository then project.repository.cwd else nil }
 			local flow = api.node(fresh, source, "workflow-index", "orchplus.workflow")

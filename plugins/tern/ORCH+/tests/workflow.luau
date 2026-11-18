@@ -3533,6 +3533,108 @@ if section == nil or section == "project_manager_boundary" then
 	check(W.restores(f), "finished-project history and independent live landing restore together")
 end
 
+-- SKILLS-201: a coordinator can only propose real eligible records. The activation lists them from the
+-- assembled roster; an unknown or stale record is refused at proposal time (both kinds) with the reason and
+-- the list sent back; an approved proposal refused at execution reaches the coordinator; the owner re-targets
+-- a refused proposal through the roster, never by typing an id.
+if section == nil or section == "proposal_records" then
+	local f = W.fixture({ reviewer_records = W.arr({ "codex" }) })
+	local b = W.builder(f, "builder", { source = W.PLAN, files = W.arr({ "src/feature.luau" }) })
+	W.settle(f, b); assert(W.send(f, b, "CHECKPOINT", W.cp("cp-1", "rev-1")).ok)
+	local cid = W.coordinator(f)
+	local cw = W.worker(f, cid)
+	local sid = cw.logical_session_id
+	local function D() return f.authority.registry.dispatch end
+	local work = W.worker(f, b).work_id
+	-- 1. The activation names every eligible record of the assembled roster, as record_id@revision.
+	local instructions = api.codec.decode_reply(cw.activation.bytes, cw).payload.instructions
+	local expected, listed = 0, 0
+	for _, row in D().catalogs[sid].records do
+		local token = row.id .. "@" .. string.format("%.0f", row.revision)
+		local fits = row.eligible and row.enabled == true
+		if fits then expected += 1 end
+		if fits == (instructions:find(token, 1, true) ~= nil) then listed += 1 end
+	end
+	check(expected >= 5 and listed == #D().catalogs[sid].records, "the activation lists exactly the eligible roster records as record_id@revision (" .. listed .. "/" .. #D().catalogs[sid].records .. ")")
+	check(instructions:find("Name only a record from the eligible list", 1, true) ~= nil, "the activation tells the coordinator to choose only from that list")
+	local function refusal_gate(code)
+		for _, g in D().gates do if table.find(g.evidence, "refused:" .. code) then return g end end
+		return nil
+	end
+	local function deliver_answer(g)
+		local reply = W.deliver(f, cid, g.id)
+		check(reply.kind == "owner_decision" and reply.payload.choice_id == "reject" and reply.payload.answer == g.answer.answer, "gate " .. g.id .. " reaches the coordinator as one typed owner_decision reject")
+		return reply.payload.answer
+	end
+	-- 2. Invented ids and stale revisions, for both kinds, are refused before any gate asks the owner.
+	local cases = {
+		{ kind = "dispatch", code = "unknown_record", fields = { record_id = "tools-docs-human-rewrite", record_revision = 0, prompt = "Do the thing." } },
+		{ kind = "dispatch", code = "catalog_changed", fields = { record_id = "codex", record_revision = 7, prompt = "Do the thing." } },
+		{ kind = "new_work", code = "unknown_record", fields = { orch_project_id = f.default_project, record_id = "tools-docs-human-rewrite", record_revision = 0,
+			prompt = "Do the thing.", scope = { paths = W.arr({ "src/a.luau" }), systems = W.arr() }, checks = W.unit() } },
+		{ kind = "new_work", code = "catalog_changed", fields = { orch_project_id = f.default_project, record_id = "codex", record_revision = 7,
+			prompt = "Do the thing.", scope = { paths = W.arr({ "src/b.luau" }), systems = W.arr() }, checks = W.unit() } },
+	}
+	for _, case in cases do
+		local before = #W.gates(f, "coordinator_proposal", false)
+		local sent = W.propose(f, cid, case.kind, if case.kind == "dispatch" then work else nil, api.clone(case.fields))
+		local label = case.kind .. "/" .. case.code
+		check(sent.ok and sent.code == case.code and W.worker(f, cid).rejected_report == nil, label .. ": refused at proposal time, committed, never held (" .. tostring(sent.code) .. ")")
+		check(#W.gates(f, "coordinator_proposal", false) == before + 1, label .. ": exactly one gate, the refusal")
+		local g
+		for _, candidate in D().gates do
+			if candidate.answer and candidate.answer.source.kind == "refusal" and candidate.answer.source.code == case.code and not candidate.seen_by_test then g = candidate end
+		end
+		check(g ~= nil and g.phase == "answered" and g.answer.choice_id == "reject" and g.execution == nil, label .. ": settled reject by ORCH+, never an owner gate")
+		local text = deliver_answer(g)
+		check(text:find(case.code, 1, true) ~= nil and text:find("codex@0", 1, true) ~= nil and text:find("builder@0", 1, true) ~= nil,
+			label .. ": the coordinator's reply names the code and the current eligible list")
+		check(table.find(g.evidence, "retarget:open") ~= nil, label .. ": the refused proposal stays open for the owner to re-target")
+		g.seen_by_test = true
+	end
+	for _, g in D().gates do g.seen_by_test = nil end
+	-- 3. An approved proposal refused at execution reaches the coordinator with its code and message.
+	local ok_proposal = W.propose(f, cid, "dispatch", work, { record_id = "codex", record_revision = 0, prompt = "Implement the follow-on planned task." })
+	check(ok_proposal.ok and ok_proposal.code == "report_committed", "a proposal naming a real record opens its gate (" .. tostring(ok_proposal.code) .. ")")
+	local pending
+	for _, g in D().gates do if g.kind == "coordinator_proposal" and g.phase == "pending" then pending = g end end
+	for _, row in D().catalogs[sid].records do if row.id == "codex" then row.enabled = false end end
+	local approved = f:apply("answer", { gate_id = pending.id, gate_revision = pending.revision, choice_id = "approve", answer = "Go." })
+	check(approved.ok and D().gates[pending.id].execution ~= nil and D().gates[pending.id].execution.state == "refused"
+		and D().gates[pending.id].execution.effect_ref == "catalog_changed", "the approved proposal is refused at execution (catalog_changed)")
+	local told = refusal_gate("execution_refused")
+	check(told ~= nil and told.answer.source.code == "execution_refused" and told.answer.choice_id == "reject", "ORCH+ settles a second reject for the approved-then-refused proposal")
+	local told_text = deliver_answer(told)
+	check(told_text:find("catalog_changed", 1, true) ~= nil and told_text:find("no longer current and eligible", 1, true) ~= nil and told_text:find("builder@0", 1, true) ~= nil,
+		"the coordinator receives the execution refusal's code, its message and the eligible list")
+	-- Acknowledged delivery must not reclaim a refusal the owner has yet to re-target.
+	local delivered = api.clone(D().gates[told.id].delivery)
+	delivered.message_id = api.codec.decode_reply(delivered.bytes, cw).message_id
+	check(W.ack(f, cid, delivered).ok, "the coordinator acknowledges the refusal")
+	assert(f:tick()); assert(W.send(f, cid, "HEARTBEAT", { state = "working" }).ok)
+	check(D().gates[told.id] ~= nil and table.find(D().gates[told.id].evidence, "retarget:open") ~= nil, "an acknowledged stale-record refusal stays on the owner's surface for re-targeting")
+	for _, row in D().catalogs[sid].records do if row.id == "codex" then row.enabled = true end end
+	-- 4. The owner re-targets through the roster: the same proposal id is re-issued on the chosen record.
+	local stale = refusal_gate("catalog_changed")
+	local catalog = D().catalogs[sid]
+	local bad = f:apply("retarget_proposal", { gate_id = stale.id, gate_revision = stale.revision, record_id = "typed-by-hand", record_revision = 0, catalog_revision = catalog.revision })
+	check(not bad.ok and bad.code == "unknown_record" and table.find(stale.evidence, "retarget:open") ~= nil, "a record outside the roster cannot re-target (" .. tostring(bad.code) .. ")")
+	local moved = f:apply("retarget_proposal", { gate_id = stale.id, gate_revision = stale.revision, record_id = "claude2", record_revision = 0, catalog_revision = catalog.revision })
+	check(moved.ok and moved.code == "proposal_retargeted", "choosing a real record re-issues the proposal (" .. tostring(moved.code) .. " " .. tostring(moved.message) .. ")")
+	stale = D().gates[stale.id]
+	check(table.find(stale.evidence, "retarget:done") ~= nil and table.find(stale.evidence, "retarget:open") == nil, "the refused proposal is marked re-targeted")
+	local reissued
+	for _, g in D().gates do
+		if g.kind == "coordinator_proposal" and g.phase == "pending" and g.id ~= pending.id then reissued = g end
+	end
+	local payload = if reissued then api.codec.decode_report(reissued.proposal, cw).payload else nil
+	check(payload ~= nil and payload.record_id == "claude2" and payload.record_revision == 0 and payload.proposal_id == api.codec.decode_report(stale.proposal, cw).payload.proposal_id,
+		"the re-issued proposal waits on the owner with the chosen record and the original proposal id")
+	local again = f:apply("retarget_proposal", { gate_id = stale.id, gate_revision = stale.revision, record_id = "claude2", record_revision = 0, catalog_revision = catalog.revision })
+	check(not again.ok and again.code == "stale_gate", "a re-targeted proposal cannot be re-targeted twice")
+	check(W.restores(f), "refused, notified and re-targeted proposal gates restore")
+end
+
 assert(section == nil or table.find({ "plan_import", "usage_delta", "review_cross_family", "review_rounds", "auto_finish", "proof_rule",
 	"release_config", "release_launch", "release_refresh", "release_holder", "deploy", "deploy_held", "deploy_retry", "deploy_lost",
 	"grid_queued_new_revision", "grid_queued_target_moved", "grid_queued_rm_rollover", "grid_queued_cancel",
@@ -3543,5 +3645,5 @@ assert(section == nil or table.find({ "plan_import", "usage_delta", "review_cros
 	"autonomy", "autonomy_dispatch", "autonomy_report", "autonomy_review", "autonomy_landing", "sources", "intake", "router", "labeller_finish", "passive_proposals", "project_start", "project_start_membership", "project_start_failures", "project_start_publication", "project_start_policy", "project_start_subject", "project_start_active", "project_start_mailbox", "project_start_malformed", "project_start_retirement", "plan_capacity", "project_review",
 	"project_gate_rearm", "project_plan_reopen", "project_live_conversation", "project_deploy_boundary", "project_manager_boundary",
 	"assignment_policy", "autonomy_paused", "proposal_early", "repository_sessions", "repository_policy", "repository_paused",
-	"repository_external", "repository_result_order", "repository_targets", "repository_head", "repository_route_change", "repository_sharing" }, section), "unknown workflow section")
+	"proposal_records", "repository_external", "repository_result_order", "repository_targets", "repository_head", "repository_route_change", "repository_sharing" }, section), "unknown workflow section")
 return "workflow/" .. tostring(section or "all") .. ": " .. tostring(checks) .. " checks passed"
