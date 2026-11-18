@@ -1299,7 +1299,7 @@ local function reclaim_gates(d: any)
 		for _, item in (d.landing or {}).items or {} do if item.gate_id == key and not LANDING_TERMINAL[item.status] then dependent = true end end
 		for _, rec in d.intakes or {} do if rec.label and rec.label.gate_id == key then dependent = true end end
 		if not dependent and not g.ruling and not gate_open(g) and (not g.delivery or g.delivery.acknowledged)
-			and not g.delivery_uncertain and (not g.execution or g.execution.state ~= "pending") then
+			and not g.delivery_uncertain and (not g.execution or g.execution.state ~= "pending") and not config.pending_notice(g) then
 			local w = d.workers[g.worker_id]
 			if w then
 				local entries = flow(w).thread
@@ -2017,7 +2017,7 @@ local function valid_workflow(d: any, registry: any, legacy: boolean?): boolean
 		if g.execution ~= nil then
 			local e = g.execution
 			local proposal = if g.proposal then codec.decode_report(g.proposal, w) else nil
-			if not closed(e, "state gate_revision effect_ref at_ms") or (e.state == "pending" and e.effect_ref == "refusal_undelivered") or not table.find({ "pending", "done", "refused" }, e.state) or not pos(e.gate_revision)
+			if not closed(e, "state gate_revision effect_ref at_ms") or not table.find({ "pending", "done", "refused" }, e.state) or not pos(e.gate_revision)
 				or e.gate_revision > g.revision or not wire_text(e.effect_ref, 1024) or not (e.at_ms == 0 or pos(e.at_ms))
 				or not g.answer or g.answer.choice_id ~= "approve" or not proposal or proposal.payload.kind == "rollover" then return false end
 		end
@@ -2039,6 +2039,17 @@ local function valid_workflow(d: any, registry: any, legacy: boolean?): boolean
 		if (g.kind == "coordinator_proposal") ~= (g.proposal ~= nil) then return false end
 		if g.delivery_uncertain ~= nil and type(g.delivery_uncertain) ~= "boolean" then return false end
 		if g.recheck ~= nil and not valid_stamp(g.recheck) then return false end
+		do
+			local marked = 0
+			for _, entry in g.evidence do if type(entry) == "string" and entry:sub(1, #config.NOTICE_PREFIX) == config.NOTICE_PREFIX then marked += 1 end end
+			if marked > 0 then
+				local notice = config.parse_notice(g)
+				local refused = g.answer ~= nil and type(g.answer.source) == "table" and g.answer.source.kind == "refusal" and g.answer.choice_id == "reject"
+				local terminal = g.execution ~= nil and g.execution.state == "refused"
+				if marked ~= 1 or not notice or notice.malformed or g.kind ~= "coordinator_proposal" or not (refused or terminal)
+					or not table.find({ "pending", "cleared" }, notice.status) or notice.order < 1 or notice.order > d.serial or #g.evidence > 256 then return false end
+			end
+		end
 		if g.proposal ~= nil then
 			local proposal = codec.decode_report(g.proposal, w)
 			if not proposal or proposal.kind ~= "COORDINATOR_PROPOSAL" or proposal.seq > w.accepted_seq then return false end
@@ -2047,6 +2058,19 @@ local function valid_workflow(d: any, registry: any, legacy: boolean?): boolean
 		end
 		-- A legacy coordinator review result is admitted only at the restore boundary, which drops it (M.restore).
 		if g.result ~= nil and (not legacy or type(g.result) ~= "string" or g.kind ~= "coordinator_proposal") then return false end
+	end
+	do
+		local per, orders, total = {}, {}, 0
+		for _, g in d.gates do
+			local notice = config.pending_notice(g)
+			if notice then
+				total += 1
+				per[g.logical_session_id] = (per[g.logical_session_id] or 0) + 1
+				if orders[notice.order] or per[g.logical_session_id] > config.NOTICE_SESSION then return false end
+				orders[notice.order] = true
+			end
+		end
+		if total > config.NOTICE_TOTAL then return false end
 	end
 	return true
 end
@@ -2712,7 +2736,7 @@ end
 -- Shape and correlation checks protect restored dispatch state; codecs revalidate exact receipts.
 function M.valid(d: any, registry: any, legacy_catalog_cache: boolean?): boolean
 	if d == nil then return true end
-	if not closed(d, "serial actions workers catalogs catalog_pages catalog_scans policies family_migrations cleanup_notices repository_policies gates command_cursors rollovers landing capacity sweeps reviews deploys plans intakes chains projects finished_projects refusals" .. (if legacy_catalog_cache then " commands" else "")) or type(d.serial) ~= "number" or d.serial < 0 or d.serial % 1 ~= 0 or d.serial > MAX then return false end
+	if not closed(d, "serial actions workers catalogs catalog_pages catalog_scans policies family_migrations cleanup_notices repository_policies gates command_cursors rollovers landing capacity sweeps reviews deploys plans intakes chains projects finished_projects" .. (if legacy_catalog_cache then " commands" else "")) or type(d.serial) ~= "number" or d.serial < 0 or d.serial % 1 ~= 0 or d.serial > MAX then return false end
 	for _, field in { "family_migrations", "cleanup_notices" } do
 		if d[field] ~= nil then
 			if type(d[field]) ~= "table" or d[field] == tern.json.null or count(d[field]) > 64 then return false end
@@ -2727,7 +2751,6 @@ function M.valid(d: any, registry: any, legacy_catalog_cache: boolean?): boolean
 			end
 		end
 	end
-	if d.refusals ~= nil and not config.valid_refusals(d, registry) then return false end
 	if d.catalog_scans ~= nil then
 		if type(d.catalog_scans) ~= "table" or d.catalog_scans == tern.json.null or count(d.catalog_scans) > 64 or type(d.catalogs) ~= "table" then return false end
 		for sid, assembling in d.catalog_scans do
@@ -2907,6 +2930,25 @@ function M.migration_problem(d: any, legacy_registry: boolean?): string?
 	end
 	return nil
 end
+-- Retained refusals that predate notification markers get one before any reclamation, oldest first, under the
+-- same limits. Detailed reasons of terminal execution refusals were never retained and are said so.
+function config.mark_legacy_refusals(d: any)
+	local legacy = {}
+	for _, g in d.gates or {} do
+		if g.kind == "coordinator_proposal" and not config.parse_notice(g) then
+			local refused = g.answer ~= nil and type(g.answer.source) == "table" and g.answer.source.kind == "refusal"
+			if refused or (g.execution ~= nil and g.execution.state == "refused") then table.insert(legacy, g) end
+		end
+	end
+	table.sort(legacy, function(a: any, b: any): boolean return (tonumber(a.id:match("%d+$")) or 0) < (tonumber(b.id:match("%d+$")) or 0) end)
+	for _, g in legacy do
+		local refused = g.answer ~= nil and type(g.answer.source) == "table" and g.answer.source.kind == "refusal"
+		local code = if refused then g.answer.source.code else g.execution.effect_ref
+		local reason = if refused then (config.REFUSALS[g.answer.source.code] or "") else "The approved proposal was refused at execution. Its detailed reason was not retained; tell your orchestrator."
+		if not code:match("^[%w_%-]+$") then code = "refused" end
+		config.notify(d, g, code, if reason == "" then "Refused." else reason, config.make_room(d, g.logical_session_id))
+	end
+end
 function M.restore(d: any)
 	if d == nil then return end
 	config.upgrade_policies(d)
@@ -2924,6 +2966,7 @@ function M.restore(d: any)
 	for _, w in d.workers do
 		w.continuation_required = true; refresh(d, w, nil)
 	end
+	config.mark_legacy_refusals(d)
 end
 local function candidate(registry: any): any
 	local n = table.clone(registry); n.dispatch = clone(registry.dispatch or fresh()); n.sessions = clone(registry.sessions); n.revision += 1; return n
@@ -3420,6 +3463,42 @@ local function issue_reply(d: any, w: any, kind: string, payload: any, gate: any
 		message_id = reply.message_id, reply_seq = reply.reply_seq, action_id = reply.action_id, action_revision = reply.action_revision, acknowledged = false }
 	return { bytes = bytes, message_id = if kind == "owner_decision" or kind == "report_request" or kind == "landing_grant" or kind == "landing_refresh" or kind == "deploy_grant" or kind == "project_start" then reply.message_id else nil, action_id = reply.action_id, action_revision = reply.action_revision, reply_seq = reply.reply_seq,
 		activation_token = payload.activation_token, acknowledged = false }, nil
+end
+-- Roster text for coordinators and refusals: every enabled, eligible record of the complete assembled catalog,
+-- sorted by id, one record_id@revision per line, never truncated (256 records at most, so about 29 KB).
+function config.roster_text(d: any, sid: string): string
+	local catalog = d.catalogs[sid]
+	local rows = {}
+	for _, row in (catalog or {}).records or {} do
+		if row.eligible and row.enabled == true and not row.id:find("\n") then table.insert(rows, row.id .. "@" .. string.format("%.0f", row.revision)) end
+	end
+	table.sort(rows)
+	if #rows == 0 then return "No eligible records." end
+	return "Eligible records (catalog revision " .. string.format("%.0f", catalog.revision) .. "):\n" .. table.concat(rows, "\n")
+end
+function config.catalog_complete(d: any, sid: string): boolean
+	return d.catalogs[sid] ~= nil and (d.catalog_scans or {})[sid] == false
+end
+-- Activation is owed to the exact current coordinator generation once semantic acceptance is confirmed.
+function config.activation_owed(n: any, w: any): boolean
+	local owner = if w.coordinator_owner_id then coordinator(n, w) else nil
+	return w.coordinator_protocol == 1 and w.accepted_event ~= nil and w.accept_pending == false and w.activation == nil
+		and owner ~= nil and owner.phase == "running" and w.stopped == nil and w.retirement == nil and w.release == nil
+end
+-- Issues the activation grant and assigns it in the same transition. Nil when nothing is owed or the complete
+-- roster is not loaded yet (the existing catalog scan continues; a later poll issues it exactly once).
+function config.issue_activation(n: any, d: any, w: any, clock: any): any?
+	if not config.activation_owed(n, w) or not config.catalog_complete(d, w.logical_session_id) then return nil end
+	local grant, err = issue_reply(d, w, "coordinator_activation", {
+		owner_id = w.coordinator_owner_id, owner_generation = w.coordinator_generation,
+		-- Rollover successors bind activation to their exact handover; retired tokens never recur.
+		activation_token = codec.sha256(w.enrolment_token .. ":coordinator:" .. w.coordinator_owner_id .. ":" .. tostring(w.coordinator_generation)
+			.. (if w.handover_id then ":handover:" .. w.handover_id .. ":" .. w.handover_token else "")),
+		instructions = (if w.handover_id then "Verified rollover handover " .. w.handover_id .. ": you succeed a stopped and retired coordinator generation; its activation token and proposals are invalid. " else "")
+			.. "Coordinator authority covers only this assignment, not OS/account isolation. Use the issued producer_helper/root/handle/enrolment_token. consume durably records this grant and reply_ack; claim before work. Retain the exact owner_id, owner_generation, activation_token and action_id/action_revision. Never independently orchestrate Tern, start agents or alter accounts. Echo each report_request.request_id once in HEARTBEAT or CHECKPOINT; reply_ack alone is not fulfillment. After activation ACK is accepted, COORDINATOR_PROPOSAL always carries owner_id, owner_generation, activation_token, proposal_id and kind. Existing dispatch/report/review/rollover/landing kinds also require work_id and checkpoint project_id; review/rollover/landing require checkpoint_id; dispatch requires current record_id, record_revision and literal prompt. New passive new_work/add_source variants instead require exactly one of orch_project_id or new_project_name, without work_id/project_id/checkpoint_id. new_work also carries record_id, record_revision, literal prompt, scope {paths,systems}, checks [{check_id,argv}], optional verified repository_id/base_ref and paired target_ref/target_revision. add_source carries source {kind=plan_file|board,path,revision} or {kind=template,template_id,revision,input,custom_fields?}. Derive these from the user's task and observed source; never guess revisions. Both passive variants require owner approval and only add held project work, including during pause. START separately releases that addition after command review. Existing effectful proposals obey pause and checkpoint scope. No proposal is permission for you to perform a native, merge or account action. Only the builder sends LANDING_REQUEST; only the exact eligible merge actor lands (existing builder by default; optional selected release agent). Coordinators never send REVIEW_RESULT or LANDING_RESULT. Retirement/recovery forbids all fresh proposals. Fulfill progress requests and settle owner decisions before release. When finished or retired, quiesce and resolve genuinely completed helper claims; retain uncertainty. Report COORDINATOR_RELEASE with the exact issued action_id/action_revision and payload {owner_id,owner_generation,activation_token,quiescent=true}. A racing retirement is consumed without a second release. Drain final receipts/replies. Native-ask workers return idle for notifications; only worker-poll workers use bounded wait. Unresolved execution blocks retirement. ORCH+/SPAWN alone own exact native stop and mailbox cleanup. DONE, idle and absence are never release." .. " Choose record_id and record_revision only from the eligible list below.\n" .. config.roster_text(d, w.logical_session_id) })
+	if err then return err end
+	w.activation = grant
+	return nil
 end
 -- START is an immutable owner decision, not a boolean launch shortcut. Only the exact
 -- coordinator's accepted claim releases this captured membership; later additions stay held.
@@ -6305,32 +6384,6 @@ function config.proposal_question(p: any, scoped: boolean, why: string?): string
 	end
 	return bounded(text, 32768)
 end
--- Places one coordinator proposal: a definite refusal (paused session, no retained checkpoint scope, or a
--- record that is unknown or stale in the assembled roster) is settled at once and told to the coordinator;
--- anything else opens its gate. Owner re-targeting re-enters here with the chosen record.
-function config.place_proposal(d: any, w: any, p: any, bytes: string, clock: any): (string?, any?)
-	local target, target_checkpoint
-	for _, worker in d.workers do if worker.work_id == p.work_id and worker.logical_session_id == w.logical_session_id then target = worker end end
-	for _, cpbytes in (if target and target.workflow then target.workflow.checkpoints else {}) do
-		local cp = codec.decode_report(cpbytes, target)
-		if cp.payload.project_id == p.project_id and (p.checkpoint_id == nil or cp.payload.checkpoint_id == p.checkpoint_id) then target_checkpoint = cp end
-	end
-	-- Paused sessions and proposals naming no retained checkpoint scope are refused definitely.
-	local refused = if p.kind == "new_work" or p.kind == "add_source" then nil
-		elseif p.kind == "review" and not policy(d, w.logical_session_id).require_code_review then "review_disabled"
-		elseif policy(d, w.logical_session_id).paused then "session_paused" elseif not target_checkpoint then "scope_mismatch" else nil
-	if not refused and (p.kind == "dispatch" or p.kind == "new_work") then refused = config.record_refusal(d, w.logical_session_id, p) end
-	if refused then
-		local _, problem = config.refuse_proposal(d, w, p, bytes, refused, clock)
-		return refused, problem
-	end
-	local _, problem = config.open_proposal(d, w, p, bytes, target_checkpoint, clock)
-	if not problem then
-		-- A live proposal holding this id closes any offer to re-target an older refusal of the same id.
-		for _, e in (d.refusals or {})[w.logical_session_id] or {} do if e.proposal_id == p.proposal_id then e.retargetable = false end end
-	end
-	return nil, problem
-end
 -- A proposal naming registered session work and a retained CHECKPOINT of its project opens one
 -- coordinator_proposal gate. D8/D9: an in-scope proposal of an auto_approve kind is answered by the
 -- session policy (tagged source); out-of-scope ones always wait for the owner. Rollover never executes.
@@ -6363,35 +6416,17 @@ config.REFUSALS = {
 	review_disabled = "code review is disabled in this session; enable Require code review in Config before proposing review. Nothing was asked of the owner or executed.",
 	session_paused = "the session is paused; nothing was asked of the owner or executed. Propose again after the owner resumes the session.",
 	scope_mismatch = "the named work retains no CHECKPOINT of that project (and checkpoint_id) in this session; nothing was asked of the owner or executed. Propose again after that checkpoint is registered.",
-	unknown_record = "the proposed record_id is not an eligible record of this session's SPAWN roster; nothing was asked of the owner or executed. Propose again with a record_id and record_revision taken exactly from the eligible list.",
-	catalog_changed = "the proposed record_id exists but that record_revision is not current, or the record is disabled or ineligible; nothing was asked of the owner or executed. Propose again with a record_id and record_revision taken exactly from the eligible list.",
-	execution_refused = "the owner approved the proposal, but ORCH+ refused to run it; nothing was executed.",
+	unknown_record = "That record ID is unknown. Nothing was added or queued. Re-propose using a listed ID and revision.",
+	catalog_changed = "That record revision is not currently enabled and eligible. Nothing was added or queued. Re-propose using a listed ID and revision.",
+	catalog_incomplete = "The agent roster is still loading. Nothing was added or queued. Re-propose after it finishes.",
 }
--- The records a coordinator may name: every eligible, enabled row of the assembled roster, as record_id@revision.
-function config.eligible_records(d: any, sid: string): { string }
-	local out = {}
-	for _, row in ((d.catalogs[sid] or {}).records or {}) do
-		if row.eligible and row.enabled == true then table.insert(out, row.id .. "@" .. string.format("%.0f", row.revision)) end
-	end
-	table.sort(out)
-	return out
-end
-function config.eligible_text(d: any, sid: string, maximum: number): string
-	local list = config.eligible_records(d, sid)
-	if #list == 0 then return "none (no eligible record is known yet; the owner must reload the agent list)" end
-	local text, listed = "", 0
-	for index, token in list do
-		local piece = (if index > 1 then ", " else "") .. token
-		if #text + #piece > maximum then break end
-		text ..= piece; listed = index
-	end
-	if listed < #list then text ..= ", and " .. tostring(#list - listed) .. " more" end
-	return text
-end
--- Nil when the named record and revision are current, eligible and enabled in the roster.
+-- Definite record refusal for dispatch and new_work: nil when the record and revision are current, enabled and
+-- eligible in the complete assembled roster.
 function config.record_refusal(d: any, sid: string, p: any): string?
+	if p.kind ~= "dispatch" and p.kind ~= "new_work" then return nil end
+	if not config.catalog_complete(d, sid) then return "catalog_incomplete" end
 	local seen = false
-	for _, row in ((d.catalogs[sid] or {}).records or {}) do
+	for _, row in (d.catalogs[sid] or {}).records or {} do
 		if row.id == p.record_id then
 			seen = true
 			if row.revision == p.record_revision and row.eligible and row.enabled == true then return nil end
@@ -6399,126 +6434,90 @@ function config.record_refusal(d: any, sid: string, p: any): string?
 	end
 	return if seen then "catalog_changed" else "unknown_record"
 end
--- Refusals the owner can see and act on live in a host-owned bounded list, d.refusals[session], never in
--- retained gates: at most eight per session and 32 overall, oldest dropped first. An entry names the proposal,
--- why it was refused, whether the owner may re-target it, and whether the coordinator was told (notice).
-config.REFUSAL_CAP, config.REFUSAL_TOTAL = 8, 32
-function config.settle_refusal(d: any, w: any, bytes: string, text: string, code: string, clock: any): (nil, any?)
-	local g, err = new_gate(d, w, "coordinator_proposal", bounded(text, 32768), { { id = "approve", label = "Approve proposal" }, { id = "reject", label = "Reject" } },
-		{ "refused:" .. code }, clock, bytes)
-	if err then return nil, err end
-	local _, problem = append(d, w, "answer", text, clock, { state = "pending", gate_id = g.id }); if problem then return nil, problem end
-	g.answer = { choice_id = "reject", answer = bounded(text, 32768), source = { kind = "refusal", code = code }, at_ms = stamp(clock).at_ms }; g.phase = "answered"
-	return nil, nil
+-- Owner notifications live in gate evidence as one host-written marker per gate:
+-- orchplus-notice:v1:<pending|cleared>:<creation order>:<older refusals cleared>:<code>:<reason, at most 900 bytes>.
+-- At most four pending per orchestration and twelve overall; overflow clears the oldest and carries its count.
+config.NOTICE_PREFIX = "orchplus-notice:v1:"
+config.NOTICE_SESSION, config.NOTICE_TOTAL = 4, 12
+function config.parse_notice(g: any): any?
+	for index, entry in g.evidence or {} do
+		if type(entry) == "string" and entry:sub(1, #config.NOTICE_PREFIX) == config.NOTICE_PREFIX then
+			local status, order, cleared, code, reason = entry:sub(#config.NOTICE_PREFIX + 1):match("^(%a+):(%d+):(%d+):([%w_%-]+):(.*)$")
+			if status then return { index = index, status = status, order = tonumber(order), cleared = tonumber(cleared), code = code, reason = reason } end
+			return { index = index, malformed = true }
+		end
+	end
+	return nil
 end
-local function refusal_serial(e: any): number return tonumber(e.refusal_id:match("%d+$")) or 0 end
-function config.add_refusal(d: any, w: any, p: any, bytes: string, code: string, text: string, retargetable: boolean, notice: string)
-	d.refusals = d.refusals or {}
-	local sid = w.logical_session_id
-	d.refusals[sid] = d.refusals[sid] or {}
-	local list = d.refusals[sid]
-	table.insert(list, { refusal_id = next_id(d, "refusal-"), proposal_id = p.proposal_id, kind = p.kind, code = code, text = bounded(text, 8192),
-		record_id = p.record_id, record_revision = p.record_revision, retargetable = retargetable, notice = notice,
-		worker_id = w.worker_id, worker_generation = w.worker_generation, owner_id = w.coordinator_owner_id, owner_generation = w.coordinator_generation, bytes = bytes })
-	while #list > config.REFUSAL_CAP do table.remove(list, 1) end
-	local total = 0
-	for _, other in d.refusals do total += #other end
-	while total > config.REFUSAL_TOTAL do
-		local from, at, lowest
-		for key, other in d.refusals do
-			for index, e in other do
-				if not lowest or refusal_serial(e) < lowest then from, at, lowest = key, index, refusal_serial(e) end
+function config.write_notice(g: any, status: string, order: number, cleared: number, code: string, reason: string)
+	local entry = config.NOTICE_PREFIX .. status .. ":" .. string.format("%.0f", order) .. ":" .. string.format("%.0f", cleared) .. ":" .. code .. ":" .. bounded(reason, 900)
+	local existing = config.parse_notice(g)
+	if existing then g.evidence[existing.index] = entry else table.insert(g.evidence, entry) end
+end
+-- Workers never supply notification metadata: every reserved-prefix entry is dropped from caller evidence.
+function config.caller_evidence(evidence: any): any
+	local out = {}
+	for _, entry in evidence or {} do
+		if not (type(entry) == "string" and entry:sub(1, #config.NOTICE_PREFIX) == config.NOTICE_PREFIX) then table.insert(out, entry) end
+	end
+	return out
+end
+function config.pending_notice(g: any): any?
+	local notice = config.parse_notice(g)
+	return if notice and not notice.malformed and notice.status == "pending" then notice else nil
+end
+-- Clears the oldest pending notifications until a new one fits; returns the count the incoming card carries.
+function config.make_room(d: any, sid: string): number
+	local carried = 0
+	while true do
+		local mine, all = {}, {}
+		for _, g in d.gates or {} do
+			local notice = config.pending_notice(g)
+			if notice then
+				table.insert(all, { g = g, n = notice })
+				if g.logical_session_id == sid then table.insert(mine, { g = g, n = notice }) end
 			end
 		end
-		if not from then break end
-		table.remove(d.refusals[from], at); total -= 1
+		local pool = if #mine >= config.NOTICE_SESSION then mine elseif #all >= config.NOTICE_TOTAL then all else nil
+		if not pool then return carried end
+		table.sort(pool, function(a: any, b: any): boolean return a.n.order < b.n.order or (a.n.order == b.n.order and a.g.id < b.g.id) end)
+		local oldest = pool[1]
+		config.write_notice(oldest.g, "cleared", oldest.n.order, oldest.n.cleared, oldest.n.code, oldest.n.reason)
+		carried += oldest.n.cleared + 1
 	end
 end
--- Entries whose coordinator worker is gone are dropped with it.
-function config.prune_refusals(d: any)
-	for sid, list in d.refusals or {} do
-		for index = #list, 1, -1 do
-			if not d.workers[list[index].worker_id] then table.remove(list, index) end
-		end
-		if #list == 0 then d.refusals[sid] = nil end
-	end
+function config.next_order(d: any): number
+	d.serial += 1
+	return d.serial
+end
+-- Marks a gate (a refusal gate, or an approved gate whose execution was refused) with a pending notification.
+function config.notify(d: any, g: any, code: string, reason: string, carried: number)
+	config.write_notice(g, "pending", config.next_order(d), carried, code, reason)
 end
 function config.refuse_proposal(d: any, w: any, p: any, bytes: string, code: string, clock: any): (nil, any?)
+	local reason = config.REFUSALS[code]
 	local text = "ORCH+ refused proposal " .. p.proposal_id .. " (" .. code .. ", " .. p.kind
 		.. (if p.work_id then " for " .. p.work_id .. " in " .. p.project_id else "")
-		.. (if p.checkpoint_id then ", checkpoint " .. p.checkpoint_id else "") .. "): " .. config.REFUSALS[code]
-	local listed = code == "unknown_record" or code == "catalog_changed"
-	if listed then text ..= " Eligible records (record_id@revision): " .. config.eligible_text(d, w.logical_session_id, 3000) .. "." end
-	local _, problem = config.settle_refusal(d, w, bytes, text, code, clock)
-	if problem then return nil, problem end
-	if listed and (p.kind == "dispatch" or p.kind == "new_work") then config.add_refusal(d, w, p, bytes, code, text, true, "delivered") end
+		.. (if p.checkpoint_id then ", checkpoint " .. p.checkpoint_id else "") .. "): " .. reason
+	if code == "unknown_record" or code == "catalog_changed" then text ..= "\n" .. config.roster_text(d, w.logical_session_id) end
+	local saved = {}
+	for key, g in d.gates or {} do saved[key] = clone(g.evidence) end
+	local carried = config.make_room(d, w.logical_session_id)
+	local g, err = new_gate(d, w, "coordinator_proposal", bounded(text, 32768), { { id = "approve", label = "Approve proposal" }, { id = "reject", label = "Reject" } },
+		{ "refused:" .. code }, clock, bytes)
+	if not err then
+		local _, problem = append(d, w, "answer", text, clock, { state = "pending", gate_id = g.id }); err = problem
+	end
+	if err then
+		for key, evidence in saved do if d.gates[key] then d.gates[key].evidence = evidence end end
+		return nil, err
+	end
+	g.answer = { choice_id = "reject", answer = bounded(text, 32768), source = { kind = "refusal", code = code }, at_ms = stamp(clock).at_ms }; g.phase = "answered"
+	config.notify(d, g, code, reason, carried)
 	return nil, nil
-end
--- An approved proposal ORCH+ then refused to run is terminal at once (the effect is never retried). Telling the
--- coordinator is a bounded notice on its refusal entry, delivered as one more typed reject when a gate slot and
--- thread room exist; it pins nothing, and is dropped when the coordinator is retired or replaced.
-function config.note_execution_refusal(d: any, w: any, g: any, p: any, code: string, message: string)
-	if code == "gate_cancelled" then return end
-	local listed = code == "catalog_changed" and (p.kind == "dispatch" or p.kind == "new_work")
-	local text = "ORCH+ refused to run approved proposal " .. p.proposal_id .. " (" .. p.kind .. ", gate " .. g.id .. ", " .. code .. "): " .. message
-	if listed then text ..= " Eligible records (record_id@revision): " .. config.eligible_text(d, w.logical_session_id, 3000) .. "." end
-	config.add_refusal(d, w, p, g.proposal, "execution_refused", text, listed, "pending")
-end
-function config.deliver_notices(d: any, sid: string, clock: any)
-	for _, e in (d.refusals or {})[sid] or {} do
-		if e.notice ~= "pending" then continue end
-		local w = d.workers[e.worker_id]
-		if not w or w.worker_generation ~= e.worker_generation or w.coordinator_owner_id ~= e.owner_id or w.coordinator_generation ~= e.owner_generation or w.retirement then
-			e.notice = "dropped"; continue
-		end
-		if count(d.gates or {}) >= 64 then reclaim_gates(d) end
-		if count(d.gates or {}) >= 64 or #flow(w).thread + 2 > 128 then return end
-		local _, problem = config.settle_refusal(d, w, e.bytes, e.text, e.code, clock)
-		if problem then return end
-		e.notice = "delivered"
-	end
-end
-function config.valid_refusals(d: any, registry: any): boolean
-	if type(d.refusals) ~= "table" or d.refusals == tern.json.null then return false end
-	local total = 0
-	for sid, list in d.refusals do
-		if not registry.sessions[sid] or not dense(list, config.REFUSAL_CAP, 1) then return false end
-		total += #list
-		for _, e in list do
-			if not closed(e, "refusal_id proposal_id kind code text record_id record_revision retargetable notice worker_id worker_generation owner_id owner_generation bytes")
-				or not id(e.refusal_id) or not id(e.proposal_id) or not str(e.kind, 32) or config.REFUSALS[e.code] == nil or not wire_text(e.text, 8192)
-				or (e.record_id ~= nil and not str(e.record_id, 96)) or (e.record_revision ~= nil and type(e.record_revision) ~= "number")
-				or type(e.retargetable) ~= "boolean" or not table.find({ "pending", "delivered", "dropped" }, e.notice)
-				or not id(e.worker_id) or not pos(e.worker_generation) or not id(e.owner_id) or not pos(e.owner_generation) or type(e.bytes) ~= "string"
-				or #e.bytes > 65536 then return false end
-		end
-	end
-	return total <= config.REFUSAL_TOTAL
-end
--- The ordinary intake of one coordinator proposal (authority, duplicate id, placement); the owner's re-target
--- goes through it too, with a new proposal id. Returns the definite-refusal code, or the problem.
-function config.proposal_intake(n: any, w: any, p: any, bytes: string, clock: any): (string?, any?)
-	local d = n.dispatch
-	local owner, activation = coordinator(n, w), w.activation
-	if not owner or owner.phase ~= "running" or not activation or not activation.acknowledged or w.retirement
-		or p.owner_id ~= owner.owner_id or p.owner_generation ~= owner.generation or p.activation_token ~= activation.activation_token then
-		return fail("proposal_unauthorized", "Proposal requires the active owner/generation and durably acknowledged activation token.")
-	end
-	if restored_coordinator(d, w.logical_session_id) then return fail("coordinator_restored", "A retired coordinator pane was observed alive again; coordinator effects are held until it is reconciled.") end
-	for _, g in d.gates or {} do
-		if g.worker_id == w.worker_id and config.proposal_live(g) then
-			local prior = codec.decode_report(g.proposal, w)
-			if prior.payload.proposal_id == p.proposal_id then return fail("proposal_conflict", "Proposal ID already exists; replay its exact original report instead.") end
-		end
-	end
-	return config.place_proposal(d, w, p, bytes, clock)
 end
 function config.refused_proposal(g: any): boolean
 	return g.answer ~= nil and type(g.answer.source) == "table" and g.answer.source.kind == "refusal"
-end
--- A proposal gate still holds its proposal id: not an ORCH+ refusal, and not an execution ORCH+ refused.
-function config.proposal_live(g: any): boolean
-	return g.proposal ~= nil and not config.refused_proposal(g) and not (g.execution ~= nil and g.execution.state == "refused")
 end
 -- Policy answer (Contract E): recorded on the gate and the thread with its tagged source, then
 -- delivered like any decision. Nothing is answered when the thread has no room.
@@ -6685,9 +6684,10 @@ function config.execute_proposal(registry: any, n: any, gate_id: string, event: 
 	local prior = g.execution
 	if prior and prior.state == state and prior.effect_ref == ref then return message end
 	g.execution = { state = state, gate_revision = g.revision, effect_ref = bounded(ref, 1024), at_ms = stamp(clock).at_ms }
-	if state == "refused" then config.note_execution_refusal(d, w, g, proposal.payload, ref, message) end
 	append(d, w, "execution", bounded("Proposal " .. proposal.payload.proposal_id .. " (" .. proposal.payload.kind .. ", gate " .. g.id .. ") " .. state .. ": " .. message, 32768), clock)
-	if state == "refused" then config.deliver_notices(d, g.logical_session_id, clock) end
+	-- A terminal refusal is shown to the owner on its own card, with the original reason, committed here with the
+	-- execution record. It opens no decision for the coordinator and nothing is retried.
+	if state == "refused" and ref ~= "gate_cancelled" then config.notify(d, g, ref, message, config.make_room(d, g.logical_session_id)) end
 	return message
 end
 -- Runs at the end of every dispatch commit for the event's session. Pause answers nothing by policy:
@@ -6696,7 +6696,6 @@ end
 -- settled execution record run, oldest first.
 function config.advance_proposals(registry: any, n: any, event: any, clock: any, reserve: any)
 	local d, sid = n.dispatch, event.orch_session_id
-	config.prune_refusals(d)
 	local function oldest(a: string, b: string): boolean return (tonumber(a:match("%d+$")) or 0) < (tonumber(b:match("%d+$")) or 0) end
 	local sp = policy(d, sid)
 	if not sp.require_code_review then
@@ -6710,6 +6709,7 @@ function config.advance_proposals(registry: any, n: any, event: any, clock: any,
 					if not problem then
 						g.answer = { choice_id = "reject", answer = message, source = { kind = "refusal", code = "review_disabled" }, at_ms = stamp(clock).at_ms }
 						g.phase = "answered"
+						config.notify(d, g, "review_disabled", config.REFUSALS.review_disabled, config.make_room(d, g.logical_session_id))
 					end
 				end
 			end
@@ -6728,7 +6728,6 @@ function config.advance_proposals(registry: any, n: any, event: any, clock: any,
 		and g.answer.choice_id == "approve" and (g.execution == nil or g.execution.state == "pending") end, oldest) do
 		config.execute_proposal(registry, n, key, event, clock, reserve)
 	end
-	config.deliver_notices(d, sid, clock)
 end
 -- Rule H review evidence: the latest unvoided review of this work with a reviewer-worker result
 -- (approved, changes_required or capped), so a landing hold names why the review does not prove it.
@@ -7860,7 +7859,6 @@ local function semantic(n: any, w: any, report: any, bytes: string, clock: any):
 	if kind == "REVIEW_RESULT" and w.role ~= "reviewer" then return fail(config.review_refusal(d, w)) end
 	if only and w.role ~= only[1] and not (w.role == "builder" and (kind == "LANDING_RESULT" or kind == "DEPLOY_RESULT")) then return fail(only[2], only[3]) end
 	local correlation, helper_summary
-	local refused -- A coordinator proposal ORCH+ refused definitely (committed, never held).
 	if report.action_id then
 		correlation = correlated(d, w, report, f)
 		if not correlation or correlation.phase == "cancelled" or correlation.phase == "superseded" then return fail("binding_mismatch", "Report action/revision was not issued or is no longer current for this recipient.") end
@@ -7872,6 +7870,7 @@ local function semantic(n: any, w: any, report: any, bytes: string, clock: any):
 		if kind ~= "WAITING" and kind ~= "HEARTBEAT" and kind ~= "CHECKPOINT" then return fail("invalid_schema", "Unexpected report request correlation.") end
 	end
 	local checkpoint = if p.checkpoint_id and f.checkpoints[p.checkpoint_id] then codec.decode_report(f.checkpoints[p.checkpoint_id], w) else nil
+	local refused -- A coordinator proposal ORCH+ refused definitely (committed, never held).
 	if table.find({ "REVIEW_READY", "DONE", "ROLLOVER_REQUEST" }, kind) and (not checkpoint
 		or (p.artifact_revision and p.artifact_revision ~= checkpoint.payload.artifact_revision)) then
 		return fail("checkpoint_mismatch", "Report must reference a retained checkpoint and its exact artifact revision.")
@@ -7888,10 +7887,34 @@ local function semantic(n: any, w: any, report: any, bytes: string, clock: any):
 			if err then return nil, err end
 		end
 	elseif kind == "ASK" then
-		local _, err = new_gate(d, w, "owner_question", p.question, p.options, p.evidence, clock); if err then return nil, err end
+		local _, err = new_gate(d, w, "owner_question", p.question, p.options, config.caller_evidence(p.evidence), clock); if err then return nil, err end
 	elseif kind == "COORDINATOR_PROPOSAL" then
-		local problem
-		refused, problem = config.proposal_intake(n, w, p, bytes, clock)
+		local owner, activation = coordinator(n, w), w.activation
+		if not owner or owner.phase ~= "running" or not activation or not activation.acknowledged or w.retirement
+			or p.owner_id ~= owner.owner_id or p.owner_generation ~= owner.generation or p.activation_token ~= activation.activation_token then
+			return fail("proposal_unauthorized", "Proposal requires the active owner/generation and durably acknowledged activation token.")
+		end
+		if restored_coordinator(d, w.logical_session_id) then return fail("coordinator_restored", "A retired coordinator pane was observed alive again; coordinator effects are held until it is reconciled.") end
+		for _, g in d.gates or {} do
+			if g.worker_id == w.worker_id and g.proposal and not config.refused_proposal(g) then
+				local prior = codec.decode_report(g.proposal, w)
+				if prior.payload.proposal_id == p.proposal_id then return fail("proposal_conflict", "Proposal ID already exists; replay its exact original report instead.") end
+			end
+		end
+		local target, target_checkpoint
+		for _, worker in d.workers do if worker.work_id == p.work_id and worker.logical_session_id == w.logical_session_id then target = worker end end
+		for _, cpbytes in (if target and target.workflow then target.workflow.checkpoints else {}) do
+			local cp = codec.decode_report(cpbytes, target)
+			if cp.payload.project_id == p.project_id and (p.checkpoint_id == nil or cp.payload.checkpoint_id == p.checkpoint_id) then target_checkpoint = cp end
+		end
+		-- Paused sessions and proposals naming no retained checkpoint scope are refused definitely.
+		refused = config.record_refusal(d, w.logical_session_id, p)
+		if refused == nil then refused = if p.kind == "new_work" or p.kind == "add_source" then nil
+			elseif p.kind == "review" and not policy(d, w.logical_session_id).require_code_review then "review_disabled"
+			elseif policy(d, w.logical_session_id).paused then "session_paused" elseif not target_checkpoint then "scope_mismatch" else nil end
+		local _, problem
+		if refused then _, problem = config.refuse_proposal(d, w, p, bytes, refused, clock)
+		else _, problem = config.open_proposal(d, w, p, bytes, target_checkpoint, clock) end
 		if problem then return nil, problem end
 	elseif kind == "REVIEW_READY" then
 		local problem = config.review_ready(n, w, checkpoint, clock); if problem then return nil, problem end
@@ -8466,19 +8489,9 @@ local function complete(n: any, a: any, body: any, clock: any, response_bytes: s
 		if body.status ~= "accepted" then return fail("accept_pending", "SPAWN has not recorded semantic acceptance.") end
 		w.accept_pending = false
 		if w.reason and w.reason.code == "accept_reissue" then w.reason = nil end
-		if w.coordinator_protocol == 1 and not w.activation then
-			if not coordinator(n, w) then return fail("owner_mismatch", "Activation belongs only to the exact reserved managed coordinator.") end
-			local grant, err = issue_reply(d, w, "coordinator_activation", {
-				owner_id = w.coordinator_owner_id, owner_generation = w.coordinator_generation,
-				-- Rollover successors bind activation to their exact handover; retired tokens never recur.
-				activation_token = codec.sha256(w.enrolment_token .. ":coordinator:" .. w.coordinator_owner_id .. ":" .. tostring(w.coordinator_generation)
-					.. (if w.handover_id then ":handover:" .. w.handover_id .. ":" .. w.handover_token else "")),
-				instructions = (if w.handover_id then "Verified rollover handover " .. w.handover_id .. ": you succeed a stopped and retired coordinator generation; its activation token and proposals are invalid. " else "")
-					.. "Coordinator authority covers only this assignment, not OS/account isolation. Use the issued producer_helper/root/handle/enrolment_token. consume durably records this grant and reply_ack; claim before work. Retain the exact owner_id, owner_generation, activation_token and action_id/action_revision. Never independently orchestrate Tern, start agents or alter accounts. Echo each report_request.request_id once in HEARTBEAT or CHECKPOINT; reply_ack alone is not fulfillment. After activation ACK is accepted, COORDINATOR_PROPOSAL always carries owner_id, owner_generation, activation_token, proposal_id and kind. Existing dispatch/report/review/rollover/landing kinds also require work_id and checkpoint project_id; review/rollover/landing require checkpoint_id; dispatch requires current record_id, record_revision and literal prompt. New passive new_work/add_source variants instead require exactly one of orch_project_id or new_project_name, without work_id/project_id/checkpoint_id. new_work also carries record_id, record_revision, literal prompt, scope {paths,systems}, checks [{check_id,argv}], optional verified repository_id/base_ref and paired target_ref/target_revision. add_source carries source {kind=plan_file|board,path,revision} or {kind=template,template_id,revision,input,custom_fields?}. Derive these from the user's task and observed source; never guess revisions. Name only a record from the eligible list at the end of these instructions, exactly as record_id and record_revision: a proposal naming any other record is refused with its reason and the current list. Both passive variants require owner approval and only add held project work, including during pause. START separately releases that addition after command review. Existing effectful proposals obey pause and checkpoint scope. No proposal is permission for you to perform a native, merge or account action. Only the builder sends LANDING_REQUEST; only the exact eligible merge actor lands (existing builder by default; optional selected release agent). Coordinators never send REVIEW_RESULT or LANDING_RESULT. Retirement/recovery forbids all fresh proposals. Fulfill progress requests and settle owner decisions before release. When finished or retired, quiesce and resolve genuinely completed helper claims; retain uncertainty. Report COORDINATOR_RELEASE with the exact issued action_id/action_revision and payload {owner_id,owner_generation,activation_token,quiescent=true}. A racing retirement is consumed without a second release. Drain final receipts/replies. Native-ask workers return idle for notifications; only worker-poll workers use bounded wait. Unresolved execution blocks retirement. ORCH+/SPAWN alone own exact native stop and mailbox cleanup. DONE, idle and absence are never release."
-					.. " Eligible records (record_id@revision): " .. config.eligible_text(d, w.logical_session_id, 6000) .. "." })
-			if err then return nil, err end
-			w.activation = grant
-		end
+		if w.coordinator_protocol == 1 and not w.activation and not coordinator(n, w) then return fail("owner_mismatch", "Activation belongs only to the exact reserved managed coordinator.") end
+		local activation_err = config.issue_activation(n, d, w, clock)
+		if activation_err then return nil, activation_err end
 	elseif request.op == "stop" then
 		if body.status ~= "stopped" or not (settled(w) or config.start_retirement_settled(d, w, request.action_id)) or (w.coordinator_owner_id and not coordinator(n, w)) then return fail("stop_pending", "Exact stopped outcome and settled generation are required.") end
 		w.stopped = clone(payload); w.reason = nil
@@ -9226,10 +9239,10 @@ function M.apply(registry: any, event: any, clock: any, reserve: any): (any?, an
 		source_request = "gate_id gate_revision source_revision cards",
 		claim = "action_id executor capacity_validation", result = "action_id executor grant_id response_bytes", lost = "action_id executor grant_id",
 		read_missing = "action_id executor grant_id query_bytes response_bytes",
-		capacity = "capacity", retarget_proposal = "refusal_id record_id record_revision catalog_revision", cancel_work = "worker_id query_bytes response_bytes",
+		capacity = "capacity", cancel_work = "worker_id query_bytes response_bytes",
 		poll = "worker_id bytes", reply = "worker_id trigger", retire = "worker_id withdraw_starts", finish = "worker_id", intake = "worker_id bytes", retry = "action_id trigger", readback_publication = "action_id",
 		policy = "policy expected_policy_sha256 template_put template_remove", pause = "", resume = "", observe = "worker_id pane_binding native_state delivery_error observation_seq",
-		answer = "gate_id gate_revision choice_id answer decision_context", cancel_gate = "gate_id gate_revision", recheck_gate = "gate_id gate_revision",
+		dismiss_refusal = "gate_id gate_revision", answer = "gate_id gate_revision choice_id answer decision_context", cancel_gate = "gate_id gate_revision", recheck_gate = "gate_id gate_revision",
 		continue_controller = "expected_revision operator_verified machine_proof", continue_worker = "worker_id pane_binding continuation_proof operator_verified machine_proof",
 		rollover = "worker_id trigger", reconcile_restored = "worker_id operator_verified", recheck_report = "worker_id",
 		cancel_landing = "landing_id landing_revision", move_landing = "landing_id landing_revision direction",
@@ -9841,35 +9854,14 @@ function M.apply(registry: any, event: any, clock: any, reserve: any): (any?, an
 			if (d.catalog_scans or {})[event.orch_session_id] == false and roster and roster.namespace == (n.compatibility or {}).spawn_namespace then config.prune_family_orphans(n, roster) end
 			answer = result("work_cancelled", { worker_id = event.worker_id, work_id = w.work_id })
 		end
-	elseif event.command == "retarget_proposal" then
-		-- The owner picked another real record for a refused proposal: ORCH+ issues a NEW proposal, under a new
-		-- id it derives, through the ordinary intake. The entry can be re-targeted once; nothing is typed.
-		local entry
-		for _, e in (d.refusals or {})[event.orch_session_id] or {} do if e.refusal_id == event.refusal_id then entry = e end end
-		local w = if entry then d.workers[entry.worker_id] else nil
-		if not entry or not entry.retargetable or not w or w.worker_generation ~= entry.worker_generation then
-			return fail("stale_refusal", "This refused proposal is no longer open for re-targeting.")
-		end
-		local c = d.catalogs[event.orch_session_id]
-		if c == nil or c.revision ~= event.catalog_revision then return fail("catalog_changed", "Refresh and select the current catalog revision.") end
-		if not str(event.record_id, 96) or type(event.record_revision) ~= "number" then return fail("invalid_task", "Choose an eligible record from the list.") end
-		local refused = config.record_refusal(d, event.orch_session_id, event)
-		if refused then return fail(refused, "That record is not current and eligible; choose one from the refreshed list. Nothing was re-sent.") end
-		local old = codec.decode_report(entry.bytes, w)
-		if not old then return fail("invalid_schema", "The re-targeted proposal could not be formed; nothing was re-sent.") end
-		local raw = clone(old)
-		raw.payload.record_id, raw.payload.record_revision = event.record_id, event.record_revision
-		raw.payload.proposal_id = entry.proposal_id:sub(1, 80) .. "-r" .. tostring(refusal_serial(entry))
-		local bytes = tern.json.encode(raw)
-		local moved = codec.decode_report(bytes, w)
-		if not moved then return fail("invalid_schema", "The re-targeted proposal could not be formed; nothing was re-sent.") end
-		local _, placed = config.proposal_intake(n, w, moved.payload, bytes, clock)
-		if placed then return nil, placed end
-		entry.retargetable = false
-		entry.text = bounded(entry.text .. " The owner re-targeted it as " .. raw.payload.proposal_id .. " on record " .. event.record_id .. "@" .. string.format("%.0f", event.record_revision) .. ".", 8192)
-		entry.notice = "pending"
-		config.deliver_notices(d, event.orch_session_id, clock)
-		answer = result("proposal_retargeted", { message = "Proposal re-sent with the chosen agent." })
+	elseif event.command == "dismiss_refusal" then
+		-- Clears only the notification: the answer, delivery and execution record are untouched and grant nothing.
+		local g = if id(event.gate_id) then (d.gates or {})[event.gate_id] else nil
+		if not g or g.logical_session_id ~= event.orch_session_id or g.revision ~= event.gate_revision then return fail("stale_gate", "That refusal changed. Nothing was dismissed.") end
+		local notice = config.pending_notice(g)
+		if not notice then return finish_command(n, event, result("no_progress")) end
+		config.write_notice(g, "cleared", notice.order, notice.cleared, notice.code, notice.reason)
+		answer = result("refusal_dismissed", { gate_id = g.id })
 	elseif config.SOURCE_COMMANDS[event.command] then
 		-- Work sources (Checkpoint 6): non-operator intake commands; the host reads files itself.
 		local handled, err = config.SOURCE_COMMANDS[event.command](registry, n, event, clock, reserve)
@@ -10193,6 +10185,8 @@ function M.apply(registry: any, event: any, clock: any, reserve: any): (any?, an
 		if w == nil or not equal(control_origin(w), event.origin) or not w.mailbox_handle or not w.pane_binding or w.continuation_required then return fail("worker_unbound", "Worker requires its explicitly continued current mailbox/native route.") end
 		if w.coordinator_owner_id and not coordinator(n, w) then return fail("owner_mismatch", "Only the current coordinator generation may settle; restored owners require inspected recovery.") end
 		resume_revoked(d, w)
+		local activation_err = config.issue_activation(n, d, w, clock)
+		if activation_err then return nil, activation_err end
 		if w.mailbox_retired then
 			if not w.coordinator_owner_id then return finish_command(n, event, result("worker_retired", { worker_id = w.worker_id })) end
 			local owner = coordinator(n, w)
@@ -10258,6 +10252,8 @@ function M.apply(registry: any, event: any, clock: any, reserve: any): (any?, an
 			for _, g in d.gates or {} do
 				if g.worker_id == w.worker_id and g.phase == "answered" then
 					local delivery, err = issue_reply(d, w, "owner_decision", { choice_id = g.answer.choice_id, answer = g.answer.answer }, g)
+					-- A full reply outbox leaves the gate answered: the existing publication paths below still drain it.
+					if err and err.code == "full" then break end
 					if err then return nil, err end
 					delivery.published = false; g.delivery = delivery; g.phase = "delivery_pending"
 					for _, entry in flow(w).thread do
@@ -10946,11 +10942,6 @@ function M.project(registry: any, session_id: string, origin_nonce: string, curr
 	table.sort(workflow.workers, function(a, b) return a.worker_id < b.worker_id end)
 	table.sort(workflow.threads, function(a, b) return a.work_id < b.work_id end)
 	table.sort(workflow.gates, function(a, b) return a.id < b.id end)
-	workflow.refusals = {}
-	for _, e in (d.refusals or {})[session_id] or {} do
-		local entry = clone(e); entry.bytes = nil
-		table.insert(workflow.refusals, entry)
-	end
 	local session = registry.sessions[session_id]
 	local sessions = {}
 	local reconcile_progress
@@ -10985,6 +10976,9 @@ end
 function M.close_problem(registry: any, sid: string): string?
 	local d = registry.dispatch
 	if not d then return nil end
+	for _, g in d.gates or {} do
+		if g.logical_session_id == sid and config.pending_notice(g) then return "Dismiss proposal refusals before removing this orchestration." end
+	end
 	if next((d.family_migrations or {})[sid] or {}) ~= nil then return "Legacy provider declarations still need SPAWN review before this orchestration can be removed." end
 	for _, a in d.actions do if a.request.origin_binding.logical_session_id == sid then return "An unresolved action or restored intention remains." end end
 	for _, w in d.workers do
@@ -11014,7 +11008,7 @@ function M.reclaim_session(candidate: any, sid: string)
 	if not existing then return end
 	-- One copy at the existing transaction seam; remove only the closing session's graph.
 	local d = clone(existing); candidate.dispatch = d
-	for _, field in { "catalogs", "catalog_pages", "catalog_scans", "sweeps", "policies", "family_migrations", "cleanup_notices", "command_cursors", "capacity", "refusals" } do if d[field] then d[field][sid] = nil end end
+	for _, field in { "catalogs", "catalog_pages", "catalog_scans", "sweeps", "policies", "family_migrations", "cleanup_notices", "command_cursors", "capacity" } do if d[field] then d[field][sid] = nil end end
 	for key, a in d.actions do if a.request.origin_binding.logical_session_id == sid then d.actions[key] = nil end end
 	for _, field in { "workers", "gates", "rollovers", "reviews", "deploys", "plans", "intakes", "chains", "projects" } do
 		for key, value in d[field] or {} do if value.logical_session_id == sid then d[field][key] = nil end end

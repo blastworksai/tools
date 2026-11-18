@@ -28,7 +28,7 @@ local STATUS_MESSAGES = {
 	plan_imported = "Plan added.",
 	catalog_cleared = "Agent list inspection closed.",
 	catalog_requested = "Checking available agents.",
-	proposal_retargeted = "Proposal sent again with the agent you chose. It now waits for your decision.",
+	refusal_dismissed = "Refusal dismissed.",
 }
 local ERROR_RESULTS = { effect_uncertain = true, bridge_rejected = true, transport_backpressure = true,
 	backpressure = true, publication_uncertain = true, project_start_delivery_failed = true }
@@ -626,19 +626,36 @@ local function dispatch_view(view: any, projection: any, selected: any): (any, a
 	end
 	return ui.card("Managed dispatch", rows), bridge, request_node, scoped_nodes
 end
--- A proposal ORCH+ refused because its record is unknown or stale stays on the normal surface, with ORCH+'s
--- reason (it was also sent to the coordinator), until the owner re-targets it through the real agent list.
+-- Pending owner notifications ride gate evidence (orchplus-notice:v1:<status>:<order>:<cleared>:<code>:<reason>).
+local function pending_notices(flow: any): { any }
+	local found = {}
+	for _, gate in flow.gates do
+		for _, entry in gate.evidence or {} do
+			if type(entry) == "string" and entry:sub(1, 19) == "orchplus-notice:v1:" then
+				local status, order, cleared, code, reason = entry:sub(20):match("^(%a+):(%d+):(%d+):([%w_%-]+):(.*)$")
+				if status == "pending" then table.insert(found, { gate = gate, order = tonumber(order), cleared = tonumber(cleared), code = code, reason = reason }) end
+			end
+		end
+	end
+	table.sort(found, function(a: any, b: any): boolean return a.order < b.order or (a.order == b.order and a.gate.id < b.gate.id) end)
+	return found
+end
+-- Refusals stay on the main surface, above every other decision and for every project, until dismissed.
 local function proposal_refusals(view: any, projection: any, selected: any): any?
 	local flow = if projection.dispatch then projection.dispatch.workflow else nil
 	if not flow then return nil end
 	local _, _, admitted = controller(view, selected)
 	local rows = {}
-	for _, entry in flow.refusals or {} do
-		if entry.retargetable or entry.notice ~= "delivered" then
-			table.insert(rows, ui.text(ui.span("Your orchestrator's proposal was refused (" .. tostring(entry.code) .. "): " .. tostring(entry.text), "warning")))
-			if admitted and entry.retargetable then
-				table.insert(rows, dispatch_link(view, "retarget_proposal", "Choose another agent…", { refusal_id = entry.refusal_id }))
-			end
+	for _, worker in flow.workers do
+		if worker.rejected_report and worker.rejected_report.code == "full" then
+			table.insert(rows, ui.text(ui.span("Delivery is held by capacity. Nothing was added or queued. Inspect the retained report and use Re-check after capacity is restored.", "warning")))
+		end
+	end
+	for _, item in pending_notices(flow) do
+		table.insert(rows, ui.text(ui.span("Your orchestrator's proposal was refused (" .. item.code .. "): " .. item.reason, "warning")))
+		if item.cleared > 0 then table.insert(rows, ui.text(tostring(item.cleared) .. " older refusals were cleared")) end
+		if admitted then
+			table.insert(rows, dispatch_link(view, "dismiss_refusal", "Dismiss", { gate_id = item.gate.id, gate_revision = item.gate.revision, worker_id = item.gate.worker_id }))
 		end
 	end
 	if #rows == 0 then return nil end

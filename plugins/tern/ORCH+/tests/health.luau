@@ -5,7 +5,7 @@ assert(section == nil or table.find({ "clock", "form_hold_notice", "form_hold_ca
 	"driver_admission_noop", "driver_admission_refused", "driver_retry_original", "driver_retry_unrelated", "driver_retry_absent",
 	"driver_deadline_absent", "driver_deadline_unrelated", "driver_missing", "driver_suspension", "driver_fence_origin", "driver_fence_claim",
 	"driver_pause_poll", "driver_pause_catalog", "driver_reply_pause", "driver_wake_busy_before", "driver_wake_busy_after",
-	"template_start", "role_pickers", "catalog_roster", "landing_row", "plans_view", "idle_wake", "gate_refusal", "proposal_refusal_view", "finish_refusal", "close_refusal", "control_scheduling", "control_observation", "receipt_polling", "startup_polling", "work_input_priority", "startup_recovery", "status_envelope", "connection_inspection", "bridge_retirement", "bridge_retirement_held", "bridge_rebind", "bridge_paging", "bridge_paging_roster", "bridge_paging_late_sweep", "bridge_paging_late_response", "bridge_paging_drain", "bridge_paging_lower", "bridge_paging_generation", "bridge_paging_prompt", "bridge_authorization", "bridge_refusal" }, section), "unknown health section")
+	"template_start", "role_pickers", "catalog_roster", "landing_row", "plans_view", "idle_wake", "gate_refusal", "s201_cards", "finish_refusal", "close_refusal", "control_scheduling", "control_observation", "receipt_polling", "startup_polling", "work_input_priority", "startup_recovery", "status_envelope", "connection_inspection", "bridge_retirement", "bridge_retirement_held", "bridge_rebind", "bridge_paging", "bridge_paging_roster", "bridge_paging_late_sweep", "bridge_paging_late_response", "bridge_paging_drain", "bridge_paging_lower", "bridge_paging_generation", "bridge_paging_prompt", "bridge_authorization", "bridge_refusal" }, section), "unknown health section")
 local runtime, environment = tern, getfenv()
 -- The fixture runs in this group's environment (as tests/run.luau loads groups), so its tern.json calls are
 -- the stepped runner's yield points and a long section spans many native slices.
@@ -5257,40 +5257,40 @@ if section == nil or section == "gate_refusal" then
 		and text:find("Owner answer:", 1, true) == nil, "an ORCH+ refusal is shown as ORCH+'s, with its code and reason, never as an owner answer")
 	check(rendered({ choice_id = "approve", source = { kind = "owner" } }):find("Owner answer:", 1, true) ~= nil, "an owner answer still reads as the owner's")
 end
--- SKILLS-201: a proposal refused for an unknown or stale record, or refused when it ran after approval, is
--- noticed on the normal surface with its code and reason; a stale record offers the real agent list.
-if section == nil or section == "proposal_refusal_view" then
-	local f = shared.fixture(function() return { now_ms = 1700000000000, mono_ms = 1000, epoch = "proposal-refusal-view" } end)
+-- SKILLS-201: pending refusal notifications are cards on the normal surface, above ordinary decisions, with
+-- the ruled wording, the cleared count and Dismiss; a capacity-held report says so.
+if section == nil or section == "s201_cards" then
+	local f = shared.fixture(function() return { now_ms = 1700000000000, mono_ms = 1000, epoch = "s201-cards" } end)
 	local id = f:accepted(true)
 	local views = shared.load("views")
-	local function rendered(gates)
+	local function rendered(gates, mutate)
 		local view, projection = render_view(f)
 		local w = projection.dispatch.workflow.workers[1]
 		local list = {}
 		for _, g in gates do
 			table.insert(list, { id = g.id, revision = 2, worker_id = id, worker_generation = w.worker_generation, work_id = w.work_id, kind = "coordinator_proposal", phase = "answered",
 				question = "Dispatch?", options = { { id = "approve", label = "Approve" }, { id = "reject", label = "Reject" } }, evidence = g.evidence,
-				answer = { choice_id = "reject", answer = g.text, source = { kind = "refusal", code = g.code } } })
+				answer = { choice_id = "reject", answer = "x", source = { kind = "refusal", code = "unknown_record" } } })
 		end
 		projection.dispatch.workflow.gates = list
-		local normal = table.concat(strings(views.render(view, projection, "ready"), {}), "\n")
-		local labels = {}
-		for _, entry in view.actions do if entry.request and entry.request.command == "retarget_proposal" then table.insert(labels, entry.request) end end
-		return normal, labels
+		if mutate then mutate(projection.dispatch.workflow) end
+		local text = table.concat(strings(views.render(view, projection, "ready"), {}), "\n")
+		local requests = {}
+		for _, entry in view.actions do if entry.request and entry.request.command == "dismiss_refusal" then table.insert(requests, entry.request) end end
+		return text, requests
 	end
-	local stale = { id = "gate-3", code = "unknown_record", evidence = { "refused:unknown_record", "retarget:open" },
-		text = "ORCH+ refused proposal p-1 (unknown_record, dispatch): not an eligible record. Eligible records (record_id@revision): codex@0." }
-	local text, requests = rendered({ stale })
-	check(text:find("Proposal refused", 1, true) ~= nil and text:find("(unknown_record)", 1, true) ~= nil and text:find("Eligible records (record_id@revision): codex@0.", 1, true) ~= nil,
-		"a stale or unknown record refusal is noticed on the normal surface with its code and reason")
-	check(#requests == 1 and requests[1].gate_id == "gate-3" and requests[1].gate_revision == 2 and requests[1].record_id == nil,
-		"it offers one re-target control naming the gate, never a typed record id")
-	local ran = { id = "gate-4", code = "execution_refused", evidence = { "refused:execution_refused", "notice:open" }, text = "ORCH+ refused to run approved proposal p-2 (review, gate gate-2, review_disabled): off." }
-	text, requests = rendered({ ran })
-	check(text:find("(execution_refused)", 1, true) ~= nil and text:find("review_disabled", 1, true) ~= nil and #requests == 0,
-		"an approved proposal refused at execution is noticed with its code and message, without a re-target control")
-	text, requests = rendered({ { id = "gate-5", code = "catalog_changed", evidence = { "refused:catalog_changed", "retarget:done" }, text = "done" } })
-	check(text:find("Proposal refused", 1, true) == nil and #requests == 0, "a re-targeted refusal is no longer noticed")
+	local pending = { id = "gate-3", evidence = { "refused:unknown_record", "orchplus-notice:v1:pending:7:2:unknown_record:That record ID is unknown. Nothing was added or queued. Re-propose using a listed ID and revision." } }
+	local text, requests = rendered({ pending })
+	check(text:find("Proposal refused", 1, true) ~= nil and text:find("Your orchestrator's proposal was refused (unknown_record): That record ID is unknown.", 1, true) ~= nil,
+		"a pending refusal is a card with the ruled title and sentence")
+	check(text:find("2 older refusals were cleared", 1, true) ~= nil, "the cleared count shows on the card")
+	check(#requests == 1 and requests[1].gate_id == "gate-3" and requests[1].gate_revision == 2, "the card offers Dismiss bound to the exact gate and revision")
+	local cleared = { id = "gate-4", evidence = { "refused:unknown_record", "orchplus-notice:v1:cleared:8:0:unknown_record:gone" } }
+	text, requests = rendered({ cleared })
+	check(text:find("Proposal refused", 1, true) == nil and #requests == 0, "a dismissed refusal is no longer a card")
+	text = rendered({}, function(flow) flow.workers[1].rejected_report = { code = "full", message = "full" } end)
+	check(text:find("Delivery is held by capacity. Nothing was added or queued. Inspect the retained report and use Re-check after capacity is restored.", 1, true) ~= nil,
+		"a report held by capacity says so on a top-level card")
 end
 -- Normal plans are continuous through 100 tasks; larger plans group at logical checkpoints.
 if section == nil or section == "plans_view" then

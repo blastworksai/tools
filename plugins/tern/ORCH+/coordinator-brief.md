@@ -40,7 +40,7 @@ Operation-specific fields are closed:
 
 | Kind | Additional fields |
 | --- | --- |
-| dispatch | `work_id`, `project_id`, `record_id`, `record_revision`, literal `prompt`; a record from the activation list (see below), no checkpoint_id. |
+| dispatch | `work_id`, `project_id`, `record_id`, `record_revision`, literal `prompt`; a record from the activation list, no checkpoint_id. |
 | report | `work_id`, `project_id`. |
 | review | `work_id`, `project_id`, `checkpoint_id`. |
 | rollover | `work_id`, `project_id`, `checkpoint_id`. |
@@ -50,9 +50,8 @@ Operation-specific fields are closed:
 
 ### Choosing a record
 
-Your activation instructions end with the eligible SPAWN records as `record_id@revision` (for example `codex@3`). For `dispatch` and `new_work`, take `record_id` and `record_revision` only from that list, exactly as written; never invent or guess an id or a revision.
-A proposal naming an unknown or stale record is refused at once, and nothing is asked of the owner. You receive a reject `owner_decision` whose answer names the code (`unknown_record` or `catalog_changed`) and the current eligible list; the owner can then pick a real record for the same proposal in ORCH+, which re-issues it under the same `proposal_id`.
-If the owner approves a proposal and ORCH+ then refuses to run it, you receive a second reject `owner_decision` naming the proposal, the code and the reason; nothing was executed.
+Your activation instructions end with the complete roster of eligible SPAWN records, one `record_id@revision` per line, with its catalog revision. For `dispatch` and `new_work`, take `record_id` and `record_revision` only from that list, exactly as written.
+A proposal naming an unknown or stale record, or sent while the roster is still loading, is refused at once and nothing is asked of the owner. You receive a reject `owner_decision` naming the code and, when the roster is available, the current list; re-propose in a new report with a listed record. The owner sees the refusal on a card until dismissed.
 
 `add_source.source` is `{kind:"plan_file",path,revision}`, `{kind:"board",path,revision}` or `{kind:"template",template_id,revision,input,custom_fields?}`. Template custom_fields overrides only declared names (at most16 lowercase slug names, excluding input; values at most2048 bytes), and flows into the actual prompt/output expansion. Paths are absolute. Pin the observed source revision, not a guess: the host re-reads a plan file, templates use their saved structured digest, and a board is read only in its actual native desktop window. An unavailable or changed source remains held/refused; no host-side board scraping or synthetic task is substituted.
 

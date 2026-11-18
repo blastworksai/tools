@@ -4477,16 +4477,9 @@ local function dispatch_control(cx: WindowCx, source: number, request: any)
 				end)
 			end, gate_still("Question changed during selection; no answer sent."))
 		end
-	elseif command == "retarget_proposal" then
-		-- The re-target pick list is the ordinary agent picker over the real roster; no record id is ever typed.
-		if type(request.refusal_id) ~= "string" then return refuse("That proposal changed. Nothing was re-sent.") end
-		local fields = { refusal_id = request.refusal_id }
-		picker_ui.pick(cx, source, origin, { placeholder = "Choose an agent for this proposal", need = "report-files-v1" }, function(fresh: WindowCx, record: any, catalog: any)
-			if not record or not catalog then return end
-			if not current_origin(fresh, source, origin) then return notice(fresh, source, origin.alias_nonce, "That proposal changed. Nothing was re-sent.") end
-			fields.record_id, fields.record_revision, fields.catalog_revision = record.id, record.revision, catalog.revision
-			send_command(fresh, source, origin, "retarget_proposal", fields, true)
-		end)
+	elseif command == "dismiss_refusal" then
+		if not current_gate(cx, source, request) then return refuse("Gate revision or recipient changed. No answer or control was submitted.") end
+		send_command(cx, source, origin, "dismiss_refusal", { gate_id = request.gate_id, gate_revision = request.gate_revision }, true)
 	elseif command == "queue" then
 		conversation_ui.start(cx, source, origin, if request.coordinator then "start_orchestrator" else "new_conversation", request)
 	elseif command == "capacity_refresh" then
