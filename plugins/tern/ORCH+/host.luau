@@ -2148,7 +2148,7 @@ local function handle(view: any, ev: any, cx: any)
 		-- Document obligations settle only through the dedicated `ruling-command` route, which reads the
 		-- buffer and disk itself; caller-supplied evidence on this generic route is never trusted.
 		if type(input.command) == "string" and (input.command:sub(1, 7) == "ruling_" or input.command == "associate_document") then return end
-		if operator and not table.find({ "catalog", "queue", "poll", "reply", "retry", "retire", "finish", "rollover", "reconcile_restored", "continue_controller", "continue_worker", "policy", "pause", "resume", "answer", "cancel_gate", "recheck_gate",
+		if operator and not table.find({ "catalog", "queue", "poll", "reply", "retry", "retire", "finish", "rollover", "reconcile_restored", "continue_controller", "continue_worker", "policy", "pause", "resume", "answer", "cancel_gate", "recheck_gate", "dismiss_refusal",
 			"cancel_landing", "move_landing", "landing_lost", "reconcile_landing", "capacity", "cancel_work", "recheck_report", "enrol", "readback_publication",
 			"new_project", "project_start", "project_start_retry", "project_associate", "associate_conversation", "detach_conversation", "project_repository", "project_finish", "project_reopen", "delete_history",
 			"plan_import", "board_intake", "inbox_intake", "template_start", "source_request",
@@ -2232,7 +2232,7 @@ local function handle(view: any, ev: any, cx: any)
 		-- cancel_work is not workflow-only: withdrawing a rejected launch queues its mailbox retirement,
 		-- which the window drives from this command result like any other queued effect.
 		local control_command = table.find({ "bridge_control", "bridge_result", "bridge_observe" }, input.command) ~= nil
-		local workflow_only = control_command or table.find({ "observe", "observe_allocation", "observe_conversation", "policy", "pause", "resume", "answer", "cancel_gate", "recheck_gate", "continue_controller",
+		local workflow_only = control_command or table.find({ "observe", "observe_allocation", "observe_conversation", "policy", "pause", "resume", "answer", "cancel_gate", "recheck_gate", "dismiss_refusal", "continue_controller",
 			"cancel_landing", "move_landing", "landing_lost", "reconcile_landing", "capacity", "sweep", "cleanup_notice", "plan_import", "board_intake", "inbox_intake", "template_start" }, input.command) ~= nil
 		workflow_only = workflow_only or table.find({ "new_project", "project_start", "project_start_retry", "project_associate", "associate_conversation", "detach_conversation", "project_repository", "project_finish", "project_reopen", "delete_history", "source_request" }, input.command) ~= nil
 		if input.command == "observe_allocation" then view.dispatch_allocation_result = response end

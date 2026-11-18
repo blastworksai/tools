@@ -40,13 +40,18 @@ Operation-specific fields are closed:
 
 | Kind | Additional fields |
 | --- | --- |
-| dispatch | `work_id`, `project_id`, `record_id`, `record_revision`, literal `prompt`; current eligible record, no checkpoint_id. |
+| dispatch | `work_id`, `project_id`, `record_id`, `record_revision`, literal `prompt`; a record from the activation list, no checkpoint_id. |
 | report | `work_id`, `project_id`. |
 | review | `work_id`, `project_id`, `checkpoint_id`. |
 | rollover | `work_id`, `project_id`, `checkpoint_id`. |
 | landing | `work_id`, `project_id`, `checkpoint_id`. |
 | new_work | Exactly one of `orch_project_id` / `new_project_name`; `record_id`, `record_revision`, literal `prompt`, `scope:{paths,systems}`, `checks:[{check_id,argv}]`; optional `base_ref`, verified `repository_id`, and paired `target_ref` / `target_revision` (target fields require repository_id). |
 | add_source | Exactly one of `orch_project_id` / `new_project_name`; `source` as one of the typed shapes below. |
+
+### Choosing a record
+
+Your activation instructions end with the complete roster of eligible SPAWN records, one `record_id@revision` per line, with its catalog revision. For `dispatch` and `new_work`, take `record_id` and `record_revision` only from that list, exactly as written.
+A proposal naming an unknown or stale record, or sent while the roster is still loading, is refused at once and nothing is asked of the owner. You receive a reject `owner_decision` naming the code and, when the roster is available, the current list; re-propose in a new report with a listed record. The owner sees the refusal on a card until dismissed.
 
 `add_source.source` is `{kind:"plan_file",path,revision}`, `{kind:"board",path,revision}` or `{kind:"template",template_id,revision,input,custom_fields?}`. Template custom_fields overrides only declared names (at most16 lowercase slug names, excluding input; values at most2048 bytes), and flows into the actual prompt/output expansion. Paths are absolute. Pin the observed source revision, not a guess: the host re-reads a plan file, templates use their saved structured digest, and a board is read only in its actual native desktop window. An unavailable or changed source remains held/refused; no host-side board scraping or synthetic task is substituted.
 

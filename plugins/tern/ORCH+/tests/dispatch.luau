@@ -4,7 +4,7 @@ local sections = { fixture = true, core = true, control_rebind = true, receipts 
 	chain = true, late = true, reconcile_chain = true, refused_chain = true, ack = true, ack_uncertain = true, ack_terminal = true, stale_witness = true, scoped_poll = true,
 	suspend = true, auto_reconcile = true, auto_reconcile_bounded = true, auto_reconcile_worker = true, sweep_rules = true, sweep_policy = true,
 	auto_reconcile_all = true, capacity_resume = true, expired_authorization = true, slot_classes = true, duplicate_claim = true, stale_claim = true, slow_receipt = true,
-	retirement_auth = true, retirement_finish = true, retirement_race = true, retirement_uncertain = true, retirement_restore = true, retirement_capability = true, retirement_codec = true, retirement_refused = true,
+	retirement_auth = true, s201_card_retired = true, retirement_finish = true, retirement_race = true, retirement_uncertain = true, retirement_restore = true, retirement_capability = true, retirement_codec = true, retirement_refused = true,
 	rejected_read = true, finish = true, finish_capacity = true, command_retention = true, continuation = true, wake_separation = true, catalog_join = true, policy = true,
 	rollover = true, rollover_launch_failure = true, rollover_token = true, rollover_stop_uncertain = true, rollover_reload = true, rollover_policy = true, rollover_context = true, rollover_context_handover = true, rollover_context_roundtrip = true,
 	rollover_coordinator = true, rollover_coordinator_ambiguous = true, rollover_coordinator_reload = true, rollover_coordinator_restored = true, rollover_coordinator_policy = true, rollover_coordinator_successor_rejected = true,
@@ -3648,6 +3648,45 @@ if section == nil or section == "retirement_finish" then
 		and f.authority.registry.sessions[f.origin.logical_session_id].orchestrator.owner_id == newer, "stale first-generation release never clears successor")
 	check(f:apply("retire", { worker_id = id }).code == "activation_required", "stale UI retirement control cannot address successor")
 	local restored = host.new_authority(f.memory); check(restored:load().ok, "retired evidence and successor validate through native host restoration")
+end
+-- SKILLS-201: a pending refusal card keeps its coordinator's evidence through native retirement and later reclamation.
+if section == nil or section == "s201_card_retired" then
+	local f, id = retirement_fixture()
+	f:drain(); assert(f:ack("activation").ok)
+	local w = f:worker()
+	local payload = { owner_id = w.coordinator_owner_id, owner_generation = w.coordinator_generation, activation_token = w.activation.activation_token,
+		proposal_id = "p-1", kind = "new_work", orch_project_id = "project-x", record_id = "nope", record_revision = 0, prompt = "x",
+		scope = { paths = runtime.json.array({}), systems = runtime.json.array({}) }, checks = runtime.json.array({ { check_id = "unit", argv = runtime.json.array({ "x" }) } }) }
+	local sent = f:apply("intake", { worker_id = id, bytes = f:report(id, w.accepted_seq + 1, "COORDINATOR_PROPOSAL", payload) })
+	check(sent.ok and (sent.code == "unknown_record" or sent.code == "catalog_incomplete"), "a record refusal is committed (" .. tostring(sent.code) .. ")")
+	local gate
+	for _, g in f.authority.registry.dispatch.gates do if g.kind == "coordinator_proposal" then gate = g end end
+	check(gate ~= nil and gate.evidence[2] ~= nil and gate.evidence[2]:sub(1, 19) == "orchplus-notice:v1:", "the refusal gate carries a pending notification")
+	for _ = 1, 8 do
+		if f.authority.registry.dispatch.gates[gate.id].delivery then break end
+		local issue = f:apply("poll", { worker_id = id }); assert(issue.ok, issue.message)
+		local issue_op = f:action(issue.action_id).request.op
+		assert(f:finish(issue.action_id, if issue_op == "mailbox_retire" then "compacted" elseif issue_op == "mailbox_read" then "missing" else "published", {}).ok)
+	end
+	f:drain()
+	local current = f.authority.registry.dispatch.gates[gate.id].delivery
+	check(current ~= nil, "the refusal is delivered to the coordinator")
+	local reply = f:worker().replies[tostring(current.reply_seq)]
+	local ack = f:report(id, f:worker().accepted_seq + 1, "reply_ack", { message_id = reply.message_id, reply_seq = reply.reply_seq, reply_sha256 = reply.sha256, status = "recorded" },
+		{ action_id = reply.action_id, action_revision = reply.action_revision })
+	assert(f:apply("intake", { worker_id = id, bytes = ack }).ok)
+	local answer = f:release(); assert(answer.ok, runtime.json.encode(answer))
+	f:drain(); f:watermark()
+	local stop = f:apply("poll", { worker_id = id }); must(stop.ok, stop)
+	assert(f:apply("claim", { action_id = stop.action_id, executor = f.origin.window_epoch }).ok)
+	local request = f:action(stop.action_id).request
+	assert(f:finish(stop.action_id, "stopped", { pane_binding = request.pane_binding, observation = "exited" }).ok)
+	local retire = f:apply("poll", { worker_id = id })
+	check(f:finish(retire.action_id, "retired", {}).code == "coordinator_retired", "the coordinator retires natively while its card is pending")
+	local successor = f:queue(true)
+	check(successor.ok, "the next reservation still succeeds with the card pending (" .. tostring(successor.code) .. ")")
+	check(f.authority.registry.dispatch.workers[id] ~= nil and f.authority.registry.dispatch.gates[gate.id] ~= nil, "the pending card keeps its retired worker's evidence")
+	local restored = host.new_authority(f.memory); check(restored:load().ok, "the retained evidence validates through native host restoration")
 end
 if section == nil or section == "retirement_race" then
 	local f, id = retirement_fixture(); f:drain(); assert(f:ack("activation").ok)

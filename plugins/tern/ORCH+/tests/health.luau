@@ -5,7 +5,7 @@ assert(section == nil or table.find({ "clock", "form_hold_notice", "form_hold_ca
 	"driver_admission_noop", "driver_admission_refused", "driver_retry_original", "driver_retry_unrelated", "driver_retry_absent",
 	"driver_deadline_absent", "driver_deadline_unrelated", "driver_missing", "driver_suspension", "driver_fence_origin", "driver_fence_claim",
 	"driver_pause_poll", "driver_pause_catalog", "driver_reply_pause", "driver_wake_busy_before", "driver_wake_busy_after",
-	"template_start", "role_pickers", "catalog_roster", "landing_row", "plans_view", "idle_wake", "gate_refusal", "finish_refusal", "close_refusal", "control_scheduling", "control_observation", "receipt_polling", "startup_polling", "work_input_priority", "startup_recovery", "status_envelope", "connection_inspection", "bridge_retirement", "bridge_retirement_held", "bridge_rebind", "bridge_paging", "bridge_paging_roster", "bridge_paging_late_sweep", "bridge_paging_late_response", "bridge_paging_drain", "bridge_paging_lower", "bridge_paging_generation", "bridge_paging_prompt", "bridge_authorization", "bridge_refusal" }, section), "unknown health section")
+	"template_start", "role_pickers", "catalog_roster", "landing_row", "plans_view", "idle_wake", "gate_refusal", "s201_cards", "finish_refusal", "close_refusal", "control_scheduling", "control_observation", "receipt_polling", "startup_polling", "work_input_priority", "startup_recovery", "status_envelope", "connection_inspection", "bridge_retirement", "bridge_retirement_held", "bridge_rebind", "bridge_paging", "bridge_paging_roster", "bridge_paging_late_sweep", "bridge_paging_late_response", "bridge_paging_drain", "bridge_paging_lower", "bridge_paging_generation", "bridge_paging_prompt", "bridge_authorization", "bridge_refusal" }, section), "unknown health section")
 local runtime, environment = tern, getfenv()
 -- The fixture runs in this group's environment (as tests/run.luau loads groups), so its tern.json calls are
 -- the stepped runner's yield points and a long section spans many native slices.
@@ -5256,6 +5256,60 @@ if section == nil or section == "gate_refusal" then
 	check(text:find("Refused by ORCH+ (scope_mismatch), not an owner answer: Checkpoint 2 has not started; proposal refused.", 1, true) ~= nil
 		and text:find("Owner answer:", 1, true) == nil, "an ORCH+ refusal is shown as ORCH+'s, with its code and reason, never as an owner answer")
 	check(rendered({ choice_id = "approve", source = { kind = "owner" } }):find("Owner answer:", 1, true) ~= nil, "an owner answer still reads as the owner's")
+end
+-- SKILLS-201: pending refusal notifications are cards on the normal surface, above ordinary decisions, with
+-- the ruled wording, the cleared count and Dismiss; a capacity-held report says so.
+if section == nil or section == "s201_cards" then
+	local f = shared.fixture(function() return { now_ms = 1700000000000, mono_ms = 1000, epoch = "s201-cards" } end)
+	local id = f:accepted(true)
+	local views = shared.load("views")
+	local function rendered(gates, mutate)
+		local view, projection = render_view(f)
+		local w = projection.dispatch.workflow.workers[1]
+		local list = {}
+		for _, g in gates do
+			table.insert(list, { id = g.id, revision = 2, worker_id = id, worker_generation = w.worker_generation, work_id = w.work_id, kind = "coordinator_proposal", phase = "answered",
+				question = "Dispatch?", options = { { id = "approve", label = "Approve" }, { id = "reject", label = "Reject" } }, evidence = g.evidence,
+				answer = { choice_id = "reject", answer = "x", source = { kind = "refusal", code = "unknown_record" } } })
+		end
+		projection.dispatch.workflow.gates = list
+		if mutate then mutate(projection.dispatch.workflow) end
+		local text = table.concat(strings(views.render(view, projection, "ready"), {}), "\n")
+		local requests = {}
+		for _, entry in view.actions do if entry.request and entry.request.command == "dismiss_refusal" then table.insert(requests, entry.request) end end
+		return text, requests
+	end
+	local pending = { id = "gate-3", evidence = { "refused:unknown_record", "orchplus-notice:v1:pending:7:2:unknown_record:That record ID is unknown. Nothing was added or queued. Re-propose using a listed ID and revision." } }
+	local text, requests = rendered({ pending })
+	check(text:find("Proposal refused", 1, true) ~= nil and text:find("Your orchestrator's proposal was refused (unknown_record): That record ID is unknown.", 1, true) ~= nil,
+		"a pending refusal is a card with the ruled title and sentence")
+	check(text:find("2 older refusals were cleared", 1, true) ~= nil, "the cleared count shows on the card")
+	check(#requests == 1 and requests[1].gate_id == "gate-3" and requests[1].gate_revision == 2, "the card offers Dismiss bound to the exact gate and revision")
+	local cleared = { id = "gate-4", evidence = { "refused:unknown_record", "orchplus-notice:v1:cleared:8:0:unknown_record:gone" } }
+	text, requests = rendered({ cleared })
+	check(text:find("Proposal refused", 1, true) == nil and #requests == 0, "a dismissed refusal is no longer a card")
+	-- A real capacity-held report: a full receipt lane leaves the ninth report unapplied and unacknowledged.
+	local lane = shared.fixture(function() return { now_ms = 1700000000000, mono_ms = 1000, epoch = "s201-capacity" } end)
+	local wid = lane:accepted(false)
+	for seq = 2, 8 do
+		assert(lane:apply("intake", { worker_id = wid, bytes = lane:report(wid, seq, "REGISTER", { capabilities = runtime.json.array({ "report-files-v1" }) }) }).ok)
+		assert(lane:finish(lane:apply("poll", { worker_id = wid }).action_id, "published", {}).ok)
+	end
+	local ninth = lane:report(wid, 9, "REGISTER", { capabilities = runtime.json.array({ "report-files-v1" }) })
+	local frames = assert(shared.codec.frame(ninth, "report", lane.authority.registry.dispatch.workers[wid]))
+	local parts = { frames.manifest }; for _, chunk in frames.chunks do table.insert(parts, chunk) end
+	local outcome
+	for _, bytes in parts do
+		local read = lane:apply("poll", { worker_id = wid }); assert(read.ok)
+		local page = assert(shared.codec.project_page(bytes, lane:action(read.action_id).request.selector))
+		outcome = lane:finish(read.action_id, "read", runtime.json.decode(page)); assert(outcome.ok)
+	end
+	check(outcome.code == "intake_backpressure" and lane.authority.registry.dispatch.workers[wid].reason ~= nil and lane.authority.registry.dispatch.workers[wid].reason.code == "full",
+		"the real capacity-held report is recorded as the worker's reason")
+	local held_view, held_projection = render_view(lane)
+	local held_text = table.concat(strings(views.render(held_view, held_projection, "ready"), {}), "\n")
+	check(held_text:find("Delivery is held by capacity. Nothing was added or queued. Inspect the retained report and use Re-check after capacity is restored.", 1, true) ~= nil,
+		"a report held by capacity says so on a top-level card")
 end
 -- Normal plans are continuous through 100 tasks; larger plans group at logical checkpoints.
 if section == nil or section == "plans_view" then

@@ -4477,6 +4477,9 @@ local function dispatch_control(cx: WindowCx, source: number, request: any)
 				end)
 			end, gate_still("Question changed during selection; no answer sent."))
 		end
+	elseif command == "dismiss_refusal" then
+		if not current_gate(cx, source, request) then return refuse("Gate revision or recipient changed. No answer or control was submitted.") end
+		send_command(cx, source, origin, "dismiss_refusal", { gate_id = request.gate_id, gate_revision = request.gate_revision }, true)
 	elseif command == "queue" then
 		conversation_ui.start(cx, source, origin, if request.coordinator then "start_orchestrator" else "new_conversation", request)
 	elseif command == "capacity_refresh" then
