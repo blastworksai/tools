@@ -1344,13 +1344,32 @@ function config.refused_handover_clear(d: any, w: any): boolean
 	end
 	return true
 end
--- Retain first-page provenance across the exact official cursor chain. A last page alone is not a roster.
-function config.observe_catalog(d: any, sid: string, request: any, payload: any): (any?, boolean)
+-- Retain first-page provenance across the exact official cursor chain. A last page alone is not a roster:
+-- a cursor page is stored only when it continues the scan this host is assembling. Any other cursor page
+-- (no remembered first page, a different revision, a different cursor) is refused with "catalog_incomplete"
+-- and the stored roster stays as it was. A re-read of a page of the roster already complete at the same
+-- identity (the picker checks a chosen agent against its own page) is accepted as a page view only.
+function config.observe_catalog(d: any, sid: string, request: any, payload: any): (any?, boolean, string?)
 	local previous = d.catalogs[sid]
 	if previous and payload.config_revision < previous.config_revision then return previous, false end
-	local contiguous = request.cursor ~= nil and (d.catalog_scans or {})[sid] == true and previous ~= nil
-		and previous.namespace == payload.namespace and previous.host_key == payload.host_key
-		and previous.config_revision == payload.config_revision and equal(previous.next_cursor, request.cursor)
+	local same_identity = previous ~= nil and previous.namespace == payload.namespace and previous.host_key == payload.host_key
+		and previous.config_revision == payload.config_revision and previous.revision == payload.revision
+	local scanning = (d.catalog_scans or {})[sid] == true
+	if same_identity and not scanning and equal(previous.setup, payload.setup) then
+		local known = {}
+		for _, row in previous.records do known[row.id] = row end
+		local consistent = true
+		for _, row in payload.records do
+			if not known[row.id] or not equal(known[row.id], row) then consistent = false; break end
+		end
+		if consistent then
+			d.catalog_pages = d.catalog_pages or {}
+			d.catalog_pages[sid] = clone(payload)
+			return previous, false
+		end
+	end
+	local contiguous = request.cursor ~= nil and scanning and same_identity and equal(previous.next_cursor, request.cursor)
+	if request.cursor ~= nil and not contiguous then return nil, false, "catalog_incomplete" end
 	local from_start = request.cursor == nil or contiguous
 	local records
 	if contiguous then
@@ -2721,8 +2740,14 @@ function M.valid(d: any, registry: any, legacy_catalog_cache: boolean?): boolean
 		for sid, page in d.catalog_pages do
 			local cached = d.catalogs[sid]
 			if not registry.sessions[sid] or not catalog(page) or type(cached) ~= "table"
-				or page.namespace ~= cached.namespace or page.host_key ~= cached.host_key or page.config_revision ~= cached.config_revision
-				or not equal(page.next_cursor, cached.next_cursor) then return false end
+				or page.namespace ~= cached.namespace or page.host_key ~= cached.host_key or page.config_revision ~= cached.config_revision then return false end
+			-- While a scan assembles, the page is its newest page. Once the roster is complete the page may be any
+			-- page of it that a chosen agent was re-read from, so it carries its own cursor and only known agents.
+			if (d.catalog_scans or {})[sid] == false then
+				local known = {}
+				for _, row in cached.records do known[row.id] = true end
+				for _, row in page.records do if not known[row.id] then return false end end
+			elseif not equal(page.next_cursor, cached.next_cursor) then return false end
 		end
 	end
 	if d.repository_policies ~= nil then
@@ -8106,7 +8131,8 @@ local function complete(n: any, a: any, body: any, clock: any, response_bytes: s
 	elseif request.op == "catalog" then
 		if body.status ~= "catalog" or not catalog(payload) then return fail("invalid_catalog", "SPAWN returned an incompatible catalog; configure the compatible bridge.") end
 		local sid = request.origin_binding.logical_session_id
-		local observed, complete_roster = config.observe_catalog(d, sid, request, payload)
+		local observed, complete_roster, refusal = config.observe_catalog(d, sid, request, payload)
+		if refusal == "catalog_incomplete" then return fail("catalog_incomplete", "That catalog page does not continue the roster this host holds, so nothing was saved. Reload the agents from their first page.") end
 		if not observed then return fail("invalid_catalog", "Catalog cursor chain duplicated record identities or exceeded its complete-roster bound; reload the roster from its first page.") end
 		local obligations = (d.family_migrations or {})[sid]
 		local defaults, defaults_cloned = n.installation_defaults.family_migrations, false
@@ -10761,7 +10787,7 @@ function M.project(registry: any, session_id: string, origin_nonce: string, curr
 				close_id = if current.close then current.close.close_id else nil } }
 		end
 	end
-	return { catalog = clone((d.catalog_pages or {})[session_id] or d.catalogs[session_id]), catalog_complete = (d.catalog_scans or {})[session_id] == false,
+	return { catalog = clone((d.catalog_pages or {})[session_id] or d.catalogs[session_id]), roster = clone(d.catalogs[session_id]), catalog_complete = (d.catalog_scans or {})[session_id] == false,
 		command_cursor = clone((d.command_cursors or {})[session_id]), actions = actions, workers = workers, workflow = workflow,
 		projects = workflow.projects, finished_projects = workflow.finished_projects,
 		protocol = 2, phase = if registry.compatibility then "stable" else "prepared", authority_namespace = registry.authority_namespace,

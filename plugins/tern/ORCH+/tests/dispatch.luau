@@ -20,7 +20,7 @@ local sections = { fixture = true, core = true, control_rebind = true, receipts 
 	stale_result_grant_change = true, held_withdrawal = true, capacity_withdrawal = true,
 	project_observation = true, project_repository_guards = true, migration_start_guards = true, enrol_route_cancel = true,
 	project_history_reuse = true, project_reserve = true, rollover_location = true, project_start_rollover = true,
-	legacy_observation = true, legacy_worker_roles = true, current_observation = true, compaction_retry = true }
+	legacy_observation = true, legacy_worker_roles = true, current_observation = true, compaction_retry = true, catalog_paging = true }
 assert(section == nil or sections[section], "unknown dispatch test section: " .. tostring(section))
 local runtime, environment = tern, getfenv()
 -- Absence stays absent; explicit JSON null remains available to negative wire tests.
@@ -4122,6 +4122,77 @@ if section == nil or section == "catalog_join" then
 			and rejected:action(request.action_id).phase == "claimed",
 			"canonical response validation rejects incomplete live catalog identity before applying any catalog: " .. runtime.json.encode(refused))
 	end
+end
+if section == nil or section == "catalog_paging" then
+	-- SKILLS-200: SPAWN pages its roster by encoded size (cursor = { revision, index of the next record }).
+	-- Twelve agents over two pages must always end as twelve stored agents, however the pages are requested.
+	local REVISION = 3
+	local function agent(position)
+		return { id = (if position == 4 then "claude-bwai" else "agent-" .. position), revision = REVISION,
+			provider = "omp", account_label = "configured, not verified", backend = "native-agent", enabled = true, eligible = true,
+			capability_evidence = "configured_operator_attestation_not_runtime_proof", effective_identity = { provider = "omp", identity_status = "configured_not_verified" },
+			capabilities = runtime.json.array({ "report-files-v1", "native-ask-v1", "coordinator-control-v1", "project-start-v1" }), unsupported = runtime.json.array(),
+			cwd = "/fixture", placement = "split" }
+	end
+	local function spawn_page(first, revision)
+		local rows = runtime.json.array()
+		local last = if first == 1 then 6 else 12
+		for position = first, last do table.insert(rows, agent(position)) end
+		return { catalog_version = 2, setup = catalog_setup(revision or REVISION), namespace = "fixture-spawn", host_key = "fixture-host",
+			config_revision = revision or REVISION, revision = revision or REVISION, records = rows,
+			next_cursor = if last < 12 then { revision = revision or REVISION, index = last + 1 } else nil }
+	end
+	local function read(f, first, revision)
+		local cursor = if first == 1 then nil else { revision = revision or REVISION, index = first }
+		local r = f:apply("catalog", { bytes = cursor })
+		if not r.ok then return r end
+		return f:finish(r.action_id, "catalog", spawn_page(first, revision))
+	end
+	local function ids(f)
+		local out = {}
+		for _, row in f.authority.registry.dispatch.catalogs[f.origin.logical_session_id].records do table.insert(out, row.id) end
+		return table.concat(out, ",")
+	end
+	local FULL = "agent-1,agent-2,agent-3,claude-bwai,agent-5,agent-6,agent-7,agent-8,agent-9,agent-10,agent-11,agent-12"
+	local function view(f) return dispatch.project(f.authority.registry, f.origin.logical_session_id, f.origin.alias_nonce) end
+	local function roster_size(f) local v = view(f); return if v.roster then #v.roster.records else -1 end
+	local f = fixture()
+	must(read(f, 1).ok, "first page")
+	must(read(f, 7).ok, "second page")
+	local sid = f.origin.logical_session_id
+	check(ids(f) == FULL and f.authority.registry.dispatch.catalog_scans[sid] == false, "a chained scan stores all twelve agents")
+	local shown = view(f)
+	check(roster_size(f) == 12 and shown.catalog_complete == true and #shown.catalog.records == 6 and shown.catalog.records[1].id == "agent-7",
+		"the session view carries the assembled roster beside the page just read")
+	-- The picker re-reads the page of a chosen agent: a later page by its bare cursor, the first page by none.
+	must(read(f, 7).ok, "choosing an agent of the second page re-reads that page")
+	check(ids(f) == FULL and f.authority.registry.dispatch.catalog_scans[sid] == false, "a cursor page re-read never replaces the complete roster")
+	check(roster_size(f) == 12 and view(f).catalog_complete == true, "the view still carries the complete roster after the re-read")
+	local again = read(f, 1); check(again.ok, "choosing an agent of the first page re-reads that page: " .. runtime.json.encode(again))
+	check(ids(f) == FULL and f.authority.registry.dispatch.catalog_scans[sid] == false and view(f).catalog_complete == true,
+		"a first-page re-read never cuts the complete roster to one page")
+	-- A cursor page of a different configuration revision cannot be chained: nothing is stored.
+	local before = runtime.json.encode(f.authority.registry.dispatch.catalogs[sid])
+	local stale = read(f, 7, REVISION + 1)
+	check(not stale.ok and stale.code == "catalog_incomplete" and runtime.json.encode(f.authority.registry.dispatch.catalogs[sid]) == before,
+		"an unchained cursor page of another revision is refused as catalog_incomplete and keeps the stored roster: " .. runtime.json.encode(stale))
+	-- No remembered first page at all: nothing partial is saved.
+	local lone = fixture()
+	local refused = read(lone, 7)
+	check(not refused.ok and refused.code == "catalog_incomplete" and lone.authority.registry.dispatch.catalogs[lone.origin.logical_session_id] == nil,
+		"a cursor page without any remembered first page saves no roster: " .. runtime.json.encode(refused))
+	-- A scan in progress is not displaced by a cursor page that does not continue it.
+	local partial = fixture()
+	must(read(partial, 1).ok, "first page of a scan")
+	local psid = partial.origin.logical_session_id
+	local partial_before = runtime.json.encode(partial.authority.registry.dispatch.catalogs[psid])
+	local jump = partial:apply("catalog", { bytes = { revision = REVISION, index = 4 } })
+	check(jump.ok and not partial:finish(jump.action_id, "catalog", spawn_page(7)).ok
+		and runtime.json.encode(partial.authority.registry.dispatch.catalogs[psid]) == partial_before
+		and partial.authority.registry.dispatch.catalog_scans[psid] == true,
+		"a cursor page that does not continue the scan leaves the scan and its stored page untouched")
+	must(read(partial, 7).ok, "the scan still completes from its own cursor")
+	check(ids(partial) == FULL and partial.authority.registry.dispatch.catalog_scans[psid] == false, "the interrupted scan still completes to twelve agents")
 end
 if section == nil or section == "continuation" then
 	local f = fixture(); local id = f:accepted(false)

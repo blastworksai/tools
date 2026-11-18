@@ -5,7 +5,7 @@ assert(section == nil or table.find({ "clock", "native", "controls", "status_lau
 	"driver_admission_noop", "driver_admission_refused", "driver_retry_original", "driver_retry_unrelated", "driver_retry_absent",
 	"driver_deadline_absent", "driver_deadline_unrelated", "driver_missing", "driver_suspension", "driver_fence_origin", "driver_fence_claim",
 	"driver_pause_poll", "driver_pause_catalog", "driver_reply_pause", "driver_wake_busy_before", "driver_wake_busy_after",
-	"template_start", "role_pickers", "landing_row", "plans_view", "idle_wake", "gate_refusal", "finish_refusal", "close_refusal", "control_scheduling", "control_observation", "receipt_polling", "startup_polling", "work_input_priority", "startup_recovery", "status_envelope", "connection_inspection", "bridge_retirement", "bridge_retirement_held", "bridge_rebind", "bridge_paging", "bridge_paging_roster", "bridge_paging_late_sweep", "bridge_paging_late_response", "bridge_paging_drain", "bridge_paging_lower", "bridge_paging_generation", "bridge_paging_prompt", "bridge_authorization", "bridge_refusal" }, section), "unknown health section")
+	"template_start", "role_pickers", "catalog_roster", "landing_row", "plans_view", "idle_wake", "gate_refusal", "finish_refusal", "close_refusal", "control_scheduling", "control_observation", "receipt_polling", "startup_polling", "work_input_priority", "startup_recovery", "status_envelope", "connection_inspection", "bridge_retirement", "bridge_retirement_held", "bridge_rebind", "bridge_paging", "bridge_paging_roster", "bridge_paging_late_sweep", "bridge_paging_late_response", "bridge_paging_drain", "bridge_paging_lower", "bridge_paging_generation", "bridge_paging_prompt", "bridge_authorization", "bridge_refusal" }, section), "unknown health section")
 local runtime, environment = tern, getfenv()
 -- The fixture runs in this group's environment (as tests/run.luau loads groups), so its tern.json calls are
 -- the stepped runner's yield points and a long section spans many native slices.
@@ -750,6 +750,10 @@ local function window_fixture(options: any?)
 	end
 	function w:catalog_index()
 		local span = find(tree(), "catalog-index").p.spans[1]
+		return runtime.json.decode(if type(span) == "string" then span else span.t)
+	end
+	function w:routing_index()
+		local span = find(tree(), "routing-index").p.spans[1]
 		return runtime.json.decode(if type(span) == "string" then span else span.t)
 	end
 	function w:deliver_continuation()
@@ -5055,6 +5059,30 @@ if section == nil or section == "role_pickers" then
 		and index.records[1].provider == row.provider and index.records[1].account_label == row.account_label,
 		"picker identity retains real record revision, provider and configured account label")
 	check(index.catalog_version == 2 and index.setup.state == "completed", "readiness receives actual peer setup metadata rather than fabricated completion")
+end
+-- SKILLS-200: the window reads the whole roster for capacity candidates and the total, and only the page just read for its listing.
+if section == nil or section == "catalog_roster" then
+	local w = window_fixture()
+	local template = clone(w.f.authority.registry.dispatch.catalogs[w.f.origin.logical_session_id].records[1])
+	local function rows(first, last)
+		local out = runtime.json.array()
+		for position = first, last do local row = clone(template); row.id = "agent-" .. position; table.insert(out, row) end
+		return out
+	end
+	local function read(cursor, first, last, more)
+		local pending = w.f:apply("catalog", { bytes = cursor }); assert(pending.ok, pending.message)
+		assert(w.f:finish(pending.action_id, "catalog", { catalog_version = 2, namespace = "fixture-spawn", host_key = "fixture-host",
+			config_revision = 0, revision = 0, setup = { schema = 1, state = "completed", config_revision = 0,
+				readiness = { state = "not_run", config_revision = 0, summary = "" } },
+			records = rows(first, last), next_cursor = if more then { revision = 0, index = last + 1 } else nil }).ok)
+	end
+	read(nil, 1, 6, true); read({ revision = 0, index = 7 }, 7, 12, false)
+	read({ revision = 0, index = 7 }, 7, 12, false) -- choosing an agent of the last page re-reads it
+	local index, routing = w:catalog_index(), w:routing_index()
+	check(index.total == 12 and #index.records == 6 and index.records[1].id == "agent-7" and index.catalog_complete == true,
+		"the catalog node counts the whole roster and lists only the page just read")
+	check(#routing.records == 12 and routing.records[1].id == "agent-1",
+		"capacity candidates come from the whole roster, not from the last page read")
 end
 -- 8C (CP4 smoke): a landing row never says "owner approved" once a refresh voided the approval.
 if section == nil or section == "landing_row" then
