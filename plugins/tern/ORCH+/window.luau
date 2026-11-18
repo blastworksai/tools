@@ -2484,7 +2484,22 @@ local function schedule(cx: WindowCx)
 		end
 		-- Give captured native controls, work-source dialogs and write preparation priority.
 		-- Timers and captured effect drivers continue; no deadline or fence is changed.
-		if control_pending(source) then continue end
+		if control_pending(source) then
+			-- Only an open form holds here: a capacity-refused launch has no driver, so a due backoff
+			-- still gets one, and its guard tells the owner the form is why it waits.
+			if not control_pending(source, true) then
+				for action_id, wait in capacity_waits do
+					local key = tostring(source) .. ":capacity:" .. action_id
+					if wait.source == source and not drivers[key] and not held_actions[action_id] and awake_now() >= wait.next_at and not scope_busy(source, action_id) then
+						local scoped = snapshot(cx, source, action_id)
+						if scoped and scoped.action and scoped.action.phase == "ready" and not scoped.action.start_blocked and not lane_busy(source, scoped.action.worker_id) then
+							drivers[key] = { key = key, source = source, origin = origin, scope = action_id, worker_id = scoped.action.worker_id, stale_result = wait.stale }
+						end
+					end
+				end
+			end
+			continue
+		end
 		if native_scope.authorized_origin(cx, source, origin) and source_ui and source_ui.sync then source_ui.sync(cx, source, origin) end
 		if native_scope.authorized_origin(cx, source, origin) then
 			setup_api.proposals = setup_api.proposals or {}

@@ -1,6 +1,6 @@
 -- Deterministic real reducer/host/window coverage. Run bounded sections in native host callbacks.
 local root, section = ...
-assert(section == nil or table.find({ "clock", "form_hold_notice", "native", "controls", "status_launcher", "timer", "epoch_window", "epoch_host", "finish", "continuation", "alias_recovery", "held_report", "sweep_schedule", "readable_views", "cp2_controls", "guided_recovery", "guided_recovery_empty", "guided_recovery_host_restart", "stopped_worker_view", "expired_wake", "revoked_authorization", "observe_retention", "uncertain_read", "quota_reader", "bridge_lifecycle", "withdraw_fenced", "config_cards", "work_picker", "inbox_window", "usage_row",
+assert(section == nil or table.find({ "clock", "form_hold_notice", "form_hold_capacity", "form_hold_rearm", "native", "controls", "status_launcher", "timer", "epoch_window", "epoch_host", "finish", "continuation", "alias_recovery", "held_report", "sweep_schedule", "readable_views", "cp2_controls", "guided_recovery", "guided_recovery_empty", "guided_recovery_host_restart", "stopped_worker_view", "expired_wake", "revoked_authorization", "observe_retention", "uncertain_read", "quota_reader", "bridge_lifecycle", "withdraw_fenced", "config_cards", "work_picker", "inbox_window", "usage_row",
 	"reconnect_stale", "reconnect_missing", "reconnect_unknown", "reconnect_unrelated", "worker_attachment", "worker_attachment_form",
 	"driver_admission_noop", "driver_admission_refused", "driver_retry_original", "driver_retry_unrelated", "driver_retry_absent",
 	"driver_deadline_absent", "driver_deadline_unrelated", "driver_missing", "driver_suspension", "driver_fence_origin", "driver_fence_claim",
@@ -3077,23 +3077,39 @@ if section == nil or section == "control_scheduling" then
 	check(claimed, "the queued effect resumes through its normal claim door after control settlement")
 end
 if section == nil or section == "form_hold_notice" then
-	-- A ready action held by an open menu or form says so once, and issues after the form closes.
+	-- A ready action held by an open menu or form says so once, and issues after it closes.
+	local WAIT = "Launch waits until you close Orchestration"
+	local function waits(w, from)
+		local out = {}
+		for index = from + 1, #w.notice_events do
+			local message = w.notice_events[index].message
+			if type(message) == "string" and message:find("Launch waits until you close", 1, true) then table.insert(out, message) end
+		end
+		return out
+	end
 	local w = window_fixture()
 	w:bridge({ placeholder = true })
 	w:click("poll", { worker_id = w.id, bytes = "watermark" })
 	local action_id = assert(w:worker().active_action_id)
 	assert(w.f:action(action_id).phase == "ready")
+	-- A second window (another source) with no form open issues normally and posts nothing.
+	local other = window_fixture()
+	other:bridge({ placeholder = true })
+	other:click("poll", { worker_id = other.id, bytes = "watermark" })
+	local other_id = assert(other:worker().active_action_id)
 	w:click("orchestration_menu")
 	assert(w:picker() ~= nil)
 	local before = #w.notice_events
-	for _ = 1, 6 do w:tick() end
-	local waits = 0
-	for index = before + 1, #w.notice_events do
-		local message = w.notice_events[index].message
-		if type(message) == "string" and message:find("Launch waits until you close", 1, true) then waits += 1 end
+	for _ = 1, 6 do w:tick(); other:tick() end
+	local first = waits(w, before)
+	check(#first == 1 and first[1] == WAIT and w.f:action(action_id).claim == nil,
+		"a ready launch held by an open menu posts exactly one notice with the full message and the menu title")
+	local claimed_other = false
+	for _, event in other.events do
+		if event.command == "claim" and event.action_id == other_id then claimed_other = true end
 	end
-	check(waits == 1 and w.f:action(action_id).claim == nil,
-		"a ready launch held by an open menu posts exactly one notice naming it")
+	check(claimed_other and #waits(other, 0) == 0 and #waits(w, before) == 1,
+		"a hold on one source neither suppresses nor duplicates a launch on another")
 	w:pick(nil)
 	for _ = 1, 6 do w:tick() end
 	local claimed = false
@@ -3101,6 +3117,97 @@ if section == nil or section == "form_hold_notice" then
 		if event.command == "claim" and event.action_id == action_id then claimed = true end
 	end
 	check(claimed, "the held launch issues once the menu closes")
+end
+-- A capacity-refused launch has no driver while its backoff runs; a form opened meanwhile must
+-- still announce the hold when the backoff is due, not stay silent until the form closes.
+if section == nil or section == "form_hold_capacity" then
+	local WAIT = "Launch waits until you close Orchestration"
+	local w = window_fixture({ commit_results = true })
+	w:bridge({ placeholder = true })
+	-- Four running effects owned by this window fill every host effect slot, so the next claim is refused "full".
+	local occupied = {}
+	local function occupy()
+		for index = #occupied + 1, 4 do
+			local queued = w.f:apply("catalog"); assert(queued.ok)
+			assert(w.f:apply("claim", { action_id = queued.action_id, executor = w.f.origin.window_epoch }).ok)
+			occupied[index] = queued.action_id
+		end
+	end
+	local function free_one()
+		local id = table.remove(occupied, 1)
+		local grant = w.f:action(id).claim
+		assert(w.f:apply("lost", { action_id = id, executor = grant.executor, grant_id = grant.grant_id }).ok)
+	end
+	occupy()
+	local claims = function(id) local n = 0; for _, e in w.events do if e.command == "claim" and e.action_id == id then n += 1 end end return n end
+	local function holds(from)
+		local n = 0
+		for index = from + 1, #w.notice_events do
+			if w.notice_events[index].message == WAIT then n += 1 end
+		end
+		return n
+	end
+	local function run(ticks) for _ = 1, ticks do w:tick(); w.api.schedule(w.cx) end end
+	w:click("poll", { worker_id = w.id, bytes = "watermark" })
+	local action_id = assert(w:worker().active_action_id)
+	for _ = 1, 4 do w:tick() end
+	assert(w.f:action(action_id).phase == "ready" and claims(action_id) == 1, "the full host refuses the claim before any effect")
+	-- The refused claim has no driver while its backoff runs. A form opened meanwhile must still announce the hold.
+	w:click("orchestration_menu")
+	free_one()
+	local before = #w.notice_events
+	run(14)
+	check(holds(before) == 1 and claims(action_id) == 1,
+		"a capacity-refused launch with no driver announces its form hold once when the backoff is due")
+end
+if section == nil or section == "form_hold_rearm" then
+	local WAIT = "Launch waits until you close Orchestration"
+	local w = window_fixture({ commit_results = true })
+	w:bridge({ placeholder = true })
+	-- Four running effects owned by this window fill every host effect slot, so the next claim is refused "full".
+	local occupied = {}
+	local function occupy()
+		for index = #occupied + 1, 4 do
+			local queued = w.f:apply("catalog"); assert(queued.ok)
+			assert(w.f:apply("claim", { action_id = queued.action_id, executor = w.f.origin.window_epoch }).ok)
+			occupied[index] = queued.action_id
+		end
+	end
+	local function free_one()
+		local id = table.remove(occupied, 1)
+		local grant = w.f:action(id).claim
+		assert(w.f:apply("lost", { action_id = id, executor = grant.executor, grant_id = grant.grant_id }).ok)
+	end
+	occupy()
+	local claims = function(id) local n = 0; for _, e in w.events do if e.command == "claim" and e.action_id == id then n += 1 end end return n end
+	local function holds(from)
+		local n = 0
+		for index = from + 1, #w.notice_events do
+			if w.notice_events[index].message == WAIT then n += 1 end
+		end
+		return n
+	end
+	local function run(ticks) for _ = 1, ticks do w:tick(2500); w.api.schedule(w.cx) end end
+	w:click("poll", { worker_id = w.id, bytes = "watermark" })
+	local action_id = assert(w:worker().active_action_id)
+	for _ = 1, 4 do w:tick() end
+	assert(w.f:action(action_id).phase == "ready" and claims(action_id) == 1, "the full host refuses the claim before any effect")
+	-- The refused claim has no driver while its backoff runs. A form opened meanwhile must still announce the hold.
+	w:click("orchestration_menu")
+	free_one()
+	local before = #w.notice_events
+	run(6)
+	assert(holds(before) == 1 and claims(action_id) == 1)
+	-- Closing the form issues the claim; the still-full host refuses it again, and a new hold re-arms the notice once.
+	w:pick(nil)
+	occupy() -- The host fills again before the held claim goes out, so it is refused once more.
+	run(3)
+	check(claims(action_id) == 2 and w.f:action(action_id).phase == "ready", "the held launch is claimed once the form closes")
+	w:click("orchestration_menu")
+	free_one()
+	local second = #w.notice_events
+	run(6)
+	check(holds(second) == 1 and claims(action_id) == 2, "a later second hold re-arms the notice exactly once")
 end
 if section == nil or section == "work_input_priority" then
 	local w = window_fixture()
