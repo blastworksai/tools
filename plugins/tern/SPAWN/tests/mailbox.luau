@@ -694,6 +694,39 @@ watchdog(3600000)
 check(killed==nil,'suspension alone never declares the running child uncertain')
 pending.callback({status=-1,timed_out=true,stdout='object\n',stderr=''})
 check(killed.status=='uncertain','a child process.run already timed out stays uncertain')
+-- Forget-only child accounting: registered before the child starts, cleared only by the child's own completion or a verified
+-- failure to start, never by the ordinary watchdog; the ordinary counters and callbacks are unchanged.
+pending={}
+local accounted
+M.execute(readOp,function(value) accounted=value end)
+local handles={[readOp.handle]=true}
+check(M.forget_children(handles)==1 and M.forget_children({other=true})==0,'a child is registered before it starts, keyed by its generation handle')
+for _=1,30 do watchdog(1000) end
+check(accounted~=nil and accounted.status=='uncertain' and M.forget_children(handles)==1,'watchdog expiry reports uncertain but never clears the outstanding child')
+pending.callback({status=0,timed_out=false,stdout='admission_full\ncapacity_admission\n1\n1\n',stderr=''})
+check(M.forget_children(handles)==0 and accounted.status=='uncertain','a late terminal completion clears the child even after the early return of a finished operation')
+-- A child's record is durable and written before it starts: after a reload (new module instances, same host store) an uncleared
+-- invocation is an uncertain outstanding child, and only that invocation's own proven termination clears it.
+pending={}
+local reloaded_result
+M.execute(readOp,function(value) reloaded_result=value end)
+check(M.forget_children(handles)==1,'the invocation is on record while its child is running')
+modules['children']=nil;modules['mailbox_adapter']=nil;modules['mailbox']=nil
+local Reloaded=load('mailbox')
+check(Reloaded.forget_children(handles)==1,'after a reload the uncleared invocation is still outstanding (uncertain), never read as clean')
+local Ledger=load('children')
+local probe=Ledger.begin(readOp.handle,'mailbox')
+Ledger.finish(probe)
+check(Reloaded.forget_children(handles)==1,'no other child\'s completion retires an older boot\'s record: helpers overlap, so only that invocation\'s own termination can')
+pending.callback({status=0,timed_out=false,stdout='admission_full\ncapacity_admission\n1\n1\n',stderr=''})
+check(M.forget_children(handles)==0,'the invocation\'s own proven termination clears its record')
+pending=nil
+local starter=fake.process.run
+fake.process.run=function() error('cannot start') end
+local unstarted
+M.execute(readOp,function(value) unstarted=value end)
+check(unstarted.status=='uncertain' and M.forget_children(handles)==0,'a verified failure to start clears the registration')
+fake.process.run=starter
 pending=nil
 response_override='full\nmailbox_bytes\n2097000\n2097152\n'
 local capacityResult

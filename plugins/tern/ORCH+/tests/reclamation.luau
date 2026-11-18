@@ -1,6 +1,6 @@
 -- Real HOST blocks and canonical reducers; no production KV, native effects or copied host logic.
 local root, section = ...
-assert(section == nil or table.find({ "host_retirement", "host_stale_result", "host_withdrawal", "project_history" }, section), "unknown reclamation section")
+assert(section == nil or table.find({ "host_retirement", "host_stale_result", "host_withdrawal", "project_history", "host_forget", "host_forget_relay", "forget_window" }, section), "unknown reclamation section")
 local runtime, environment = tern, getfenv()
 local fixture_chunk = assert(loadstring(runtime.fs.read(root .. "/tests/dispatch.luau"), "reclamation-fixture"))
 setfenv(fixture_chunk, setmetatable({}, { __index = environment }))
@@ -14,12 +14,12 @@ local function node(tree, key)
 	for _, child in tree.c or {} do local found = node(child, key); if found then return found end end
 	return nil
 end
-local function fixture()
+local function fixture(options)
 	local f = shared.fixture()
 	local fake, definition = table.clone(runtime), nil
 	local contexts, views, modules = {}, {}, {}
 	local channel_files, channel_dirs = {}, {}
-	fake.plugin = table.clone(runtime.plugin); fake.plugin.data = "/fixture/plugins/orchplus-reclamation"
+	fake.plugin = table.clone(runtime.plugin); fake.plugin.data = if options and options.relay then "/fixture/plugins/orchplus" else "/fixture/plugins/orchplus-reclamation"
 	fake.fs = {
 		exists = function(path) return channel_files[path] ~= nil or channel_dirs[path] == true end,
 		mkdir = function(path) channel_dirs[path] = true end,
@@ -48,7 +48,11 @@ local function fixture()
 		end
 	end }
 	fake.on = function() end
-	fake.timer = function() return { cancel = function() end } end
+	fake.timer = function(ms, callback)
+		if ms == 100 and options and options.relay then f.relay_tick = callback end
+		return { cancel = function() end }
+	end
+	f.fake = fake
 	local function load(name, base)
 		name = (base or "") .. name:gsub("^%./", "")
 		if modules[name] then return modules[name] end
@@ -57,6 +61,7 @@ local function fixture()
 		modules[name] = chunk(); return modules[name]
 	end
 	load("host")
+	f.fake_load = function(name) return load(name) end
 	assert(definition and type(definition.init) == "function" and type(definition.view) == "function"
 		and type(definition.event) == "function", "actual orchplus.orchestrator lifecycle is required")
 	for _, pane in { 42, 43, 44 } do
@@ -78,7 +83,7 @@ local function fixture()
 				origin = f.origin, event = input }) }, contexts[42])
 			response = view.dispatch_background_result
 		end
-		assert(response and response.request_id == input.request_id, "actual HOST callback must return this request's correlated result, not an earlier operator receipt")
+		assert(response and response.request_id == input.request_id, "actual HOST callback must return this request's correlated result, not an earlier operator receipt: " .. tostring(input.kind))
 		return response
 	end
 	f.authority = proxy
@@ -131,6 +136,9 @@ local function fixture()
 	end
 	function f:redraw() definition.view(views[43], contexts[43]) end
 	f.views = views
+	function f:saved(pane) return definition.save(views[pane]) end
+	function f:render(pane) return definition.view(views[pane], contexts[pane]) end
+	function f:host_event(pane, act, value) definition.event(views[pane], { ev = "action", act = act, value = runtime.json.encode(value) }, contexts[pane]) end
 	function f:create(pane, name)
 		definition.event(views[pane], { ev = "action", act = "orchestration-create", value = runtime.json.encode({
 			source_nonce = views[pane].alias_nonce, request_id = "create-" .. name, name = name,
@@ -212,6 +220,265 @@ if section == nil or section == "host_retirement" then
 	check(closed.views[44].orchestration_result == survivor
 		and runtime.json.encode(closed.authority.registry.sessions[survivor.orch_session_id]) == survivor_session,
 		"confirmed removal preserves unrelated creation results and current session ownership")
+end
+if section == nil or section == "host_forget" then
+	local f = fixture()
+	local id, bytes = f:catalog_delivery(); assert(f:deliver(id, bytes).ok)
+	local sid = f.origin.logical_session_id
+	local survivor = f:create(44, "Surviving creation"); assert(survivor.ok)
+	local survivor_session = runtime.json.encode(f.authority.registry.sessions[survivor.orch_session_id])
+	f.views[43].orch_session_id = sid
+	f.views[42].relay_notice = "stale relay notice"
+	check(f.views[42].dispatch_command_result ~= nil and f:saved(42).orch_session_id == sid and f:saved(43).orch_session_id == sid,
+		"before forgetting, saved window data names the session and its last command result")
+	local codec = shared.codec
+	local function bound(epoch)
+		local o = clone(f.origin); o.window_epoch = epoch or o.window_epoch; return o
+	end
+	local function request_bytes(attempt, o)
+		local session = f.authority.registry.sessions[sid]
+		return runtime.json.encode({ schema = 1, origin = "orchplus", op = "discard_session", work = "spawn-work-v1", request_id = "forget-" .. attempt, attempt_id = attempt,
+			authority_namespace = f.authority.registry.authority_namespace, spawn_namespace = session.spawn_namespace, logical_session_id = sid,
+			admission_seq = session.admission_seq, controller_pane = "9001", challenge = "forget-0000000000000000", dispatch_revision = 7, spawn_boot = "boot-1",
+			owner = { owner_id = o.owner_id, owner_generation = o.owner_generation, host_pane_id = o.host_pane_id, alias_nonce = o.alias_nonce,
+				window_key = o.window_key, native_session_id = o.native_session_id, window_host_id = o.window_host_id } })
+	end
+	local function forget(kind, attempt, o)
+		return f.authority:apply(f:state_event(kind, { attempt_id = attempt, request_bytes = request_bytes(attempt, o), preview = { spawn_boot = "boot-1", dispatch_revision = 7 },
+			control_origin = { kind = "closing", binding = o, controller_pane = "9001", close_id = attempt } }))
+	end
+	local ordinary = f.authority:apply(f:state_event("begin_close", { close_id = "ordinary",
+		control_origin = { kind = "closing", binding = clone(f.origin), controller_pane = "9001", close_id = "ordinary" } }))
+	check(not ordinary.ok and ordinary.code == "session_busy", "an ordinary close refuses unconfirmed executor evidence")
+	-- Window-side progress reaches the actual host view as a closed set of stages and bounded rows.
+	local card = { { kind = "uncertain", agent = "claude-a", host = "7" }, { kind = "unobservable", agent = "omp-b", host = "9" } }
+	local roster = { { agent = "claude-a", host = "7" }, { agent = "worker-c", host = "7" } }
+	f:host_event(42, "forget-state", { stage = "blocked", blockers = card, participants = roster, omitted = 3, blockers_omitted = 4, pending = false })
+	check(f.views[42].forget ~= nil and f.views[42].forget.stage == "blocked" and f.views[42].forget.blockers_omitted == 4 and #f.views[42].forget.blockers == 2 and #f.views[42].forget.participants == 2 and f.views[42].forget.omitted == 3,
+		"the host keeps the blocker rows, the participants and the exact omitted count of the preview")
+	f:host_event(42, "forget-state", { stage = "blocked", blockers = { { kind = "pane", agent = "x", host = "7", pane = "55" }, card[1] }, participants = roster, omitted = 0 })
+	check(#f.views[42].forget.blockers == 1, "an obsolete pane blocker kind is dropped")
+	f:host_event(42, "forget-state", { stage = "blocked", blockers = card, participants = roster, omitted = 3, blockers_omitted = 4, pending = false })
+	f:host_event(42, "forget-state", { stage = "exploit", blockers = card })
+	check(f.views[42].forget.stage == "blocked", "an unknown stage is ignored")
+	local function texts(tree, out)
+		out = out or {}
+		if type(tree) ~= "table" then return out end
+		if tree.p and tree.p.spans and not tree.p.hidden then for _, span in tree.p.spans do if type(span) == "table" and span.t then table.insert(out, span.t) end end end
+		for _, child in tree.c or {} do texts(child, out) end
+		return out
+	end
+	local shown = table.concat(texts(f:render(42).main), "\n")
+	for _, expected in { "Cannot forget yet. Review the blockers below.", "claude-a · execution outcome is uncertain on 7", "omp-b · cannot be checked on 9",
+		"Agents whose execution is not checked:", "worker-c · 7", "3 additional participants whose execution is not checked.", "4 additional blockers.",
+		"Agents still running may continue their assignments and use any approvals already received; Forget neither stops them nor revokes that authority." } do
+		check(shown:find(expected, 1, true) ~= nil, "the blocker card shows: " .. expected)
+	end
+	check(shown:find("4 additional blockers.", 1, true) < shown:find("Agents whose execution is not checked:", 1, true), "the omitted-blockers count follows the blocker rows")
+	-- The exact omitted count is shown independently of the retained rows (the byte budget can drop every participant).
+	f:host_event(42, "forget-state", { stage = "blocked", blockers = card, participants = {}, omitted = 5, blockers_omitted = 0, pending = false })
+	local budgeted = table.concat(texts(f:render(42).main), "\n")
+	check(budgeted:find("Agents whose execution is not checked:", 1, true) ~= nil and budgeted:find("5 additional participants whose execution is not checked.", 1, true) ~= nil,
+		"with every participant budgeted out the card still shows the exact omitted count")
+	f:host_event(42, "forget-state", { stage = "blocked", blockers = card, participants = roster, omitted = 3, blockers_omitted = 4, pending = false })
+	local participants_at, residual_at = shown:find("Agents whose execution is not checked:", 1, true), shown:find("Agents still running may continue", 1, true)
+	check(participants_at ~= nil and residual_at ~= nil and residual_at > participants_at, "the residual notice follows the participants")
+	check(shown:find("Close these panes", 1, true) == nil and shown:find("Do not close", 1, true) == nil and shown:find("using Tern", 1, true) == nil, "no row asks the owner to close a pane")
+	local begun = forget("begin_forget", "attempt-a", bound()); assert(begun.ok, runtime.json.encode(begun))
+	check(f.authority.registry.sessions[sid].close.forget.attempt_id == "attempt-a", "the owner's confirmed forget fences the session despite unconfirmed executor evidence")
+	f:host_event(42, "forget-state", { stage = "idle" })
+	local pending_tree = f:render(42).main
+	local pending_text = table.concat(texts(pending_tree), "\n")
+	check(pending_text:find("Forgetting is pending. This orchestration remains fenced. Resolve the listed blockers, then continue.", 1, true) ~= nil
+		and runtime.json.encode(pending_tree):find("Continue forgetting", 1, true) ~= nil, "a persisted forget shows the pending notice and Continue forgetting even after a reload (no window state)")
+	-- Crash/reload after fencing: the window epoch is new; recovery supersedes the pending bytes from the current origin.
+	f.origin.window_epoch = "reloaded-window"
+	local recovered = forget("supersede_forget", "attempt-b", bound()); assert(recovered.ok, runtime.json.encode(recovered))
+	check(f.authority.registry.sessions[sid].close.control_origin.binding.window_epoch == "reloaded-window", "recovery is accepted through the actual host from the reloaded window's origin")
+	local session = f.authority.registry.sessions[sid]
+	local request = codec.decode_forget_request(session.close.forget.request_bytes)
+	local closed = codec.encode_forget_response({ schema = 1, op = "discard_session", work = "spawn-work-v1", request_id = request.request_id, attempt_id = "attempt-b", status = "closed",
+		spawn_namespace = request.spawn_namespace, authority_namespace = request.authority_namespace, logical_session_id = sid, admission_seq = request.admission_seq,
+		spawn_boot = "boot-1", payload = { admission_cursor = 9 } })
+	local before_next = f.authority.registry.next_admission_seq
+	local done = f.authority:apply(f:state_event("complete_forget", { attempt_id = "attempt-b", response_bytes = closed }))
+	assert(done.ok, runtime.json.encode(done))
+	check(f.authority.registry.sessions[sid] == nil and f.authority.registry.next_admission_seq == math.max(before_next, 10), "host authority no longer holds the session and its admission is never reissued")
+	for _, pane in { 42, 43 } do
+		local saved = f:saved(pane)
+		check(saved.orch_session_id == nil and saved.dispatch_command_result == nil and saved.relay_notice == nil
+			and saved.notice == "Orchestration forgotten. Mailbox files were kept. You can create a new orchestration.", "saved window data of every view on the forgotten session keeps no session, result or relay trace, and shows the completion notice")
+		check(f.views[pane].scoped_results == nil and f.views[pane].orchestration_result == nil and f.views[pane].forget == nil, "live view results of the session are cleared too")
+	end
+	check(f:saved(44).orch_session_id ~= sid and runtime.json.encode(f.authority.registry.sessions[survivor.orch_session_id]) == survivor_session,
+		"an unrelated session and its view are untouched")
+	-- Forget a second orchestration (never admitted to SPAWN: one local commit). The notice now names B, not A.
+	local sid_b = survivor.orch_session_id
+	local b_origin = { logical_session_id = sid_b, owner_id = survivor.owner_id, owner_generation = survivor.generation, host_pane_id = "44",
+		alias_nonce = f.views[44].alias_nonce, window_key = "", window_epoch = "b", native_session_id = "7", window_host_id = "local" }
+	f:host_event(44, "authority-command", { source_nonce = f.views[44].alias_nonce, origin = b_origin, event = { kind = "begin_forget", request_id = "b-forget",
+		orch_session_id = sid_b, authority_namespace = f.authority.registry.authority_namespace, expected_revision = f.authority.registry.revision,
+		attempt_id = "attempt-b2", control_origin = { kind = "closing", binding = b_origin, controller_pane = "9001", close_id = "attempt-b2" } } })
+	check(f.authority.registry.sessions[sid_b] == nil and f.authority.registry.forgotten.orch_session_id == sid_b, "the second orchestration is forgotten and the notice names it")
+	-- A stale view of the FIRST forgotten session (A) is reopened: it is normalized against the loaded authority too.
+	f.views[43].orch_session_id = sid
+	f.views[43].scoped_results = { stale = { result = {} } }
+	check(f:saved(43).orch_session_id == nil, "saved window data never carries a session the authority lacks")
+	f:render(43)
+	check(f.views[43].orch_session_id == sid, "the closed-view alias keeps the id through a short grace")
+	f.views[43].absent_since = -1000000000
+	f:render(43)
+	check(f.views[43].orch_session_id == nil and f.views[43].scoped_results == nil, "after the grace every absent id is cleared with its scoped results, not only the latest forgotten one")
+end
+if section == nil or section == "host_forget_relay" then
+	-- The REAL host relay and carrier: capability, preview and discard travel on their own protocol end to end.
+	local f = fixture({ relay = true })
+	local Channel = f.fake_load("channel/channel")
+	local peer = assert(Channel.open({ plugin_id = "spawn", plugin_data = "/fixture/plugins/spawn", incarnation = "spawn-fixture-boot",
+		fs = f.fake.fs, json = f.fake.json, base64 = f.fake.base64 }))
+	local metadata = f.views[42].spawn_relay
+	local function event(act, bytes, peer_boot)
+		f:host_event(42, "spawn_relay", { schema = 1, source_nonce = f.views[42].alias_nonce, relay_endpoint = metadata.relay_endpoint, relay_boot = metadata.relay_boot,
+			lane_id = "forget", peer_boot = peer_boot, act = act, bytes = bytes })
+	end
+	local function pump() for _ = 1, 4 do f.relay_tick() end end
+	event("bind", runtime.json.encode(f.origin))
+	local bind = assert(peer.receive(4)[1], "the host forwards the bind"); assert(peer.ack(bind))
+	assert(peer.send({ peer = "orchplus", route = "spawn.source", binding = metadata.relay_endpoint .. ":forget", id = "r-1",
+		body = runtime.json.encode({ schema = 1, relay_endpoint = metadata.relay_endpoint, relay_boot = metadata.relay_boot, lane_id = "forget",
+			host_pane_id = "42", source_nonce = f.views[42].alias_nonce, peer_boot = "spawn-fixture-boot", bind_request = { id = bind.id, incarnation = bind.incarnation } }) }))
+	pump()
+	check(metadata.lanes[1] ~= nil and metadata.lanes[1].peer_boot == "spawn-fixture-boot", "the lane is bound to the real controller identity")
+	local codec = shared.codec
+	local sid = f.origin.logical_session_id
+	local session = f.authority.registry.sessions[sid]
+	local o = f.origin
+	local function request(op, extra, owner_patch)
+		local r = { schema = 1, origin = "orchplus", op = op, work = "spawn-work-v1", request_id = "relay-" .. op, attempt_id = "relay-attempt", authority_namespace = f.authority.registry.authority_namespace,
+			spawn_namespace = session.spawn_namespace, logical_session_id = sid, admission_seq = session.admission_seq, controller_pane = "42",
+			owner = { owner_id = o.owner_id, owner_generation = o.owner_generation, host_pane_id = o.host_pane_id, alias_nonce = o.alias_nonce,
+				window_key = o.window_key, native_session_id = o.native_session_id, window_host_id = o.window_host_id } }
+		for k, v in extra or {} do r[k] = v end
+		for k, v in owner_patch or {} do r.owner[k] = v end
+		return r
+	end
+	local serial = 1
+	local function roundtrip(op, extra)
+		local r = request(op, extra)
+		event(op, runtime.json.encode(r), "spawn-fixture-boot")
+		local forwarded = peer.receive(4)
+		check(#forwarded == 1 and forwarded[1].route == "spawn.request" and forwarded[1].body == runtime.json.encode(r)
+			and forwarded[1].binding:find(":" .. op .. ":", 1, true) ~= nil, "the host forwards " .. op .. " bytes unchanged on the carrier")
+		assert(peer.ack(forwarded[1]))
+		local body = { schema = 1, op = op, work = "spawn-work-v1", request_id = r.request_id, attempt_id = r.attempt_id, spawn_namespace = r.spawn_namespace, authority_namespace = r.authority_namespace,
+			logical_session_id = sid, admission_seq = r.admission_seq, spawn_boot = "boot-1" }
+		if op == "discard_capability" then body.status, body.payload = "capable", { challenge = "forget-0000000000000000", work = "spawn-work-v1" }
+		elseif op == "discard_preview" then body.status, body.payload = "clean", { dispatch_revision = 4, inventory = { requests = 0, workers = 0, generations = 0 }, participants = tern.json.array(), omitted = 0 }
+		else body.status, body.payload = "closed", { admission_cursor = 6 } end
+		local bytes = assert(codec.encode_forget_response(body))
+		serial += 1
+		local receipt = assert(peer.send({ peer = "orchplus", route = "spawn.response", binding = metadata.relay_endpoint .. ":forget", id = "r-" .. serial, body = bytes }))
+		pump()
+		check(f.views[42].spawn_relay_frames.forget.response == bytes and not metadata.held, "the host publishes the " .. op .. " response unchanged and is not held")
+		check(codec.decode_forget_response(f.views[42].spawn_relay_frames.forget.response, r) ~= nil, "the window can decode it against its own request")
+		event("ack", runtime.json.encode({ route = "spawn.response", id = "r-" .. serial, incarnation = "spawn-fixture-boot" }), "spawn-fixture-boot")
+		for _ = 1, 4 do peer.settle(4); pump() end
+		check(not metadata.held, "acknowledging a forget response never raises an unresolved effect")
+	end
+	roundtrip("discard_capability")
+	roundtrip("discard_preview", { challenge = "forget-0000000000000000" })
+	-- A discard is forwarded only when these exact bytes are the request this authority persisted for the session.
+	local discard_extra = { challenge = "forget-0000000000000000", dispatch_revision = 4, spawn_boot = "boot-1" }
+	local unpersisted = request("discard_session", discard_extra)
+	event("discard_session", runtime.json.encode(unpersisted), "spawn-fixture-boot")
+	check(#peer.receive(4) == 0, "a discard whose bytes the authority did not persist is never forwarded")
+	local persisted_bytes = runtime.json.encode(request("discard_session", discard_extra))
+	local begun = f.authority:apply(f:state_event("begin_forget", { attempt_id = "relay-attempt", request_bytes = persisted_bytes, preview = { spawn_boot = "boot-1", dispatch_revision = 4 },
+		control_origin = { kind = "closing", binding = clone(f.origin), controller_pane = "42", close_id = "relay-attempt" } }))
+	assert(begun.ok, runtime.json.encode(begun))
+	roundtrip("discard_session", discard_extra)
+	local forged = request("discard_capability", nil, { alias_nonce = "someone-else" })
+	event("discard_capability", runtime.json.encode(forged), "spawn-fixture-boot")
+	check(#peer.receive(4) == 0, "a request whose owner is not the lane's bound source is never forwarded")
+	local legacy = request("discard_capability"); legacy.schema = 2
+	event("discard_capability", runtime.json.encode(legacy), "spawn-fixture-boot")
+	check(#peer.receive(4) == 0, "a malformed request is never forwarded")
+end
+if section == nil or section == "forget_window" then
+	-- The window module itself, driven with a scripted SPAWN: recovery after a reload (new epoch) and an absent session.
+	local codec = shared.codec
+	local modules = {}
+	local function load_module(name)
+		if modules[name] then return modules[name] end
+		local chunk = assert(loadstring(runtime.fs.read(root .. "/" .. name .. ".luau"), name))
+		setfenv(chunk, setmetatable({ require = function(path) return load_module((path:gsub("^%./", ""))) end }, { __index = environment }))
+		modules[name] = chunk(); return modules[name]
+	end
+	local function scenario(absent, same_identity, probe, blocked)
+		local old = { owner_id = "owner", owner_generation = 1, host_pane_id = "42", alias_nonce = "alias", window_key = "", window_epoch = "epoch-old", native_session_id = "3", window_host_id = "7", logical_session_id = "s1" }
+		local now = clone(old); now.window_epoch = "epoch-new"
+		if not same_identity then now.alias_nonce = "someone-else" end
+		local data = { source_nonce = "nonce", authority_namespace = "orch-ns", spawn_namespace = "spawn-ns", authority_revision = 5,
+			session_control = { admission_seq = 1, name = "Stuck", close = { control_origin = { kind = "closing", binding = old, controller_pane = "42", close_id = "attempt-old" },
+				forget = { attempt_id = "attempt-old", request_bytes = "{}" } } } }
+		local sent_ops, authority_calls, states = {}, {}, {}
+		local last_response
+		local serial = 0
+		local api = {
+			id = function() serial += 1; return "id-" .. serial end,
+			notice = function() end,
+			current = function() return probe ~= nil end, -- the old window epoch makes the cursor comparison fail after a reload
+			context = function() return true end,
+			closing = function() return false end,
+			snapshot = function() return data end, origin = function() return now end,
+			capture = function(_, _, _, done) done({ confirm = true }, nil, { }) end,
+			intent = function(origin) return origin end,
+			bridge = function() return { endpoint = true } end,
+			peer = function() return true, last_response end,
+			authority = function(_, _, _, kind, fields) table.insert(authority_calls, { kind = kind, fields = fields }) end,
+			relay = function(_, _, event)
+				table.insert(sent_ops, event.act)
+				local r = assert(codec.decode_forget_request(event.value))
+				local body = { schema = 1, op = r.op, work = "spawn-work-v1", request_id = r.request_id, attempt_id = r.attempt_id, spawn_namespace = r.spawn_namespace, authority_namespace = r.authority_namespace,
+					logical_session_id = r.logical_session_id, admission_seq = r.admission_seq, spawn_boot = "boot-1" }
+				if r.op == "discard_capability" then body.status, body.payload = "capable", { challenge = "forget-0000000000000000", work = "spawn-work-v1", absent = if absent then true else nil }
+				elseif blocked then body.status, body.payload = "blocked", { dispatch_revision = 4, participants = tern.json.array(), omitted = 0, blockers = tern.json.array({ { kind = "uncertain", agent = "claude-a", host = "7" } }), blockers_omitted = 2 }
+				else body.status, body.payload = "clean", { dispatch_revision = 4, inventory = { requests = 0, workers = 0, generations = 0 }, participants = tern.json.array(if probe then { { agent = "claude-a", host = "7" }, { agent = "worker-c", host = "7" } } else nil), omitted = if probe then 2 else 0 } end
+				local encoded, why = codec.encode_forget_response(body); assert(encoded, runtime.json.encode(why) .. runtime.json.encode(body)); last_response = encoded
+			end,
+		}
+		local cx = { session = { event = function(_, _, ev) table.insert(states, ev) end }, pick = function(_, options) if probe then probe.placeholder = options.placeholder end return {} end }
+		local module = load_module("forget_window").new(api)
+		local started = module.start(cx, 42, now, data, probe == nil)
+		for _ = 1, 8 do if started then module.tick_source(cx, 42, data, now) end end
+		return started, sent_ops, authority_calls
+	end
+	local started, ops, calls = scenario(false, true)
+	check(started and ops[1] == "discard_capability" and ops[2] == "discard_preview" and #calls == 1 and calls[1].kind == "supersede_forget",
+		"after a reload (new epoch, same owner) recovery passes the check, runs capability and preview and reaches supersede_forget")
+	local request = codec.decode_forget_request(calls[1].fields.request_bytes)
+	check(request ~= nil and request.op == "discard_session" and request.dispatch_revision == 4 and request.spawn_boot == "boot-1" and calls[1].fields.attempt_id ~= "attempt-old",
+		"the superseding request is a fresh discard bound to the new preview and attempt")
+	local started2, ops2, calls2 = scenario(true, true)
+	check(started2 and ops2[1] == "discard_capability" and ops2[2] == nil and #calls2 == 1 and calls2[1].kind == "supersede_forget",
+		"an absent session skips the preview and goes straight to the idempotent discard")
+	local request2 = codec.decode_forget_request(calls2[1].fields.request_bytes)
+	check(request2 ~= nil and request2.dispatch_revision == 0, "the absent-session discard carries no observed revision")
+	local budgeted_text = load_module("forget_text").confirm("N", {}, 4)
+	check(budgeted_text:find("4 additional participants whose execution is not checked.", 1, true) ~= nil and budgeted_text:find("Agents whose execution is not checked:", 1, true) ~= nil,
+		"the confirmation shows the exact omitted count even when every participant row was budgeted out")
+	local probe = {}
+	local _, _, probe_calls = scenario(false, true, probe)
+	check(probe.placeholder ~= nil and probe.placeholder:find("Agents whose execution is not checked:", 1, true) ~= nil and probe.placeholder:find("claude-a · 7", 1, true) ~= nil
+		and probe.placeholder:find("2 additional participants whose execution is not checked.", 1, true) ~= nil, "the confirmation lists the informational participants and the exact omitted count")
+	check(probe.placeholder:sub(-#load_module("forget_text").RESIDUAL) == load_module("forget_text").RESIDUAL and load_module("forget_text").RESIDUAL == "Agents still running may continue their assignments and use any approvals already received; Forget neither stops them nor revokes that authority.",
+		"the residual notice is appended verbatim at the end of the confirmation")
+	check(#probe_calls == 1 and probe_calls[1].kind == "begin_forget", "confirming a ready preview begins the forget")
+	local blocked_probe = {}
+	local _, _, blocked_calls = scenario(false, true, blocked_probe, true)
+	check(blocked_probe.placeholder == nil and #blocked_calls == 0, "a blocked preview with omitted blockers is never ready: no confirmation, no begin")
+	local started3, _, calls3 = scenario(false, false)
+	check(not started3 and #calls3 == 0, "a different owner identity is refused: only the exact retained identity recovers")
 end
 if section == nil or section == "host_withdrawal" then
 	local f = fixture(); f:catalog(0)

@@ -119,7 +119,7 @@ function M.validate_registry(root)
  local deliveries={};local delivery_count=0
  local mail,why=Mailbox.validate(root.mailboxes);if not mail then return nil,M.mailbox_error(why) end
  for logical,s in pairs(root.sessions) do
-  if not P.id(logical) or not P.fields(s,{admission_seq=true,control=true,authority=true,host_session=true,controller_pane=true},{closing_origin=Codec.validate_dispatch_control_origin}) or not P.integer(s.admission_seq,1) or s.admission_seq>root.admission_cursor or not root.authority_namespace or admissions[s.admission_seq] or not Codec.validate_dispatch_control(s.control) or s.control.binding and s.control.binding.logical_session_id~=logical or s.closing_origin and (s.control.phase~='closing' or s.closing_origin.close_id~=s.control.close_id or s.closing_origin.binding.logical_session_id~=logical) then return nil,'Corrupt active session control' end
+  if not P.id(logical) or not P.fields(s,{admission_seq=true,control=true,authority=true,host_session=true,controller_pane=true},{closing_origin=Codec.validate_dispatch_control_origin,forget=function(v)return type(v)=='table' and P.id(v.attempt_id) and type(v.journal)=='table' and #v.journal<=128 end}) or not P.integer(s.admission_seq,1) or s.admission_seq>root.admission_cursor or not root.authority_namespace or admissions[s.admission_seq] or not Codec.validate_dispatch_control(s.control) or s.control.binding and s.control.binding.logical_session_id~=logical or s.closing_origin and (s.control.phase~='closing' or s.closing_origin.close_id~=s.control.close_id or s.closing_origin.binding.logical_session_id~=logical) then return nil,'Corrupt active session control' end
   if not P.text(s.authority,256,false) or not P.integer(s.host_session,0) or not P.text(s.controller_pane,32,false) or not s.controller_pane:match('^%d+$') then return nil,'Corrupt native session authority' end
   admissions[s.admission_seq]=true
  end
@@ -373,6 +373,94 @@ local function reconnectable(root,s,r)
   end
  end
  return true
+end
+-- Explicit forget (SKILLS-205, evidence model `spawn-work-v1`). Forget removes one session/admission's saved graph once SPAWN's own
+-- execution obligations have settled. It never observes panes or processes: running agents, pending proposals and unfinished
+-- logical obligations are informational participants and never gate deletion. A blocker is only SPAWN-owned work that is still
+-- open: claimed/launching/uncertain operations, consumed authorizations without a settled result, pending reservation writes,
+-- mailbox effects, publications or retirement, outstanding helper children and unmatched Authority reservations.
+M.FORGET_PROTOCOL='spawn-work-v1'
+-- ctx.children(logical): helper children still outstanding; ctx.conflicts(journal) -> number of journaled reservations Authority holds in another shape;
+-- ctx.host: the owner's execution host for rows that name no binding.
+function M.forget_inventory(root,logical,ctx)
+ ctx=ctx or {}
+ local blockers,seen,participants,pseen,journal={},{},{},{},{}
+ local counts={requests=0,workers=0,generations=0}
+ local function block(agent,host,kind)
+  local key=kind..'|'..agent..'|'..host
+  if not seen[key] then seen[key]=true;blockers[#blockers+1]={kind=kind,agent=agent,host=host} end
+ end
+ local function participate(agent,host)
+  local key=agent..'|'..host
+  if not pseen[key] then pseen[key]=true;participants[#participants+1]={agent=agent,host=host} end
+ end
+ local journaled={}
+ local function reserve(observer,record,attempt)
+  if type(observer)~='string' or journaled[observer] then return end
+  journaled[observer]=true
+  journal[#journal+1]={observer_id=observer,record_id=record,attempt_id=attempt}
+ end
+ local function host_of(origin) return tostring(origin and origin.window_host_id or ctx.host or '') end
+ for _,e in pairs(root.requests) do
+  local r=e.request
+  if r.logical_session_id==logical then
+   counts.requests+=1
+   local host=host_of(r.origin_binding);local agent=r.record_id or ''
+   if agent~='' then participate(agent,host) end
+   local status=e.body and e.body.status
+   -- A mailbox operation id stays on a successfully settled request; only a still-pending one is open work.
+   -- A claim record outlives its settlement (a settled launch keeps it), so only the outcome status says the work is still open.
+   local open_effect=status=='claimed' or status=='launching' or status=='uncertain' or status=='pending' and e.operation~=nil or e.attempt_pending
+    or e.stop_request_id~=nil and e.retirement_result==nil and status~='stopped' and status~='retired' and status~='rejected'
+    or e.authorization~=nil and e.authorization.phase=='consumed' and (status==nil or status=='resolved' or status=='pending' or status=='awaiting_window')
+   local wake=e.wake and (e.wake.phase=='claimed' or e.wake.phase=='launching' or e.wake.phase=='uncertain')
+   if open_effect or wake then block(agent,host,'uncertain') end
+   reserve(e.observer_id,r.record_id,e.attempt_id)
+   -- Reservations are ordered by observer for a deterministic journal.
+  end
+ end
+ for _,w in pairs(root.workers) do
+  if w.logical_session_id==logical then
+   counts.workers+=1
+   local host=host_of(w.origin_binding);local agent=w.record_id or ''
+   if agent~='' then participate(agent,host) end
+   -- Acknowledgement moves a launch into a worker, which keeps its reservation identity.
+   reserve(w.observer_id,w.record_id,w.attempt_id)
+   if w.phase=='claimed' or w.phase=='launching' or w.phase=='uncertain' then block(agent,host,'uncertain') end
+   for _,p in pairs(w.wakes or {}) do
+    local phase=p.wake and p.wake.phase
+    if phase=='claimed' or phase=='launching' or phase=='uncertain' then block(agent,host,'uncertain') end
+   end
+  end
+ end
+ for _,g in pairs(root.mailboxes.generations) do
+  if g.binding and g.binding.logical_session_id==logical then
+   counts.generations+=1
+   local agent=g.record_id or '';local host=tostring(ctx.host or '')
+   if agent~='' then participate(agent,host) end
+   local pending=g.active~=nil or g.status=='intent'
+   for _,w in pairs(g.writes or {}) do if w.status=='uncertain' or w.status=='active' then pending=true end end
+   if pending then block(agent,host,'uncertain') end
+  end
+ end
+ if ctx.children and ctx.children(logical)>0 then block('mailbox helper',tostring(ctx.host or ''),'uncertain') end
+ table.sort(journal,function(a,b) return a.observer_id<b.observer_id end)
+ if ctx.conflicts and ctx.conflicts(journal)>0 then block('agent reservation',tostring(ctx.host or ''),'unobservable') end
+ table.sort(participants,function(a,b) if a.agent~=b.agent then return a.agent<b.agent end return a.host<b.host end)
+ table.sort(blockers,function(a,b) if a.kind~=b.kind then return a.kind<b.kind end if a.agent~=b.agent then return a.agent<b.agent end return a.host<b.host end)
+ return {blockers=blockers,participants=participants,inventory=counts,dispatch_revision=root.revision,journal=journal}
+end
+-- Deletes exactly this session's graph (and its fence/journal with it).
+function M.forget_delete(root,logical)
+ for key,e in pairs(root.requests) do if e.request.logical_session_id==logical then root.requests[key]=nil end end
+ for key,w in pairs(root.workers) do
+  if w.logical_session_id==logical then
+   root.workers[key]=nil
+   if views[root] then views[root][key]=nil end
+  end
+ end
+ for handle,g in pairs(root.mailboxes.generations) do if g.binding and g.binding.logical_session_id==logical then root.mailboxes.generations[handle]=nil end end
+ root.sessions[logical]=nil
 end
 function M.control(root,r,binding,session,peer)
  if root.migration or r.compatibility.kind~='current' then return nil,'migration_blocked' end

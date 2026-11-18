@@ -3696,6 +3696,37 @@ if section == nil or section == "s201_notifications" then
 	check(left == 0, "Forget discards the session's notification gates")
 	check(W.restores(f), "pending and cleared markers restore")
 end
+if section == nil or section == "s205_forget_refusals" then
+	-- SKILLS-205 x SKILLS-201: ordinary Close is blocked by a pending refusal card; Forget is not, and leaves no marker.
+	local f, b, cid = s201_setup()
+	local sid = f.origin.logical_session_id
+	assert(refuse_unknown(f, b, cid, "p-forget").ok)
+	check(#pending_notices(f) == 1, "a refusal card is pending")
+	check(api.dispatch.close_problem(f.authority.registry, sid) == "Dismiss proposal refusals before removing this orchestration.", "ordinary Close is blocked by the notification-only card")
+	local session = f.authority.registry.sessions[sid]
+	local o = api.clone(f.origin)
+	local request = tern.json.encode({ schema = 1, origin = "orchplus", op = "discard_session", work = "spawn-work-v1", request_id = "forget-205", attempt_id = "attempt-205",
+		authority_namespace = f.authority.registry.authority_namespace, spawn_namespace = session.spawn_namespace, logical_session_id = sid, admission_seq = session.admission_seq,
+		controller_pane = "9001", challenge = "forget-0000000000000000", dispatch_revision = 3, spawn_boot = "boot-1",
+		owner = { owner_id = o.owner_id, owner_generation = o.owner_generation, host_pane_id = o.host_pane_id, alias_nonce = o.alias_nonce,
+			window_key = o.window_key, native_session_id = o.native_session_id, window_host_id = o.window_host_id } })
+	local begun = f.authority:apply(f:state_event("begin_forget", { attempt_id = "attempt-205", request_bytes = request, preview = { spawn_boot = "boot-1", dispatch_revision = 3 },
+		control_origin = { kind = "closing", binding = o, controller_pane = "9001", close_id = "attempt-205" } }))
+	check(begun.ok, "Forget bypasses the notification-only Close block (" .. tostring(begun.code) .. ")")
+	local decoded = api.codec.decode_forget_request(request)
+	local closed = api.codec.encode_forget_response({ schema = 1, op = "discard_session", work = "spawn-work-v1", request_id = "forget-205", attempt_id = "attempt-205", status = "closed",
+		spawn_namespace = decoded.spawn_namespace, authority_namespace = decoded.authority_namespace, logical_session_id = sid, admission_seq = decoded.admission_seq,
+		spawn_boot = "boot-1", payload = { admission_cursor = 1 } })
+	local done = f.authority:apply(f:state_event("complete_forget", { attempt_id = "attempt-205", response_bytes = closed }))
+	check(done.ok and f.authority.registry.sessions[sid] == nil, "Forget completes with the card still pending (" .. tostring(done.code) .. ")")
+	local markers = 0
+	for _, g in (f.authority.registry.dispatch.gates or {}) do
+		if g.logical_session_id == sid then markers += 1 end
+		if type(g.answer) == "table" and type(g.answer.answer) == "string" and g.answer.answer:find(NOTICE, 1, true) then markers += 1 end
+	end
+	check(markers == 0, "no gate or refusal marker of the forgotten session remains")
+	check(api.state.rehydrate(api.clone(f.authority.registry)) ~= nil, "the registry restores")
+end
 if section == nil or section == "s201_ask_forgery" then
 	local f, b = s201_setup()
 	local sent = W.send(f, b, "ASK", { question = "Pick one", options = W.arr({ { id = "a", label = "A" } }),
@@ -3798,5 +3829,5 @@ assert(section == nil or table.find({ "plan_import", "usage_delta", "review_cros
 	"autonomy", "autonomy_dispatch", "autonomy_report", "autonomy_review", "autonomy_landing", "sources", "intake", "router", "labeller_finish", "passive_proposals", "project_start", "project_start_membership", "project_start_failures", "project_start_publication", "project_start_policy", "project_start_subject", "project_start_active", "project_start_mailbox", "project_start_malformed", "project_start_retirement", "plan_capacity", "project_review",
 	"project_gate_rearm", "project_plan_reopen", "project_live_conversation", "project_deploy_boundary", "project_manager_boundary",
 	"assignment_policy", "autonomy_paused", "proposal_early", "repository_sessions", "repository_policy", "repository_paused",
-	"s201_activation", "s201_deferred_activation", "s201_refusals", "s201_notifications", "s201_ask_forgery", "s201_execution_refusal", "s201_outbox_drain", "s201_capacity_rollback", "s201_marker_bounds", "repository_external", "repository_result_order", "repository_targets", "repository_head", "repository_route_change", "repository_sharing" }, section), "unknown workflow section")
+	"s201_activation", "s201_deferred_activation", "s201_refusals", "s201_notifications", "s205_forget_refusals", "s201_ask_forgery", "s201_execution_refusal", "s201_outbox_drain", "s201_capacity_rollback", "s201_marker_bounds", "repository_external", "repository_result_order", "repository_targets", "repository_head", "repository_route_change", "repository_sharing" }, section), "unknown workflow section")
 return "workflow/" .. tostring(section or "all") .. ": " .. tostring(checks) .. " checks passed"

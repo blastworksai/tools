@@ -334,6 +334,43 @@ local function routing_rows(view: any, rows: any, worker: any, admitted: boolean
 		table.insert(rows, dispatch_link(view, "capacity_refresh", "Re-check capacity now"))
 	end
 end
+-- "Forget this orchestration…" is visible at the top level, not hidden in Advanced: its blockers and its pending state
+-- are owner decisions. No row ever tells the owner to close a pane: Forget checks SPAWN's own work, not panes.
+local function forget_view(view: any, projection: any): { any }
+	local nodes: { any } = {}
+	local control = if projection.dispatch then projection.dispatch.session_control else nil
+	local pending = control ~= nil and control.close ~= nil and control.close.forget ~= nil
+	local forget = view.forget
+	if type(forget) ~= "table" and not pending then return nodes end
+	local text = require("./forget_text")
+	if type(forget) == "table" and forget.stage == "checking" then
+		table.insert(nodes, ui.text(text.CHECKING))
+		return nodes
+	end
+	local card: { any } = {}
+	if type(forget) == "table" and forget.stage == "blocked" then
+		table.insert(card, ui.text(text.BLOCKED))
+		for _, row in forget.blockers do table.insert(card, ui.text(text.row(row))) end
+		if type(forget.blockers_omitted) == "number" and forget.blockers_omitted > 0 then table.insert(card, ui.text(text.additional_blockers(forget.blockers_omitted))) end
+		local has_participants = type(forget.participants) == "table" and #forget.participants > 0
+		local omitted = if type(forget.omitted) == "number" then forget.omitted else 0
+		if has_participants or omitted > 0 then
+			table.insert(card, ui.text(text.PARTICIPANTS))
+			if has_participants then for _, row in forget.participants do table.insert(card, ui.text(text.row({ agent = row.agent, host = row.host }))) end end
+			if omitted > 0 then table.insert(card, ui.text(text.additional(omitted))) end
+		end
+		table.insert(card, ui.text(text.RESIDUAL))
+	end
+	if pending or (type(forget) == "table" and (forget.stage == "pending" or forget.pending == true)) then
+		table.insert(card, ui.text(text.PENDING))
+		table.insert(card, dispatch_link(view, "forget_continue", text.CONTINUE))
+	end
+	if type(forget) == "table" then
+		table.insert(card, ui.row({ dispatch_link(view, "forget_session", text.CHECK_AGAIN), dispatch_link(view, "forget_back", text.BACK) }))
+	end
+	table.insert(nodes, ui.card(text.MENU, card))
+	return nodes
+end
 local function dispatch_view(view: any, projection: any, selected: any): (any, any, any?, any)
 	local d = projection.dispatch or { actions = {}, workers = {} }
 	local owner, bound, admitted = controller(view, selected)
@@ -341,11 +378,13 @@ local function dispatch_view(view: any, projection: any, selected: any): (any, a
 	if bound then
 		table.insert(rows, ui.row({ dispatch_link(view, "bridge_admit", "Admit this session to SPAWN"),
 			dispatch_link(view, "bridge_reconcile", "Reconcile current SPAWN control"),
-			dispatch_link(view, "close_session", "Close logical session…") }))
+			dispatch_link(view, "close_session", "Close logical session…"),
+			dispatch_link(view, "forget_session", require("./forget_text").MENU) }))
 		table.insert(rows, ui.text("Close fences new work. Owners, uncertain effects, deliveries and document writes must settle before removal; source documents and Git are untouched."))
 	end
 	local closing = if d.session_control and d.session_control.close then d.session_control.close.control_origin else nil
-	if not bound and closing and closing.binding.alias_nonce == view.alias_nonce and closing.controller_pane == tostring(view.pane) then
+	local forgetting = d.session_control ~= nil and d.session_control.close ~= nil and d.session_control.close.forget ~= nil
+	if not forgetting and not bound and closing and closing.binding.alias_nonce == view.alias_nonce and closing.controller_pane == tostring(view.pane) then
 		table.insert(rows, ui.row({ dispatch_link(view, "bridge_reconcile", "Read current closure status"),
 			dispatch_link(view, "close_session", "Continue explicit close…") }))
 	end
@@ -1500,6 +1539,7 @@ function M.render(view: any, projection: any, status: string, diagnostic: string
 		end
 		local card, dispatch_node, request_node, scoped_nodes = dispatch_view(view, projection, selected)
 		local workflow, workflow_nodes = workflow_view(view, projection, selected)
+		for _, node in forget_view(view, projection) do table.insert(rows, node) end
 		if not view.config_open then
 			local refusals = proposal_refusals(view, projection, selected)
 			if refusals then table.insert(rows, refusals) end

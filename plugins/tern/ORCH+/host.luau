@@ -394,9 +394,34 @@ end
 -- renders every block only when committed authority changed, else just the originating block
 -- when its own view-visible state changed (window drivers read its result/receipt surfaces).
 local handling_event = false
+-- A forgotten orchestration leaves no selection, scoped result or saved id behind. Only a successfully LOADED authority
+-- (ready, with the installation-level notice naming this exact session and the session truly gone) may authorize this:
+-- missing, corrupt or unreadable storage never clears anything.
+local FORGOTTEN_VIEW_FIELDS = { "scoped_results", "dispatch_command_result", "dispatch_action", "recovery",
+	"attestation", "close_armed", "relay_notice", "creation_ready", "setup_result", "migration_result", "orchestration_result", "forget" }
+-- Any session id the loaded authority no longer holds is cleared with its scoped results. A forgotten orchestration clears at
+-- once and shows the completion notice; any other absent id (an ordinary close) is kept for a short grace so the closed bridge
+-- view can still release through its session_closed alias, and is never written to saved data.
+local ABSENT_GRACE_MS = 5000
+local function authority_lacks(view: any): boolean
+	local registry = authority.registry
+	return authority.status == "ready" and registry ~= nil and view.orch_session_id ~= nil and registry.sessions[view.orch_session_id] == nil
+end
+local function normalize_view(view: any)
+	if not authority_lacks(view) then view.absent_since = nil; return end
+	local forgotten = authority.registry.forgotten
+	if forgotten == nil or forgotten.orch_session_id ~= view.orch_session_id then
+		if view.absent_since == nil then view.absent_since = tern.now(); return end
+		if tern.now() - view.absent_since < ABSENT_GRACE_MS then return end
+	else
+		view.notice = require("./forget_text").DONE
+	end
+	for _, field in FORGOTTEN_VIEW_FIELDS do view[field] = nil end
+	view.orch_session_id, view.absent_since = nil, nil
+end
 local function render_all()
 	if handling_event then return end
-	for _, entry in contexts do entry.cx:render() end
+	for _, entry in contexts do normalize_view(entry.view); entry.cx:render() end
 end
 local function authority_signature(): string
 	return tostring(authority.status) .. "\0" .. tostring(authority.diagnostic) .. "\0" .. tostring(authority.uncommitted_observation)
@@ -1310,12 +1335,22 @@ function relay.observed_control(message: any): boolean
 	end
 	return false
 end
+-- The dedicated forget protocol has its own frame and closed schema. Its responses are read-only observations from the host's
+-- point of view: classification never adopts a request, and a lost completion is recovered by an idempotent authenticated retry.
+function relay.forget_body(bytes: any): any?
+	if type(bytes) ~= "string" or #bytes > codec.FORGET.limit or bytes:sub(1, #codec.FORGET.prefix) ~= codec.FORGET.prefix then return nil end
+	local body, problem = codec.strict_decode(bytes:sub(#codec.FORGET.prefix + 1), codec.FORGET.limit)
+	if problem or not codec.validate_forget_response(body) then return nil end
+	return body
+end
+local FORGET_ACTS = { discard_capability = true, discard_preview = true, discard_session = true }
 function relay.retirable_projection(message: any): boolean
 	-- Execution still needs the peer's exact consumption proof. Results can retire
 	-- only as read-only observations or after durable domain consumption.
 	if message.route == "spawn.execution" then return false end
 	if message.body == "" or message.route == "spawn.current" then return true end
 	if message.route ~= "spawn.response" then return false end
+	if relay.forget_body(message.body) ~= nil then return true end
 	local body = relay.response_body(message.body)
 	if body ~= nil and table.find({ "catalog", "owner_status", "status", "mailbox_inventory", "mailbox_allocation" }, body.op) ~= nil then return true end
 	if authority.status ~= "ready" or authority.uncommitted_observation
@@ -1335,7 +1370,7 @@ function relay.reject(message: any, code: string, view: any?): boolean
 	-- exact ORCH obligation; no new outcome ledger or inferred completion is created.
 	if message.route == "spawn.response" and message.body ~= "" then
 		local body = relay.response_body(message.body)
-		local readonly = body and table.find({ "catalog", "owner_status", "status", "mailbox_inventory", "mailbox_allocation" }, body.op)
+		local readonly = relay.forget_body(message.body) ~= nil or body and table.find({ "catalog", "owner_status", "status", "mailbox_inventory", "mailbox_allocation" }, body.op)
 		if not readonly then
 			local registry = authority.registry
 			local pending = if body and registry and registry.dispatch then registry.dispatch.actions[body.action_id] else nil
@@ -1491,7 +1526,7 @@ function relay.spawn_event(view: any, input: any)
 		local retained = lane.received[key]
 		if retained and retained.message.route == "spawn.response" and retained.message.body ~= "" then
 			local response = relay.response_body(retained.message.body)
-			if not response or not table.find({ "catalog", "owner_status", "status", "mailbox_inventory", "mailbox_allocation" }, response.op) then return end
+			if relay.forget_body(retained.message.body) == nil and (not response or not table.find({ "catalog", "owner_status", "status", "mailbox_inventory", "mailbox_allocation" }, response.op)) then return end
 		end
 		if retained and retained.message.route == proof.route and retained.message.incarnation == proof.incarnation
 			and relay.ack(view, retained) then lane.received[key] = nil end
@@ -1524,6 +1559,30 @@ function relay.spawn_event(view: any, input: any)
 			if not request or request.op ~= "catalog" or not view.setup_catalog_request
 				or not same_value(request, view.setup_catalog_request, 0)
 				or not same_value(request.setup_origin, lane.source.origin, 0) then return end
+		elseif FORGET_ACTS[input.act] then
+			-- Own decoder end to end. The owner identity (without its window epoch) must be this lane's bound source.
+			request = codec.decode_forget_request(input.bytes)
+			local o = lane.source.origin
+			if not request or request.op ~= input.act or request.logical_session_id ~= o.logical_session_id or request.controller_pane ~= lane.source.host_pane_id then return end
+			for _, name in { "owner_id", "owner_generation", "host_pane_id", "alias_nonce", "window_key", "native_session_id", "window_host_id" } do
+				if request.owner[name] ~= o[name] then relay.failure(view, "origin_changed", lane.metadata); return end
+			end
+			if input.act == "discard_session" and (next(relay.unresolved) ~= nil or view.spawn_relay.held or lane.metadata.held) then
+				relay.failure(view, "relay_held", lane.metadata); return
+			end
+			local proof = ""
+			if input.act == "discard_session" then
+				-- The host, not the window, proves the exact bytes are the request this authority persisted for the session.
+				local persisted = authority.registry and view.orch_session_id and authority.registry.sessions[view.orch_session_id]
+				persisted = persisted and persisted.close and persisted.close.forget
+				if not persisted or persisted.request_bytes ~= input.bytes then
+					view.relay_notice = "Forgetting was not forwarded: its request is not the one this orchestration persisted."
+					return
+				end
+				proof = ":" .. codec.sha256(input.bytes)
+			end
+			local sent = relay.send(view, lane, "spawn", "spawn.request", input.relay_endpoint .. ":" .. input.lane_id .. ":" .. input.act .. ":" .. input.peer_boot .. proof, input.act, input.bytes, nil)
+			return
 		else request = codec.decode_dispatch_request(input.bytes) end
 		if not request or (not RELAY_CALLBACKS[input.act] and not migration and request.op ~= input.act) then return end
 		if not RELAY_CALLBACKS[input.act] and ((migration and migration.operation ~= "source")
@@ -2114,6 +2173,32 @@ local function handle(view: any, ev: any, cx: any)
 		render_all()
 		return
 	end
+	if ev.act == "forget-state" then
+		-- Window-side progress of "Forget this orchestration…": a closed set of stages and bounded blocker rows, never free text.
+		local input = decode(ev.value)
+		if type(input) ~= "table" or not table.find({ "idle", "checking", "blocked", "pending" }, input.stage) then return end
+		local blockers: { any } = {}
+		local participants: { any } = {}
+		local function rows(source: any, out: { any }, kinds: { string }?)
+			if type(source) ~= "table" then return end
+			for _, row in source do
+				if #out >= 8 then break end
+				if type(row) == "table" and (kinds == nil or table.find(kinds, row.kind))
+					and type(row.agent) == "string" and #row.agent <= 96 and type(row.host) == "string" and #row.host <= 256 then
+					table.insert(out, { kind = row.kind, agent = row.agent, host = row.host })
+				end
+			end
+		end
+		if input.stage == "blocked" then
+			rows(input.blockers, blockers, { "unobservable", "uncertain" })
+			rows(input.participants, participants)
+		end
+		local omitted = if type(input.omitted) == "number" and input.omitted >= 0 and input.omitted % 1 == 0 then input.omitted else 0
+		local blockers_omitted = if input.stage == "blocked" and type(input.blockers_omitted) == "number" and input.blockers_omitted >= 0 and input.blockers_omitted % 1 == 0 then input.blockers_omitted else 0
+		view.forget = if input.stage == "idle" then nil else { stage = input.stage, blockers = blockers, participants = participants, omitted = omitted, blockers_omitted = blockers_omitted, pending = input.pending == true }
+		render_all()
+		return
+	end
 	if ev.act == "authority-command" or ev.act == "authority-operator-command" then
 		local input = decode(ev.value)
 		local event = if input then input.event else nil
@@ -2122,7 +2207,7 @@ local function handle(view: any, ev: any, cx: any)
 			or input.origin.alias_nonce ~= view.alias_nonce or input.origin.host_pane_id ~= tostring(view.pane)
 			or input.origin.logical_session_id ~= view.orch_session_id
 			or not event or event.orch_session_id ~= view.orch_session_id
-			or not table.find({ "begin_close", "release_controller", "confirm_close" }, event.kind) then return end
+			or not table.find({ "begin_close", "release_controller", "confirm_close", "begin_forget", "supersede_forget", "complete_forget" }, event.kind) then return end
 		if operator and event.kind ~= "release_controller" then return end
 		local session = session_for(view)
 		local owner = if session then session.controller else nil
@@ -2130,12 +2215,17 @@ local function handle(view: any, ev: any, cx: any)
 		local active = owner and owner.owner_id == input.origin.owner_id and owner.generation == input.origin.owner_generation
 			and owner.pane_binding and owner.pane_binding.alias_nonce == view.alias_nonce
 		if not active and not (closing and same_value(closing.binding, input.origin, 0)) then return end
-		if event.kind == "begin_close" and (not event.control_origin or not same_value(event.control_origin.binding, input.origin, 0)) then return end
+		if (event.kind == "begin_close" or event.kind == "begin_forget" or event.kind == "supersede_forget")
+			and (not event.control_origin or not same_value(event.control_origin.binding, input.origin, 0)) then return end
 		if event.kind == "release_controller" and ((not operator and not session.close) or event.expected_owner_id ~= input.origin.owner_id
 			or event.expected_generation ~= input.origin.owner_generation) then return end
 		local notice = view.notice
 		local response = action(view, event)
-		if operator then view.dispatch_command_result = response else view.dispatch_background_result = response; view.notice = notice end
+		if operator then view.dispatch_command_result = response
+		else
+			view.dispatch_background_result = response
+			if event.kind ~= "complete_forget" then view.notice = notice end -- the completion notice stays
+		end
 		return
 	end
 	if ev.act == "dispatch-command" or ev.act == "dispatch-operator-command" then
@@ -2589,6 +2679,7 @@ local definition: BlockDef<any> = {
 			else view.notice = dispatch_notice(saved.notice) end
 			if type(saved.relay_notice) == "string" and #saved.relay_notice <= 512 then view.relay_notice = saved.relay_notice end
 		end
+		normalize_view(view)
 		-- Native page args are a one-shot launch request, never restored from saved block args.
 		if saved == nil and view.config_open and args[2] ~= nil then page_entry(view, args[2]) end
 		contexts[cx.pane] = { cx = cx, view = view }
@@ -2598,6 +2689,7 @@ local definition: BlockDef<any> = {
 	end,
 	title = function(_view: any): string return "ORCHESTRATED WORK" end,
 	view = function(view: any, _cx: BlockCx): BlockView
+		normalize_view(view)
 		view.host_pane_titles = {}
 		for _, pane in tern.pane.list() do view.host_pane_titles[tostring(pane.pane)] = pane.title end
 		local root = authority.registry or authority.migration_source
@@ -2625,7 +2717,8 @@ local definition: BlockDef<any> = {
 	end,
 	event = handle_event,
 	save = function(view: any): any
-		return { pane = view.pane, alias_nonce = view.alias_nonce, orch_session_id = view.orch_session_id, established = authority.established,
+		normalize_view(view)
+		return { pane = view.pane, alias_nonce = view.alias_nonce, orch_session_id = if authority_lacks(view) then nil else view.orch_session_id, established = authority.established,
 			dispatch_command_result = view.dispatch_command_result, notice = view.notice, relay_notice = view.relay_notice }
 	end,
 }

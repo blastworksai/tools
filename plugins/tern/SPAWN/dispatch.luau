@@ -9,6 +9,7 @@ local State=require('./dispatch_state')
 local MailboxAdapter=require('./mailbox_adapter')
 local Native=require('./native_cli')
 local TerminalIdentity=require('./terminal_identity')
+local Children=require('./children')
 local Config=require('./config')
 local terminal_starts,terminal_checks={},{}
 local valid=State.validate_registry
@@ -30,6 +31,10 @@ local function native_claim(root,executor_id)
  return {spawn_namespace=root.namespace,claim_nonce=string.format('claim-%d-%08x-%08x-%08x-%08x',os.time(),math.random(1,2147483647),math.random(1,2147483647),math.random(1,2147483647),math.random(1,2147483647)),executor_id=executor_id,boot=boot}
 end
 local function key(r) return r.logical_session_id..'/'..r.request_id end
+-- Durable Forget fence (SKILLS-205): once a confirmed forget persists it, no new SPAWN work begins for the session (admission,
+-- native begin, delayed continuation); only settlement recording continues, so the obligations that block forgetting can finish.
+local FENCED_MESSAGE='This orchestration is being forgotten; no new work can begin'
+local function fenced(root,logical) local s=root.sessions[logical];return s~=nil and s.forget~=nil end
 local function same_owner(a,b)
  return a.logical_session_id==b.logical_session_id and a.owner_id==b.owner_id and a.owner_generation==b.owner_generation and a.host_pane_id==b.host_pane_id
 end
@@ -210,8 +215,13 @@ local function capture_terminal(logical,id)
  if not start or not start.route or start.busy or start.ambiguous then return end
  local root=load();local target=root and State.worker(root,logical,id)
  if not target or target.body.status~='accepted' or target.stop_request_id or target.terminal_process then return end
+ -- Forget evidence: the capture helper is an outstanding child until its own completion (durable, written before it starts).
+ -- Fail closed: a helper whose registration failed is never started, so no untracked child can exist.
+ local child=Children.begin('session:'..logical,'terminal')
+ if child==nil then start.error='The terminal observation could not be recorded; it was not started';return end
  start.busy=true
  TerminalIdentity.capture(start.route,start.session,start.expected,function(proof)
+  Children.finish(child)
   start.busy=false
   if not proof or not TerminalIdentity.valid(proof) or terminal_starts[k]~=start or start.ambiguous then return end
   local fresh=load();local current=fresh and State.worker(fresh,logical,id)
@@ -235,8 +245,11 @@ local function terminal_reconnect(root,r)
  local count=0
  for id,value in pairs(terminal_checks) do if value.complete and tern.now()-value.at>5000 then terminal_checks[id]=nil else count+=1 end end
  if count>=64 then return false,'Terminal process observations are busy; retain the original request and retry observation later' end
+ local child=Children.begin('session:'..r.logical_session_id,'terminal')
+ if child==nil then return false,'The terminal observation could not be recorded; it was not started. Retain the original request and retry observation later' end
  observed={identity=identity,complete=false};terminal_checks[k]=observed
  TerminalIdentity.verify(target.terminal_process,function(passed,problem)
+  Children.finish(child)
   if terminal_checks[k]~=observed then return end
   if problem then
    problem=tostring(problem):gsub("%z",""):sub(1,512)
@@ -882,6 +895,7 @@ function M.stage(r,binding,session,bridge,request_json,relay_binding)
  -- owner_status is a read-only admission view: answered for any same-session binding, never staged or authorized.
  if r.op=='owner_status' or r.op=='mailbox_inventory' or r.op=='mailbox_allocation' then return M.request(r,binding,session,function()end) end
  local root,why=load(State.control_request(r));if not root then return P.reject(r,'migration_blocked',why) end
+ if fenced(root,r.logical_session_id) then return P.reject(r,'target_unavailable',FENCED_MESSAGE) end
  if State.control_request(r) then
   if not P.equal(P.decode(request_json),r) then return P.reject(r,'invalid_schema','Exact immutable control bytes required') end
   for id,c in pairs(control_challenges) do if c.boot~=boot or c.deadline<tern.now() then control_challenges[id]=nil end end
@@ -936,6 +950,7 @@ function M.authorize(r,nonce,bridge,changed,claim,executor_id,proof,relay_bindin
  local root,why=load();if not root then return P.reject(r,'storage_error',why) end
  local entry=root.requests[key(r)];local a=if entry then entry.authorization else nil
  if not entry then return missing(root,r) end
+ if fenced(root,r.logical_session_id) then return P.reject(r,'target_unavailable',FENCED_MESSAGE) end
  local mismatch=if not a then 'SPAWN authorization challenge is missing or already consumed'
   elseif not P.equal(entry.request,r) then 'SPAWN authorization request differs from staged immutable request'
   elseif entry.relay_binding~=relay_binding then 'SPAWN authorization belongs to another relay incarnation'
@@ -981,6 +996,7 @@ function M.request(r,binding,session,changed,authorization_nonce,authorized_snap
  if not available then return P.reject(r,'target_unavailable',preparation_error) end
  local root,why=load();if not root then return P.reject(r,'storage_error',why) end
  if r.op=='owner_status' then return State.observation(root,r) end
+ if r.op~='status' and r.op~='catalog' and fenced(root,r.logical_session_id) then return P.reject(r,'target_unavailable',FENCED_MESSAGE) end
  local admitted,owner_error=owner(root,r,binding,session,r.op~='catalog' and r.op~='status' and r.op~='mailbox_inventory' and r.op~='mailbox_allocation')
  if not admitted then return if owner_error=='already_consumed' then P.body(r,'already_consumed',nil,nil,'already_consumed') else P.reject(r,owner_error,'Current admitted authority and binding required') end
  local snapshot,snapshot_error=authorized_snapshot,nil
@@ -1286,6 +1302,140 @@ function M.current(logical_session_id)
  end
  return {protocol=2,phase=if root.migration then 'prepared' else 'stable',spawn_namespace=root.namespace,authority_namespace=root.authority_namespace,authority_revision=root.revision,admission_cursor=root.admission_cursor,sessions=sessions,session_progress=progress,compatibility=State.compatibility(root),qualification=observed}
 end
+-- Explicit forget (SKILLS-205, `spawn-work-v1`): dedicated opt-in operations, answered here and nowhere else. The preview is
+-- read-only: it never uses load() (whose reload recovery rewrites claims and persists), never revokes a permit and never
+-- acknowledges a request. A challenge is bound to both namespaces, the session/admission, the retained owner identity, this
+-- boot and one attempt id; only the latest per identity is honoured and it lives in memory, so a SPAWN reload invalidates it.
+-- Forget never looks at panes or processes: it removes one session's graph once SPAWN's own execution obligations have settled.
+local forget_challenges={}
+local forget_done={} -- identity -> the exact completed attempt, so an exact retry of a lost completion answers closed again
+local FORGET_ROWS=8
+local function forget_body(r,status,payload,err)
+ return {schema=1,op=r.op,request_id=r.request_id,attempt_id=r.attempt_id,status=status,work=State.FORGET_PROTOCOL,spawn_namespace=r.spawn_namespace,authority_namespace=r.authority_namespace,logical_session_id=r.logical_session_id,admission_seq=r.admission_seq,spawn_boot=boot,payload=payload,error=err}
+end
+local function forget_refuse(r,code,message) return forget_body(r,'refused',nil,{code=code,message=message}) end
+local function forget_identity(r) return r.authority_namespace..'/'..r.logical_session_id..'/'..string.format('%.0f',r.admission_seq) end
+local function forget_owner_matches(s,owner)
+ local function same(b)
+  if type(b)~='table' then return false end
+  for _,name in ipairs({'owner_id','owner_generation','host_pane_id','alias_nonce','window_key','native_session_id','window_host_id'}) do
+   if b[name]~=owner[name] then return false end
+  end
+  return true
+ end
+ return same(s.control.binding) or s.closing_origin~=nil and same(s.closing_origin.binding)
+end
+function M.forget_unavailable(r,why) return forget_refuse(r,'unsupported',tostring(why or 'Execution-host authority is unavailable'):sub(1,400)) end
+-- The one inventory used by preview, the final check and resume: synchronous, so no observation separates it from persistence.
+local function forget_inventory(root,r,binding)
+ local logical=r.logical_session_id
+ return State.forget_inventory(root,logical,{
+  host=r.owner.window_host_id,
+  children=function()
+   local scopes={['session:'..logical]=true}
+   for handle,g in pairs(root.mailboxes.generations) do if g.binding and g.binding.logical_session_id==logical then scopes[handle]=true end end
+   return MailboxAdapter.forget_children(scopes)
+  end,
+  conflicts=function(journal)
+   local count,problem=Authority.forget_reservation_conflicts(binding,journal)
+   return if count==nil then 1 else count
+  end})
+end
+-- Preview rows: deterministic, bounded, with the exact omitted counts.
+local function forget_rows(list)
+ local rows=tern.json.array()
+ for index=1,math.min(#list,FORGET_ROWS) do table.insert(rows,list[index]) end
+ return rows,#list-#rows
+end
+-- The ENCODED preview must fit the 8192-byte frame whatever the agent and host names are: rows are dropped (participants first,
+-- then blockers, always keeping one) and counted exactly, so overflow can never become a transport failure.
+function M.forget_fit(body,payload)
+ while true do
+  local bytes=Codec.encode_forget_response(body)
+  if bytes then return body end
+  if #payload.participants>0 then
+   table.remove(payload.participants);payload.omitted+=1
+  elseif payload.blockers and #payload.blockers>1 then
+   table.remove(payload.blockers);payload.blockers_omitted+=1
+  else return forget_refuse(body.op and {op=body.op,request_id=body.request_id,attempt_id=body.attempt_id,spawn_namespace=body.spawn_namespace,authority_namespace=body.authority_namespace,logical_session_id=body.logical_session_id,admission_seq=body.admission_seq},'busy','The preview cannot fit its frame') end
+ end
+end
+function M.forget(r,binding,session)
+ if hold then return forget_refuse(r,'busy',hold) end
+ local ok,stored=pcall(tern.kv.get,KEY)
+ if not ok or type(stored)~='table' or stored.version~=2 or not valid(stored) then return forget_refuse(r,'unsupported','Managed dispatch store is unavailable or not current') end
+ local root=P.clone(stored);P.observe(root)
+ if root.migration or root.authority_namespace~=r.authority_namespace or root.namespace~=r.spawn_namespace then return forget_refuse(r,'changed','The paired namespaces changed') end
+ local identity=forget_identity(r)
+ local s=root.sessions[r.logical_session_id]
+ if s then
+  if s.admission_seq~=r.admission_seq then return forget_refuse(r,'changed','The admission changed') end
+  if s.authority~=(binding.managed_authority_id or binding.authority_id) or s.host_session~=session or not forget_owner_matches(s,r.owner) then
+   return forget_refuse(r,'owner_mismatch','This orchestration is owned by a different identity')
+  end
+ elseif r.admission_seq>root.admission_cursor then return forget_refuse(r,'not_found','No such admission was ever recorded')
+ elseif root.sessions[r.logical_session_id]~=nil then return forget_refuse(r,'changed','Conflicting admission') end
+ local current=forget_challenges[identity]
+ if r.op=='discard_capability' then
+  -- Repeating the same attempt is idempotent; a new attempt replaces (and so invalidates) the older challenge.
+  if not current or current.attempt_id~=r.attempt_id then
+   current={attempt_id=r.attempt_id,challenge=string.format('forget-%08x-%08x-%08x-%08x',math.random(1,2147483647),math.random(1,2147483647),math.random(1,2147483647),math.random(1,2147483647)),boot=boot}
+   forget_challenges[identity]=current
+  end
+  return forget_body(r,'capable',{challenge=current.challenge,work=State.FORGET_PROTOCOL,absent=if s==nil then true else nil})
+ end
+ local done=forget_done[identity]
+ if r.op=='discard_session' and s==nil and done and done.attempt_id==r.attempt_id and done.challenge==r.challenge then
+  return forget_body(r,'closed',{admission_cursor=root.admission_cursor})
+ end
+ if not current or current.attempt_id~=r.attempt_id or current.challenge~=r.challenge or current.boot~=boot then
+  return forget_refuse(r,'stale_challenge','The challenge is not the latest for this attempt and boot')
+ end
+ if not s then
+  -- An authenticated retry after SPAWN already deleted the graph: the admission existed (cursor), nothing conflicts.
+  if r.op=='discard_session' then return forget_body(r,'closed',{admission_cursor=root.admission_cursor}) end
+  return forget_refuse(r,'not_found','The orchestration is already gone')
+ end
+ -- Queued (not yet started) read-only inventory work belongs to this session's token: cancel it before the final check, so no timer
+ -- can start a helper on a retained target after the graph is gone. In-flight helpers are counted by the child accounting.
+ if r.op=='discard_session' then inventories[r.logical_session_id]=nil end
+ local inventory=forget_inventory(root,r,binding)
+ if r.op=='discard_preview' then
+  local participants,omitted=forget_rows(inventory.participants)
+  if #inventory.blockers>0 then
+   local blockers,blockers_omitted=forget_rows(inventory.blockers)
+   local payload={dispatch_revision=inventory.dispatch_revision,participants=participants,omitted=omitted,blockers=blockers,blockers_omitted=blockers_omitted}
+   return M.forget_fit(forget_body(r,'blocked',payload),payload)
+  end
+  local payload={dispatch_revision=inventory.dispatch_revision,inventory=inventory.inventory,participants=participants,omitted=omitted}
+  local body=M.forget_fit(forget_body(r,'clean',payload),payload)
+  -- A preview that had to drop rows is still a complete, ready answer only because the dropped rows are informational and counted.
+  current.ready_revision=inventory.dispatch_revision
+  return body
+ end
+ -- discard_session. Unfenced: the checked boot and revision must still hold. Once fenced, the fence is the commitment and only the
+ -- owner's fresh challenge is required, so an interrupted forget always resumes.
+ local fenced=s.forget~=nil
+ if not fenced then
+  if r.spawn_boot~=boot or r.dispatch_revision~=root.revision or current.ready_revision~=root.revision then return forget_refuse(r,'changed','The orchestration changed after it was checked') end
+ end
+ -- The durable SPAWN fence and the reservation journal are persisted under the session BEFORE any Authority change.
+ if not fenced then
+  s.forget={attempt_id=r.attempt_id,journal=inventory.journal}
+  local saved,why=save(root,true)
+  if not saved then return forget_refuse(r,'busy',tostring(why):sub(1,400)) end
+ end
+ if #inventory.blockers>0 then return forget_refuse(r,'blocked','Forgetting is pending; execution has not settled') end
+ local journal=s.forget.journal
+ local cleaned,why=Authority.forget_reservations(binding,journal)
+ if not cleaned then return forget_refuse(r,'blocked','Reservation cleanup is pending: '..tostring(why):sub(1,300)) end
+ State.forget_delete(root,r.logical_session_id)
+ local saved,why=save(root,true)
+ if not saved then return forget_refuse(r,'busy',tostring(why):sub(1,400)) end
+ forget_challenges[identity]=nil
+ forget_done[identity]={attempt_id=r.attempt_id,challenge=r.challenge}
+ return forget_body(r,'closed',{admission_cursor=root.admission_cursor})
+end
 local function execution_in(root,r,bridge,relay_binding)
  if r.setup_origin then return nil end
  if State.control_request(r) then
@@ -1458,6 +1608,7 @@ function M.claim(r,executor_id,operation,result,proof,observed_claim,relay_bindi
  local entry=root.requests[key(r)]
  if not entry then return missing(root,r) end
  if entry.relay_binding~=relay_binding then return P.reject(r,'binding_mismatch','Native claim belongs to another transport incarnation') end
+ if (operation=='claim' or operation=='begin') and fenced(root,r.logical_session_id) then return P.reject(r,'target_unavailable',FENCED_MESSAGE) end
  if (operation=='claim' or operation=='begin') and not relay_start_current(entry,executor_id) then return P.reject(r,'stale_binding','Relay native consent expired; reconcile without renewing or replaying it') end
  if not P.equal(entry.request,r) or not P.id(executor_id) then return P.reject(r,'binding_mismatch','Execution request differs') end
  local current_owner=State.owner(root,r.logical_session_id)
@@ -1514,6 +1665,7 @@ function M.stop_claim(r,executor_id,operation,result,proof,observed_claim,relay_
  local entry=root.requests[key(r)];local owner_record=State.owner(root,r.logical_session_id)
  if not entry then return missing(root,r) end
  if entry.relay_binding~=relay_binding then return P.reject(r,'binding_mismatch','Native stop belongs to another transport incarnation') end
+ if (operation=='claim' or operation=='begin') and fenced(root,r.logical_session_id) then return P.reject(r,'target_unavailable',FENCED_MESSAGE) end
  if (operation=='claim' or operation=='begin') and not relay_start_current(entry,executor_id) then return P.reject(r,'stale_binding','Relay stop consent expired; preserve the existing conversation') end
  local target=stop_target(root,r)
  if r.op~='stop' or not P.equal(entry.request,r) or not P.id(executor_id) or not target or target.stop_request_id~=r.request_id or not owner_record or owner_record.recovery_revision or not P.equal(owner_record.binding,r.origin_binding) then return P.reject(r,'stale_binding','Stop claim does not match the exclusive accepted launch') end
@@ -1548,6 +1700,7 @@ function M.wake_claim(r,executor_id,operation,result,claim,proof,observed_claim,
  local entry=root.requests[key(r)];local owner_record=State.owner(root,r.logical_session_id)
  if not entry then return missing(root,r) end
  if entry.relay_binding~=relay_binding then return P.reject(r,'binding_mismatch','Native wake belongs to another transport incarnation') end
+ if (operation=='wakeclaim' or operation=='wakebegin') and fenced(root,r.logical_session_id) then return P.reject(r,'target_unavailable',FENCED_MESSAGE) end
  if (operation=='wakeclaim' or operation=='wakebegin') and not relay_start_current(entry,executor_id) then return P.reject(r,'stale_binding','Relay wake consent expired; do not renew it from retained delivery') end
  local target,launch=wake_target(root,r)
  if not P.equal(entry.request,r) or not target or target.wake.request_id~=r.request_id or not P.id(executor_id) or not owner_record or owner_record.recovery_revision or not P.equal(owner_record.binding,r.origin_binding) then return P.reject(r,'stale_binding','Wake action is not owned by this controller') end

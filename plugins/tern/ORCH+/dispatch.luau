@@ -3006,6 +3006,8 @@ local function bridge_control(n: any, event: any): (any?, any?)
 		or not codec.dispatch_compatibility_ready(event.compatibility)
 		or not equal(event.compatibility, n.compatibility) then return fail("migration_blocked", "Both native stores must independently qualify the exact current pair.") end
 	if session.bridge_control then return fail("control_pending", "Reconcile the current immutable control; do not replace an uncertain admission.") end
+	-- A pending forget owns the closing fence; ordinary controls (including close_session) never run beside it.
+	if session.close and session.close.forget then return fail("forget_pending", "Forgetting is pending; resume or recover it.") end
 	if event.operation ~= "close_session" and session.phase ~= "open" then return fail("session_closing", "Closing fences admission and ordinary reconciliation.") end
 	if event.operation == "admit_session" then
 		if session.admitted then return result("already_admitted"), nil end
