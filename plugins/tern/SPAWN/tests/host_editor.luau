@@ -518,7 +518,7 @@ do
  local omp=Sel.parse_models('omp','{"models":["openai/gpt-5.2",{"id":"x-1"},{"nope":1}]}',json.decode)
  check(#omp==2 and omp[1]=='openai/gpt-5.2' and omp[2]=='x-1','omp listing accepts id strings and id tables')
  check(#Sel.parse_models('omp','not json',json.decode)==0 and #Sel.parse_models('grok',nil)==0,'garbage yields no ids')
- local g=record('listgrok');g.provider='grok';g.command='grok';g.account_label='G'
+ local g=record('listgrok');g.provider='grok';g.command='grok';g.account_label='G';g.cwd='/project'
  local c=record('listclaude');c.provider='claude';c.command='claude';c.account_label='C'
  local prior=clone(snapshot().records);local list=clone(prior);table.insert(list,g);table.insert(list,c)
  check(A.edit(state.binding,snapshot().config_revision,'replace-records',{records=list}),'seed grok and claude records');refresh()
@@ -563,8 +563,8 @@ do
  check(ran~=nil and ran[1]=='sudo' and table.concat(ran,' '):find('otheracct',1,true)~=nil,'another account lists through the sudo login route: '..tostring(ran and table.concat(ran,' ')))
  -- a literal sudo wrapper selects the account; no record.user is needed
  local wrap=clone(saved_record('listgrok'));wrap.id='listwrap';wrap.account_label='W';wrap.command='sudo';wrap.arguments={'-n','-H','-u','workeracct','--','grok'}
- local plain_omp_a=record('listompa');plain_omp_a.provider='omp';plain_omp_a.command='/opt/install-a/bin/omp';plain_omp_a.account_label='A'
- local plain_omp_b=record('listompb');plain_omp_b.provider='omp';plain_omp_b.command='/opt/install-b/bin/omp';plain_omp_b.account_label='B'
+ local plain_omp_a=record('listompa');plain_omp_a.provider='omp';plain_omp_a.command='/opt/install-a/bin/omp';plain_omp_a.account_label='A';plain_omp_a.cwd='/project'
+ local plain_omp_b=record('listompb');plain_omp_b.provider='omp';plain_omp_b.command='/opt/install-b/bin/omp';plain_omp_b.account_label='B';plain_omp_b.cwd='/project'
  local more2=clone(snapshot().records);table.insert(more2,wrap);table.insert(more2,plain_omp_a);table.insert(more2,plain_omp_b)
  check(A.edit(state.binding,snapshot().config_revision,'replace-records',{records=more2}),'seed sudo-wrapper and custom-executable records');refresh()
  rows=rows_of('agents')
@@ -587,6 +587,26 @@ do
  local oa,ob=rows[rid('listompa','model')],rows[rid('listompb','model')]
  check(oa.control.k=='choice' and oa.control.options[2].value=='alpha-1' and #oa.control.options==2,'install A keeps its own catalog')
  check(ob.control.k=='choice' and ob.control.options[2].value=='beta-2' and #ob.control.options==2,'install B has a different catalog')
+ -- the listing takes launch's own route: SUDO (not the literal sudo launch reads) is a different program, so no listing
+ local upper=clone(wrap);upper.id='listupper';upper.account_label='U';upper.command='/opt/bin/SUDO'
+ -- relative executables resolve from the record's launch folder, for the current account and across accounts
+ local rel=clone(saved_record('listgrok'));rel.id='listrel';rel.account_label='R';rel.command='bin/grok';rel.cwd='/project'
+ local relx=clone(rel);relx.id='listrelx';relx.account_label='RX';relx.user='otheracct'
+ local nocwd=clone(rel);nocwd.id='listnocwd';nocwd.account_label='NC';nocwd.cwd='project'
+ local more4=clone(snapshot().records);for _,item in ipairs({upper,rel,relx,nocwd}) do table.insert(more4,item) end
+ check(A.edit(state.binding,snapshot().config_revision,'replace-records',{records=more4}),'seed SUDO and relative-path records');refresh()
+ rows=rows_of('agents')
+ check(rows['model-list-listupper']==nil,'/opt/bin/SUDO offers no listing (launch does not treat it as sudo)')
+ check(rows['model-list-listnocwd']==nil,'a relative launch folder offers no listing')
+ local ran_options
+ fake.process.run=function(argv,options,callback) ran=argv;ran_options=options;callback({status=0,timed_out=false,stdout=grok_out,stderr=''}) end
+ definition.event(state,{ev='action',act='model-list:listrel@'..state.snapshot.config_revision},cx)
+ check(ran[1]=='bin/grok' and ran[2]=='models' and ran_options.cwd=='/project','relative executable lists from the record folder: '..table.concat(ran,' ')..' cwd='..tostring(ran_options.cwd))
+ definition.event(state,{ev='action',act='model-list:listrelx@'..state.snapshot.config_revision},cx)
+ local wrapped=table.concat(ran,' ')
+ check(ran[1]=='sudo' and wrapped:find('otheracct',1,true)~=nil and wrapped:find("cd -- '/project'",1,true)~=nil and wrapped:find("'bin/grok'",1,true)~=nil and ran_options.cwd==nil,'cross-account relative executable lists inside the record folder, not /: '..wrapped)
+ rows=rows_of('agents')
+ check(rows[rid('listrel','model')].control.k=='choice','current-account relative record shows its catalog')
  -- a login sudo cannot be listed
  local login=clone(wrap);login.id='listlogin';login.account_label='L';login.arguments={'-n','-i','-u','workeracct','--','grok'}
  local more3=clone(snapshot().records);table.insert(more3,login)

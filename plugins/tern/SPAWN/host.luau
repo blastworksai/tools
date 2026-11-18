@@ -10,6 +10,8 @@ local Dispatch = require("./dispatch")
 local DispatchState = require("./dispatch_state")
 local ManagedSetup = require("./managed_setup")
 local Prereq = require("./prereq")
+local Backend = require("./backend")
+local Resolution = require("./launch_resolution")
 local PageNavigation = require("./page_navigation")
 local WindowJournal = require("./window_journal")
 local SetupDiscovery = require("./setup_discovery")
@@ -957,29 +959,37 @@ end
 -- Model choices from the CLI's own headless listing. A listing runs only when the person asks (the
 -- "List models" action), read-only, as the agent's own OS account on this machine; nothing starts an
 -- agent and nothing is saved. An unknown listing, a failed run or an empty answer keeps the free-text field.
-local function listing_argv(record,key)
-	local target=Config.listing_target(record)
-	local argv=Selectors.lister(key)
-	if not target or argv==nil then return nil,nil end
-	argv[1]=target.executable
-	return argv,target.user
+-- The listing is the CLI's own listing command run through the SAME route the launch takes: the record is
+-- resolved by launch's resolver, a literal sudo form is read by Backend.same_host_route (the function
+-- launch and preparation use), and the folder is the record's launch folder. Nothing here parses sudo.
+-- No route (not POSIX, SSH, a relative or empty folder, a route launch itself refuses, or a program
+-- that is not the CLI) means no listing and the Model field stays free text.
+local function listing_route(state,record,key)
+	local lister=Selectors.lister(key)
+	if lister==nil or state.snapshot.host_os=="windows" then return nil end
+	if record.backend=="ssh-command" or (record.host~=nil and record.host~="") then return nil end
+	local cwd=record.cwd
+	if type(cwd)~="string" or cwd:sub(1,1)~="/" or cwd:find("%c") then return nil end
+	local resolved=Resolution.resolve(record,if Resolution.fresh_available(record) then "fresh" else "ordinary","posix")
+	if resolved==nil then return nil end
+	local route=Backend.same_host_route(resolved.executable,resolved.arguments,if type(record.user)=="string" then record.user else "")
+	if route==nil or Selectors.program_key(route.executable)~=key then return nil end
+	local argv={route.executable}
+	for index=2,#lister do table.insert(argv,lister[index]) end
+	return {argv=argv,user=route.user,cwd=cwd}
 end
-local function model_list_key(record,key)
-	local argv,user=listing_argv(record,key)
-	return (user or "")..":"..(if argv then argv[1] else "")..":"..tostring(key)
+local function model_list_key(state,record,key)
+	local route=listing_route(state,record,key)
+	if route==nil then return "" end
+	return route.user.."\0"..route.argv[1].."\0"..route.cwd.."\0"..tostring(key)
 end
 local function can_list_models(state,record,key)
-	if Selectors.lister(key)==nil then return false end
-	if record.backend=="ssh-command" or (record.host~=nil and record.host~="") then return false end
-	local argv,user=listing_argv(record,key)
-	if argv==nil then return false end
-	if state.snapshot.host_os=="windows" and user~="" then return false end
-	return true
+	return listing_route(state,record,key)~=nil
 end
 local function model_rows(state,record,id,key)
 	local current=if record.model_selector then text(record.model) else ""
 	local legacy=record.model~=nil and record.model_selector~=true
-	local listed=if state.model_lists then state.model_lists[model_list_key(record,key)] else nil
+	local listed=if state.model_lists then state.model_lists[model_list_key(state,record,key)] else nil
 	local helper=Selectors.helper(key) or ""
 	local rows={}
 	if listed and #listed>0 then
@@ -993,7 +1003,8 @@ local function model_rows(state,record,id,key)
 	end
 	if can_list_models(state,record,key) then
 		local busy=state.model_list_busy~=nil and state.model_list_busy[record.id]
-		local shown_argv,shown_user=listing_argv(record,key)
+		local shown=listing_route(state,record,key)
+		local shown_argv,shown_user=shown.argv,shown.user
 		table.insert(rows,action_row("model-list-"..record.id,if busy then "Listing models..." else "List models",action(state,"model-list:"..record.id),"Runs "..table.concat(shown_argv," ").." read-only as "..(if shown_user~="" then shown_user else "the current account")..". It starts no agent and saves nothing; if the CLI cannot list (not signed in, no listing) the Model field stays free text."..(if state.model_list_notes and state.model_list_notes[record.id] then " Last result: "..state.model_list_notes[record.id] else "")))
 	end
 	return rows
@@ -2016,16 +2027,16 @@ local definition={
 				state.model_list_busy=state.model_list_busy or {};state.model_list_notes=state.model_list_notes or {};state.model_lists=state.model_lists or {}
 				if state.model_list_busy[list_id] then return end
 				state.model_list_busy[list_id]=true
-				local list_key=model_list_key(record,key)
-				local argv,user=listing_argv(record,key)
-				Prereq.run(Prereq.as_user(argv,user),"",function(stdout,why)
+				local list_key=model_list_key(state,record,key)
+				local route=listing_route(state,record,key)
+				Prereq.run(Prereq.as_user(route.argv,route.user,route.cwd),"",function(stdout,why)
 					state.model_list_busy[list_id]=nil
 					if state.closed then return end
 					local ids=if stdout then Selectors.parse_models(key,stdout,tern.json.decode) else {}
 					if #ids>0 then state.model_lists[list_key]=ids;state.model_list_notes[list_id]=tostring(#ids).." models listed"
 					else state.model_lists[list_key]=nil;state.model_list_notes[list_id]="the CLI listed no models ("..(if stdout then "empty or unrecognised output" else tostring(why or "failed"):sub(1,160))..")" end
 					cx:render()
-				end)
+				end,if route.user=="" then route.cwd else nil)
 				return
 			end
 			if op=="managed-open" then state.page="managed";return end

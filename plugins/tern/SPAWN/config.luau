@@ -408,28 +408,6 @@ function Config.record_cli(record: any): string?
 	if mode == nil then return nil end
 	return Selectors.program_key((Config.program_of(mode.executable, mode.argv)))
 end
--- Where a model listing must run: the executable the launch really runs (a literal sudo wrapper
--- stripped) and the OS account that runs it (the wrapper's selected user, else record.user). nil plus a
--- reason when the launch cannot be named, a login sudo (-i/-s) is used, or the two accounts disagree.
-function Config.listing_target(record: any): ({ executable: string, user: string }?, string?)
-	local modes = launch_modes(record)
-	table.sort(modes, function(a, b) return a.name == "fresh" and b.name ~= "fresh" end)
-	local mode = modes[1]
-	if mode == nil then return nil, "No launch command" end
-	local user = if type(record.user) == "string" then record.user else ""
-	local executable = mode.executable
-	if basename(executable) == "sudo" then
-		local selected, index, login, problem = Config.parse_sudo(mode.argv)
-		if problem ~= nil then return nil, problem end
-		if login then return nil, "A sudo login shell (-i/-s) cannot be listed safely" end
-		if selected == nil or mode.argv[index] == nil then return nil, "sudo without an explicit account and program" end
-		if user ~= "" and user ~= selected then return nil, "Configured OS user conflicts with the sudo account selector" end
-		user = selected
-		executable = mode.argv[index]
-	end
-	if executable == "" or executable:sub(1, 1) == "-" or executable:find("%c") then return nil, "Executable cannot be named" end
-	return { executable = executable, user = user }, nil
-end
 -- Identity and value rules for the selectors a record sets. Only records that set a 0.7 selector
 -- (`model_selector` or `effort`) are checked, so a saved roster with display-text models loads and
 -- launches as before. The CLI is the program each launch really runs, never the provider label.

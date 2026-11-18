@@ -127,9 +127,9 @@ end
 -- The same login road for a fixed prerequisite or helper command (preparation checks), so a tool found on the
 -- account's login PATH at discovery is the one preparation finds. The folder is the root: these commands read no
 -- relative path, and sudo -i would otherwise start them in the account's home.
-function Resolution.login_argv(user: string, argv: {string}): {string}
+function Resolution.login_argv(user: string, argv: {string}, cwd: string?): {string}
 	local wrapped = table.clone(argv)
-	login_wrap(wrapped, 1, "/")
+	login_wrap(wrapped, 1, cwd or "/")
 	local out = { "sudo", "-n", "-i", "-u", user, "--" }
 	for _, word in ipairs(wrapped) do table.insert(out, word) end
 	return out

@@ -3,17 +3,17 @@ local Backend = require('./backend')
 local Codec = require('./wire/codec')
 local TerminalIdentity = require('./terminal_identity')
 local M = {}
-local function run(argv,stdin,done)
- local ok,why=pcall(tern.process.run,argv,{stdin=stdin or '',timeout_ms=15000},function(result)
+local function run(argv,stdin,done,cwd)
+ local ok,why=pcall(tern.process.run,argv,{stdin=stdin or '',timeout_ms=15000,cwd=cwd},function(result)
   if result.timed_out or result.status~=0 then done(nil,(result.stderr or 'Process failed'):sub(1,1024));return end
   done(result.stdout,nil)
  end)
  if not ok then done(nil,tostring(why):sub(1,1024)) end
 end
-local function as_user(argv,user)
+local function as_user(argv,user,cwd)
  if not user or user=='' then return argv end
  -- The launch route (sudo -i login shell, argv carried as encoded data): preparation sees the same PATH as the launch.
- return Backend.login_argv(user,argv)
+ return Backend.login_argv(user,argv,cwd)
 end
 M.run=run
 M.as_user=as_user
