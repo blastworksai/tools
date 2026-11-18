@@ -2499,6 +2499,21 @@ sections.forget=function()
  local r=request('discard_capability','pl-live');local c=contradict.d.forget(r,contradict.binding,1,gone,nil)
  local p=contradict.d.forget(request('discard_preview','pl-live',{challenge=c.payload.challenge}),contradict.binding,1,live,nil)
  check(p.status=='blocked' and p.payload.blockers[1].kind=='pane','the host\'s live pane list contradicting a recorded launch blocks')
+ -- The PRODUCTION observer (no injected pane flag): the host pane list AND the live agent list for the retained identity.
+ local function production(rows,configure)
+  local h=launched_fixture(true)
+  h.runtime.pane={list=function() if rows==false then error('pane list unavailable') end return rows end}
+  if configure then configure(h) end
+  local c=h.d.forget(request('discard_capability','prod'),h.binding,1,nil,nil)
+  return h.d.forget(request('discard_preview','prod',{challenge=c.payload.challenge}),h.binding,1,nil,nil)
+ end
+ local agent_still_listed=production({{pane=70,program='/usr/bin/omp',cwd='/work'}})
+ check(agent_still_listed.status=='blocked' and agent_still_listed.payload.blockers[1].kind=='pane' and agent_still_listed.payload.blockers[1].pane=='70',
+  'the retained pane is missing from the pane list but its agent is still listed: blocks, naming the listed pane')
+ check(production({{pane=71,program='bash',cwd='/work'},{pane=72,program='omp',cwd='/elsewhere'}}).status=='clean','pane and agent both gone (other programs and other directories do not match): clean')
+ local unreadable_agents=production({},function(h) h.authority.setup_snapshot=function() error('agent identity unavailable') end end)
+ check(unreadable_agents.status=='blocked' and unreadable_agents.payload.blockers[1].kind=='unobservable','an agent list that cannot be matched to the retained identity is cannot be checked')
+ check(production(false).status=='blocked','an unreadable pane list is cannot be checked')
 end
 -- The actual relay carries the dedicated forget operations on their own protocol, bound to the bound source's identity.
 sections.forget_relay=function()

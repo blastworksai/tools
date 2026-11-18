@@ -380,18 +380,18 @@ end
 -- stops a process, and nothing outside the graph (agent roster, other sessions, watermarks, files) is touched.
 local function forget_panes(root,logical)
  local panes={}
- local function add(binding,agent,proof,launched)
+ local function add(binding,agent,proof,launched,cwd)
   if type(binding)=='table' and binding.pane_id then
    local key=binding.pane_id..'|'..tostring(binding.window_host_id)
    local known=panes[key]
-   panes[key]={binding=binding,agent=agent or (known and known.agent) or '',proof=proof or (known and known.proof),launched=launched or (known and known.launched)}
+   panes[key]={binding=binding,agent=agent or (known and known.agent) or '',proof=proof or (known and known.proof),launched=launched or (known and known.launched),cwd=cwd or (known and known.cwd)}
   end
  end
  for _,e in pairs(root.requests) do
   local r=e.request
   if r.logical_session_id==logical then
    local agent=r.record_id
-   add(e.pane_binding,agent,e.terminal_process,e.launch_incarnation);add(r.pane_binding,agent)
+   add(e.pane_binding,agent,e.terminal_process,e.launch_incarnation,r.cwd);add(r.pane_binding,agent)
    add(e.attachment and e.attachment.pane_binding,agent);add(e.wake and e.wake.pane_binding,agent)
    add(e.body and type(e.body.payload)=='table' and e.body.payload.pane_binding,agent)
    add(e.native_result and e.native_result.result and e.native_result.result.pane_binding,agent)
@@ -456,7 +456,8 @@ function M.forget_inventory(root,logical,observe,host,native_session,process_sta
   local p=mine[key];local binding=p.binding;local proof=p.proof
   local host_name=tostring(binding.window_host_id)
   -- Fail closed: evidence from another host or another native session (a restarted Tern reuses pane ids) is unavailable, never absence.
-  local pane=if binding.window_host_id~=host or (native_session~=nil and binding.native_session_id~=native_session) then 'unknown' else observe(binding)
+  local pane,matched='unknown',nil
+  if binding.window_host_id==host and (native_session==nil or binding.native_session_id==native_session) then pane,matched=observe(binding,{agent=p.agent,cwd=p.cwd}) end
   -- A retained terminal process identity decides what the pane id means: only the retained process itself (boot, pid, start time)
   -- is positive evidence about the retained execution. A failed verification is never evidence of absence.
   local process=nil
@@ -474,13 +475,13 @@ function M.forget_inventory(root,logical,observe,host,native_session,process_sta
    blockers[#blockers+1]={kind='unobservable',agent=p.agent,host=host_name}
   elseif process=='alive' then
    -- A surviving retained process: a named pane to close through Tern, or (pane gone) a process outside any pane to resolve.
-   if pane=='present' then blockers[#blockers+1]={kind=if others[key] then 'shared_pane' else 'pane',agent=p.agent,pane=binding.pane_id,host=host_name}
+   if pane=='present' then blockers[#blockers+1]={kind=if others[key] then 'shared_pane' else 'pane',agent=p.agent,pane=matched or binding.pane_id,host=host_name}
    else blockers[#blockers+1]={kind='uncertain',agent=p.agent,host=host_name} end
   elseif pane=='present' then
    if process=='gone' then
     -- The pane id now shows some other process: attributing it to this orchestration (or telling the owner to close it) would be a guess.
     blockers[#blockers+1]={kind='unobservable',agent=p.agent,host=host_name}
-   else blockers[#blockers+1]={kind=if others[key] then 'shared_pane' else 'pane',agent=p.agent,pane=binding.pane_id,host=host_name} end
+   else blockers[#blockers+1]={kind=if others[key] then 'shared_pane' else 'pane',agent=p.agent,pane=matched or binding.pane_id,host=host_name} end
   end
  end
  for _,u in ipairs(forget_uncertain(root,logical)) do blockers[#blockers+1]={kind='uncertain',agent=u.agent,host=u.host} end

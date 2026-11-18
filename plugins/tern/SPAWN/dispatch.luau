@@ -1312,12 +1312,39 @@ local function forget_body(r,status,payload,err)
 end
 local function forget_refuse(r,code,message) return forget_body(r,'refused',nil,{code=code,message=message}) end
 local function forget_identity(r) return r.authority_namespace..'/'..r.logical_session_id..'/'..string.format('%.0f',r.admission_seq) end
+-- Production pane observer. A retained pane is absent only when BOTH the host's pane list lacks its id AND the host's live agent
+-- panes (the pane list entries running an agent program) show no agent for the retained identity (the record's command in the
+-- retained working directory). A still-listed agent is a blocker (present, naming the pane the owner can see); anything that cannot
+-- be read or identified is unknown ("cannot be checked"), never absence. The window-only `cx.agents:list()` has no host-side
+-- twin: the host pane list, which supplies each pane's program and cwd, is the live agent list this peer can read.
 local function forget_pane_observer()
  local ok,panes=pcall(tern.pane.list)
  if not ok or type(panes)~='table' then return function() return 'unknown' end end
- local present={}
- for _,pane in ipairs(panes) do present[tostring(pane.pane)]=true end
- return function(binding) return if present[binding.pane_id] then 'present' else 'absent' end end
+ local present,rows={},{}
+ for _,pane in ipairs(panes) do present[tostring(pane.pane)]=true;rows[#rows+1]=pane end
+ local function basename(value) return type(value)=='string' and value:match('([^/\\]+)$') or nil end
+ local commands
+ local function command_of(record_id)
+  if commands==nil then
+   commands={}
+   local read,snapshot=pcall(Authority.setup_snapshot)
+   if not read or type(snapshot)~='table' or type(snapshot.records)~='table' then commands=false
+   else for _,record in ipairs(snapshot.records) do if type(record)=='table' and type(record.id)=='string' then commands[record.id]=basename(record.command) end end end
+  end
+  return if commands then commands[record_id] else nil
+ end
+ return function(binding,info)
+  if present[binding.pane_id] then return 'present' end
+  info=info or {}
+  local command=command_of(info.agent)
+  -- Without the record's agent identity the live agent list cannot be matched to this binding.
+  if command==nil or type(info.cwd)~='string' then return 'unknown' end
+  for _,pane in ipairs(rows) do
+   if basename(pane.program)==command and pane.cwd==info.cwd then return 'present',tostring(pane.pane) end
+  end
+  return 'absent'
+ end
+end
 -- Retained terminal process identity: synchronous on Linux (/proc); other platforms answer 'unknown', which is a blocker.
 local function forget_process_observer(proof)
  local result='unknown'
