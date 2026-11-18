@@ -1748,6 +1748,8 @@ local function host_block(db, authority, config)
 		if name == "./wire/codec" then return load("wire/codec") end
 		if name == "./managed_setup" then return load("managed_setup") end
 		if name == "./selectors" then return load("selectors") end
+		if name == "./backend" then return load("backend") end
+		if name == "./launch_resolution" then return load("launch_resolution") end
 		if name == "./status/status_prompt" then return { host_serve = function() end } end
 		if name == "./prereq" then return registration("prereq") end
 		if name == "./page_navigation" then return load("page_navigation") end
