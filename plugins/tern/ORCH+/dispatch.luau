@@ -6324,6 +6324,7 @@ function config.place_proposal(d: any, w: any, p: any, bytes: string, clock: any
 		return refused, problem
 	end
 	local _, problem = config.open_proposal(d, w, p, bytes, target_checkpoint, clock)
+	if not problem then config.supersede_retargets(d, w, p.proposal_id) end
 	return nil, problem
 end
 -- A proposal naming registered session work and a retained CHECKPOINT of its project opens one
@@ -6396,17 +6397,47 @@ function config.record_refusal(d: any, sid: string, p: any): string?
 end
 -- A refused record proposal stays on the owner's surface (and out of gate reclamation) until the owner
 -- re-targets it; at most the newest seven stay open so the gate table cannot fill with them.
+-- Retention markers are host-generated: they count only on a refusal gate ORCH+ itself settled, and caller
+-- evidence (a worker's ASK) never carries them.
 function config.kept_open(g: any): boolean
-	return table.find(g.evidence or {}, "retarget:open") ~= nil or table.find(g.evidence or {}, "notice:open") ~= nil
+	return g.kind == "coordinator_proposal" and type(g.answer) == "table" and type(g.answer.source) == "table" and g.answer.source.kind == "refusal"
+		and (table.find(g.evidence or {}, "retarget:open") ~= nil or table.find(g.evidence or {}, "notice:open") ~= nil)
+end
+function config.caller_evidence(evidence: any): any
+	local out = {}
+	for _, entry in evidence or {} do
+		if not (type(entry) == "string" and (entry:sub(1, 9) == "retarget:" or entry:sub(1, 7) == "notice:" or entry:sub(1, 5) == "kept:")) then table.insert(out, entry) end
+	end
+	return out
+end
+-- A live proposal taking a proposal id closes the offer to re-target any older refusal of that id.
+function config.supersede_retargets(d: any, w: any, proposal_id: string)
+	for _, g in d.gates or {} do
+		if g.worker_id == w.worker_id and g.proposal and config.kept_open(g) then
+			local old = codec.decode_report(g.proposal, w)
+			local at = table.find(g.evidence, "retarget:open")
+			if old and old.payload.proposal_id == proposal_id and at then g.evidence[at] = "kept:lapsed" end
+		end
+	end
+end
+-- True when a live (non-refused) proposal gate of this coordinator already holds the id.
+function config.proposal_id_taken(d: any, w: any, proposal_id: string): boolean
+	for _, g in d.gates or {} do
+		if g.worker_id == w.worker_id and g.proposal and not config.refused_proposal(g) then
+			local prior = codec.decode_report(g.proposal, w)
+			if prior and prior.payload.proposal_id == proposal_id then return true end
+		end
+	end
+	return false
 end
 function config.lapse_retargets(d: any, sid: string)
 	local open = {}
 	for key, g in d.gates or {} do
 		if g.logical_session_id == sid and config.kept_open(g) then table.insert(open, key) end
 	end
-	if #open < 8 then return end
+	if #open < 7 then return end
 	table.sort(open, function(a: string, b: string): boolean return (tonumber(a:match("%d+$")) or 0) < (tonumber(b:match("%d+$")) or 0) end)
-	for index = 1, #open - 7 do
+	for index = 1, #open - 6 do
 		local g = d.gates[open[index]]
 		g.evidence[(table.find(g.evidence, "retarget:open") or table.find(g.evidence, "notice:open")) :: number] = "kept:lapsed"
 	end
@@ -6434,12 +6465,16 @@ function config.refuse_proposal(d: any, w: any, p: any, bytes: string, code: str
 end
 -- An approved proposal ORCH+ then refused to run is told to the coordinator as one more typed reject, so
 -- it never waits for an effect that will not happen; a stale record stays open for the owner to re-target.
-function config.refuse_execution(d: any, w: any, g: any, p: any, code: string, message: string, clock: any)
-	if code == "gate_cancelled" then return end
+function config.refuse_execution(d: any, w: any, g: any, p: any, code: string, message: string, clock: any): boolean
+	if code == "gate_cancelled" then return true end
+	-- Room first: a refusal that cannot be told must leave the execution pending, never terminally silent.
+	if count(d.gates or {}) >= 64 then reclaim_gates(d) end
+	if count(d.gates or {}) >= 64 or #flow(w).thread + 2 > 128 then return false end
 	local text = "ORCH+ refused to run approved proposal " .. p.proposal_id .. " (" .. p.kind .. ", gate " .. g.id .. ", " .. code .. "): " .. message
 	local listed = code == "catalog_changed" and (p.kind == "dispatch" or p.kind == "new_work")
 	if listed then text ..= " Eligible records (record_id@revision): " .. config.eligible_text(d, w.logical_session_id, 3000) .. "." end
-	config.settle_refusal(d, w, p, g.proposal, text, "execution_refused", if listed then "retarget:open" else "notice:open", clock)
+	local _, problem = config.settle_refusal(d, w, p, g.proposal, text, "execution_refused", if listed then "retarget:open" else "notice:open", clock)
+	return problem == nil
 end
 function config.refused_proposal(g: any): boolean
 	return g.answer ~= nil and type(g.answer.source) == "table" and g.answer.source.kind == "refusal"
@@ -6608,9 +6643,12 @@ function config.execute_proposal(registry: any, n: any, gate_id: string, event: 
 	g = d.gates[gate_id]; w = d.workers[g.worker_id]
 	local prior = g.execution
 	if prior and prior.state == state and prior.effect_ref == ref then return message end
+	if state == "refused" and not config.refuse_execution(d, w, g, proposal.payload, ref, message, clock) then
+		state, ref, message = "pending", "refusal_undelivered", "ORCH+ could not yet tell the coordinator why " .. ref .. " refused this approved proposal; it is retried on a later commit."
+		if prior and prior.state == state and prior.effect_ref == ref then return message end
+	end
 	g.execution = { state = state, gate_revision = g.revision, effect_ref = bounded(ref, 1024), at_ms = stamp(clock).at_ms }
 	append(d, w, "execution", bounded("Proposal " .. proposal.payload.proposal_id .. " (" .. proposal.payload.kind .. ", gate " .. g.id .. ") " .. state .. ": " .. message, 32768), clock)
-	if state == "refused" then config.refuse_execution(d, w, g, proposal.payload, ref, message, clock) end
 	return message
 end
 -- Runs at the end of every dispatch commit for the event's session. Pause answers nothing by policy:
@@ -7809,7 +7847,7 @@ local function semantic(n: any, w: any, report: any, bytes: string, clock: any):
 			if err then return nil, err end
 		end
 	elseif kind == "ASK" then
-		local _, err = new_gate(d, w, "owner_question", p.question, p.options, p.evidence, clock); if err then return nil, err end
+		local _, err = new_gate(d, w, "owner_question", p.question, p.options, config.caller_evidence(p.evidence), clock); if err then return nil, err end
 	elseif kind == "COORDINATOR_PROPOSAL" then
 		local owner, activation = coordinator(n, w), w.activation
 		if not owner or owner.phase ~= "running" or not activation or not activation.acknowledged or w.retirement
@@ -9790,6 +9828,9 @@ function M.apply(registry: any, event: any, clock: any, reserve: any): (any?, an
 		if refused then return fail(refused, "That record is not current and eligible; choose one from the refreshed list. Nothing was re-sent.") end
 		local owner = coordinator(n, w)
 		local old = codec.decode_report(g.proposal, w)
+		if old and config.proposal_id_taken(d, w, old.payload.proposal_id) then
+			return fail("proposal_conflict", "A live proposal already holds this proposal ID; nothing was re-sent.")
+		end
 		if not owner or owner.phase ~= "running" or not w.activation or w.retirement or not old
 			or old.payload.activation_token ~= w.activation.activation_token then
 			return fail("proposal_unauthorized", "The proposing coordinator is no longer active; nothing was re-sent.")
@@ -9799,9 +9840,9 @@ function M.apply(registry: any, event: any, clock: any, reserve: any): (any?, an
 		local bytes = tern.json.encode(raw)
 		local moved = codec.decode_report(bytes, w)
 		if not moved then return fail("invalid_schema", "The re-targeted proposal could not be formed; nothing was re-sent.") end
+		g.evidence[table.find(g.evidence, "retarget:open") :: number] = "retarget:done"
 		local _, placed = config.place_proposal(d, w, moved.payload, bytes, clock)
 		if placed then return nil, placed end
-		g.evidence[table.find(g.evidence, "retarget:open") :: number] = "retarget:done"
 		answer = result("proposal_retargeted", { message = "Proposal re-sent with the chosen agent." })
 	elseif config.SOURCE_COMMANDS[event.command] then
 		-- Work sources (Checkpoint 6): non-operator intake commands; the host reads files itself.
