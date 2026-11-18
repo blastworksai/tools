@@ -157,9 +157,13 @@ check(config.parse_arguments(table.concat(many, " ")) == nil, "argument count re
 local executor, native = load("host_executor"), load("native_cli")
 local ordinary_render = record("render", { command = "'/opt/My Tools/custom-cli'", arguments = copy(argv), prompt = "not an implicit ordinary-terminal message" })
 local render_before = copy(ordinary_render)
+local PWD_EXPANSION_TEXT = [==["$(printf %s "$PWD" | od -An -v -to1 | tr -d '\n' | sed 's/ /\\/g')"]==]
 local rendered = assert(executor.render(ordinary_render, "/bin/bash", "linux"))
 -- POSIX lines carry one provider command-name word; the rest is the exact argv.
 local function argv_of(line, provider)
+	-- The folder word is a shell expansion that holds quotes of its own; it is checked separately and parsed here as a token.
+	local at, finish = line:find(PWD_EXPANSION_TEXT, 1, true)
+	if at ~= nil then line = line:sub(1, at - 1) .. "@PWD@" .. line:sub(finish + 1) end
 	local words = assert(config.parse_arguments(line))
 	check(words[1] == "SPAWN_PROVIDER=" .. provider, "POSIX launch line begins with its provider command name")
 	table.remove(words, 1)
@@ -174,7 +178,9 @@ same(ordinary_render, render_before, "host rendering does not mutate the approve
 -- escapes every byte except letters, digits, `_`, `-` and `$` (and leaves `$` live), so the approved program and
 -- arguments travel as ONE word of octal-encoded shell text that a constant /bin/sh script decodes and evals.
 local LOGIN_SCRIPT = [==[eval "$(printf "${1}")"]==]
-local LOGIN_SCRIPT_PWD = [==[cd -- "${1}" || exit 1; eval "$(printf "${2}")"]==]
+local LOGIN_SCRIPT_PWD = [==[d=$(printf "${1}x"); cd -- "${d%x}" || exit 1; eval "$(printf "${2}")"]==]
+-- The pane's folder is octal-encoded by the typing shell itself, before sudo sees it.
+local PWD_EXPANSION = PWD_EXPANSION_TEXT
 local function sq(word) return "'" .. word:gsub("'", "'\\''") .. "'" end
 local function octal(text) return (text:gsub("[\\$%%\n]", function(c) return string.format("\\%03o", c:byte()) end)) end
 -- The decoder the login script performs (printf's octal escapes), reimplemented to prove the round trip.
@@ -184,7 +190,7 @@ local function with_login(prefix, rest)
 	for _, v in ipairs(prefix) do table.insert(out, v) end
 	local quoted = {}
 	for _, v in ipairs(rest) do table.insert(quoted, sq(v)) end
-	for _, v in ipairs({ "/bin/sh", "-c", LOGIN_SCRIPT_PWD, "spawn-login", "$PWD", octal("exec " .. table.concat(quoted, " ")) }) do table.insert(out, v) end
+	for _, v in ipairs({ "/bin/sh", "-c", LOGIN_SCRIPT_PWD, "spawn-login", "@PWD@", octal("exec " .. table.concat(quoted, " ")) }) do table.insert(out, v) end
 	return out
 end
 local approved_prompt = "  Exact approved prompt.\nQuotes: ' \" $HOME `literal`  "
@@ -212,10 +218,12 @@ do
 		local source = table.clone(agent)
 		if source.startup_prompt ~= nil then source.prompt = source.startup_prompt; source.startup_prompt = nil end
 		local line = assert(executor.render(source, "/bin/bash", "linux"), "fixture record renders: " .. tostring(agent.id))
+		local at, finish = line:find(PWD_EXPANSION_TEXT, 1, true)
+		if at ~= nil then line = line:sub(1, at - 1) .. "@PWD@" .. line:sub(finish + 1) end
 		local words = assert(config.parse_arguments(line))
 		table.remove(words, 1)
 		local at = table.find(words, "--")
-		check(words[1] == "sudo" and words[2] == "-i" and words[3] == "-n" and words[at + 1] == "/bin/sh" and words[at + 2] == "-c" and words[at + 4] == "spawn-login" and words[at + 5] == "$PWD",
+		check(words[1] == "sudo" and words[2] == "-i" and words[3] == "-n" and words[at + 1] == "/bin/sh" and words[at + 2] == "-c" and words[at + 4] == "spawn-login" and words[at + 5] == "@PWD@",
 			"ordinary launch of " .. agent.id .. " enters the login shell without a configured user field")
 		check(decode(words[at + 6]):find("exec '" .. source.arguments[table.find(source.arguments, "--") + 1] .. "'", 1, true) == 1, "the approved program is carried exactly for " .. agent.id)
 	end
@@ -224,10 +232,11 @@ end
 do
 	local simple = record("simple", { command = "claude", user = "seat", arguments = { "--flag" } })
 	same(argv_of(assert(executor.render(simple, "/bin/bash", "linux")), "custom"),
-		{ "sudo", "-i", "-u", "seat", "--", "/bin/sh", "-c", 'cd -- "${1}" || exit 1; eval "$(printf "${2}")"', "spawn-login", "$PWD", "exec 'claude' '--flag'" },
-		"a cross-account launch is `sudo -i -u <user> -- /bin/sh -c <script> spawn-login $PWD <text>`, with no -H and no forced PATH")
+		{ "sudo", "-i", "-u", "seat", "--", "/bin/sh", "-c", 'd=$(printf "${1}x"); cd -- "${d%x}" || exit 1; eval "$(printf "${2}")"', "spawn-login", "@PWD@", "exec 'claude' '--flag'" },
+		"a cross-account launch is `sudo -i -u <user> -- /bin/sh -c <script> spawn-login <encoded pane folder> <text>`, with no -H and no forced PATH")
 	local line = assert(executor.render(simple, "/bin/bash", "linux"))
-	check(line:find(' "$PWD" ', 1, true) ~= nil, "the folder word is the pane's own unquoted \"$PWD\", never a quoted literal")
+	check(line:find(" " .. PWD_EXPANSION .. " ", 1, true) ~= nil, "the folder word is the typing shell's own octal encoding of $PWD, computed before sudo sees it")
+	check(PWD_EXPANSION:find("od -An -v -to1", 1, true) ~= nil and (line:gsub(PWD_EXPANSION_TEXT:gsub("%p", "%%%0"), "")):find("$PWD", 1, true) == nil, "the raw $PWD is never handed to sudo -i, whose login shell would expand a dollar in a folder name")
 	local nasty = { "; touch /tmp/pwned $(id) `id` ${HOME} $HOME", "it's", "two\nlines % \\ \\n \"q\"", "$", "x" }
 	local hostile2 = record("hostile2", { command = "claude", user = "seat", arguments = nasty })
 	local words = argv_of(assert(executor.render(hostile2, "/bin/bash", "linux")), "custom")

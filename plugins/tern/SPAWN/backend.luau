@@ -13,7 +13,8 @@ local function nonblank(value: any): boolean
 end
 function Backend.posix_quote(value: string): string
 	-- The one marker word of an OS-user launch typed into the pane that already stands in the launch folder (records cannot hold NUL).
-	if value == Resolution.PWD then return '"$PWD"' end
+	-- The typing shell encodes $PWD as \ooo octal escapes, so sudo -i and the login shell only ever see safe characters.
+	if value == Resolution.PWD then return [==["$(printf %s "$PWD" | od -An -v -to1 | tr -d '\n' | sed 's/ /\\/g')"]==] end
 	return "'" .. value:gsub("'", "'\\''") .. "'"
 end
 function Backend.powershell_quote(value: string): string

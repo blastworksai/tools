@@ -70,11 +70,13 @@ end
 -- word of single-quoted shell text in which `\`, `$`, `%` and newline are replaced by octal escapes. A constant
 -- /bin/sh script (written without `$` before a live character, so the login shell leaves it alone) decodes the
 -- word with printf and evals it, which ends in `exec`. sudo -i starts in the account's home, so the launch folder
--- is carried too: inside the text when the caller knows it, or as the pane's own "$PWD" (a marker word the
--- renderers turn into that unquoted expansion) when the line is typed into the pane that already stands there.
+-- is carried too: inside the text when the caller knows it, or, when the line is typed into the pane that already
+-- stands there, as a marker word the renderers turn into the typing shell's own octal encoding of "$PWD" (computed
+-- in the first shell pass, before sudo, so a dollar or newline in a folder name reaches the login shell as data).
 Resolution.PWD = "\0spawn-pwd"
 local LOGIN_SCRIPT = [==[eval "$(printf "${1}")"]==]
-local LOGIN_SCRIPT_PWD = [==[cd -- "${1}" || exit 1; eval "$(printf "${2}")"]==]
+-- ${1} is the pane folder as \ooo escapes; the sentinel x keeps printf's command substitution from eating a trailing newline.
+local LOGIN_SCRIPT_PWD = [==[d=$(printf "${1}x"); cd -- "${d%x}" || exit 1; eval "$(printf "${2}")"]==]
 local function octal(text: string): string
 	return (string.gsub(text, "[\\$%%\n]", function(char) return string.format("\\%03o", string.byte(char)) end))
 end
