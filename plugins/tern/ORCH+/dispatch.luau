@@ -1439,6 +1439,13 @@ function config.prune_family_orphans(n: any, roster: any)
 		end
 	end
 end
+-- A pending refusal card keeps the evidence of the worker it names; it never blocks native retirement.
+function config.card_references(d: any, worker_id: string): boolean
+	for _, g in d.gates or {} do
+		if g.worker_id == worker_id and config.pending_notice(g) then return true end
+	end
+	return false
+end
 local function reclaim_workers(registry: any)
 	local d = registry.dispatch
 	reclaim_gates(d)
@@ -1449,7 +1456,7 @@ local function reclaim_workers(registry: any)
 			if p.start and p.start.coordinator.worker_id == key then start_evidence = true end
 			for _, prior in p.start_history or {} do if prior.coordinator.worker_id == key then start_evidence = true end end
 		end
-		if w.mailbox_retired and not start_evidence and not (owner and owner.managed_worker_id == key) and not pending(d, w) and not work_referenced(d, w) then
+		if w.mailbox_retired and not start_evidence and not (owner and owner.managed_worker_id == key) and not pending(d, w) and not work_referenced(d, w) and not config.card_references(d, key) then
 			for action_id, action in d.actions do
 				if action.worker_id == key then d.actions[action_id] = nil end
 			end
@@ -6443,6 +6450,7 @@ function config.parse_notice(g: any): any?
 	for index, entry in g.evidence or {} do
 		if type(entry) == "string" and entry:sub(1, #config.NOTICE_PREFIX) == config.NOTICE_PREFIX then
 			local status, order, cleared, code, reason = entry:sub(#config.NOTICE_PREFIX + 1):match("^(%a+):(%d+):(%d+):([%w_%-]+):(.*)$")
+			if status and (#order > 10 or #cleared > 10 or tonumber(order) > 2147483648 or tonumber(cleared) > 2147483648 or #reason > 900) then return { index = index, malformed = true } end
 			if status then return { index = index, status = status, order = tonumber(order), cleared = tonumber(cleared), code = code, reason = reason } end
 			return { index = index, malformed = true }
 		end
@@ -6450,7 +6458,7 @@ function config.parse_notice(g: any): any?
 	return nil
 end
 function config.write_notice(g: any, status: string, order: number, cleared: number, code: string, reason: string)
-	local entry = config.NOTICE_PREFIX .. status .. ":" .. string.format("%.0f", order) .. ":" .. string.format("%.0f", cleared) .. ":" .. code .. ":" .. bounded(reason, 900)
+	local entry = config.NOTICE_PREFIX .. status .. ":" .. string.format("%.0f", order) .. ":" .. string.format("%.0f", math.min(cleared, 2147483647)) .. ":" .. code .. ":" .. bounded(reason, 900)
 	local existing = config.parse_notice(g)
 	if existing then g.evidence[existing.index] = entry else table.insert(g.evidence, entry) end
 end

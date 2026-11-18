@@ -3771,6 +3771,23 @@ if section == nil or section == "s201_capacity_rollback" then
 	check(not sent.ok and #pending_notices(f) == before and before == 4, "a refusal that cannot be stored preserves the previous cards (" .. tostring(sent.code) .. ")")
 end
 
+-- SKILLS-201 review: a pending refusal card keeps its referenced worker; marker numbers and summaries are bounded.
+if section == nil or section == "s201_marker_bounds" then
+	local f, b, cid = s201_setup()
+	assert(refuse_unknown(f, b, cid, "m-1").ok)
+	local function with(entry)
+		local registry = api.clone(f.authority.registry)
+		for _, g in registry.dispatch.gates do
+			for index, e in g.evidence do if e:sub(1, #NOTICE) == NOTICE then g.evidence[index] = entry end end
+		end
+		return api.state.rehydrate(registry)
+	end
+	check(with(NOTICE .. "pending:5:3:unknown_record:fine") ~= nil, "bounds: a valid marker restores")
+	check(with(NOTICE .. "pending:5:" .. string.rep("9", 30) .. ":unknown_record:huge") == nil, "bounds: a huge cleared count is rejected at restore")
+	check(with(NOTICE .. "pending:5:4294967296:unknown_record:big") == nil, "bounds: a cleared count above 2^31 is rejected")
+	check(with(NOTICE .. "pending:5:0:unknown_record:" .. string.rep("x", 901)) == nil, "bounds: a summary over 900 bytes is rejected")
+end
+
 assert(section == nil or table.find({ "plan_import", "usage_delta", "review_cross_family", "review_rounds", "auto_finish", "proof_rule",
 	"release_config", "release_launch", "release_refresh", "release_holder", "deploy", "deploy_held", "deploy_retry", "deploy_lost",
 	"grid_queued_new_revision", "grid_queued_target_moved", "grid_queued_rm_rollover", "grid_queued_cancel",
@@ -3781,5 +3798,5 @@ assert(section == nil or table.find({ "plan_import", "usage_delta", "review_cros
 	"autonomy", "autonomy_dispatch", "autonomy_report", "autonomy_review", "autonomy_landing", "sources", "intake", "router", "labeller_finish", "passive_proposals", "project_start", "project_start_membership", "project_start_failures", "project_start_publication", "project_start_policy", "project_start_subject", "project_start_active", "project_start_mailbox", "project_start_malformed", "project_start_retirement", "plan_capacity", "project_review",
 	"project_gate_rearm", "project_plan_reopen", "project_live_conversation", "project_deploy_boundary", "project_manager_boundary",
 	"assignment_policy", "autonomy_paused", "proposal_early", "repository_sessions", "repository_policy", "repository_paused",
-	"s201_activation", "s201_deferred_activation", "s201_refusals", "s201_notifications", "s201_ask_forgery", "s201_execution_refusal", "s201_outbox_drain", "s201_capacity_rollback", "repository_external", "repository_result_order", "repository_targets", "repository_head", "repository_route_change", "repository_sharing" }, section), "unknown workflow section")
+	"s201_activation", "s201_deferred_activation", "s201_refusals", "s201_notifications", "s201_ask_forgery", "s201_execution_refusal", "s201_outbox_drain", "s201_capacity_rollback", "s201_marker_bounds", "repository_external", "repository_result_order", "repository_targets", "repository_head", "repository_route_change", "repository_sharing" }, section), "unknown workflow section")
 return "workflow/" .. tostring(section or "all") .. ": " .. tostring(checks) .. " checks passed"

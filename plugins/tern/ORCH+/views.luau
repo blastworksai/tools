@@ -647,7 +647,9 @@ local function proposal_refusals(view: any, projection: any, selected: any): any
 	local _, _, admitted = controller(view, selected)
 	local rows = {}
 	for _, worker in flow.workers do
-		if worker.rejected_report and worker.rejected_report.code == "full" then
+		-- Capacity-held intake is recorded as the worker's reason (code full); the immutable source stays unacknowledged.
+		local projected = if projection.dispatch.workers then projection.dispatch.workers[worker.worker_id] else nil
+		if projected and projected.reason and projected.reason.code == "full" then
 			table.insert(rows, ui.text(ui.span("Delivery is held by capacity. Nothing was added or queued. Inspect the retained report and use Re-check after capacity is restored.", "warning")))
 		end
 	end

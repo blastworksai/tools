@@ -5288,8 +5288,27 @@ if section == nil or section == "s201_cards" then
 	local cleared = { id = "gate-4", evidence = { "refused:unknown_record", "orchplus-notice:v1:cleared:8:0:unknown_record:gone" } }
 	text, requests = rendered({ cleared })
 	check(text:find("Proposal refused", 1, true) == nil and #requests == 0, "a dismissed refusal is no longer a card")
-	text = rendered({}, function(flow) flow.workers[1].rejected_report = { code = "full", message = "full" } end)
-	check(text:find("Delivery is held by capacity. Nothing was added or queued. Inspect the retained report and use Re-check after capacity is restored.", 1, true) ~= nil,
+	-- A real capacity-held report: a full receipt lane leaves the ninth report unapplied and unacknowledged.
+	local lane = shared.fixture(function() return { now_ms = 1700000000000, mono_ms = 1000, epoch = "s201-capacity" } end)
+	local wid = lane:accepted(false)
+	for seq = 2, 8 do
+		assert(lane:apply("intake", { worker_id = wid, bytes = lane:report(wid, seq, "REGISTER", { capabilities = runtime.json.array({ "report-files-v1" }) }) }).ok)
+		assert(lane:finish(lane:apply("poll", { worker_id = wid }).action_id, "published", {}).ok)
+	end
+	local ninth = lane:report(wid, 9, "REGISTER", { capabilities = runtime.json.array({ "report-files-v1" }) })
+	local frames = assert(shared.codec.frame(ninth, "report", lane.authority.registry.dispatch.workers[wid]))
+	local parts = { frames.manifest }; for _, chunk in frames.chunks do table.insert(parts, chunk) end
+	local outcome
+	for _, bytes in parts do
+		local read = lane:apply("poll", { worker_id = wid }); assert(read.ok)
+		local page = assert(shared.codec.project_page(bytes, lane:action(read.action_id).request.selector))
+		outcome = lane:finish(read.action_id, "read", runtime.json.decode(page)); assert(outcome.ok)
+	end
+	check(outcome.code == "intake_backpressure" and lane.authority.registry.dispatch.workers[wid].reason ~= nil and lane.authority.registry.dispatch.workers[wid].reason.code == "full",
+		"the real capacity-held report is recorded as the worker's reason")
+	local held_view, held_projection = render_view(lane)
+	local held_text = table.concat(strings(views.render(held_view, held_projection, "ready"), {}), "\n")
+	check(held_text:find("Delivery is held by capacity. Nothing was added or queued. Inspect the retained report and use Re-check after capacity is restored.", 1, true) ~= nil,
 		"a report held by capacity says so on a top-level card")
 end
 -- Normal plans are continuous through 100 tasks; larger plans group at logical checkpoints.
