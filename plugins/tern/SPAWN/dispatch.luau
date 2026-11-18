@@ -1339,9 +1339,18 @@ local function forget_pane_observer()
   local command=command_of(info.agent)
   -- Without the record's agent identity the live agent list cannot be matched to this binding.
   if command==nil or type(info.cwd)~='string' then return 'unknown' end
+  -- Every candidate must be fully resolved: a pane whose program is unreadable, or that runs the retained command with an unreadable
+  -- working directory, is unresolved and the binding is then cannot-be-checked, never absent.
+  local unresolved=false
   for _,pane in ipairs(rows) do
-   if basename(pane.program)==command and pane.cwd==info.cwd then return 'present',tostring(pane.pane) end
+   local program=basename(pane.program)
+   if program==nil then unresolved=true
+   elseif program==command then
+    if type(pane.cwd)~='string' then unresolved=true
+    elseif pane.cwd==info.cwd then return 'present',tostring(pane.pane) end
+   end
   end
+  if unresolved then return 'unknown' end
   return 'absent'
  end
 end

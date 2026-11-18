@@ -304,6 +304,13 @@ do
  check(#inventory_of(build(),'session',gone,'7','3',nil,false).blockers>=1,'an unverifiable current incarnation is never evidence')
  inv=inventory_of(build(),'session',observer({['55']='present',['57']='absent'}),'7','3',nil,'inc-1')
  check(#inv.blockers==1 and inv.blockers[1].kind=='pane','the host\'s live agent/pane list contradicting the record blocks')
+ -- A command/cwd match is evidence only, and is checked for shared ownership on the MATCHED pane.
+ local function matched_obs(id) return function(b) return 'present',id end end
+ inv=inventory_of(build(),'session',matched_obs('90'),'7','3')
+ check(#inv.blockers>=1 and inv.blockers[1].kind=='unobservable' and inv.blockers[1].pane==nil,'a command/cwd match is never a close-this-pane instruction')
+ local shared=build();shared.requests['other/launch'].pane_binding=pane('90')
+ inv=inventory_of(shared,'session',matched_obs('90'),'7','3')
+ check(inv.blockers[1].kind=='shared_pane' and inv.blockers[1].pane=='90','a match on a pane another orchestration retains is marked shared')
  local woken=build()
  woken.workers['session/w'].wakes={wake1={request_id='wake1',origin_binding=origin('session'),wake={phase='claimed'}}}
  inv=inventory_of(woken,'session',gone,'7','3')

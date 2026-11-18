@@ -2508,12 +2508,41 @@ sections.forget=function()
   return h.d.forget(request('discard_preview','prod',{challenge=c.payload.challenge}),h.binding,1,nil,nil)
  end
  local agent_still_listed=production({{pane=70,program='/usr/bin/omp',cwd='/work'}})
- check(agent_still_listed.status=='blocked' and agent_still_listed.payload.blockers[1].kind=='pane' and agent_still_listed.payload.blockers[1].pane=='70',
-  'the retained pane is missing from the pane list but its agent is still listed: blocks, naming the listed pane')
+ check(agent_still_listed.status=='blocked' and agent_still_listed.payload.blockers[1].kind=='unobservable' and agent_still_listed.payload.blockers[1].pane==nil,
+  'the retained pane is missing from the pane list but its agent is still listed: blocks as cannot be checked, with no close-this-pane instruction')
  check(production({{pane=71,program='bash',cwd='/work'},{pane=72,program='omp',cwd='/elsewhere'}}).status=='clean','pane and agent both gone (other programs and other directories do not match): clean')
  local unreadable_agents=production({},function(h) h.authority.setup_snapshot=function() error('agent identity unavailable') end end)
  check(unreadable_agents.status=='blocked' and unreadable_agents.payload.blockers[1].kind=='unobservable','an agent list that cannot be matched to the retained identity is cannot be checked')
  check(production(false).status=='blocked','an unreadable pane list is cannot be checked')
+ -- Round 6: unresolved candidates, evidence-only matches, and compaction.
+ local nil_cwd=production({{pane=70,program='omp'}})
+ check(nil_cwd.status=='blocked' and nil_cwd.payload.blockers[1].kind=='unobservable','a matching program with an unreadable cwd is cannot be checked, never absent')
+ local nil_program=production({{pane=71,cwd='/work'}})
+ check(nil_program.status=='blocked' and nil_program.payload.blockers[1].kind=='unobservable','a pane whose program cannot be read is an unresolved candidate')
+ local compacted=launched_fixture(true)
+ do
+  local State=compacted.load('dispatch_state')
+  local root=compacted.saved['dispatch-v1']
+  local entry=root.requests['session/launch']
+  State.preserve_worker(root,entry);root.requests['session/launch']=nil
+  check(root.workers['session/launch'].cwd=='/work' and root.workers['session/launch'].launch_incarnation~=nil,'worker compaction preserves the launch cwd and incarnation')
+ end
+ local function preview_of(h,rows)
+  h.runtime.pane={list=function() return rows end}
+  local c=h.d.forget(request('discard_capability','cmp'),h.binding,1,nil,nil)
+  return h.d.forget(request('discard_preview','cmp',{challenge=c.payload.challenge}),h.binding,1,nil,nil)
+ end
+ check(preview_of(compacted,{}).status=='clean','after compaction a gone pane with no live agent is clean (the cwd survived)')
+ local old_compacted=launched_fixture(true)
+ do
+  local State=old_compacted.load('dispatch_state')
+  local root=old_compacted.saved['dispatch-v1']
+  State.preserve_worker(root,root.requests['session/launch']);root.requests['session/launch']=nil
+  root.workers['session/launch'].cwd=nil
+ end
+ local older=preview_of(old_compacted,{})
+ check(older.status=='blocked' and older.payload.blockers[1].kind=='unobservable','an older compacted worker without a recorded cwd stays cannot be checked')
+ check(preview_of(compacted,{{pane=70,program='omp',cwd='/work'}}).payload.blockers[1].kind=='unobservable','a command/cwd match after compaction is evidence only')
 end
 -- The actual relay carries the dedicated forget operations on their own protocol, bound to the bound source's identity.
 sections.forget_relay=function()

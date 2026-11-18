@@ -147,7 +147,7 @@ local function current_complete(root)
  for _,w in pairs(root.workers) do
   if not P.fields(w,{kind=true,logical_session_id=P.id,worker_id=P.id,worker_generation=true,launch_request_id=P.id,launch_action_id=P.id,work_id=P.id,enrolment_token=P.token,assignment_sha256=P.digest,mailbox_handle=P.id,
     record_id=true,record_revision=true,origin_binding=P.binding,controller_pane=true,controller_generation=true,phase=true,backend=true,binding=native_binding,mailbox_live=true},
-    {delivery=function(v)return v=='native_ask' or v=='clipboard'end,pane_binding=P.pane,acceptance=true,attempt_id=true,observer_id=true,handover_id=P.id,handover_token=P.token,coordinator_owner_id=P.id,coordinator_generation=true,attachment=true,stopped=true,stop_request_id=P.id,capabilities=true,wakes=true,terminal_process=TerminalIdentity.valid,launch_incarnation=true})
+    {delivery=function(v)return v=='native_ask' or v=='clipboard'end,pane_binding=P.pane,acceptance=true,attempt_id=true,observer_id=true,handover_id=P.id,handover_token=P.token,coordinator_owner_id=P.id,coordinator_generation=true,attachment=true,stopped=true,stop_request_id=P.id,capabilities=true,wakes=true,terminal_process=TerminalIdentity.valid,launch_incarnation=true,cwd=true})
    or w.kind~='launch' and w.kind~='adopt' and w.kind~='enrol' or (w.kind=='enrol')~=(w.delivery~=nil) or not P.text(w.record_id,256,false) or not P.integer(w.record_revision,0) or not P.integer(w.controller_generation,1)
    or w.phase~='accepted' and w.phase~='awaiting_acceptance' and w.phase~='uncertain' or w.backend~='native-agent' and w.backend~='local-terminal' and w.backend~='ssh-command'
    or (w.handover_id==nil)~=(w.handover_token==nil) or (w.coordinator_owner_id==nil)~=(w.coordinator_generation==nil)
