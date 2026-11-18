@@ -141,6 +141,39 @@ function M.capture(route,session,expected,done)
   done({platform='linux',session=session,route=route,root_pid=value.child.pid,root_identity=root.identity,provider_pid=provider,provider_identity=state.identity,tty=state.tty,group=state.group,process_session=state.session,root_argv_sha256=root_hash,provider_argv_sha256=provider_hash},nil)
  end)
 end
+-- Positive process liveness for Forget. 'gone' only when the retained identity (boot id, pid and start time) is positively not
+-- running; 'alive' when it still is; anything else (unreadable /proc, another platform, a malformed proof) is 'unknown' and is never
+-- evidence of absence. Linux reads /proc synchronously; other platforms are not implemented here and stay 'unknown'.
+local function proc_state(pid,identity)
+ if not integer(pid) or type(identity)~='string' then return 'unknown' end
+ local path='/proc/'..string.format('%.0f',pid)..'/stat'
+ local exists_ok,exists=pcall(tern.fs.exists,path)
+ if not exists_ok then return 'unknown' end
+ if not exists then
+  -- A missing entry proves absence only while /proc itself is readable and this is the same boot.
+  local boot_ok,boot=pcall(tern.fs.read,'/proc/sys/kernel/random/boot_id',128)
+  if not boot_ok or type(boot)~='string' then return 'unknown' end
+  return 'gone'
+ end
+ local current=linux(pid)
+ if current==nil then
+  -- Present but unparsable: a zombie or exited process reads as nil; an unreadable one is unknown.
+  local ok,bytes=pcall(tern.fs.read,path,16384)
+  if not ok or type(bytes)~='string' then return 'unknown' end
+  local state=bytes:match('^%d+ %(.+%) (%a)')
+  if state=='Z' or state=='X' then return 'gone' end
+  return 'unknown'
+ end
+ return if current.identity==identity then 'alive' else 'gone'
+end
+function M.liveness(proof,done)
+ if not M.valid(proof) or proof.platform~=tern.runtime.os or proof.platform~='linux' then done('unknown');return end
+ local root=proc_state(proof.root_pid,proof.root_identity)
+ local provider=proc_state(proof.provider_pid,proof.provider_identity)
+ if root=='alive' or provider=='alive' then done('alive');return end
+ if root=='gone' and provider=='gone' then done('gone');return end
+ done('unknown')
+end
 function M.verify(proof,done)
  if not M.valid(proof) or proof.platform~=tern.runtime.os then done(false,'No exact retained terminal process proof is available on this host');return end
  process(proof.route,proof.session,function(value,problem)

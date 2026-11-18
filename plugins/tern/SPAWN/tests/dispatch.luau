@@ -2403,6 +2403,8 @@ sections.forget=function()
  local f=launched_fixture(true)
  local root=f.saved['dispatch-v1']
  root.mailboxes.generations.mine={binding={logical_session_id='session'}}
+ root.requests['session/launch'].terminal_process={platform='linux',session=1,route={executable='/bin/tern',socket='/tmp/s',window='w',pane=55},root_pid=10,root_identity='boot:10:5',provider_pid=11,provider_identity='boot:11:6',tty='1',group='1',process_session='1',root_argv_sha256=string.rep('a',64),provider_argv_sha256=string.rep('b',64)} -- a retained terminal process proof
+ local proc=function() return 'gone' end
  local roster=copy(f.snapshot.records)
  local function request(op,attempt,extra)
   local o=f.origin
@@ -2415,8 +2417,8 @@ sections.forget=function()
  end
  local live=function(b)return 'present' end
  local gone=function(b)return 'absent' end
- local function ask(op,attempt,extra,observe)
-  local body=f.d.forget(request(op,attempt,extra),f.binding,1,observe or gone)
+ local function ask(op,attempt,extra,observe,process)
+  local body=f.d.forget(request(op,attempt,extra),f.binding,1,observe or gone,process or proc)
   assert(f.c.encode_forget_response(body),'response must satisfy the canonical schema: '..runtime.json.encode(body):sub(1,200))
   return body
  end
@@ -2426,11 +2428,11 @@ sections.forget=function()
  cap=ask('discard_capability','attempt-2')
  check(cap.payload.challenge~=older and ask('discard_preview','attempt-1',{challenge=older}).error.code=='stale_challenge','a replacement attempt invalidates the older challenge')
  local wrong_owner=request('discard_capability','attempt-2');wrong_owner.owner.alias_nonce='someone-else'
- check(f.d.forget(wrong_owner,f.binding,1).error.code=='owner_mismatch','a different retained owner identity is refused')
+ check(f.d.forget(wrong_owner,f.binding,1,gone,proc).error.code=='owner_mismatch','a different retained owner identity is refused')
  local wrong_ns=request('discard_capability','attempt-2');wrong_ns.spawn_namespace='other-spawn'
- check(f.d.forget(wrong_ns,f.binding,1).error.code=='changed','another SPAWN namespace is refused')
+ check(f.d.forget(wrong_ns,f.binding,1,gone,proc).error.code=='changed','another SPAWN namespace is refused')
  local before=f.image();local writes=f.effects.writes
- local blocked=ask('discard_preview','attempt-2',{challenge=cap.payload.challenge},live)
+ local blocked=ask('discard_preview','attempt-2',{challenge=cap.payload.challenge},live,function() return 'alive' end)
  check(blocked.status=='blocked' and blocked.payload.blockers[1].kind=='pane' and blocked.payload.blockers[1].pane=='55'
   and f.p.equal(before,f.image()) and f.effects.writes==writes,'a blocked preview names the pane and writes nothing (no loader recovery, no revocation, no ACK)')
  local clean=ask('discard_preview','attempt-2',{challenge=cap.payload.challenge})
@@ -2440,6 +2442,9 @@ sections.forget=function()
  check(ask('discard_session','attempt-2',stale).error.code=='changed','a changed dispatch revision requires another preview')
  local reboot=copy(bound);reboot.spawn_boot='old-boot'
  check(ask('discard_session','attempt-2',reboot).error.code=='changed','a preview from another SPAWN boot is refused')
+ -- Observation bound to the preview: a result that changed (process now alive) between preview and commit is refused.
+ local alive_proof=f.d.forget(request('discard_session','attempt-2',bound),f.binding,1,gone,function() return 'alive' end)
+ check(alive_proof.status=='refused' and f.p.equal(before,f.image()),'a verification result that changed after the preview refuses the discard and changes nothing')
  local raced=ask('discard_session','attempt-2',bound,live)
  check(raced.error and raced.error.code=='blocked' and f.p.equal(before,f.image()),'execution that reappears before commit blocks it and changes nothing')
  local done=ask('discard_session','attempt-2',bound)
@@ -2458,7 +2463,7 @@ sections.forget=function()
  local reloaded=fixture(copy(f.saved))
  local ask2=function(op,attempt,extra)
   local r=request(op,attempt,extra)
-  local body=reloaded.d.forget(r,reloaded.binding,1,gone)
+  local body=reloaded.d.forget(r,reloaded.binding,1,gone,proc)
   assert(f.c.encode_forget_response(body),runtime.json.encode(body):sub(1,200))
   return body
  end
@@ -2472,7 +2477,7 @@ sections.forget=function()
  local retry=ask('discard_session','attempt-3',{challenge=again.payload.challenge,dispatch_revision=0,spawn_boot=again.spawn_boot})
  check(retry.status=='closed','an authenticated retry after SPAWN already deleted the graph returns idempotent completion')
  local never=request('discard_capability','attempt-4');never.admission_seq=99
- check(f.d.forget(never,f.binding,1).error.code=='not_found','an admission SPAWN never recorded is not completed')
+ check(f.d.forget(never,f.binding,1,gone,proc).error.code=='not_found','an admission SPAWN never recorded is not completed')
 end
 -- The actual relay carries the dedicated forget operations on their own protocol, bound to the bound source's identity.
 sections.forget_relay=function()

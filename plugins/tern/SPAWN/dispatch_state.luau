@@ -440,7 +440,7 @@ local function forget_uncertain(root,logical)
 end
 -- `observe(pane_binding)` answers 'absent', 'present' or anything else for unobservable. `host` is the one execution
 -- host this peer can observe (the retained owner's window host); evidence from any other host is unavailable.
-function M.forget_inventory(root,logical,observe,host,native_session)
+function M.forget_inventory(root,logical,observe,host,native_session,process_state)
  local blockers,counts={},{requests=0,workers=0,generations=0}
  for _,e in pairs(root.requests) do if e.request.logical_session_id==logical then counts.requests+=1 end end
  for _,w in pairs(root.workers) do if w.logical_session_id==logical then counts.workers+=1 end end
@@ -451,25 +451,40 @@ function M.forget_inventory(root,logical,observe,host,native_session)
   if other~=logical then for key,p in pairs(forget_panes(root,other)) do others[key]=p end end
  end
  local keys={};for key in pairs(mine) do keys[#keys+1]=key end;table.sort(keys)
+ local observed={}
  for _,key in ipairs(keys) do
-  local p=mine[key];local binding=p.binding
-  -- Fail closed: evidence from another host, another native session (a restarted Tern reuses pane ids) or a terminal
-  -- process proof this host cannot read is unavailable evidence, never absence.
-  local proof=p.proof
-  local state=if binding.window_host_id~=host or (native_session~=nil and binding.native_session_id~=native_session)
-    or (type(proof)=='table' and proof.platform~=nil and proof.platform~=tern.runtime.os) then 'unknown' else observe(binding)
-  if state=='present' then
-   blockers[#blockers+1]={kind=if others[key] then 'shared_pane' else 'pane',agent=p.agent,pane=binding.pane_id,host=tostring(binding.window_host_id)}
-  elseif state~='absent' then
-   blockers[#blockers+1]={kind='unobservable',agent=p.agent,host=tostring(binding.window_host_id)}
+  local p=mine[key];local binding=p.binding;local proof=p.proof
+  local host_name=tostring(binding.window_host_id)
+  -- Fail closed: evidence from another host or another native session (a restarted Tern reuses pane ids) is unavailable, never absence.
+  local pane=if binding.window_host_id~=host or (native_session~=nil and binding.native_session_id~=native_session) then 'unknown' else observe(binding)
+  -- A retained terminal process identity decides what the pane id means: only the retained process itself (boot, pid, start time)
+  -- is positive evidence about the retained execution. A failed verification is never evidence of absence.
+  local process=nil
+  if type(proof)=='table' then process=if process_state then process_state(proof) else 'unknown' end
+  observed[#observed+1]=key..'='..tostring(pane)..'/'..tostring(process)
+  if pane=='unknown' or pane~='present' and pane~='absent' then
+   blockers[#blockers+1]={kind='unobservable',agent=p.agent,host=host_name}
+  elseif process=='unknown' then
+   blockers[#blockers+1]={kind='unobservable',agent=p.agent,host=host_name}
+  elseif process=='alive' then
+   -- A surviving retained process: a named pane to close through Tern, or (pane gone) a process outside any pane to resolve.
+   if pane=='present' then blockers[#blockers+1]={kind=if others[key] then 'shared_pane' else 'pane',agent=p.agent,pane=binding.pane_id,host=host_name}
+   else blockers[#blockers+1]={kind='uncertain',agent=p.agent,host=host_name} end
+  elseif pane=='present' then
+   if process=='gone' then
+    -- The pane id now shows some other process: attributing it to this orchestration (or telling the owner to close it) would be a guess.
+    blockers[#blockers+1]={kind='unobservable',agent=p.agent,host=host_name}
+   else blockers[#blockers+1]={kind=if others[key] then 'shared_pane' else 'pane',agent=p.agent,pane=binding.pane_id,host=host_name} end
   end
  end
  for _,u in ipairs(forget_uncertain(root,logical)) do blockers[#blockers+1]={kind='uncertain',agent=u.agent,host=u.host} end
- return {blockers=blockers,inventory=counts,dispatch_revision=root.revision}
+ -- Binds every observation result: a later commit must reproduce exactly these results.
+ return {blockers=blockers,inventory=counts,dispatch_revision=root.revision,fingerprint=Codec.sha256(table.concat(observed,';'))}
 end
 -- Deletes exactly this session's graph. Returns the inventory, or nil and the blocking inventory.
-function M.forget_discard(root,logical,observe,host,native_session)
- local inventory=M.forget_inventory(root,logical,observe,host,native_session)
+function M.forget_discard(root,logical,observe,host,native_session,process_state,expected_fingerprint)
+ local inventory=M.forget_inventory(root,logical,observe,host,native_session,process_state)
+ if expected_fingerprint~=nil and #inventory.blockers==0 and inventory.fingerprint~=expected_fingerprint then return nil,inventory,'changed' end
  if #inventory.blockers>0 then return nil,inventory end
  for key,e in pairs(root.requests) do if e.request.logical_session_id==logical then root.requests[key]=nil end end
  for key,w in pairs(root.workers) do

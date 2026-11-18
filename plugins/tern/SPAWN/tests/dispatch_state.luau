@@ -251,6 +251,46 @@ do
  check(#State.forget_inventory(root,'session',gone,'7','3').blockers==0,'the same native session with the pane absent is clean')
  local with_proof=build();with_proof.workers['session/w'].terminal_process={platform='not-this-os'}
  check(State.forget_inventory(with_proof,'session',gone,'7','3').blockers[1].kind=='unobservable','a terminal process proof this host cannot read is unavailable evidence')
+ -- Retained terminal process identity decides what a pane id means (positive absence only; a failed check is never absence).
+ local function terminal(pane_state,process_value)
+  local r=build();r.workers['session/w'].terminal_process={platform='linux',root_pid=1}
+  local obs=observer({['55']=pane_state,['57']='absent'})
+  return State.forget_inventory(r,'session',obs,'7','3',function() return process_value end)
+ end
+ inv=terminal('absent','alive')
+ check(#inv.blockers==1 and inv.blockers[1].kind=='uncertain','a surviving retained process with its pane gone blocks (no pane to close)')
+ inv=terminal('present','gone')
+ check(#inv.blockers==1 and inv.blockers[1].kind=='unobservable' and inv.blockers[1].pane==nil,'a reused pane id showing a different process blocks and is never "close this pane"')
+ inv=terminal('absent','gone')
+ check(#inv.blockers==0,'the retained process positively gone and the pane absent is clean')
+ inv=terminal('absent','unknown')
+ check(#inv.blockers==1 and inv.blockers[1].kind=='unobservable','a failed process verification is never proof of absence')
+ inv=terminal('present','alive')
+ check(#inv.blockers==1 and inv.blockers[1].kind=='pane' and inv.blockers[1].pane=='55','a live retained process in its pane is the named pane to close')
+ check(terminal('absent','gone').fingerprint~=terminal('absent','alive').fingerprint and terminal('absent','gone').fingerprint==terminal('absent','gone').fingerprint,'the bound observation fingerprint follows the results')
+ local fp=terminal('absent','gone').fingerprint
+ local changed_root=build();changed_root.workers['session/w'].terminal_process={platform='linux',root_pid=1}
+ local refused,_,why=State.forget_discard(changed_root,'session',observer({['55']='absent',['57']='absent'}),'7','3',function() return 'gone' end,fp..'x')
+ check(refused==nil and why=='changed' and changed_root.sessions.session~=nil,'a result that differs from the previewed one refuses the discard and changes nothing')
+-- Real /proc liveness (Linux): positive absence, positive presence, and everything else unknown.
+ do
+  local TI=load('terminal_identity')
+  local function proof(pid,identity,provider_pid,provider_identity)
+   return {platform='linux',session=1,route={executable='/bin/tern',socket='/tmp/s',window='w',pane=55},root_pid=pid,root_identity=identity,provider_pid=provider_pid or pid,provider_identity=provider_identity or identity,tty='1',group='1',process_session='1',root_argv_sha256=string.rep('a',64),provider_argv_sha256=string.rep('b',64)}
+  end
+  local function live(p) local out;TI.liveness(p,function(v) out=v end);return out end
+  local stat=tern.fs.read('/proc/self/stat',16384)
+  local pid=tonumber(stat:match('^(%d+) '))
+  local rest=stat:match('^%d+ %(.+%) (.+)$');local fields={};for word in rest:gmatch('%S+') do fields[#fields+1]=word end
+  local boot=tern.fs.read('/proc/sys/kernel/random/boot_id',128):gsub('%s+$','')
+  local identity=boot..':'..tostring(pid)..':'..fields[20]
+  check(live(proof(pid,identity))=='alive','a retained process whose boot, pid and start time still match is alive')
+  check(live(proof(pid,boot..':'..tostring(pid)..':1'))=='gone','a reused pid (different start time) is positively not the retained process')
+  check(live(proof(4194000,boot..':4194000:5'))=='gone','a pid with no /proc entry is positively gone')
+  check(live(proof(pid,identity,4194000,boot..':4194000:5'))=='alive','any surviving retained process keeps it alive')
+  local other=proof(pid,identity);other.platform='windows'
+  check(live(other)=='unknown' and live({})=='unknown','another platform or a malformed proof is unknown, never gone')
+ end
  local woken=build()
  woken.workers['session/w'].wakes={wake1={request_id='wake1',origin_binding=origin('session'),wake={phase='claimed'}}}
  inv=State.forget_inventory(woken,'session',gone,'7','3')

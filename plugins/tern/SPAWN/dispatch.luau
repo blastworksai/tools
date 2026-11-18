@@ -1303,6 +1303,12 @@ local function forget_pane_observer()
  local present={}
  for _,pane in ipairs(panes) do present[tostring(pane.pane)]=true end
  return function(binding) return if present[binding.pane_id] then 'present' else 'absent' end end
+-- Retained terminal process identity: synchronous on Linux (/proc); other platforms answer 'unknown', which is a blocker.
+local function forget_process_observer(proof)
+ local result='unknown'
+ local ok=pcall(TerminalIdentity.liveness,proof,function(value) result=value end)
+ return if ok then result else 'unknown'
+end
 local function forget_owner_matches(s,owner)
  local function same(b)
   if type(b)~='table' then return false end
@@ -1314,7 +1320,7 @@ local function forget_owner_matches(s,owner)
  return same(s.control.binding) or s.closing_origin~=nil and same(s.closing_origin.binding)
 end
 function M.forget_unavailable(r,why) return forget_refuse(r,'unsupported',tostring(why or 'Execution-host authority is unavailable'):sub(1,400)) end
-function M.forget(r,binding,session,observe)
+function M.forget(r,binding,session,observe,process_state)
  if hold then return forget_refuse(r,'busy',hold) end
  local ok,stored=pcall(tern.kv.get,KEY)
  if not ok or type(stored)~='table' or stored.version~=2 or not valid(stored) then return forget_refuse(r,'unsupported','Managed dispatch store is unavailable or not current') end
@@ -1346,6 +1352,7 @@ function M.forget(r,binding,session,observe)
   return forget_refuse(r,'stale_challenge','The challenge is not the latest for this attempt and boot')
  end
  observe=observe or forget_pane_observer()
+ process_state=process_state or forget_process_observer
  if not s then
   -- An authenticated retry after SPAWN already deleted the graph: the admission existed (cursor), nothing conflicts.
   if r.op=='discard_session' then return forget_body(r,'closed',{admission_cursor=root.admission_cursor}) end
@@ -1353,13 +1360,16 @@ function M.forget(r,binding,session,observe)
  end
  local host=r.owner.window_host_id
  if r.op=='discard_preview' then
-  local inventory=State.forget_inventory(root,r.logical_session_id,observe,host,r.owner.native_session_id)
+  local inventory=State.forget_inventory(root,r.logical_session_id,observe,host,r.owner.native_session_id,process_state)
   if #inventory.blockers>0 then return forget_body(r,'blocked',{dispatch_revision=inventory.dispatch_revision,blockers=inventory.blockers}) end
+  current.preview_fingerprint=inventory.fingerprint
   return forget_body(r,'clean',{dispatch_revision=inventory.dispatch_revision,inventory=inventory.inventory})
  end
  -- discard_session: the preview's boot and revision must still hold, then everything is observed again immediately before commit.
  if r.spawn_boot~=boot or r.dispatch_revision~=root.revision then return forget_refuse(r,'changed','The orchestration changed after it was checked') end
- local inventory,blocked=State.forget_discard(root,r.logical_session_id,observe,host,r.owner.native_session_id)
+ if current.preview_fingerprint==nil then return forget_refuse(r,'changed','The orchestration must be previewed before it is forgotten') end
+ local inventory,blocked,why=State.forget_discard(root,r.logical_session_id,observe,host,r.owner.native_session_id,process_state,current.preview_fingerprint)
+ if why=='changed' then return forget_refuse(r,'changed','The observed execution changed after it was checked') end
  if not inventory then return forget_refuse(r,'blocked','Execution is not provably quiescent') end
  local saved,why=save(root,true)
  if not saved then return forget_refuse(r,'busy',tostring(why):sub(1,400)) end
