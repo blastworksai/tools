@@ -316,7 +316,18 @@ check(rejectedSetup and rejectedSetup.value==nil and rejectedSetup.probe==nil an
 setupDraft.id=saved.id;setupDraft.task_argument_index="0";rejectedSetup=nil
 Setup.prepare(setupDraft,host,function(value,probe,why) rejectedSetup={value=value,probe=probe,why=why} end)
 check(rejectedSetup and rejectedSetup.value==nil and rejectedSetup.why:find("position",1,true),"invalid task insertion refuses before effects")
-same(table.concat(Prereq.as_user({"id","-un"},"selected"),"|"),"sudo|-n|-u|selected|-H|--|id|-un","prerequisites execute noninteractive chosen-account checks with that account's home")
+do
+ -- SKILLS-209: preparation checks run on the launch road (sudo -i login shell, argv carried as encoded data), so a
+ -- tool on the account's login PATH is found by preparation exactly as discovery found it.
+ local argv=Prereq.as_user({"id","-un"},"selected")
+ same(table.concat(argv,"|",1,6),"sudo|-n|-i|-u|selected|--","prerequisites execute noninteractive chosen-account checks through a sudo -i login")
+ same(table.concat(argv,"|",7,9),"/bin/sh|-c|eval \"$(printf \"${1}\")\"","the login shell receives the constant decoder script, never the approved words")
+ same(argv[10].."|"..argv[11],"spawn-login|cd -- '/' && exec 'id' '-un'","the approved program and arguments travel as one quoted word")
+ check(#argv==11,"no extra word, and no -H, reaches sudo")
+ local hostile=Prereq.as_user({"sh","-c","echo $HOME %s \\ x"},"selected")
+ check(not table.concat(hostile," "):find("$",1,true) or table.concat(hostile," "):find('printf "${1}"',1,true)~=nil,"a dollar or percent in a checked script is carried as octal text")
+ check(table.concat(hostile,"|",10):find("\\044HOME",1,true)~=nil and table.concat(hostile,"|",10):find("\\045s",1,true)~=nil,"live characters in the checked script are octal escapes")
+end
 local sameUser={"id","-un"}
 check(Prereq.as_user(sameUser,nil)==sameUser,"same-user prerequisites do not add SSH or sudo")
 do
@@ -574,7 +585,7 @@ do
   mode=case;calls={}
   local observed,problem
   prerequisite.account("selected","native","/work",function(account,why)observed=account;problem=why end)
-  check(#calls==2 and table.concat(calls[2],"|",1,6)=="sudo|-n|-u|selected|-H|--","existing-account observations use only the explicit authorized noninteractive identity")
+  check(#calls==2 and table.concat(calls[2],"|",1,6)=="sudo|-n|-i|-u|selected|--","existing-account observations use only the explicit authorized noninteractive identity")
   if case=="accepted" then check(observed and observed.home=="/home/selected" and observed.executable=="/home/selected/.local/bin/native" and problem==nil,"account preparation exposes actual home/executable observation, not login/readiness")
   else check(observed==nil and problem:find("Selected-account prerequisite failed",1,true),"denial/identity mismatch cannot become a current-user fallback") end
  end

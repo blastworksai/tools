@@ -131,6 +131,7 @@ end
 
 -- Mailbox adapters use this same identity-fenced SSH transport constructor.
 Backend.ssh_arguments = Resolution.ssh_arguments
+Backend.login_argv = Resolution.login_argv
 local SETUP_LIMIT = 32000
 
 local function setup_text(value: any, limit: number): boolean

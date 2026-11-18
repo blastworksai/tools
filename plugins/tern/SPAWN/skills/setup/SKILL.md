@@ -14,9 +14,9 @@ Read `glitch_installation`: `detected` verifies one candidate but grants no inte
 Discover Claude, Codex, Kimi, Grok, Agy/Antigravity, Muse, OMP and custom executables with `command -v`/`Get-Command`; inspect installed `--help`/version without provider tasks.
 
 **Resolve each executable as the account that will run it.** A path found as the operator belongs to the operator alone: never copy it to another account's record, even when the file exists and looks right. For every record that runs as another POSIX account:
-1. Resolve it through the login route SPAWN launches with: `sudo -n -i -u <account> -- sh -c 'command -v <cli>'`. Keep that command free of `$`, `(`, nested quotes and other shell syntax, because `sudo -i` escapes them and the answer comes back empty.
+1. Resolve it through the login route SPAWN launches with: `sudo -n -i -u <account> -- sh -c 'command -v <cli>'`. Keep that command to plain words: no `$`, `(` or nested quotes, because `sudo -i` re-quotes the command for the login shell, which then expands or mangles them.
 2. Confirm that account can run the result: `sudo -n -i -u <account> -- test -x <resolved path>`. A failure means unavailable.
-3. If the account has no such CLI, or the check fails, show that row as unavailable with the reason (for example "grokbwai: no grok on its login PATH") and leave it out of the roster. Never substitute the operator's or another account's file.
+3. If the account has no such CLI, or the check fails, show that row as unavailable with the reason (for example "agentwork: no grok on its login PATH") and leave it out of the roster. Never substitute the operator's or another account's file.
 4. A resolved path may differ per account (`/home/<account>/.local/bin/<cli>` for one, `/usr/bin/<cli>` for another). Use each account's own answer. Availability proves neither login nor readiness/flags. Never install, launch saved agents, create accounts/credentials/profiles/keys, copy secrets, grant access, alter Glitch or bypass trust.
 
 ## Choices and approval

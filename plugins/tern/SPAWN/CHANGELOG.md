@@ -3,6 +3,7 @@
 ## 0.6.8
 
 - **Guided setup resolves each agent's CLI as the account that runs it.** On a host with several OS accounts, the setup helper looked up `grok` as the operator and wrote the operator's `/home/<operator>/.local/bin/grok` into another account's record; that account cannot run the file, and preparation stopped at that record. The setup skill now resolves every cross-account CLI through the same login route SPAWN launches with (`sudo -n -i -u <account> -- sh -c 'command -v <cli>'`), checks that the account can execute it, shows an account without the CLI as unavailable instead of borrowing another account's file, and proposes the account, provider and CLI table itself, so the operator approves it without typing paths.
+- Preparation checks (account, home, executable, helper tools) now run on that same `sudo -i` login route instead of a bare `sudo -n -u … -H`, so a tool found at discovery on the account's login PATH is the one preparation finds.
 - The helper writes such a record in the shape SPAWN stores after preparation: the account in `user` and that account's own executable in `command`, with no `sudo` wrapper (SKILLS-209).
 
 ## 0.6.7
