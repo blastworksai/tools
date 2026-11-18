@@ -21,6 +21,21 @@ local LIMIT=4*1024*1024
 local RESERVE=256*1024
 local boot=string.format('vm-%d-%08x-%08x',os.time(),math.random(1,2147483647),math.random(1,2147483647))
 local loaded=false
+-- The Tern host incarnation this SPAWN runs in. On Linux the host process identity (boot id, pid, start time) survives a plugin
+-- reload but never a Tern restart; elsewhere it is this VM's boot token, which also changes on reload (a conservative false
+-- change). A pane recorded under a different incarnation may have had its id reused.
+local incarnation=(function()
+ local ok,value=pcall(function()
+  if tern.runtime.os~='linux' then return nil end
+  local stat=tern.fs.read('/proc/self/stat',16384)
+  local pid,rest=stat:match('^(%d+) %(.+%) (.+)$')
+  local fields={};for word in rest:gmatch('%S+') do fields[#fields+1]=word;if #fields==20 then break end end
+  local boot_id=tern.fs.read('/proc/sys/kernel/random/boot_id',128):gsub('%s+$','')
+  if #fields~=20 or #boot_id~=36 then return nil end
+  return 'linux:'..boot_id..':'..pid..':'..fields[20]
+ end)
+ return if ok and value then value else 'vm:'..boot
+end)()
 local hold=nil
 local control_challenges={}
 local qualification_snapshot=nil
@@ -1320,7 +1335,7 @@ local function forget_owner_matches(s,owner)
  return same(s.control.binding) or s.closing_origin~=nil and same(s.closing_origin.binding)
 end
 function M.forget_unavailable(r,why) return forget_refuse(r,'unsupported',tostring(why or 'Execution-host authority is unavailable'):sub(1,400)) end
-function M.forget(r,binding,session,observe,process_state)
+function M.forget(r,binding,session,observe,process_state,incarnation_override)
  if hold then return forget_refuse(r,'busy',hold) end
  local ok,stored=pcall(tern.kv.get,KEY)
  if not ok or type(stored)~='table' or stored.version~=2 or not valid(stored) then return forget_refuse(r,'unsupported','Managed dispatch store is unavailable or not current') end
@@ -1353,6 +1368,7 @@ function M.forget(r,binding,session,observe,process_state)
  end
  observe=observe or forget_pane_observer()
  process_state=process_state or forget_process_observer
+ local current_incarnation=incarnation_override or incarnation
  if not s then
   -- An authenticated retry after SPAWN already deleted the graph: the admission existed (cursor), nothing conflicts.
   if r.op=='discard_session' then return forget_body(r,'closed',{admission_cursor=root.admission_cursor}) end
@@ -1360,7 +1376,7 @@ function M.forget(r,binding,session,observe,process_state)
  end
  local host=r.owner.window_host_id
  if r.op=='discard_preview' then
-  local inventory=State.forget_inventory(root,r.logical_session_id,observe,host,r.owner.native_session_id,process_state)
+  local inventory=State.forget_inventory(root,r.logical_session_id,observe,host,r.owner.native_session_id,process_state,current_incarnation)
   if #inventory.blockers>0 then return forget_body(r,'blocked',{dispatch_revision=inventory.dispatch_revision,blockers=inventory.blockers}) end
   current.preview_fingerprint=inventory.fingerprint
   return forget_body(r,'clean',{dispatch_revision=inventory.dispatch_revision,inventory=inventory.inventory})
@@ -1368,7 +1384,7 @@ function M.forget(r,binding,session,observe,process_state)
  -- discard_session: the preview's boot and revision must still hold, then everything is observed again immediately before commit.
  if r.spawn_boot~=boot or r.dispatch_revision~=root.revision then return forget_refuse(r,'changed','The orchestration changed after it was checked') end
  if current.preview_fingerprint==nil then return forget_refuse(r,'changed','The orchestration must be previewed before it is forgotten') end
- local inventory,blocked,why=State.forget_discard(root,r.logical_session_id,observe,host,r.owner.native_session_id,process_state,current.preview_fingerprint)
+ local inventory,blocked,why=State.forget_discard(root,r.logical_session_id,observe,host,r.owner.native_session_id,process_state,current.preview_fingerprint,current_incarnation)
  if why=='changed' then return forget_refuse(r,'changed','The observed execution changed after it was checked') end
  if not inventory then return forget_refuse(r,'blocked','Execution is not provably quiescent') end
  local saved,why=save(root,true)
@@ -1587,13 +1603,13 @@ function M.claim(r,executor_id,operation,result,proof,observed_claim,relay_bindi
   if result.status=='refused' then return finish(root,entry,P.reject(r,'target_unavailable',result.message or 'Enrollment refused before delivery; nothing was sent'),true) end
   local expected=if r.op=='enrol' and r.delivery=='clipboard' then 'copied' else 'submitted'
   if result.status==expected and P.equal(result.pane_binding,r.pane_binding) then
-   entry.pane_binding=P.clone(r.pane_binding)
+   entry.pane_binding=P.clone(r.pane_binding);entry.launch_incarnation=incarnation
    return finish(root,entry,P.body(r,'awaiting_acceptance',launch_payload(entry)),true)
   end
   return finish(root,entry,P.body(r,'uncertain',launch_payload(entry),{code='target_unavailable',message=result.message or 'Native ask may have been delivered; never repeat it'}),true)
  end
  if result.status=='submitted' and result.pane_binding and result.pane_binding.window_epoch==r.origin_binding.window_epoch and result.pane_binding.window_key==r.origin_binding.window_key and result.pane_binding.native_session_id==r.origin_binding.native_session_id and result.pane_binding.window_host_id==r.origin_binding.window_host_id then
-  entry.pane_binding=P.clone(result.pane_binding)
+  entry.pane_binding=P.clone(result.pane_binding);entry.launch_incarnation=incarnation
   local observed,observe_error=Authority.managed_observe(entry.binding,entry.attempt_id,entry.observer_id,{phase='Starting',pane=tonumber(result.pane_binding.pane_id)})
   if not observed then return finish(root,entry,P.body(r,'uncertain',launch_payload(entry),{code='storage_error',message=tostring(observe_error):sub(1,512)}),true) end
   return finish(root,entry,P.body(r,'awaiting_acceptance',launch_payload(entry)),true)

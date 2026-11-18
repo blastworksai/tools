@@ -2478,6 +2478,27 @@ sections.forget=function()
  check(retry.status=='closed','an authenticated retry after SPAWN already deleted the graph returns idempotent completion')
  local never=request('discard_capability','attempt-4');never.admission_seq=99
  check(f.d.forget(never,f.binding,1,gone,proc).error.code=='not_found','an admission SPAWN never recorded is not completed')
+ -- Proof-less panes: only a launch recorded under the current Tern host incarnation makes pane absence evidence.
+ local g=launched_fixture(true)
+ local recorded=g.saved['dispatch-v1'].requests['session/launch'].launch_incarnation
+ check(type(recorded)=='string' and #recorded>0,'the launch records the Tern host incarnation from now on')
+ local function previewed(h,override,label)
+  local r1=request('discard_capability','pl-'..label)
+  r1.request_id='pl-cap-'..label
+  local c=h.d.forget(r1,h.binding,1,gone,nil,override)
+  local r2=request('discard_preview','pl-'..label,{challenge=c.payload.challenge})
+  return h.d.forget(r2,h.binding,1,gone,nil,override)
+ end
+ check(previewed(g,nil,'same').status=='clean','same incarnation, launched pane gone: clean')
+ local restarted=previewed(g,'linux:other-boot:1:2','restart')
+ check(restarted.status=='blocked' and restarted.payload.blockers[1].kind=='unobservable' and restarted.payload.blockers[1].pane==nil,'after a Tern restart the recorded launch reads as cannot be checked, never absent')
+ local older=launched_fixture(true)
+ older.saved['dispatch-v1'].requests['session/launch'].launch_incarnation=nil
+ check(previewed(older,nil,'older').status=='blocked','a binding launched without a recorded incarnation cannot be checked')
+ local contradict=launched_fixture(true)
+ local r=request('discard_capability','pl-live');local c=contradict.d.forget(r,contradict.binding,1,gone,nil)
+ local p=contradict.d.forget(request('discard_preview','pl-live',{challenge=c.payload.challenge}),contradict.binding,1,live,nil)
+ check(p.status=='blocked' and p.payload.blockers[1].kind=='pane','the host\'s live pane list contradicting a recorded launch blocks')
 end
 -- The actual relay carries the dedicated forget operations on their own protocol, bound to the bound source's identity.
 sections.forget_relay=function()

@@ -124,7 +124,7 @@ function M.validate_registry(root)
   admissions[s.admission_seq]=true
  end
  for k,w in pairs(root.workers) do
-  if not P.fields(w,{kind=launch_family,logical_session_id=P.id,worker_id=P.id,worker_generation=function(v)return P.integer(v,1)end,launch_request_id=P.id,launch_action_id=P.id,work_id=P.id,enrolment_token=P.token,assignment_sha256=P.digest,mailbox_handle=P.id,record_id=function(v)return P.text(v,96,false)end,record_revision=function(v)return P.integer(v,0)end,origin_binding=P.binding,controller_pane=true,controller_generation=function(v)return P.integer(v,1)end,phase=true,backend=true,binding=true,mailbox_live=function(v)return type(v)=='boolean'end},{delivery=function(v)return v=='native_ask' or v=='clipboard'end,pane_binding=P.pane,acceptance=true,capabilities=true,attempt_id=true,observer_id=true,handover_id=P.id,handover_token=P.token,coordinator_owner_id=P.id,coordinator_generation=true,attachment=true,stop_request_id=P.id,stopped=function(v)return v=='absent' or v=='exited'end,wakes=true,terminal_process=TerminalIdentity.valid}) or k~=w.logical_session_id..'/'..w.launch_request_id or not root.sessions[w.logical_session_id] or type(w.binding)~='table' then return nil,'Corrupt current worker' end
+  if not P.fields(w,{kind=launch_family,logical_session_id=P.id,worker_id=P.id,worker_generation=function(v)return P.integer(v,1)end,launch_request_id=P.id,launch_action_id=P.id,work_id=P.id,enrolment_token=P.token,assignment_sha256=P.digest,mailbox_handle=P.id,record_id=function(v)return P.text(v,96,false)end,record_revision=function(v)return P.integer(v,0)end,origin_binding=P.binding,controller_pane=true,controller_generation=function(v)return P.integer(v,1)end,phase=true,backend=true,binding=true,mailbox_live=function(v)return type(v)=='boolean'end},{delivery=function(v)return v=='native_ask' or v=='clipboard'end,pane_binding=P.pane,acceptance=true,capabilities=true,attempt_id=true,observer_id=true,handover_id=P.id,handover_token=P.token,coordinator_owner_id=P.id,coordinator_generation=true,attachment=true,stop_request_id=P.id,stopped=function(v)return v=='absent' or v=='exited'end,wakes=true,terminal_process=TerminalIdentity.valid,launch_incarnation=function(v)return type(v)=='string' and #v>0 and #v<=256 end}) or k~=w.logical_session_id..'/'..w.launch_request_id or not root.sessions[w.logical_session_id] or type(w.binding)~='table' then return nil,'Corrupt current worker' end
   if (w.kind=='enrol')~=(w.delivery~=nil) or w.kind=='enrol' and (w.handover_id~=nil or w.coordinator_owner_id~=nil or w.attempt_id~=nil or w.backend~=(if w.delivery=='native_ask' then 'native-agent' else 'local-terminal')) then return nil,'Corrupt enrollment delivery facts' end
   if w.origin_binding.logical_session_id~=w.logical_session_id or not P.text(w.controller_pane,32,false) or not w.controller_pane:match('^%d+$') or not P.text(w.phase,32,false) or (w.backend~='native-agent' and w.backend~='local-terminal' and w.backend~='ssh-command') or w.acceptance~=nil and type(w.acceptance)~='table' then return nil,'Corrupt current worker facts' end
   if w.capabilities~=nil and (type(w.capabilities)~='table' or not Capabilities.valid_set(w.backend,if table.find(w.capabilities,'native-ask-v1') then 'native-ask-v1' else 'worker-poll-v1',w.capabilities)) then return nil,'Corrupt provisioned capability facts' end
@@ -138,7 +138,7 @@ function M.validate_registry(root)
  end
  local serials={}
  for k,entry in pairs(root.requests) do
-  if not P.fields(entry,{request=true,request_json=true,body=true},{claim=true,orch_claim=true,authorization=true,wake=true,attachment=true,launch=true,launch_sha256=true,binding=true,observer_id=true,stop_request_id=true,stop_backend=true,retirement_result=true,identity=true,capabilities=true,attempt_pending=true,attempt_id=true,pane_binding=true,acceptance=true,operation=true,authorization_fence=true,stopped=true,mailbox_live=true,wakes=true,relay_binding=P.digest,relay_consent=true,relay_result=true,native_result=true,terminal_process=TerminalIdentity.valid}) or type(entry.request)~='table' or type(entry.body)~='table' then return nil,'Corrupt retained request' end
+  if not P.fields(entry,{request=true,request_json=true,body=true},{claim=true,orch_claim=true,authorization=true,wake=true,attachment=true,launch=true,launch_sha256=true,binding=true,observer_id=true,stop_request_id=true,stop_backend=true,retirement_result=true,identity=true,capabilities=true,attempt_pending=true,attempt_id=true,pane_binding=true,acceptance=true,operation=true,authorization_fence=true,stopped=true,mailbox_live=true,wakes=true,relay_binding=P.digest,relay_consent=true,relay_result=true,native_result=true,terminal_process=TerminalIdentity.valid,launch_incarnation=function(v)return type(v)=='string' and #v>0 and #v<=256 end}) or type(entry.request)~='table' or type(entry.body)~='table' then return nil,'Corrupt retained request' end
   local request=P.decode(entry.request_json)
   if not request or not P.equal(request,entry.request) or request.setup_origin or M.control_request(request) or request.logical_session_id..'/'..request.request_id~=k or entry.body.request_id~=request.request_id or entry.body.action_id~=request.action_id or not P.equal(entry.body.origin_binding,request.origin_binding) or not P.encode(entry.body) then return nil,'Corrupt retained outcome' end
   if entry.relay_consent~=nil and (entry.relay_binding==nil or not P.fields(entry.relay_consent,{nonce=P.id,boot=P.id,bridge=function(v)return P.integer(v,1)end,deadline=deadline,executor_id=P.id}) or tostring(entry.relay_consent.bridge)~=request.origin_binding.host_pane_id) then return nil,'Corrupt consumed relay consent' end
@@ -214,12 +214,12 @@ function M.worker(root,logical,id)
  if cache[key] then return cache[key] end
  local e={worker_id=w.worker_id,worker_generation=w.worker_generation,enrolment_token=w.enrolment_token,assignment_sha256=w.assignment_sha256,handover_id=w.handover_id,handover_token=w.handover_token,coordinator_owner_id=w.coordinator_owner_id,coordinator_generation=w.coordinator_generation}
  local r={op=w.kind,delivery=w.delivery,request_id=w.launch_request_id,action_id=w.launch_action_id,logical_session_id=w.logical_session_id,origin_binding=w.origin_binding,controller_pane=w.controller_pane,controller_generation=w.controller_generation,record_id=w.record_id,record_revision=w.record_revision,work_id=w.work_id,mailbox_handle=w.mailbox_handle,enrolment=e}
- local entry={request=r,body={status=w.phase},pane_binding=w.pane_binding,acceptance=w.acceptance,launch={backend=w.backend},binding=w.binding,attempt_id=w.attempt_id,observer_id=w.observer_id,capabilities=w.capabilities,attachment=w.attachment,stop_request_id=w.stop_request_id,stopped=w.stopped,mailbox_live=w.mailbox_live,wakes=w.wakes,terminal_process=w.terminal_process}
+ local entry={request=r,body={status=w.phase},pane_binding=w.pane_binding,acceptance=w.acceptance,launch={backend=w.backend},binding=w.binding,attempt_id=w.attempt_id,observer_id=w.observer_id,capabilities=w.capabilities,attachment=w.attachment,stop_request_id=w.stop_request_id,stopped=w.stopped,mailbox_live=w.mailbox_live,wakes=w.wakes,terminal_process=w.terminal_process,launch_incarnation=w.launch_incarnation}
  cache[key]=entry;return entry
 end
 local function worker(entry)
  local r=entry.request;local e=r.enrolment
- return {kind=r.op,delivery=r.delivery,logical_session_id=r.logical_session_id,worker_id=e.worker_id,worker_generation=e.worker_generation,launch_request_id=r.request_id,launch_action_id=r.action_id,work_id=r.work_id,enrolment_token=e.enrolment_token,assignment_sha256=e.assignment_sha256,mailbox_handle=r.mailbox_handle,record_id=r.record_id,record_revision=r.record_revision,origin_binding=P.clone(r.origin_binding),controller_pane=r.controller_pane,controller_generation=r.controller_generation,pane_binding=P.clone(entry.pane_binding),acceptance=P.clone(entry.acceptance),phase=entry.body.status,backend=entry.launch.backend,capabilities=P.clone(entry.capabilities),binding=P.clone(entry.binding),attempt_id=entry.attempt_id,observer_id=entry.observer_id,handover_id=e.handover_id,handover_token=e.handover_token,coordinator_owner_id=e.coordinator_owner_id,coordinator_generation=e.coordinator_generation,attachment=P.clone(entry.attachment),stop_request_id=entry.stop_request_id,stopped=entry.stopped,mailbox_live=entry.mailbox_live~=false,wakes=entry.wakes,terminal_process=P.clone(entry.terminal_process)}
+ return {kind=r.op,delivery=r.delivery,logical_session_id=r.logical_session_id,worker_id=e.worker_id,worker_generation=e.worker_generation,launch_request_id=r.request_id,launch_action_id=r.action_id,work_id=r.work_id,enrolment_token=e.enrolment_token,assignment_sha256=e.assignment_sha256,mailbox_handle=r.mailbox_handle,record_id=r.record_id,record_revision=r.record_revision,origin_binding=P.clone(r.origin_binding),controller_pane=r.controller_pane,controller_generation=r.controller_generation,pane_binding=P.clone(entry.pane_binding),acceptance=P.clone(entry.acceptance),phase=entry.body.status,backend=entry.launch.backend,capabilities=P.clone(entry.capabilities),binding=P.clone(entry.binding),attempt_id=entry.attempt_id,observer_id=entry.observer_id,handover_id=e.handover_id,handover_token=e.handover_token,coordinator_owner_id=e.coordinator_owner_id,coordinator_generation=e.coordinator_generation,attachment=P.clone(entry.attachment),stop_request_id=entry.stop_request_id,stopped=entry.stopped,mailbox_live=entry.mailbox_live~=false,wakes=entry.wakes,terminal_process=P.clone(entry.terminal_process),launch_incarnation=entry.launch_incarnation}
 end
 function M.flush(root)
  for key,entry in pairs(views[root] or {}) do if root.workers[key] then root.workers[key]=worker(entry) end end
@@ -380,18 +380,18 @@ end
 -- stops a process, and nothing outside the graph (agent roster, other sessions, watermarks, files) is touched.
 local function forget_panes(root,logical)
  local panes={}
- local function add(binding,agent,proof)
+ local function add(binding,agent,proof,launched)
   if type(binding)=='table' and binding.pane_id then
    local key=binding.pane_id..'|'..tostring(binding.window_host_id)
    local known=panes[key]
-   panes[key]={binding=binding,agent=agent or (known and known.agent) or '',proof=proof or (known and known.proof)}
+   panes[key]={binding=binding,agent=agent or (known and known.agent) or '',proof=proof or (known and known.proof),launched=launched or (known and known.launched)}
   end
  end
  for _,e in pairs(root.requests) do
   local r=e.request
   if r.logical_session_id==logical then
    local agent=r.record_id
-   add(e.pane_binding,agent,e.terminal_process);add(r.pane_binding,agent)
+   add(e.pane_binding,agent,e.terminal_process,e.launch_incarnation);add(r.pane_binding,agent)
    add(e.attachment and e.attachment.pane_binding,agent);add(e.wake and e.wake.pane_binding,agent)
    add(e.body and type(e.body.payload)=='table' and e.body.payload.pane_binding,agent)
    add(e.native_result and e.native_result.result and e.native_result.result.pane_binding,agent)
@@ -400,7 +400,7 @@ local function forget_panes(root,logical)
  end
  for _,w in pairs(root.workers) do
   if w.logical_session_id==logical then
-   add(w.pane_binding,w.record_id,w.terminal_process);add(w.attachment and w.attachment.pane_binding,w.record_id);add(w.stopped and w.stopped.pane_binding,w.record_id)
+   add(w.pane_binding,w.record_id,w.terminal_process,w.launch_incarnation);add(w.attachment and w.attachment.pane_binding,w.record_id);add(w.stopped and w.stopped.pane_binding,w.record_id,nil,w.launch_incarnation)
    -- Wake obligations retained on the worker (publications kept by acknowledge()) carry their own pane bindings.
    for _,p in pairs(w.wakes or {}) do add(p.wake and p.wake.pane_binding,w.record_id) end
   end
@@ -440,7 +440,7 @@ local function forget_uncertain(root,logical)
 end
 -- `observe(pane_binding)` answers 'absent', 'present' or anything else for unobservable. `host` is the one execution
 -- host this peer can observe (the retained owner's window host); evidence from any other host is unavailable.
-function M.forget_inventory(root,logical,observe,host,native_session,process_state)
+function M.forget_inventory(root,logical,observe,host,native_session,process_state,incarnation)
  local blockers,counts={},{requests=0,workers=0,generations=0}
  for _,e in pairs(root.requests) do if e.request.logical_session_id==logical then counts.requests+=1 end end
  for _,w in pairs(root.workers) do if w.logical_session_id==logical then counts.workers+=1 end end
@@ -460,7 +460,13 @@ function M.forget_inventory(root,logical,observe,host,native_session,process_sta
   -- A retained terminal process identity decides what the pane id means: only the retained process itself (boot, pid, start time)
   -- is positive evidence about the retained execution. A failed verification is never evidence of absence.
   local process=nil
-  if type(proof)=='table' then process=if process_state then process_state(proof) else 'unknown' end
+  if type(proof)=='table' then
+   if process_state then process=process_state(proof) else process='unknown' end
+  elseif pane=='absent' and (incarnation==nil or p.launched~=incarnation) then
+   -- No retained process proof: pane absence is evidence only for a pane that a SPAWN launch recorded under THIS Tern host
+   -- incarnation. A missing record (older binding) or a different one (Tern restarted; pane ids may be reused) is not evidence.
+   pane='unknown'
+  end
   observed[#observed+1]=key..'='..tostring(pane)..'/'..tostring(process)
   if pane=='unknown' or pane~='present' and pane~='absent' then
    blockers[#blockers+1]={kind='unobservable',agent=p.agent,host=host_name}
@@ -482,8 +488,8 @@ function M.forget_inventory(root,logical,observe,host,native_session,process_sta
  return {blockers=blockers,inventory=counts,dispatch_revision=root.revision,fingerprint=Codec.sha256(table.concat(observed,';'))}
 end
 -- Deletes exactly this session's graph. Returns the inventory, or nil and the blocking inventory.
-function M.forget_discard(root,logical,observe,host,native_session,process_state,expected_fingerprint)
- local inventory=M.forget_inventory(root,logical,observe,host,native_session,process_state)
+function M.forget_discard(root,logical,observe,host,native_session,process_state,expected_fingerprint,incarnation)
+ local inventory=M.forget_inventory(root,logical,observe,host,native_session,process_state,incarnation)
  if expected_fingerprint~=nil and #inventory.blockers==0 and inventory.fingerprint~=expected_fingerprint then return nil,inventory,'changed' end
  if #inventory.blockers>0 then return nil,inventory end
  for key,e in pairs(root.requests) do if e.request.logical_session_id==logical then root.requests[key]=nil end end

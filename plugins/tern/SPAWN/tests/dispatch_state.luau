@@ -222,40 +222,43 @@ do
  local function pane(id,host) return {pane_id=id,window_epoch='epoch',window_key='',native_session_id='3',window_host_id=host or '7'} end
  local function build()
   local root=fresh();admit(root,'session',1);admit(root,'other',2)
-  root.requests['session/launch']={request={op='launch',logical_session_id='session',request_id='launch',record_id='claude-a',origin_binding=origin('session')},body={status='accepted'},pane_binding=pane('55')}
-  root.requests['other/launch']={request={op='launch',logical_session_id='other',request_id='launch',record_id='omp-b',origin_binding=origin('other')},body={status='accepted'},pane_binding=pane('66')}
-  root.workers['session/w']={logical_session_id='session',record_id='claude-a',pane_binding=pane('55'),stopped={pane_binding=pane('57'),observation='exited'}}
+  root.requests['session/launch']={request={op='launch',logical_session_id='session',request_id='launch',record_id='claude-a',origin_binding=origin('session')},body={status='accepted'},pane_binding=pane('55'),launch_incarnation='inc-1'}
+  root.requests['other/launch']={request={op='launch',logical_session_id='other',request_id='launch',record_id='omp-b',origin_binding=origin('other')},body={status='accepted'},pane_binding=pane('66'),launch_incarnation='inc-1'}
+  root.workers['session/w']={logical_session_id='session',record_id='claude-a',pane_binding=pane('55'),launch_incarnation='inc-1',stopped={pane_binding=pane('57'),observation='exited'}}
   root.mailboxes.generations.mine={binding={logical_session_id='session'}};root.mailboxes.generations.theirs={binding={logical_session_id='other'}}
   return root
  end
  local function observer(map) return function(b) return map[b.pane_id] end end
+ -- Every launch in these fixtures was recorded under Tern host incarnation 'inc-1', which is also the current one.
+ local function inventory_of(r,l,o,h,n,p,i) if i==nil then i='inc-1' end return State.forget_inventory(r,l,o,h,n,p,i) end
+ local function discard_of(r,l,o,h,n,p,fp,i) return State.forget_discard(r,l,o,h,n,p,fp,i or 'inc-1') end
  local gone=observer({['55']='absent',['57']='absent'})
  local root=build()
- local inv=State.forget_inventory(root,'session',gone,'7')
+ local inv=inventory_of(root,'session',gone,'7')
  check(#inv.blockers==0 and inv.inventory.requests==1 and inv.inventory.workers==1 and inv.inventory.generations==1 and inv.dispatch_revision==root.revision,
   'closed panes, historically stopped ones included, give a clean inventory of exactly this graph')
- inv=State.forget_inventory(root,'session',observer({['55']='present',['57']='absent'}),'7')
+ inv=inventory_of(root,'session',observer({['55']='present',['57']='absent'}),'7')
  check(#inv.blockers==1 and inv.blockers[1].kind=='pane' and inv.blockers[1].pane=='55' and inv.blockers[1].agent=='claude-a' and inv.blockers[1].host=='7','a live pane of this session is a named blocker')
- inv=State.forget_inventory(root,'session',observer({['55']='absent',['57']='present'}),'7')
+ inv=inventory_of(root,'session',observer({['55']='absent',['57']='present'}),'7')
  check(#inv.blockers==1 and inv.blockers[1].pane=='57','a historically stopped pane must be freshly absent too')
- inv=State.forget_inventory(root,'session',observer({['55']='unknown',['57']='absent'}),'7')
+ inv=inventory_of(root,'session',observer({['55']='unknown',['57']='absent'}),'7')
  check(#inv.blockers==1 and inv.blockers[1].kind=='unobservable','a failed lookup is unavailable evidence, never absence')
- inv=State.forget_inventory(root,'session',gone,'9')
+ inv=inventory_of(root,'session',gone,'9')
  check(#inv.blockers==2 and inv.blockers[1].kind=='unobservable','a pane of another host cannot be observed and blocks')
  root.requests['other/launch'].pane_binding=pane('55')
- inv=State.forget_inventory(root,'session',observer({['55']='present',['57']='absent'}),'7')
+ inv=inventory_of(root,'session',observer({['55']='present',['57']='absent'}),'7')
  check(inv.blockers[1].kind=='shared_pane','a pane also retained by another orchestration is marked shared')
  -- Fail closed on identity: another native session, an unreadable terminal proof, wake obligations retained on a worker.
- inv=State.forget_inventory(root,'session',gone,'7','9')
+ inv=inventory_of(root,'session',gone,'7','9')
  check(#inv.blockers>=1 and inv.blockers[1].kind=='unobservable','a pane of another native session (restarted Tern, reused pane ids) is unobservable, never absent')
- check(#State.forget_inventory(root,'session',gone,'7','3').blockers==0,'the same native session with the pane absent is clean')
+ check(#inventory_of(root,'session',gone,'7','3').blockers==0,'the same native session with the pane absent is clean')
  local with_proof=build();with_proof.workers['session/w'].terminal_process={platform='not-this-os'}
- check(State.forget_inventory(with_proof,'session',gone,'7','3').blockers[1].kind=='unobservable','a terminal process proof this host cannot read is unavailable evidence')
+ check(inventory_of(with_proof,'session',gone,'7','3').blockers[1].kind=='unobservable','a terminal process proof this host cannot read is unavailable evidence')
  -- Retained terminal process identity decides what a pane id means (positive absence only; a failed check is never absence).
  local function terminal(pane_state,process_value)
   local r=build();r.workers['session/w'].terminal_process={platform='linux',root_pid=1}
   local obs=observer({['55']=pane_state,['57']='absent'})
-  return State.forget_inventory(r,'session',obs,'7','3',function() return process_value end)
+  return inventory_of(r,'session',obs,'7','3',function() return process_value end)
  end
  inv=terminal('absent','alive')
  check(#inv.blockers==1 and inv.blockers[1].kind=='uncertain','a surviving retained process with its pane gone blocks (no pane to close)')
@@ -270,7 +273,7 @@ do
  check(terminal('absent','gone').fingerprint~=terminal('absent','alive').fingerprint and terminal('absent','gone').fingerprint==terminal('absent','gone').fingerprint,'the bound observation fingerprint follows the results')
  local fp=terminal('absent','gone').fingerprint
  local changed_root=build();changed_root.workers['session/w'].terminal_process={platform='linux',root_pid=1}
- local refused,_,why=State.forget_discard(changed_root,'session',observer({['55']='absent',['57']='absent'}),'7','3',function() return 'gone' end,fp..'x')
+ local refused,_,why=discard_of(changed_root,'session',observer({['55']='absent',['57']='absent'}),'7','3',function() return 'gone' end,fp..'x')
  check(refused==nil and why=='changed' and changed_root.sessions.session~=nil,'a result that differs from the previewed one refuses the discard and changes nothing')
 -- Real /proc liveness (Linux): positive absence, positive presence, and everything else unknown.
  do
@@ -291,29 +294,39 @@ do
   local other=proof(pid,identity);other.platform='windows'
   check(live(other)=='unknown' and live({})=='unknown','another platform or a malformed proof is unknown, never gone')
  end
+ -- Proof-less panes: absence counts only for a launch recorded under the CURRENT, positively verified Tern host incarnation.
+ check(#inventory_of(build(),'session',gone,'7','3',nil,'inc-1').blockers==0,'a launch recorded in this incarnation with its pane gone is clean')
+ inv=inventory_of(build(),'session',gone,'7','3',nil,'inc-2')
+ check(#inv.blockers>=1 and inv.blockers[1].kind=='unobservable' and inv.blockers[1].pane==nil,'after a Tern restart (different incarnation) a reused pane id reads as cannot be checked, never absent')
+ local unrecorded=build();unrecorded.requests['session/launch'].launch_incarnation=nil;unrecorded.workers['session/w'].launch_incarnation=nil
+ inv=inventory_of(unrecorded,'session',gone,'7','3',nil,'inc-1')
+ check(#inv.blockers>=1 and inv.blockers[1].kind=='unobservable','a binding launched without a recorded incarnation cannot be checked')
+ check(#inventory_of(build(),'session',gone,'7','3',nil,false).blockers>=1,'an unverifiable current incarnation is never evidence')
+ inv=inventory_of(build(),'session',observer({['55']='present',['57']='absent'}),'7','3',nil,'inc-1')
+ check(#inv.blockers==1 and inv.blockers[1].kind=='pane','the host\'s live agent/pane list contradicting the record blocks')
  local woken=build()
  woken.workers['session/w'].wakes={wake1={request_id='wake1',origin_binding=origin('session'),wake={phase='claimed'}}}
- inv=State.forget_inventory(woken,'session',gone,'7','3')
+ inv=inventory_of(woken,'session',gone,'7','3')
  check(#inv.blockers==1 and inv.blockers[1].kind=='uncertain','a claimed wake retained on a worker blocks')
  woken.workers['session/w'].wakes.wake1.wake={phase='resolved',pane_binding=pane('58')}
- inv=State.forget_inventory(woken,'session',observer({['55']='absent',['57']='absent',['58']='present'}),'7','3')
+ inv=inventory_of(woken,'session',observer({['55']='absent',['57']='absent',['58']='present'}),'7','3')
  check(#inv.blockers==1 and inv.blockers[1].kind=='pane' and inv.blockers[1].pane=='58','a pane named only by a retained wake is observed too')
  root=build()
  root.requests['session/launch'].body.status='claimed'
- inv=State.forget_inventory(root,'session',gone,'7')
+ inv=inventory_of(root,'session',gone,'7')
  check(#inv.blockers==1 and inv.blockers[1].kind=='uncertain','a claimed effect blocks even with every pane absent')
  root=build();root.mailboxes.generations.mine.active={id='op'}
- check(#State.forget_inventory(root,'session',gone,'7').blockers==1,'a running mailbox child blocks')
+ check(#inventory_of(root,'session',gone,'7').blockers==1,'a running mailbox child blocks')
  root=build();root.requests['session/launch'].authorization={phase='requested'}
- check(#State.forget_inventory(root,'session',gone,'7').blockers==0,'a positively unconsumed grant does not block (it is revoked with the graph)')
+ check(#inventory_of(root,'session',gone,'7').blockers==0,'a positively unconsumed grant does not block (it is revoked with the graph)')
  root.requests['session/launch'].authorization={phase='consumed'}
- check(#State.forget_inventory(root,'session',gone,'7').blockers==1,'a consumed grant is uncertain execution and blocks')
+ check(#inventory_of(root,'session',gone,'7').blockers==1,'a consumed grant is uncertain execution and blocks')
  root=build()
  local before_other=P.clone(root.sessions.other);local theirs=P.clone(root.mailboxes.generations.theirs)
  local rest={version=root.version,namespace=root.namespace,authority_namespace=root.authority_namespace,admission_cursor=root.admission_cursor,gates=P.clone(root.gates),next_id=root.next_id}
- local blocked,why=State.forget_discard(root,'session',observer({['55']='present',['57']='absent'}),'7')
+ local blocked,why=discard_of(root,'session',observer({['55']='present',['57']='absent'}),'7')
  check(blocked==nil and why and #why.blockers==1 and root.sessions.session~=nil and count(root.requests)==2,'a blocked discard changes nothing')
- local done=State.forget_discard(root,'session',gone,'7')
+ local done=discard_of(root,'session',gone,'7')
  check(done and root.sessions.session==nil and count(root.requests)==1 and root.requests['other/launch']~=nil and count(root.workers)==0,'only the matching session graph is removed')
  check(root.mailboxes.generations.mine==nil and P.equal(root.mailboxes.generations.theirs,theirs) and P.equal(root.sessions.other,before_other),'its mailbox generations go; another session is untouched')
  for key,value in pairs(rest) do check(P.equal(root[key],value),'roster-side fields, counters and the admission watermark are untouched: '..key) end
