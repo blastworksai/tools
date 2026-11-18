@@ -153,7 +153,7 @@ omp_family() { # config text on stdin
 }
 
 # Does this --help text list the flag as its own token (so --yolo-extra is not --yolo), and, for a valued
-# flag, the value in that flag's own entry (its line plus indented continuation lines)?
+# flag, the value in that flag's own entry (its line plus lines indented deeper than it)?
 help_has() { # help text, flag, value-or-empty
 	printf '%s\n' "$1" | LC_ALL=C awk -v f="$2" -v v="$3" '
 	function has(s, t,   i, off, b, a) {
@@ -166,9 +166,12 @@ help_has() { # help text, flag, value-or-empty
 		return 0
 	}
 	function judge() { if (v == "" || has(cur, v)) ok = 1 }
-	{ if (coll && $0 ~ /^[ \t]+[^ \t-]/) { cur = cur " " $0; next }
+	{ ind = match($0, /[^ \t]/) - 1
+	  # A continuation is indented deeper than the entry that holds the flag; a line at the same or a shallower
+	  # indent (a sibling entry, a positional or environment name) or one starting with a dash ends the entry.
+	  if (coll && $0 ~ /^[ \t]+[^ \t-]/ && ind > eind) { cur = cur " " $0; next }
 	  if (coll) { judge(); coll = 0 }
-	  if (has($0, f)) { coll = 1; cur = $0 } }
+	  if (has($0, f)) { coll = 1; cur = $0; eind = (ind < 0) ? 0 : ind } }
 	END { if (coll) judge(); exit ok ? 0 : 1 }'
 }
 

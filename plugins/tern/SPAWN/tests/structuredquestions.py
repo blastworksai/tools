@@ -384,7 +384,7 @@ class StructuredQuestions(unittest.TestCase):
         # No PowerShell on the build host: these are source checks of the Windows twin, not a run of it.
         ps1 = (PACKAGE / "structuredquestions.ps1").read_text()
         self.assertIn("WaitForExit($timeoutMs)", ps1)
-        self.assertIn("$process.Kill()", ps1)
+        self.assertIn("Stop-ProcessTree $id $since", ps1, "the whole tree is stopped, not only the launched process")
         self.assertNotIn("& $cmd.Source --help", ps1, "no unbounded help call")
         self.assertIn(".omp\\agent\\config.yml", ps1)
         self.assertIn("modelRoles:", ps1)
@@ -437,6 +437,20 @@ class StructuredQuestions(unittest.TestCase):
             self.assertEqual({"Grok", "OMP"} <= asked, expected, text)
             self.assertEqual(bool({"Grok", "OMP"} & asked), expected, text)
 
+    def test_a_sibling_entry_is_not_a_continuation_of_the_flag(self):
+        # P2: any indented non-option line counted as a continuation, so a sibling `MODEL ... yolo` entry after
+        # `--approval-mode MODE` enabled YOLO.
+        sibling = "  --approval-mode MODE\n  MODEL   pick a model (always-ask|yolo)\n  --permission-mode MODE\n  MODEL   bypassPermissions\n"
+        fx = self.fixture(help_text=sibling)
+        data = self.output(fx, "--glitch-root", str(fx.glitch))
+        asked = {q["when"]["provider"] for q in questions(data) if q["question"].endswith("which permission mode?")}
+        self.assertFalse({"Grok", "OMP"} & asked, "a sibling entry at the same indent ended the flag's entry")
+        # The same value on a continuation indented deeper than the flag still counts (the real grok layout).
+        deeper = "  --approval-mode MODE\n      pick one of always-ask|yolo\n  --permission-mode <MODE>\n      [possible values: default, bypassPermissions]\n"
+        fx = self.fixture(help_text=deeper)
+        asked = {q["when"]["provider"] for q in questions(self.output(fx, "--glitch-root", str(fx.glitch))) if q["question"].endswith("which permission mode?")}
+        self.assertTrue({"Grok", "OMP"} <= asked)
+
     def test_windows_launch_plan_and_flag_tokens_from_the_ps1_source(self):
         # No PowerShell on the build host. The launch decision and the token boundary are literal patterns in the
         # twin's source; they are read from it and applied here, so the source itself is what is exercised.
@@ -465,6 +479,15 @@ class StructuredQuestions(unittest.TestCase):
         self.assertFalse(token("--yolo-extra", "--yolo") or token("x--yolo", "--yolo") or token("--approval-mode-x", "--approval-mode"))
         self.assertTrue(token("(always-ask|yolo)", "yolo") and not token("(always-ask|yolo-extra)", "yolo"))
 
+
+    @unittest.skipUnless(shutil.which("pwsh") or shutil.which("powershell"), "needs PowerShell (the build host has none; run on Windows)")
+    def test_windows_runtime_hang_tree_kill_and_help_layouts(self):
+        host = shutil.which("pwsh") or shutil.which("powershell")
+        work = Path(self.tmp.name) / "win"
+        work.mkdir()
+        done = subprocess.run([host, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(Path(__file__).with_name("structuredquestions_windows.ps1")),
+                               "-Dir", str(work), "-Script", str(PACKAGE / "structuredquestions.ps1")], capture_output=True, text=True, timeout=300)
+        self.assertIn("VERDICT PASS", done.stdout, done.stdout + done.stderr)
 
     def test_script_is_read_only_and_forbids_model_questions(self):
         text = SCRIPT.read_text()

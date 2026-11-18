@@ -3,11 +3,14 @@
 # only account row is the operator's own. Same JSON, same titles and options, same limits (at most 4
 # questions per prompt, at most 4 options per question). Run with PowerShell, never cmd.exe:
 #   structuredquestions.ps1 [-GlitchRoot <path>[,<path>]] [-Cwd <path>]
-param([string[]]$GlitchRoot = @(), [string]$Cwd = (Get-Location).Path)
+# -SearchPath and -TimeoutSeconds exist for tests: the first limits each provider CLI's lookup to those folders,
+# the second sets the per-call bound without touching the environment.
+param([string[]]$GlitchRoot = @(), [string]$Cwd = (Get-Location).Path, [string[]]$SearchPath = @(), [int]$TimeoutSeconds = 0)
 $ErrorActionPreference = 'Stop'
 # Every external call is bounded (SPAWN_QUESTIONS_TIMEOUT seconds, default 20): WaitForExit(ms), then Kill.
 $timeoutMs = 20000
-if ($env:SPAWN_QUESTIONS_TIMEOUT -match '^\d+$') { $timeoutMs = [int]$env:SPAWN_QUESTIONS_TIMEOUT * 1000 }
+if ($TimeoutSeconds -gt 0) { $timeoutMs = $TimeoutSeconds * 1000 }
+elseif ($env:SPAWN_QUESTIONS_TIMEOUT -match '^\d+$') { $timeoutMs = [int]$env:SPAWN_QUESTIONS_TIMEOUT * 1000 }
 # How to start a discovered program. Get-Command -CommandType Application also returns .cmd/.bat shims (npm
 # installs them), which Process.Start with UseShellExecute=$false cannot run: they go through cmd.exe /d /c with
 # the path in one pair of quotes, and a path cmd.exe would still interpret inside quotes (quote, %, !, line
@@ -31,28 +34,56 @@ $script:TokenAfter = '(?![A-Za-z0-9_-])'
 function Test-Token([string]$Text, [string]$Token) {
   return [regex]::IsMatch($Text, $script:TokenBefore + [regex]::Escape($Token) + $script:TokenAfter)
 }
+function Get-Indent([string]$Line) { return $Line.Length - $Line.TrimStart().Length }
 function Test-HelpFlag([string]$Help, [string]$Flag, [string]$Value) {
-  $entry = $null
+  $entry = $null; $indent = 0
   foreach ($line in ($Help -split "\r?\n")) {
-    if ($null -ne $entry -and $line -match '^\s+[^\s-]') { $entry += ' ' + $line; continue }
+    # A continuation is indented deeper than the entry holding the flag; a sibling entry, a positional or
+    # environment name at the same or a shallower indent, or a line starting with a dash ends the entry.
+    if ($null -ne $entry -and $line -match '^\s+[^\s-]' -and (Get-Indent $line) -gt $indent) { $entry += ' ' + $line; continue }
     if ($null -ne $entry -and ($Value -eq '' -or (Test-Token $entry $Value))) { return $true }
     $entry = $null
-    if (Test-Token $line $Flag) { $entry = $line }
+    if (Test-Token $line $Flag) { $entry = $line; $indent = Get-Indent $line }
   }
   return ($null -ne $entry -and ($Value -eq '' -or (Test-Token $entry $Value)))
+}
+# Ends a launched program AND everything it started (a .cmd shim's cmd.exe leaves its child CLI running when only
+# it is killed). Works on Windows PowerShell 5.1 and PowerShell 7 alike: the descendants are found through
+# Win32_Process parent links (valid while the parent is gone too, as long as the child started after the parent),
+# then stopped deepest first, then the root. Process.Kill($true) is .NET Core only, so it is not relied on.
+function Stop-ProcessTree([int]$RootId, [datetime]$Since) {
+  try {
+    $table = @(Get-CimInstance -ClassName Win32_Process -ErrorAction Stop | Select-Object ProcessId, ParentProcessId, CreationDate)
+    $order = New-Object System.Collections.ArrayList
+    $queue = New-Object System.Collections.Queue; $queue.Enqueue($RootId)
+    while ($queue.Count -gt 0) {
+      $parentId = $queue.Dequeue()
+      foreach ($row in $table) {
+        if ($row.ParentProcessId -eq $parentId -and $row.ProcessId -ne $RootId -and $row.CreationDate -ge $Since.AddSeconds(-2) -and -not $order.Contains([int]$row.ProcessId)) { [void]$order.Add([int]$row.ProcessId); $queue.Enqueue([int]$row.ProcessId) }
+      }
+    }
+    for ($i = $order.Count - 1; $i -ge 0; $i--) { Stop-Process -Id $order[$i] -Force -ErrorAction SilentlyContinue }
+  } catch { }
+  Stop-Process -Id $RootId -Force -ErrorAction SilentlyContinue
 }
 function Invoke-Bounded([string]$File, [string]$Arguments) {
   $info = New-Object System.Diagnostics.ProcessStartInfo
   $info.FileName = $File; $info.Arguments = $Arguments; $info.UseShellExecute = $false; $info.CreateNoWindow = $true
   $info.RedirectStandardInput = $true; $info.RedirectStandardOutput = $true; $info.RedirectStandardError = $true
   $process = [System.Diagnostics.Process]::Start($info)
+  $id = $process.Id
+  try { $since = $process.StartTime } catch { $since = (Get-Date).AddSeconds(-5) }
+  $text = $null
   try {
     $process.StandardInput.Close()
     $out = $process.StandardOutput.ReadToEndAsync(); $err = $process.StandardError.ReadToEndAsync()
-    if (-not $process.WaitForExit($timeoutMs)) { try { $process.Kill() } catch { }; [void]$process.WaitForExit(2000); return $null }
-    if (-not $out.Wait(2000) -or -not $err.Wait(2000)) { return $null }
-    return ($out.Result + $err.Result)
-  } finally { $process.Dispose() }
+    if ($process.WaitForExit($timeoutMs) -and $out.Wait(2000) -and $err.Wait(2000)) { $text = $out.Result + $err.Result }
+  } finally {
+    # On time-out, on an output drain that never ends and after a normal exit alike: nothing it started stays.
+    Stop-ProcessTree $id $since
+    $process.Dispose()
+  }
+  return $text
 }
 # The service named in an OMP account's own config (modelRoles.default is "<service>/<model>"); any service is kept.
 function Get-OmpFamily([string]$ConfigPath) {
@@ -104,13 +135,21 @@ $arrow = [string][char]0x2192
 $dot = [string][char]0x00B7
 $found = @(); $missing = @(); $accounts = @(); $used = @{}; $permOut = [ordered]@{}; $noflag = @(); $unavailable = @()
 foreach ($p in $providers) {
-  $cmd = Get-Command $p.cli -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+  $cmd = $null
+  if ($SearchPath.Count -gt 0) {
+    foreach ($dir in $SearchPath) {
+      foreach ($ext in '.exe', '.cmd', '.bat', '.com') {
+        $candidate = Join-Path $dir ($p.cli + $ext)
+        if (-not $cmd -and (Test-Path -LiteralPath $candidate -PathType Leaf)) { $cmd = [pscustomobject]@{ Source = $candidate } }
+      }
+    }
+  } else { $cmd = Get-Command $p.cli -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1 }
   if (-not $cmd) { $missing += $p.name; continue }
   # One provider that cannot be started is reported and skipped; discovery of the others goes on.
   $plan = Get-LaunchPlan $cmd.Source
   if (-not $plan.ok) { $unavailable += "Unavailable: $($p.name) ($($plan.reason))."; continue }
   try { $help = Invoke-Bounded $plan.file $plan.arguments } catch { $unavailable += "Unavailable: $($p.name) (it could not be started: $($_.Exception.Message))."; continue }
-  if ($null -eq $help) { $help = '' }
+  if ($null -eq $help) { $unavailable += "Unavailable: $($p.name) (its --help did not finish within $([int]($timeoutMs / 1000)) seconds)."; continue }
   $found += "$($p.name) you"
   $family = $p.family
   if ($p.cli -eq 'omp') { $family = Get-OmpFamily (Join-Path $userHome '.omp\agent\config.yml') }
@@ -182,4 +221,7 @@ $result = [ordered]@{
   }
   limits = [ordered]@{ questions_per_prompt = 4; options_per_question = 4; header_characters = 12 }
 }
-[Console]::Out.WriteLine(($result | ConvertTo-Json -Depth 12 -Compress))
+# UTF-8 bytes straight to stdout: Windows PowerShell 5.1 would otherwise encode the dash, arrow and dot in the
+# console's OEM code page, and the helper reads UTF-8.
+$bytes = (New-Object System.Text.UTF8Encoding($false)).GetBytes(($result | ConvertTo-Json -Depth 12 -Compress) + "`n")
+$stdout = [Console]::OpenStandardOutput(); $stdout.Write($bytes, 0, $bytes.Length); $stdout.Flush()
