@@ -11,10 +11,11 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 import unittest
 
 PACKAGE = Path(__file__).resolve().parents[1]
-SCRIPT = PACKAGE / "structuredquestions.sh"
+SCRIPT = Path(os.environ.get("SPAWN_SQ_SCRIPT", PACKAGE / "structuredquestions.sh"))  # the override exists to show a test red on the old script
 GOLDEN = Path(__file__).with_name("structuredquestions.golden.json")
 PROVIDERS = ["claude", "codex", "kimi", "grok", "agy", "muse", "omp"]
 SEATS = ["claudework", "claudehome", "codexone", "codextwo", "kimione", "grokone",
@@ -23,14 +24,15 @@ HELP_ALL = "usage: tool [--dangerously-skip-permissions] [--dangerously-bypass-a
 
 
 class Fixture:
-    def __init__(self, base, seats=SEATS, operator_clis=PROVIDERS, help_text=HELP_ALL, glitch=True, sudo=True, no_cli=()):
+    def __init__(self, base, seats=SEATS, operator_clis=PROVIDERS, help_text=HELP_ALL, glitch=True, sudo=True, no_cli=(), help_by=None, hang=(), omp_family="openai"):
         self.base = Path(base)
         self.bin = self.base / "bin"
         self.bin.mkdir()
         # A closed PATH: only these system tools, so a real provider CLI or sudo on the test machine never leaks in.
         self.sys = self.base / "sys"
         self.sys.mkdir()
-        for tool in ("sh", "awk", "grep", "mktemp", "rm", "timeout", "cat", "env", "test", "true", "tail", "sed", "tr", "head"):
+        # No `timeout` here on purpose (macOS has none): the script must bound calls itself.
+        for tool in ("sh", "awk", "grep", "mktemp", "rm", "cat", "env", "test", "true", "tail", "sed", "tr", "head", "od", "sleep", "kill"):
             found = shutil.which(tool)
             if found:
                 (self.sys / tool).symlink_to(found)
@@ -41,15 +43,15 @@ class Fixture:
         for account in seats:
             provider = next(p for p in PROVIDERS if account.startswith(p))
             if account not in no_cli:
-                self.cli(account, provider, help_text)
+                self.cli(account, provider, (help_by or {}).get(account, help_text), hang=account in hang)
         for provider in operator_clis:
-            self.cli("you", provider, help_text)
+            self.cli("you", provider, (help_by or {}).get("you", help_text), hang="you" in hang)
         omp = self.home / "ompone/.omp/agent"
         omp.mkdir(parents=True)
         (omp / "config.yml").write_text("modelRoles:\n  default: anthropic/claude-model\nsetupVersion: 3\n")
         mine = self.home / "you/.omp/agent"
         mine.mkdir(parents=True)
-        (mine / "config.yml").write_text("modelRoles:\n  default: openai/gpt-model\n")
+        (mine / "config.yml").write_text(f"modelRoles:\n  default: {omp_family}/some-model\n")
         passwd = "".join(f"{a}:x:{1100 + i}:{1100 + i}::{self.home / a}:/bin/bash\n" for i, a in enumerate(seats))
         passwd += f"you:x:1000:1000::{self.home / 'you'}:/bin/bash\n"
         passwd += "nobody:x:65534:65534::/nonexistent:/usr/sbin/nologin\nclaudeservice:x:1200:1200::/nonexistent:/usr/sbin/nologin\n"
@@ -58,10 +60,10 @@ class Fixture:
         self.script("getent", '[ "$1" = passwd ] && cat "$FIX/passwd"\n')
         self.script("id", 'echo you\n')
         if sudo:
-            self.script("sudo", f'''echo "$*" >> "$FIX/sudo.log"
+            self.script("sudo", f'''printf '%s\n' "$*" >> "$FIX/sudo.log"
 [ "$1" = -n ] || exit 1
 shift
-[ "$1" = true ] && exit 0
+[ "$1" = true ] && exit 1   # this operator may use the per-seat login route but is not allowed root
 [ "$1" = -i ] && [ "$2" = -u ] || exit 1
 account=$3; shift 3
 [ "$1" = -- ] || exit 1
@@ -82,18 +84,27 @@ exec env -i HOME="$FIX/home/$account" PATH="$FIX/home/$account/.local/bin:$FIX/s
         path.write_text("#!/bin/sh\n" + body)
         path.chmod(0o755)
 
-    def cli(self, account, provider, help_text):
+    def cli(self, account, provider, help_text, hang=False):
         path = self.home / account / ".local/bin" / provider
-        path.write_text(f"#!/bin/sh\nprintf '%s' '{help_text}'\n")
+        body = "sleep 300\n" if hang else f"printf '%s' '{help_text}'\n"
+        path.write_text("#!/bin/sh\n" + body)
         path.chmod(0o755)
 
-    def run(self, *extra, cwd=None):
-        env = {"PATH": f"{self.bin}:{self.home / 'you/.local/bin'}:{self.sys}", "HOME": str(self.home / "you"),
+    def run(self, *extra, cwd=None, timeout=120, seconds="20"):
+        env = {"SPAWN_QUESTIONS_TIMEOUT": seconds, "PATH": f"{self.bin}:{self.home / 'you/.local/bin'}:{self.sys}", "HOME": str(self.home / "you"),
                "FIX": str(self.base), "TMPDIR": str(self.base), "SPAWN_QUESTIONS_SYSTEM_GLITCH": str(self.base / "no-system-glitch")}
         args = ["/bin/sh", str(SCRIPT), "--cwd", str(cwd or self.base / "nothing"), *extra]
-        done = subprocess.run(args, env=env, capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=120)
+        done = subprocess.run(args, env=env, capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=timeout)
         self.assert_clean = (done.returncode, done.stderr)
         return done
+
+
+def decode_login(line):
+    """A logged sudo call -> (account, decoded program text), or None when it is not the login wrapper."""
+    m = re.match(r"^-n -i -u (\S+) -- /bin/sh -c eval \"\$\(printf \"\$\{1\}\"\)\" spawn-login (.+)$", line)
+    if not m:
+        return None
+    return m.group(1), re.sub(r"\\([0-7]{3})", lambda o: chr(int(o.group(1), 8)), m.group(2))
 
 
 def questions(data):
@@ -110,11 +121,11 @@ def labels(question):
 
 class StructuredQuestions(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory(prefix="spawn-sq-")
+        self.tmp = tempfile.TemporaryDirectory(prefix="spawn sq ")
         self.addCleanup(self.tmp.cleanup)
 
-    def fixture(self, **kwargs):
-        base = Path(self.tmp.name) / f"fx{len(list(Path(self.tmp.name).iterdir()))}"
+    def fixture(self, name=None, **kwargs):
+        base = Path(self.tmp.name) / (name or f"fx {len(list(Path(self.tmp.name).iterdir()))}")
         base.mkdir()
         return Fixture(base, **kwargs)
 
@@ -202,11 +213,13 @@ class StructuredQuestions(unittest.TestCase):
     def test_each_seat_resolves_as_its_own_account_through_sudo_login(self):
         fx = self.fixture()
         data = self.output(fx, "--glitch-root", str(fx.glitch))
-        calls = (fx.base / "sudo.log").read_text().splitlines()
+        calls = [decode_login(line) for line in (fx.base / "sudo.log").read_text().splitlines()]
+        self.assertNotIn(None, calls, "every seat call is the constant login wrapper with one encoded word")
+        self.assertNotIn("-n true", (fx.base / "sudo.log").read_text().splitlines(), "root is never probed: only the per-account route")
         for account in ("claudework", "grokone", "ompone"):
             provider = next(p for p in PROVIDERS if account.startswith(p))
-            self.assertIn(f"-n -i -u {account} -- sh -c command -v {provider}", calls)
-            self.assertIn(f"-n -i -u {account} -- test -x {fx.base}/home/{account}/.local/bin/{provider}", calls)
+            self.assertIn((account, f"exec 'sh' '-c' 'command -v {provider}'"), calls)
+            self.assertIn((account, f"exec 'test' '-x' '{fx.base}/home/{account}/.local/bin/{provider}'"), calls)
         for a in data["derived"]["accounts"]:
             if not a["operator"]:
                 self.assertTrue(a["command"].startswith(f"{fx.base}/home/{a['account']}/"), "a seat never gets another account's CLI path")
@@ -245,7 +258,7 @@ class StructuredQuestions(unittest.TestCase):
         fx = self.fixture(sudo=False)
         data = self.output(fx, "--glitch-root", str(fx.glitch))
         self.assertTrue(all(a["operator"] for a in data["derived"]["accounts"]))
-        self.assertTrue(any("sudo -n is not available" in line for line in data["intro"]))
+        self.assertTrue(any("sudo is not installed" in line for line in data["intro"]))
 
     def test_output_is_deterministic_and_leaves_nothing_behind(self):
         fx = self.fixture()
@@ -266,6 +279,110 @@ class StructuredQuestions(unittest.TestCase):
                       "Found on this machine", "Not found: ", "Glitch folder detected: "]:
             self.assertIn(exact, sh)
             self.assertIn(exact, ps1)
+
+    # ---- cross-family review round 1 (SKILLS-210) ----
+    def test_a_path_is_never_put_inside_a_shell_string(self):
+        # P1: the resolved CLI path crossed `sh -c` unquoted, so spaces broke and metacharacters ran as the seat.
+        fx = self.fixture(name="a b;touch PWNED;'q$(touch PWNED2)")
+        data = self.output(fx, "--glitch-root", str(fx.glitch))
+        self.assertEqual([p for p in fx.base.rglob("PWNED*")], [], "a metacharacter in a path executed")
+        claude = [a for a in data["derived"]["accounts"] if a["account"] == "claudework"][0]
+        self.assertEqual(claude["command"], f"{fx.base}/home/claudework/.local/bin/claude")
+        self.assertIn("Claude 2", data["intro"][0])
+        perm = [q for q in questions(data) if q["question"] == "Claude: which permission mode?"]
+        self.assertEqual(len(perm), 1, "help still read for a path with spaces and quotes")
+
+    def test_a_forged_row_in_an_input_is_only_data(self):
+        # P2: paths went into an unescaped tab-separated file; a newline in --cwd forged an ACC row.
+        fx = self.fixture()
+        evil = "x\nACC\tclaude\tevil\tseat\t/evil/claude\t/evil\tanthropic\nGLITCH\t/evil\tq"
+        data = self.output(fx, "--glitch-root", str(fx.glitch), cwd=evil)
+        self.assertNotIn("evil", [a["account"] for a in data["derived"]["accounts"]])
+        self.assertEqual(data["derived"]["launch_folder"], evil)
+        self.assertEqual(data["derived"]["glitch_folders"], [str(fx.glitch)])
+        tabbed = self.output(fx, "--glitch-root", str(fx.glitch), cwd="a\tb c%41")
+        self.assertEqual(tabbed["derived"]["launch_folder"], "a\tb c%41", "tabs and percent signs survive intact")
+
+    def test_a_hanging_command_is_bounded_without_gnu_timeout(self):
+        # P2: no `timeout` on macOS, none on Windows, and GNU timeout had no kill fallback.
+        fx = self.fixture(hang=("claudework", "you"))
+        started = time.monotonic()
+        done = fx.run("--glitch-root", str(fx.glitch), timeout=90, seconds="1")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertLess(time.monotonic() - started, 60)
+        data = json.loads(done.stdout)
+        claude = [q for q in questions(data) if q["question"] == "Claude: which permission mode?"][0]
+        unsupported = claude["options"][1]["unsupported_by"]
+        self.assertIn("claude-work", unsupported, "an account whose --help hangs supports nothing")
+        self.assertIn("claude-you", unsupported)
+        self.assertNotIn("claude-home", unsupported)
+        self.assertEqual([p for p in fx.base.iterdir() if p.name.startswith("spawn-questions.")], [])
+
+    def test_permission_flags_are_checked_per_account(self):
+        # P2: the flag list came from the first account's --help only.
+        fx = self.fixture(help_by={"claudehome": "usage: claude [--other]\n"})
+        data = self.output(fx, "--glitch-root", str(fx.glitch))
+        claude = [q for q in questions(data) if q["question"] == "Claude: which permission mode?"][0]
+        self.assertEqual(claude["options"][0].get("unsupported_by"), None)
+        self.assertEqual(claude["options"][1]["unsupported_by"], ["claude-home"])
+        self.assertEqual(data["derived"]["permissions"]["Claude"][1]["unsupported_by"], ["claude-home"])
+        # Every account supports it everywhere else: no unsupported_by at all.
+        codex = [q for q in questions(data) if q["question"] == "Codex: which permission mode?"][0]
+        self.assertTrue(all("unsupported_by" not in o for o in codex["options"]))
+        # No account supports the flag: the option is not offered and the intro says so.
+        none = self.output(self.fixture(help_text="usage: tool\n"), "--glitch-root", "/nonexistent")
+        self.assertEqual([q for q in questions(none) if q["question"].endswith("which permission mode?")], [])
+
+    def test_four_glitch_roots_still_fit_four_options(self):
+        # P2: 4 roots plus the home option made five options.
+        fx = self.fixture()
+        roots = [fx.glitch]
+        for n in range(3):
+            extra = fx.base / f"glitch{n}"
+            (extra / ".claude/scripts").mkdir(parents=True)
+            (extra / ".claude/scripts/workspaces.py").write_text("x")
+            (extra / ".claude/scripts/plan_check.py").write_text("x")
+            roots.append(extra)
+        args = [a for r in roots for a in ("--glitch-root", str(r))]
+        data = self.output(fx, *args)
+        folder = by_id(data, "folder")["questions"][0]
+        self.assertEqual(len(folder["options"]), 4)
+        self.assertEqual(labels(folder)[-1], "Each account's own home folder")
+        self.assertEqual(sum(o["preselected"] for o in folder["options"]), 0, "no single recommendation among several roots")
+        self.assertTrue(any(line.startswith("More Glitch folders found, not listed as choices") and str(roots[3]) in line for line in data["intro"]))
+
+    def test_an_operator_allowed_per_seat_but_not_root_resolves_every_seat(self):
+        # P2: `sudo -n true` tested root, not the per-account route.
+        fx = self.fixture()
+        data = self.output(fx, "--glitch-root", str(fx.glitch))
+        self.assertEqual(len([a for a in data["derived"]["accounts"] if not a["operator"]]), 12)
+        self.assertFalse(any(line.startswith("Unavailable:") for line in data["intro"]))
+        self.assertNotIn("-n true", (fx.base / "sudo.log").read_text().splitlines())
+
+    def test_an_omp_service_outside_the_three_is_offered_as_configured(self):
+        fx = self.fixture(omp_family="moonshot")
+        data = self.output(fx, "--glitch-root", str(fx.glitch))
+        omp = {q["when"]["account_id"]: labels(q) for q in by_id(data, "omp")["questions"]}
+        self.assertEqual(omp["omp-you"], ["moonshot (from its config) (Recommended)", "openai", "google"])
+        self.assertEqual([a["provider_family"] for a in data["derived"]["accounts"] if a["id"] == "omp-you"], ["moonshot"])
+
+    def test_windows_twin_reads_the_omp_config_and_bounds_every_call(self):
+        # No PowerShell on the build host: these are source checks of the Windows twin, not a run of it.
+        ps1 = (PACKAGE / "structuredquestions.ps1").read_text()
+        self.assertIn("WaitForExit($timeoutMs)", ps1)
+        self.assertIn("$process.Kill()", ps1)
+        self.assertNotIn("& $cmd.Source --help", ps1, "no unbounded help call")
+        self.assertIn(".omp\\agent\\config.yml", ps1)
+        self.assertIn("modelRoles:", ps1)
+        self.assertIn("Get-OmpFamily", ps1)
+        self.assertIn("Select-Object -First 3", ps1)
+
+    def test_skill_forwards_every_observed_glitch_candidate(self):
+        skill = (PACKAGE / "skills/setup/SKILL.md").read_text()
+        self.assertIn("every entry of its `candidates` in any state", skill)
+        self.assertIn("`unsupported_by`", skill)
+        self.assertLessEqual(len(json.dumps(skill)), 8957, "stays within main's JSON-encoded size")
+
 
     def test_script_is_read_only_and_forbids_model_questions(self):
         text = SCRIPT.read_text()

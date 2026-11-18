@@ -5,6 +5,33 @@
 #   structuredquestions.ps1 [-GlitchRoot <path>[,<path>]] [-Cwd <path>]
 param([string[]]$GlitchRoot = @(), [string]$Cwd = (Get-Location).Path)
 $ErrorActionPreference = 'Stop'
+# Every external call is bounded (SPAWN_QUESTIONS_TIMEOUT seconds, default 20): WaitForExit(ms), then Kill.
+$timeoutMs = 20000
+if ($env:SPAWN_QUESTIONS_TIMEOUT -match '^\d+$') { $timeoutMs = [int]$env:SPAWN_QUESTIONS_TIMEOUT * 1000 }
+function Invoke-Bounded([string]$File, [string]$Arguments) {
+  $info = New-Object System.Diagnostics.ProcessStartInfo
+  $info.FileName = $File; $info.Arguments = $Arguments; $info.UseShellExecute = $false; $info.CreateNoWindow = $true
+  $info.RedirectStandardInput = $true; $info.RedirectStandardOutput = $true; $info.RedirectStandardError = $true
+  $process = [System.Diagnostics.Process]::Start($info)
+  try {
+    $process.StandardInput.Close()
+    $out = $process.StandardOutput.ReadToEndAsync(); $err = $process.StandardError.ReadToEndAsync()
+    if (-not $process.WaitForExit($timeoutMs)) { try { $process.Kill() } catch { }; [void]$process.WaitForExit(2000); return $null }
+    if (-not $out.Wait(2000) -or -not $err.Wait(2000)) { return $null }
+    return ($out.Result + $err.Result)
+  } finally { $process.Dispose() }
+}
+# The service named in an OMP account's own config (modelRoles.default is "<service>/<model>"); any service is kept.
+function Get-OmpFamily([string]$ConfigPath) {
+  if (-not (Test-Path -LiteralPath $ConfigPath -PathType Leaf)) { return '' }
+  $inRoles = $false
+  foreach ($line in (Get-Content -LiteralPath $ConfigPath -TotalCount 400)) {
+    if ($line -match '^modelRoles:') { $inRoles = $true; continue }
+    if ($inRoles -and $line -match '^\S') { $inRoles = $false }
+    if ($inRoles -and $line -match '^\s+default:\s*["'']?([a-z0-9._-]+)/') { return $Matches[1] }
+  }
+  return ''
+}
 $operator = [Environment]::UserName
 $userHome = $env:USERPROFILE
 $providers = @(
@@ -47,10 +74,13 @@ foreach ($p in $providers) {
   $cmd = Get-Command $p.cli -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
   if (-not $cmd) { $missing += $p.name; continue }
   $found += "$($p.name) you"
+  $family = $p.family
+  if ($p.cli -eq 'omp') { $family = Get-OmpFamily (Join-Path $userHome '.omp\agent\config.yml') }
   $id = "$($p.cli)-$($operator.ToLower())"
-  $accounts += [ordered]@{ id = $id; provider = $p.name; provider_family = $p.family; account_label = $operator.ToUpper(); account = $operator; operator = $true; command = $cmd.Source; home = $userHome; option = "$operator (you) $dash $($cmd.Source)"; row = "$operator $arrow ID $id, label $($operator.ToUpper())" }
+  $accounts += [ordered]@{ id = $id; provider = $p.name; provider_family = $family; account_label = $operator.ToUpper(); account = $operator; operator = $true; command = $cmd.Source; home = $userHome; option = "$operator (you) $dash $($cmd.Source)"; row = "$operator $arrow ID $id, label $($operator.ToUpper())" }
   $help = ''
-  try { $help = (& $cmd.Source --help 2>&1 | Out-String) } catch { $help = '' }
+  $help = Invoke-Bounded $cmd.Source '--help'
+  if ($null -eq $help) { $help = '' }
   $list = @()
   foreach ($choice in $perm[$p.cli]) {
     if ($choice[1] -eq '' -or $help.Contains($choice[1])) { $list += , [ordered]@{ label = $choice[0]; arguments = @($choice[2] -split ' ' | Where-Object { $_ }) } }
@@ -70,7 +100,8 @@ $intro = @("Found on this machine: $(if ($found) { $found -join " $dot " } else 
 if ($missing) { $intro += "Not found: $($missing -join ', ')." }
 if ($glitch.Count -eq 1) { $intro += "Glitch folder detected: $($glitch[0])." }
 elseif ($glitch.Count -gt 1) { $intro += "Glitch folders detected: $($glitch -join ', ')." }
-else { $intro += "Glitch folder: not found in $userHome\Glitch, the launch folder and its parents." }
+if ($glitch.Count -gt 3) { $intro += "More Glitch folders found, not listed as choices (pick Other and type one): $(($glitch | Select-Object -Skip 3) -join ', ')." }
+if ($glitch.Count -eq 0) { $intro += "Glitch folder: not found in $userHome\Glitch, the launch folder and its parents." }
 $intro += $noflag
 # Prompt 1: one multi-select per provider (a lone operator row gets a Skip row: every question needs 2 options).
 $qs = @()
@@ -82,7 +113,7 @@ foreach ($p in $providers) {
 }
 Section 'accounts' 'Accounts' $qs $null
 Section 'ids' 'IDs and labels' @((Ask 'Use these IDs and labels?' 'IDs' $false @((Opt 'Use these (Recommended)' 'Use the IDs and labels in the table above.' $true), (Opt 'Change some' 'Say which IDs or labels to change.' $false)) $null)) $null
-$fo = @(); foreach ($g in $glitch) { $fo += , (Opt "Glitch folder: $g$(if ($glitch.Count -eq 1) { ' (Recommended)' })" 'Every agent starts in this Glitch installation.' ($glitch.Count -eq 1)) }
+$fo = @(); foreach ($g in ($glitch | Select-Object -First 3)) { $fo += , (Opt "Glitch folder: $g$(if ($glitch.Count -eq 1) { ' (Recommended)' })" 'Every agent starts in this Glitch installation.' ($glitch.Count -eq 1)) }
 $fo += , (Opt "Each account's own home folder" "Each agent starts in its own account's home folder." ($glitch.Count -eq 0))
 if ($glitch.Count -eq 0) { $fo += , (Opt "This launch folder: $Cwd" 'Every agent starts in the folder this setup was launched from.' $false) }
 Section 'folder' 'Folder' @((Ask 'Which folder should every agent start in?' 'Folder' $false $fo $null)) $null
