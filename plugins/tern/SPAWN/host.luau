@@ -957,13 +957,23 @@ end
 -- Model choices from the CLI's own headless listing. A listing runs only when the person asks (the
 -- "List models" action), read-only, as the agent's own OS account on this machine; nothing starts an
 -- agent and nothing is saved. An unknown listing, a failed run or an empty answer keeps the free-text field.
+local function listing_argv(record,key)
+	local target=Config.listing_target(record)
+	local argv=Selectors.lister(key)
+	if not target or argv==nil then return nil,nil end
+	argv[1]=target.executable
+	return argv,target.user
+end
 local function model_list_key(record,key)
-	return (if record.user~=nil and record.user~="" then record.user else "")..":"..tostring(key)
+	local argv,user=listing_argv(record,key)
+	return (user or "")..":"..(if argv then argv[1] else "")..":"..tostring(key)
 end
 local function can_list_models(state,record,key)
 	if Selectors.lister(key)==nil then return false end
 	if record.backend=="ssh-command" or (record.host~=nil and record.host~="") then return false end
-	if state.snapshot.host_os=="windows" and record.user~=nil and record.user~="" then return false end
+	local argv,user=listing_argv(record,key)
+	if argv==nil then return false end
+	if state.snapshot.host_os=="windows" and user~="" then return false end
 	return true
 end
 local function model_rows(state,record,id,key)
@@ -983,7 +993,8 @@ local function model_rows(state,record,id,key)
 	end
 	if can_list_models(state,record,key) then
 		local busy=state.model_list_busy~=nil and state.model_list_busy[record.id]
-		table.insert(rows,action_row("model-list-"..record.id,if busy then "Listing models..." else "List models",action(state,"model-list:"..record.id),"Runs "..table.concat(Selectors.lister(key)," ").." read-only as this agent's account. It starts no agent and saves nothing; if the CLI cannot list (not signed in, no listing) the Model field stays free text."..(if state.model_list_notes and state.model_list_notes[record.id] then " Last result: "..state.model_list_notes[record.id] else "")))
+		local shown_argv,shown_user=listing_argv(record,key)
+		table.insert(rows,action_row("model-list-"..record.id,if busy then "Listing models..." else "List models",action(state,"model-list:"..record.id),"Runs "..table.concat(shown_argv," ").." read-only as "..(if shown_user~="" then shown_user else "the current account")..". It starts no agent and saves nothing; if the CLI cannot list (not signed in, no listing) the Model field stays free text."..(if state.model_list_notes and state.model_list_notes[record.id] then " Last result: "..state.model_list_notes[record.id] else "")))
 	end
 	return rows
 end
@@ -2006,7 +2017,8 @@ local definition={
 				if state.model_list_busy[list_id] then return end
 				state.model_list_busy[list_id]=true
 				local list_key=model_list_key(record,key)
-				Prereq.run(Prereq.as_user(Selectors.lister(key),record.user),"",function(stdout,why)
+				local argv,user=listing_argv(record,key)
+				Prereq.run(Prereq.as_user(argv,user),"",function(stdout,why)
 					state.model_list_busy[list_id]=nil
 					if state.closed then return end
 					local ids=if stdout then Selectors.parse_models(key,stdout,tern.json.decode) else {}

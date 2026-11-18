@@ -561,6 +561,37 @@ do
  fake.process.run=function(argv,_,callback) ran=argv;callback({status=0,timed_out=false,stdout=grok_out,stderr=''}) end
  definition.event(state,{ev='action',act='model-list:listother@'..state.snapshot.config_revision},cx)
  check(ran~=nil and ran[1]=='sudo' and table.concat(ran,' '):find('otheracct',1,true)~=nil,'another account lists through the sudo login route: '..tostring(ran and table.concat(ran,' ')))
+ -- a literal sudo wrapper selects the account; no record.user is needed
+ local wrap=clone(saved_record('listgrok'));wrap.id='listwrap';wrap.account_label='W';wrap.command='sudo';wrap.arguments={'-n','-H','-u','workeracct','--','grok'}
+ local plain_omp_a=record('listompa');plain_omp_a.provider='omp';plain_omp_a.command='/opt/install-a/bin/omp';plain_omp_a.account_label='A'
+ local plain_omp_b=record('listompb');plain_omp_b.provider='omp';plain_omp_b.command='/opt/install-b/bin/omp';plain_omp_b.account_label='B'
+ local more2=clone(snapshot().records);table.insert(more2,wrap);table.insert(more2,plain_omp_a);table.insert(more2,plain_omp_b)
+ check(A.edit(state.binding,snapshot().config_revision,'replace-records',{records=more2}),'seed sudo-wrapper and custom-executable records');refresh()
+ rows=rows_of('agents')
+ check(rows['model-list-listwrap']~=nil,'a literal sudo-wrapper agent offers listing')
+ ran=nil
+ definition.event(state,{ev='action',act='model-list:listwrap@'..state.snapshot.config_revision},cx)
+ local joined=ran and table.concat(ran,' ') or ''
+ check(ran~=nil and ran[1]=='sudo' and joined:find('workeracct',1,true)~=nil,'the sudo-selected account lists through its own login route, not the current account: '..joined)
+ -- two installations of one CLI list separately and cache separately
+ fake.process.run=function(argv,_,callback)
+  ran=argv
+  local body=if argv[1]=='/opt/install-a/bin/omp' then '{"models":["alpha-1"]}' elseif argv[1]=='/opt/install-b/bin/omp' then '{"models":["beta-2"]}' else '{"models":[]}'
+  callback({status=0,timed_out=false,stdout=body,stderr=''})
+ end
+ definition.event(state,{ev='action',act='model-list:listompa@'..state.snapshot.config_revision},cx)
+ check(ran[1]=='/opt/install-a/bin/omp' and ran[2]=='models','listing runs the own executable of the agent: '..table.concat(ran,' '))
+ definition.event(state,{ev='action',act='model-list:listompb@'..state.snapshot.config_revision},cx)
+ check(ran[1]=='/opt/install-b/bin/omp','the second install lists through its own executable')
+ rows=rows_of('agents')
+ local oa,ob=rows[rid('listompa','model')],rows[rid('listompb','model')]
+ check(oa.control.k=='choice' and oa.control.options[2].value=='alpha-1' and #oa.control.options==2,'install A keeps its own catalog')
+ check(ob.control.k=='choice' and ob.control.options[2].value=='beta-2' and #ob.control.options==2,'install B has a different catalog')
+ -- a login sudo cannot be listed
+ local login=clone(wrap);login.id='listlogin';login.account_label='L';login.arguments={'-n','-i','-u','workeracct','--','grok'}
+ local more3=clone(snapshot().records);table.insert(more3,login)
+ check(A.edit(state.binding,snapshot().config_revision,'replace-records',{records=more3}),'seed sudo -i record');refresh()
+ check(rows_of('agents')['model-list-listlogin']==nil,'a sudo -i login record offers no listing')
  fake.process.run=function()error('Editor attempted a real subprocess') end
  check(A.edit(state.binding,snapshot().config_revision,'replace-records',{records=prior}),'listing fixtures removed');refresh();state.page='spawn'
 end
