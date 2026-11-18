@@ -157,9 +157,13 @@ check(config.parse_arguments(table.concat(many, " ")) == nil, "argument count re
 local executor, native = load("host_executor"), load("native_cli")
 local ordinary_render = record("render", { command = "'/opt/My Tools/custom-cli'", arguments = copy(argv), prompt = "not an implicit ordinary-terminal message" })
 local render_before = copy(ordinary_render)
+local PWD_EXPANSION_TEXT = [==["$(printf %s "$PWD" | od -An -v -to1 | tr -s ' \n' '\n\n' | sed '/^$/d;s/^/\\/' | tr -d '\n')"]==]
 local rendered = assert(executor.render(ordinary_render, "/bin/bash", "linux"))
 -- POSIX lines carry one provider command-name word; the rest is the exact argv.
 local function argv_of(line, provider)
+	-- The folder word is a shell expansion that holds quotes of its own; it is checked separately and parsed here as a token.
+	local at, finish = line:find(PWD_EXPANSION_TEXT, 1, true)
+	if at ~= nil then line = line:sub(1, at - 1) .. "@PWD@" .. line:sub(finish + 1) end
 	local words = assert(config.parse_arguments(line))
 	check(words[1] == "SPAWN_PROVIDER=" .. provider, "POSIX launch line begins with its provider command name")
 	table.remove(words, 1)
@@ -170,37 +174,42 @@ local expected_words = { "/opt/My Tools/custom-cli" }
 for _, value in ipairs(argv) do table.insert(expected_words, value) end
 same(rendered_words, expected_words, "host POSIX rendering preserves empty, quoted, newline and Unicode argv")
 same(ordinary_render, render_before, "host rendering does not mutate the approved record")
--- SKILLS-194b: an OS-user launch enters the account's own login shell so ~/.profile PATH and tokens apply.
--- The program and its arguments stay separate positional parameters, never shell text.
--- The account's login shell comes from its passwd entry (never from the environment) and is entered with the
--- approved program text, so a profile can neither move the folder nor replace the argv.
-local LOGIN_SCRIPT = [==[o=$PATH; PATH=/usr/bin:/bin:/usr/sbin:/sbin; export PATH; u=$(id -un); d=$PWD; sh=$(getent passwd "$u" 2>/dev/null | cut -d: -f7); [ -n "$sh" ] || sh=$(dscl . -read "/Users/$u" UserShell 2>/dev/null | sed -n 's/^UserShell: //p'); case "${sh##*/}" in bash|zsh|sh|dash|ksh) [ -x "$sh" ] && exec "$sh" -lc "$1" "$d";; esac; PATH=$o; export PATH; exec /bin/sh -c "$1" "$d"]==]
+-- SKILLS-208: an OS-user launch takes the owner's manual road: `sudo -i -u <user>`, then cd, then exec. sudo -i
+-- escapes every byte except letters, digits, `_`, `-` and `$` (and leaves `$` live), so the approved program and
+-- arguments travel as ONE word of octal-encoded shell text that a constant /bin/sh script decodes and evals.
+local LOGIN_SCRIPT = [==[eval "$(printf "${1}")"]==]
+local LOGIN_SCRIPT_PWD = [==[d=$(printf "${1}x"); [ "${d}" != x ] || exit 1; cd -- "${d%x}" || exit 1; eval "$(printf "${2}")"]==]
+-- The pane's folder is octal-encoded by the typing shell itself, before sudo sees it.
+local PWD_EXPANSION = PWD_EXPANSION_TEXT
 local function sq(word) return "'" .. word:gsub("'", "'\\''") .. "'" end
+local function octal(text) return (text:gsub("[\\$%%\n]", function(c) return string.format("\\%03o", c:byte()) end)) end
+-- The decoder the login script performs (printf's octal escapes), reimplemented to prove the round trip.
+local function decode(word) return (word:gsub("\\(%d%d%d)", function(d) return string.char(tonumber(d, 8)) end)) end
 local function with_login(prefix, rest)
 	local out = {}
 	for _, v in ipairs(prefix) do table.insert(out, v) end
 	local quoted = {}
 	for _, v in ipairs(rest) do table.insert(quoted, sq(v)) end
-	for _, v in ipairs({ "/bin/sh", "-c", LOGIN_SCRIPT, "spawn-login", 'cd -- "$0" || exit 1; exec ' .. table.concat(quoted, " ") }) do table.insert(out, v) end
+	for _, v in ipairs({ "/bin/sh", "-c", LOGIN_SCRIPT_PWD, "spawn-login", "@PWD@", octal("exec " .. table.concat(quoted, " ")) }) do table.insert(out, v) end
 	return out
 end
 local approved_prompt = "  Exact approved prompt.\nQuotes: ' \" $HOME `literal`  "
 local native_record = record("native-render", { provider = "omp", backend = "native-agent", command = "omp", arguments = { "--profile", "work account" }, prompt = "saved greeting", user = "account" })
 rendered = assert(executor.render(native_record, "/bin/zsh", "macos", approved_prompt))
-same(argv_of(rendered, "omp"), with_login({ "sudo", "-u", "account", "-H", "--" }, { "omp", "--profile", "work account", approved_prompt }), "ordinary OMP explicit prompt override remains one exact argv after approved arguments")
+same(argv_of(rendered, "omp"), with_login({ "sudo", "-i", "-u", "account", "--" }, { "omp", "--profile", "work account", approved_prompt }), "ordinary OMP explicit prompt override remains one exact argv after approved arguments")
 check(native_record.prompt == "saved greeting" and #native_record.arguments == 2, "ordinary prompt override does not mutate persisted argv")
 native_record.user = ""
 same(argv_of(assert(executor.render(native_record, "/bin/bash", "linux")), "omp"), { "omp", "--profile", "work account", "saved greeting" }, "ordinary native launch uses its approved stored prompt")
 local wrapped = record("wrapped", { command = "sudo -u explicit -- ordinary-cli", user = "explicit", arguments = { "one" } })
-same(argv_of(assert(executor.render(wrapped, "/bin/bash", "linux")), "custom"), with_login({ "sudo", "-u", "explicit", "--" }, { "ordinary-cli", "one" }), "explicit sudo wrapper is preserved rather than nested, and enters the account's login shell")
+same(argv_of(assert(executor.render(wrapped, "/bin/bash", "linux")), "custom"), with_login({ "sudo", "-i", "-u", "explicit", "--" }, { "ordinary-cli", "one" }), "explicit sudo wrapper is preserved rather than nested, and enters the account's login shell")
 local hostile = record("hostile", { command = "sudo -n -H -u seat -- /usr/bin/claude", user = "seat", arguments = { "--flag", "; touch /tmp/pwned $(id) `id`", "it's" } })
-same(argv_of(assert(executor.render(hostile, "/bin/bash", "linux")), "custom"), with_login({ "sudo", "-n", "-H", "-u", "seat", "--" }, { "/usr/bin/claude", "--flag", "; touch /tmp/pwned $(id) `id`", "it's" }), "the real literal sudo shape keeps -n and every argument exact inside the login wrapper")
+same(argv_of(assert(executor.render(hostile, "/bin/bash", "linux")), "custom"), with_login({ "sudo", "-i", "-n", "-H", "-u", "seat", "--" }, { "/usr/bin/claude", "--flag", "; touch /tmp/pwned $(id) `id`", "it's" }), "the real literal sudo shape keeps -n and every argument exact inside the login wrapper")
 local already = record("already", { command = "sudo -n -i -u seat -- claude", user = "seat" })
 same(argv_of(assert(executor.render(already, "/bin/bash", "linux")), "custom"), { "sudo", "-n", "-i", "-u", "seat", "--", "claude" }, "an explicit sudo -i is already a login shell and is not wrapped again")
-check(LOGIN_SCRIPT:find("$SHELL", 1, true) == nil and LOGIN_SCRIPT:find("getent passwd", 1, true) ~= nil, "the login shell is read from the passwd entry, never from the environment")
+check(LOGIN_SCRIPT:find("getent", 1, true) == nil and LOGIN_SCRIPT_PWD:find("getent", 1, true) == nil and LOGIN_SCRIPT:find("PATH", 1, true) == nil, "the login shell comes from sudo -i itself: no shell discovery and no forced PATH remain in the wrapper")
 -- A record that selects its account only through literal sudo arguments (every record of a guided result) is wrapped too.
 local selector_only = record("selector-only", { command = "sudo", arguments = { "-n", "-H", "-u", "user-a", "--", "/usr/bin/claude", "--flag" } })
-same(argv_of(assert(executor.render(selector_only, "/bin/bash", "linux")), "custom"), with_login({ "sudo", "-n", "-H", "-u", "user-a", "--" }, { "/usr/bin/claude", "--flag" }), "a record without a user field but with literal sudo selectors enters the login shell on ordinary launch")
+same(argv_of(assert(executor.render(selector_only, "/bin/bash", "linux")), "custom"), with_login({ "sudo", "-i", "-n", "-H", "-u", "user-a", "--" }, { "/usr/bin/claude", "--flag" }), "a record without a user field but with literal sudo selectors enters the login shell on ordinary launch")
 do
 	-- Every record of the anonymised guided result selects its account by literal sudo arguments only.
 	local fixture = assert(runtime.json.decode(runtime.fs.read(root .. "/tests/setup_result_fixture.json")))
@@ -209,15 +218,37 @@ do
 		local source = table.clone(agent)
 		if source.startup_prompt ~= nil then source.prompt = source.startup_prompt; source.startup_prompt = nil end
 		local line = assert(executor.render(source, "/bin/bash", "linux"), "fixture record renders: " .. tostring(agent.id))
+		local at, finish = line:find(PWD_EXPANSION_TEXT, 1, true)
+		if at ~= nil then line = line:sub(1, at - 1) .. "@PWD@" .. line:sub(finish + 1) end
 		local words = assert(config.parse_arguments(line))
 		table.remove(words, 1)
 		local at = table.find(words, "--")
-		check(words[1] == "sudo" and words[2] == "-n" and words[at + 1] == "/bin/sh" and words[at + 2] == "-c" and words[at + 4] == "spawn-login",
+		check(words[1] == "sudo" and words[2] == "-i" and words[3] == "-n" and words[at + 1] == "/bin/sh" and words[at + 2] == "-c" and words[at + 4] == "spawn-login" and words[at + 5] == "@PWD@",
 			"ordinary launch of " .. agent.id .. " enters the login shell without a configured user field")
-		check(words[at + 5]:find("exec '" .. source.arguments[table.find(source.arguments, "--") + 1] .. "'", 1, true) ~= nil, "the approved program is carried exactly for " .. agent.id)
+		check(decode(words[at + 6]):find("exec '" .. source.arguments[table.find(source.arguments, "--") + 1] .. "'", 1, true) == 1, "the approved program is carried exactly for " .. agent.id)
 	end
 end
-check(LOGIN_SCRIPT:find("PATH=/usr/bin:/bin:/usr/sbin:/sbin; export PATH; u=$(id -un)", 1, true) ~= nil, "every lookup in the login script runs with a fixed PATH, set before the first command")
+-- Exact argv shape of a cross-account launch (pinned literally), hostile data, and the same-account path.
+do
+	local simple = record("simple", { command = "claude", user = "seat", arguments = { "--flag" } })
+	same(argv_of(assert(executor.render(simple, "/bin/bash", "linux")), "custom"),
+		{ "sudo", "-i", "-u", "seat", "--", "/bin/sh", "-c", 'd=$(printf "${1}x"); [ "${d}" != x ] || exit 1; cd -- "${d%x}" || exit 1; eval "$(printf "${2}")"', "spawn-login", "@PWD@", "exec 'claude' '--flag'" },
+		"a cross-account launch is `sudo -i -u <user> -- /bin/sh -c <script> spawn-login <encoded pane folder> <text>`, with no -H and no forced PATH")
+	local line = assert(executor.render(simple, "/bin/bash", "linux"))
+	check(line:find(" " .. PWD_EXPANSION .. " ", 1, true) ~= nil, "the folder word is the typing shell's own octal encoding of $PWD, computed before sudo sees it")
+	check(PWD_EXPANSION:find("od -An -v -to1", 1, true) ~= nil and (line:gsub(PWD_EXPANSION_TEXT:gsub("%p", "%%%0"), "")):find("$PWD", 1, true) == nil, "the raw $PWD is never handed to sudo -i, whose login shell would expand a dollar in a folder name")
+	local nasty = { "; touch /tmp/pwned $(id) `id` ${HOME} $HOME", "it's", "two\nlines % \\ \\n \"q\"", "$", "x" }
+	local hostile2 = record("hostile2", { command = "claude", user = "seat", arguments = nasty })
+	local words = argv_of(assert(executor.render(hostile2, "/bin/bash", "linux")), "custom")
+	local encoded = words[#words]
+	check(encoded:find("[$\n%%]") == nil, "the encoded word carries no live dollar, no newline and no percent for sudo -i or printf to act on")
+	check(encoded:gsub("\\%d%d%d", ""):find("\\", 1, true) == nil, "every backslash in the encoded word starts an octal escape")
+	local expected = { "exec 'claude'" }
+	for _, v in ipairs(nasty) do table.insert(expected, sq(v)) end
+	same(decode(encoded), table.concat(expected, " "), "the encoded word decodes to exactly the single-quoted approved argv, so a hostile argument stays data")
+	local own = record("own", { command = "claude", arguments = { "--flag" } })
+	same(argv_of(assert(executor.render(own, "/bin/bash", "linux")), "custom"), { "claude", "--flag" }, "a launch with no other account never goes through sudo")
+end
 -- An executable literally named like an option would be read by exec as one.
 for _, bad in ipairs({
 	record("dash-direct", { command = "-a", user = "seat" }),
