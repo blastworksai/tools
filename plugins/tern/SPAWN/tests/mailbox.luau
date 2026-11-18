@@ -706,7 +706,7 @@ check(accounted~=nil and accounted.status=='uncertain' and M.forget_children(han
 pending.callback({status=0,timed_out=false,stdout='admission_full\ncapacity_admission\n1\n1\n',stderr=''})
 check(M.forget_children(handles)==0 and accounted.status=='uncertain','a late terminal completion clears the child even after the early return of a finished operation')
 -- A child's record is durable and written before it starts: after a reload (new module instances, same host store) an uncleared
--- invocation is an uncertain outstanding child, and only a later same-scope completion retires it.
+-- invocation is an uncertain outstanding child, and only that invocation's own proven termination clears it.
 pending={}
 local reloaded_result
 M.execute(readOp,function(value) reloaded_result=value end)
@@ -717,8 +717,9 @@ check(Reloaded.forget_children(handles)==1,'after a reload the uncleared invocat
 local Ledger=load('children')
 local probe=Ledger.begin(readOp.handle,'mailbox')
 Ledger.finish(probe)
-check(Reloaded.forget_children(handles)==0,'a later completed child of the same scope retires the older boot\'s record')
+check(Reloaded.forget_children(handles)==1,'no other child\'s completion retires an older boot\'s record: helpers overlap, so only that invocation\'s own termination can')
 pending.callback({status=0,timed_out=false,stdout='admission_full\ncapacity_admission\n1\n1\n',stderr=''})
+check(M.forget_children(handles)==0,'the invocation\'s own proven termination clears its record')
 pending=nil
 local starter=fake.process.run
 fake.process.run=function() error('cannot start') end

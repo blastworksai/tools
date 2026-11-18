@@ -26,10 +26,12 @@ end
 -- The confirmation: the fixed words, then the informational participants (when there are any), then the residual notice verbatim.
 function M.confirm(name: any, participants: any?, omitted: any?): string
 	local lines = { "Forget “" .. plain(name) .. "”? This discards its saved orchestration state and unfinished obligations. Documents, sources, Git, mailbox files, your SPAWN agent roster and other orchestrations stay. After confirmation, this cannot be cancelled. If execution changes before removal, the orchestration stays fenced until forgetting can finish." }
-	if type(participants) == "table" and #participants > 0 then
+	local has_rows = type(participants) == "table" and #participants > 0
+	local count = if type(omitted) == "number" then omitted else 0
+	if has_rows or count > 0 then
 		table.insert(lines, M.PARTICIPANTS)
-		for _, row in participants do table.insert(lines, M.row(row)) end
-		if type(omitted) == "number" and omitted > 0 then table.insert(lines, M.additional(omitted)) end
+		if has_rows then for _, row in participants do table.insert(lines, M.row(row)) end end
+		if count > 0 then table.insert(lines, M.additional(count)) end
 	end
 	table.insert(lines, M.RESIDUAL)
 	return table.concat(lines, "\n")

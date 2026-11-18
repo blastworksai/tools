@@ -1305,6 +1305,10 @@ sections.attachment=function()
   local restored=fixture(qualified);restored.effects.procfiles=copy(files);restored.effects.native_process=copy(f.effects.native_process)
   local q=automatic(restored,'terminal-reload');restored.admit_origin(q)
   check(restored.d.request(q,restored.binding,1,function()end).status=='attached' and restored.effects.reserves==0,'qualified existing terminal reconnects after reload without launch, prompt replay or mailbox provisioning')
+  local ledgerless=fixture(qualified);ledgerless.effects.procfiles=copy(files);ledgerless.effects.native_process=copy(f.effects.native_process)
+  ledgerless.load('children').begin=function() return nil end
+  local lq=automatic(ledgerless,'terminal-ledger');ledgerless.admit_origin(lq)
+  check(ledgerless.d.request(lq,ledgerless.binding,1,function()end).status~='attached','a terminal observation whose child cannot be registered is not started, so it cannot reconnect')
   local changed=fixture(qualified);changed.effects.procfiles=copy(files);changed.effects.native_process=copy(f.effects.native_process)
   changed.effects.procfiles['/proc/200/stat']=stat(200,100,200,999)
   local stale=automatic(changed,'terminal-reused-pid');changed.admit_origin(stale)
@@ -2567,6 +2571,32 @@ sections.forget_relay=function()
  local closed=ask('discard_session',{challenge=cap.payload.challenge,dispatch_revision=clean.payload.dispatch_revision,spawn_boot=clean.spawn_boot})
  check(closed and closed.status=='closed' and f.saved['dispatch-v1'].sessions.session==nil,'the relay carries the discard and SPAWN persists exactly one deletion')
 end
+sections.terminal_ledger=function()
+ if runtime.runtime.os~='linux' then return end
+ local f=launched_fixture(false,true)
+ local launch=f.saved['dispatch-v1'].requests['session/launch']
+ local words=assert(f.load('config').parse_arguments(launch.launch.command))
+ local files={['/proc/sys/kernel/random/boot_id']='aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n'}
+ local function stat(pid,parent,group,start)
+  local fields={'S',tostring(parent),tostring(group),'100','123','200'}
+  for _=7,19 do table.insert(fields,'0') end
+  table.insert(fields,tostring(start));return tostring(pid)..' (fixture) '..table.concat(fields,' ')..'\n'
+ end
+ files['/proc/100/stat']=stat(100,1,100,111);files['/proc/200/stat']=stat(200,100,200,222);files['/proc/300/stat']=stat(300,200,200,333)
+ files['/proc/100/cmdline']='/bin/sh\0-c\0'..launch.launch.command..'\0'
+ files['/proc/200/cmdline']=table.concat(words,'\0')..'\0'
+ files['/proc/300/cmdline']='/bin/sh\0report-helper\0'
+ f.effects.procfiles=files;f.effects.native_process={pane=55,child={pid=100},foreground={pid=300}}
+ for _,callback in ipairs(f.effects.handlers.spawn) do
+  callback({program='/bin/sh',args={'-c',launch.launch.command},cwd='/work',env={TERN_EXE='/tools/tern',TERN_PANE_SOCKET='/runtime/socket',TERN_WINDOW_KEY='',TERN_PANE='55'}})
+ end
+ check(f.saved['dispatch-v1'].requests['session/launch'].terminal_process==nil,'a fresh spawn or transient startup alone does not qualify a terminal conversation')
+ local Children=f.load('children');local real=Children.begin;Children.begin=function() return nil end
+ local accepted=f.req('accept','accept-qualified-terminal',{target_request_id='launch',target_action_id=launch.request.action_id,pane_binding=pane,worker_id='worker-id',worker_generation=1,enrolment_token='aaaaaaaaaaaaaaaa',work_id='work',event_id=f.c.sha256('mailbox:report:1'),seq=1,event_sha256=f.c.sha256('accepted')})
+ check(f.d.request(accepted,f.binding,1,function()end).status=='accepted','the acknowledgement itself still succeeds')
+ check(f.image()['dispatch-v1'].requests['session/launch'].terminal_process==nil,'a capture helper whose child cannot be registered is never started: no proof is retained')
+ Children.begin=real
+end
 -- Review round: journal covers workers, queued inventory work is fenced, helper evidence is durable, frame budget.
 sections.forget_review=function()
  local function setup(configure)
@@ -2666,6 +2696,6 @@ if section then
  assert(sections[section],'unknown dispatch section '..section)
  sections[section]()
 else
- for _,name in ipairs({'forget_review','launch','allocation','migration','publication','ack_lifecycle','wake_binding','authorization','expired_authorization','recovery','duplex','retirement_binding','retirement_settlement','retirement_producer','unused_retirement','failed_startup','coordinator_launch','wake_capacity','wake_retention','attachment','attachment_recovery','authority_rotation','host_local','rollover_accept','adopt','enrol','presentation','accept_recovery','native_rollback','owner_retention','bootstrap','administration','consumed_status','scope_progress','relay_fence','native_delivery'})do sections[name]()end
+ for _,name in ipairs({'terminal_ledger','forget_review','launch','allocation','migration','publication','ack_lifecycle','wake_binding','authorization','expired_authorization','recovery','duplex','retirement_binding','retirement_settlement','retirement_producer','unused_retirement','failed_startup','coordinator_launch','wake_capacity','wake_retention','attachment','attachment_recovery','authority_rotation','host_local','rollover_accept','adopt','enrol','presentation','accept_recovery','native_rollback','owner_retention','bootstrap','administration','consumed_status','scope_progress','relay_fence','native_delivery'})do sections[name]()end
 end
 return 'PASS dispatch'..(if section then '/'..section else '')..' '..tostring(checks)

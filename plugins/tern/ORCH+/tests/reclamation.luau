@@ -275,6 +275,12 @@ if section == nil or section == "host_forget" then
 		check(shown:find(expected, 1, true) ~= nil, "the blocker card shows: " .. expected)
 	end
 	check(shown:find("4 additional blockers.", 1, true) < shown:find("Agents whose execution is not checked:", 1, true), "the omitted-blockers count follows the blocker rows")
+	-- The exact omitted count is shown independently of the retained rows (the byte budget can drop every participant).
+	f:host_event(42, "forget-state", { stage = "blocked", blockers = card, participants = {}, omitted = 5, blockers_omitted = 0, pending = false })
+	local budgeted = table.concat(texts(f:render(42).main), "\n")
+	check(budgeted:find("Agents whose execution is not checked:", 1, true) ~= nil and budgeted:find("5 additional participants whose execution is not checked.", 1, true) ~= nil,
+		"with every participant budgeted out the card still shows the exact omitted count")
+	f:host_event(42, "forget-state", { stage = "blocked", blockers = card, participants = roster, omitted = 3, blockers_omitted = 4, pending = false })
 	local participants_at, residual_at = shown:find("Agents whose execution is not checked:", 1, true), shown:find("Agents still running may continue", 1, true)
 	check(participants_at ~= nil and residual_at ~= nil and residual_at > participants_at, "the residual notice follows the participants")
 	check(shown:find("Close these panes", 1, true) == nil and shown:find("Do not close", 1, true) == nil and shown:find("using Tern", 1, true) == nil, "no row asks the owner to close a pane")
@@ -458,6 +464,9 @@ if section == nil or section == "forget_window" then
 		"an absent session skips the preview and goes straight to the idempotent discard")
 	local request2 = codec.decode_forget_request(calls2[1].fields.request_bytes)
 	check(request2 ~= nil and request2.dispatch_revision == 0, "the absent-session discard carries no observed revision")
+	local budgeted_text = load_module("forget_text").confirm("N", {}, 4)
+	check(budgeted_text:find("4 additional participants whose execution is not checked.", 1, true) ~= nil and budgeted_text:find("Agents whose execution is not checked:", 1, true) ~= nil,
+		"the confirmation shows the exact omitted count even when every participant row was budgeted out")
 	local probe = {}
 	local _, _, probe_calls = scenario(false, true, probe)
 	check(probe.placeholder ~= nil and probe.placeholder:find("Agents whose execution is not checked:", 1, true) ~= nil and probe.placeholder:find("claude-a · 7", 1, true) ~= nil

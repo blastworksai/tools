@@ -352,10 +352,12 @@ local function forget_view(view: any, projection: any): { any }
 		table.insert(card, ui.text(text.BLOCKED))
 		for _, row in forget.blockers do table.insert(card, ui.text(text.row(row))) end
 		if type(forget.blockers_omitted) == "number" and forget.blockers_omitted > 0 then table.insert(card, ui.text(text.additional_blockers(forget.blockers_omitted))) end
-		if type(forget.participants) == "table" and #forget.participants > 0 then
+		local has_participants = type(forget.participants) == "table" and #forget.participants > 0
+		local omitted = if type(forget.omitted) == "number" then forget.omitted else 0
+		if has_participants or omitted > 0 then
 			table.insert(card, ui.text(text.PARTICIPANTS))
-			for _, row in forget.participants do table.insert(card, ui.text(text.row({ agent = row.agent, host = row.host }))) end
-			if type(forget.omitted) == "number" and forget.omitted > 0 then table.insert(card, ui.text(text.additional(forget.omitted))) end
+			if has_participants then for _, row in forget.participants do table.insert(card, ui.text(text.row({ agent = row.agent, host = row.host }))) end end
+			if omitted > 0 then table.insert(card, ui.text(text.additional(omitted))) end
 		end
 		table.insert(card, ui.text(text.RESIDUAL))
 	end

@@ -215,9 +215,11 @@ local function capture_terminal(logical,id)
  if not start or not start.route or start.busy or start.ambiguous then return end
  local root=load();local target=root and State.worker(root,logical,id)
  if not target or target.body.status~='accepted' or target.stop_request_id or target.terminal_process then return end
- start.busy=true
  -- Forget evidence: the capture helper is an outstanding child until its own completion (durable, written before it starts).
+ -- Fail closed: a helper whose registration failed is never started, so no untracked child can exist.
  local child=Children.begin('session:'..logical,'terminal')
+ if child==nil then start.error='The terminal observation could not be recorded; it was not started';return end
+ start.busy=true
  TerminalIdentity.capture(start.route,start.session,start.expected,function(proof)
   Children.finish(child)
   start.busy=false
@@ -243,8 +245,9 @@ local function terminal_reconnect(root,r)
  local count=0
  for id,value in pairs(terminal_checks) do if value.complete and tern.now()-value.at>5000 then terminal_checks[id]=nil else count+=1 end end
  if count>=64 then return false,'Terminal process observations are busy; retain the original request and retry observation later' end
- observed={identity=identity,complete=false};terminal_checks[k]=observed
  local child=Children.begin('session:'..r.logical_session_id,'terminal')
+ if child==nil then return false,'The terminal observation could not be recorded; it was not started. Retain the original request and retry observation later' end
+ observed={identity=identity,complete=false};terminal_checks[k]=observed
  TerminalIdentity.verify(target.terminal_process,function(passed,problem)
   Children.finish(child)
   if terminal_checks[k]~=observed then return end

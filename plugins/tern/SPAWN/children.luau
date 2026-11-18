@@ -1,8 +1,8 @@
 -- Forget-only durable evidence of outstanding helper children (SKILLS-205). A record is written BEFORE a helper child starts and
 -- removed only by that child's own terminal completion or a verified failure to start; a watchdog expiry never removes it. After
--- a reload an uncleared record is an uncertain outstanding child: nothing proves it settled. Records belong to a scope string
--- (a mailbox generation handle, or "session:<logical>" for terminal-observation helpers). A later child of the same scope that
--- completes after a reload proves the serialized earlier invocations are over and retires the older boots' records.
+-- a reload an uncleared record is an uncertain outstanding child: nothing proves it settled, and no other child's completion can
+-- (helpers overlap). It stays a blocker until a manual reset. Records belong to a scope string (a mailbox generation handle, or
+-- "session:<logical>" for terminal-observation helpers).
 local KEY='spawn-children-v1'
 local MAX=256
 local M={}
@@ -33,11 +33,7 @@ end
 function M.finish(token)
  if token==nil then return end
  local map=read();if not map then return end
- local mine=map[token]
  map[token]=nil
- if mine then
-  for other,record in pairs(map) do if record.scope==mine.scope and record.boot~=boot then map[other]=nil end end
- end
  write(map)
 end
 -- Outstanding children for any scope in the set; an unreadable ledger counts as one uncertain child.
