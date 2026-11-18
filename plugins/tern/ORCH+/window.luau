@@ -4586,6 +4586,7 @@ conversation_ui = require("./conversation_window").new(ui_api)
 -- (window.luau is at Luau's 200-local limit: the forget module hangs off conversation_ui instead of a new local.)
 ui_api.bridge = function(cx: WindowCx, source: number, origin: any) return acquire_bridge(cx, source, origin, "control") end
 ui_api.peer, ui_api.relay, ui_api.closing, ui_api.authority, ui_api.intent = peer_surface, relay_event, closing_context, authority_command, intent_origin
+ui_api.context = current_context
 conversation_ui.forget = require("./forget_window").new(ui_api)
 tern.route.link(function(link: any, cx: WindowCx)
 	if source_ui.route and source_ui.route(cx, link) then return { handled = true } end

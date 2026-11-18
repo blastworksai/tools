@@ -1651,7 +1651,8 @@ local function forget_response_schema(b: any, shapes: any?, request: any?): bool
 	end
 	if b.error ~= nil then return false end
 	local inventory = function(v: any): boolean return fields(v, { requests = zero, workers = zero, generations = zero }, {}, shapes) end
-	if status == "capable" then return b.op == "discard_capability" and fields(p, { challenge = token }, {}, shapes) end
+	-- `absent`: SPAWN no longer holds the session (an earlier discard completed). Recovery then skips the preview.
+	if status == "capable" then return b.op == "discard_capability" and fields(p, { challenge = token }, { absent = boolean }, shapes) end
 	if status == "clean" then return b.op == "discard_preview" and fields(p, { dispatch_revision = zero, inventory = inventory }, {}, shapes) end
 	if status == "blocked" then
 		return b.op == "discard_preview" and fields(p, { dispatch_revision = zero, blockers = function(v: any): boolean

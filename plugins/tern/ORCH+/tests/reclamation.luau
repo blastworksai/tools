@@ -1,6 +1,6 @@
 -- Real HOST blocks and canonical reducers; no production KV, native effects or copied host logic.
 local root, section = ...
-assert(section == nil or table.find({ "host_retirement", "host_stale_result", "host_withdrawal", "project_history", "host_forget" }, section), "unknown reclamation section")
+assert(section == nil or table.find({ "host_retirement", "host_stale_result", "host_withdrawal", "project_history", "host_forget", "host_forget_relay", "forget_window" }, section), "unknown reclamation section")
 local runtime, environment = tern, getfenv()
 local fixture_chunk = assert(loadstring(runtime.fs.read(root .. "/tests/dispatch.luau"), "reclamation-fixture"))
 setfenv(fixture_chunk, setmetatable({}, { __index = environment }))
@@ -14,12 +14,12 @@ local function node(tree, key)
 	for _, child in tree.c or {} do local found = node(child, key); if found then return found end end
 	return nil
 end
-local function fixture()
+local function fixture(options)
 	local f = shared.fixture()
 	local fake, definition = table.clone(runtime), nil
 	local contexts, views, modules = {}, {}, {}
 	local channel_files, channel_dirs = {}, {}
-	fake.plugin = table.clone(runtime.plugin); fake.plugin.data = "/fixture/plugins/orchplus-reclamation"
+	fake.plugin = table.clone(runtime.plugin); fake.plugin.data = if options and options.relay then "/fixture/plugins/orchplus" else "/fixture/plugins/orchplus-reclamation"
 	fake.fs = {
 		exists = function(path) return channel_files[path] ~= nil or channel_dirs[path] == true end,
 		mkdir = function(path) channel_dirs[path] = true end,
@@ -48,7 +48,11 @@ local function fixture()
 		end
 	end }
 	fake.on = function() end
-	fake.timer = function() return { cancel = function() end } end
+	fake.timer = function(ms, callback)
+		if ms == 100 and options and options.relay then f.relay_tick = callback end
+		return { cancel = function() end }
+	end
+	f.fake = fake
 	local function load(name, base)
 		name = (base or "") .. name:gsub("^%./", "")
 		if modules[name] then return modules[name] end
@@ -57,6 +61,7 @@ local function fixture()
 		modules[name] = chunk(); return modules[name]
 	end
 	load("host")
+	f.fake_load = function(name) return load(name) end
 	assert(definition and type(definition.init) == "function" and type(definition.view) == "function"
 		and type(definition.event) == "function", "actual orchplus.orchestrator lifecycle is required")
 	for _, pane in { 42, 43, 44 } do
@@ -294,6 +299,150 @@ if section == nil or section == "host_forget" then
 	end
 	check(f:saved(44).orch_session_id ~= sid and runtime.json.encode(f.authority.registry.sessions[survivor.orch_session_id]) == survivor_session,
 		"an unrelated session and its view are untouched")
+	-- Forget a second orchestration (never admitted to SPAWN: one local commit). The notice now names B, not A.
+	local sid_b = survivor.orch_session_id
+	local b_origin = { logical_session_id = sid_b, owner_id = survivor.owner_id, owner_generation = survivor.generation, host_pane_id = "44",
+		alias_nonce = f.views[44].alias_nonce, window_key = "", window_epoch = "b", native_session_id = "7", window_host_id = "local" }
+	f:host_event(44, "authority-command", { source_nonce = f.views[44].alias_nonce, origin = b_origin, event = { kind = "begin_forget", request_id = "b-forget",
+		orch_session_id = sid_b, authority_namespace = f.authority.registry.authority_namespace, expected_revision = f.authority.registry.revision,
+		attempt_id = "attempt-b2", control_origin = { kind = "closing", binding = b_origin, controller_pane = "9001", close_id = "attempt-b2" } } })
+	check(f.authority.registry.sessions[sid_b] == nil and f.authority.registry.forgotten.orch_session_id == sid_b, "the second orchestration is forgotten and the notice names it")
+	-- A stale view of the FIRST forgotten session (A) is reopened: it is normalized against the loaded authority too.
+	f.views[43].orch_session_id = sid
+	f.views[43].scoped_results = { stale = { result = {} } }
+	check(f:saved(43).orch_session_id == nil, "saved window data never carries a session the authority lacks")
+	f:render(43)
+	check(f.views[43].orch_session_id == sid, "the closed-view alias keeps the id through a short grace")
+	f.views[43].absent_since = -1000000000
+	f:render(43)
+	check(f.views[43].orch_session_id == nil and f.views[43].scoped_results == nil, "after the grace every absent id is cleared with its scoped results, not only the latest forgotten one")
+end
+if section == nil or section == "host_forget_relay" then
+	-- The REAL host relay and carrier: capability, preview and discard travel on their own protocol end to end.
+	local f = fixture({ relay = true })
+	local Channel = f.fake_load("channel/channel")
+	local peer = assert(Channel.open({ plugin_id = "spawn", plugin_data = "/fixture/plugins/spawn", incarnation = "spawn-fixture-boot",
+		fs = f.fake.fs, json = f.fake.json, base64 = f.fake.base64 }))
+	local metadata = f.views[42].spawn_relay
+	local function event(act, bytes, peer_boot)
+		f:host_event(42, "spawn_relay", { schema = 1, source_nonce = f.views[42].alias_nonce, relay_endpoint = metadata.relay_endpoint, relay_boot = metadata.relay_boot,
+			lane_id = "forget", peer_boot = peer_boot, act = act, bytes = bytes })
+	end
+	local function pump() for _ = 1, 4 do f.relay_tick() end end
+	event("bind", runtime.json.encode(f.origin))
+	local bind = assert(peer.receive(4)[1], "the host forwards the bind"); assert(peer.ack(bind))
+	assert(peer.send({ peer = "orchplus", route = "spawn.source", binding = metadata.relay_endpoint .. ":forget", id = "r-1",
+		body = runtime.json.encode({ schema = 1, relay_endpoint = metadata.relay_endpoint, relay_boot = metadata.relay_boot, lane_id = "forget",
+			host_pane_id = "42", source_nonce = f.views[42].alias_nonce, peer_boot = "spawn-fixture-boot", bind_request = { id = bind.id, incarnation = bind.incarnation } }) }))
+	pump()
+	check(metadata.lanes[1] ~= nil and metadata.lanes[1].peer_boot == "spawn-fixture-boot", "the lane is bound to the real controller identity")
+	local codec = shared.codec
+	local sid = f.origin.logical_session_id
+	local session = f.authority.registry.sessions[sid]
+	local o = f.origin
+	local function request(op, extra, owner_patch)
+		local r = { schema = 1, origin = "orchplus", op = op, request_id = "relay-" .. op, attempt_id = "relay-attempt", authority_namespace = f.authority.registry.authority_namespace,
+			spawn_namespace = session.spawn_namespace, logical_session_id = sid, admission_seq = session.admission_seq, controller_pane = "42",
+			owner = { owner_id = o.owner_id, owner_generation = o.owner_generation, host_pane_id = o.host_pane_id, alias_nonce = o.alias_nonce,
+				window_key = o.window_key, native_session_id = o.native_session_id, window_host_id = o.window_host_id } }
+		for k, v in extra or {} do r[k] = v end
+		for k, v in owner_patch or {} do r.owner[k] = v end
+		return r
+	end
+	local serial = 1
+	local function roundtrip(op, extra)
+		local r = request(op, extra)
+		event(op, runtime.json.encode(r), "spawn-fixture-boot")
+		local forwarded = peer.receive(4)
+		check(#forwarded == 1 and forwarded[1].route == "spawn.request" and forwarded[1].body == runtime.json.encode(r)
+			and forwarded[1].binding:find(":" .. op .. ":", 1, true) ~= nil, "the host forwards " .. op .. " bytes unchanged on the carrier")
+		assert(peer.ack(forwarded[1]))
+		local body = { schema = 1, op = op, request_id = r.request_id, attempt_id = r.attempt_id, spawn_namespace = r.spawn_namespace, authority_namespace = r.authority_namespace,
+			logical_session_id = sid, admission_seq = r.admission_seq, spawn_boot = "boot-1" }
+		if op == "discard_capability" then body.status, body.payload = "capable", { challenge = "forget-0000000000000000" }
+		elseif op == "discard_preview" then body.status, body.payload = "clean", { dispatch_revision = 4, inventory = { requests = 0, workers = 0, generations = 0 } }
+		else body.status, body.payload = "closed", { admission_cursor = 6 } end
+		local bytes = assert(codec.encode_forget_response(body))
+		serial += 1
+		local receipt = assert(peer.send({ peer = "orchplus", route = "spawn.response", binding = metadata.relay_endpoint .. ":forget", id = "r-" .. serial, body = bytes }))
+		pump()
+		check(f.views[42].spawn_relay_frames.forget.response == bytes and not metadata.held, "the host publishes the " .. op .. " response unchanged and is not held")
+		check(codec.decode_forget_response(f.views[42].spawn_relay_frames.forget.response, r) ~= nil, "the window can decode it against its own request")
+		event("ack", runtime.json.encode({ route = "spawn.response", id = "r-" .. serial, incarnation = "spawn-fixture-boot" }), "spawn-fixture-boot")
+		for _ = 1, 4 do peer.settle(4); pump() end
+		check(not metadata.held, "acknowledging a forget response never raises an unresolved effect")
+	end
+	roundtrip("discard_capability")
+	roundtrip("discard_preview", { challenge = "forget-0000000000000000" })
+	roundtrip("discard_session", { challenge = "forget-0000000000000000", dispatch_revision = 4, spawn_boot = "boot-1" })
+	local forged = request("discard_capability", nil, { alias_nonce = "someone-else" })
+	event("discard_capability", runtime.json.encode(forged), "spawn-fixture-boot")
+	check(#peer.receive(4) == 0, "a request whose owner is not the lane's bound source is never forwarded")
+	local legacy = request("discard_capability"); legacy.schema = 2
+	event("discard_capability", runtime.json.encode(legacy), "spawn-fixture-boot")
+	check(#peer.receive(4) == 0, "a malformed request is never forwarded")
+end
+if section == nil or section == "forget_window" then
+	-- The window module itself, driven with a scripted SPAWN: recovery after a reload (new epoch) and an absent session.
+	local codec = shared.codec
+	local modules = {}
+	local function load_module(name)
+		if modules[name] then return modules[name] end
+		local chunk = assert(loadstring(runtime.fs.read(root .. "/" .. name .. ".luau"), name))
+		setfenv(chunk, setmetatable({ require = function(path) return load_module((path:gsub("^%./", ""))) end }, { __index = environment }))
+		modules[name] = chunk(); return modules[name]
+	end
+	local function scenario(absent, same_identity)
+		local old = { owner_id = "owner", owner_generation = 1, host_pane_id = "42", alias_nonce = "alias", window_key = "", window_epoch = "epoch-old", native_session_id = "3", window_host_id = "7", logical_session_id = "s1" }
+		local now = clone(old); now.window_epoch = "epoch-new"
+		if not same_identity then now.alias_nonce = "someone-else" end
+		local data = { source_nonce = "nonce", authority_namespace = "orch-ns", spawn_namespace = "spawn-ns", authority_revision = 5,
+			session_control = { admission_seq = 1, name = "Stuck", close = { control_origin = { kind = "closing", binding = old, controller_pane = "42", close_id = "attempt-old" },
+				forget = { attempt_id = "attempt-old", request_bytes = "{}" } } } }
+		local sent_ops, authority_calls, states = {}, {}, {}
+		local last_response
+		local serial = 0
+		local api = {
+			id = function() serial += 1; return "id-" .. serial end,
+			notice = function() end,
+			current = function() return false end, -- the old window epoch makes the cursor comparison fail after a reload
+			context = function() return true end,
+			closing = function() return false end,
+			snapshot = function() return data end, origin = function() return now end,
+			capture = function(_, _, _, done) done({ confirm = true }, nil, { }) end,
+			intent = function(origin) return origin end,
+			bridge = function() return { endpoint = true } end,
+			peer = function() return true, last_response end,
+			authority = function(_, _, _, kind, fields) table.insert(authority_calls, { kind = kind, fields = fields }) end,
+			relay = function(_, _, event)
+				table.insert(sent_ops, event.act)
+				local r = assert(codec.decode_forget_request(event.value))
+				local body = { schema = 1, op = r.op, request_id = r.request_id, attempt_id = r.attempt_id, spawn_namespace = r.spawn_namespace, authority_namespace = r.authority_namespace,
+					logical_session_id = r.logical_session_id, admission_seq = r.admission_seq, spawn_boot = "boot-1" }
+				if r.op == "discard_capability" then body.status, body.payload = "capable", { challenge = "forget-0000000000000000", absent = if absent then true else nil }
+				else body.status, body.payload = "clean", { dispatch_revision = 4, inventory = { requests = 0, workers = 0, generations = 0 } } end
+				last_response = assert(codec.encode_forget_response(body))
+			end,
+		}
+		local cx = { session = { event = function(_, _, ev) table.insert(states, ev) end }, pick = function() return {} end }
+		local module = load_module("forget_window").new(api)
+		local started = module.start(cx, 42, now, data, true)
+		for _ = 1, 8 do if started then module.tick_source(cx, 42, data, now) end end
+		return started, sent_ops, authority_calls
+	end
+	local started, ops, calls = scenario(false, true)
+	check(started and ops[1] == "discard_capability" and ops[2] == "discard_preview" and #calls == 1 and calls[1].kind == "supersede_forget",
+		"after a reload (new epoch, same owner) recovery passes the check, runs capability and preview and reaches supersede_forget")
+	local request = codec.decode_forget_request(calls[1].fields.request_bytes)
+	check(request ~= nil and request.op == "discard_session" and request.dispatch_revision == 4 and request.spawn_boot == "boot-1" and calls[1].fields.attempt_id ~= "attempt-old",
+		"the superseding request is a fresh discard bound to the new preview and attempt")
+	local started2, ops2, calls2 = scenario(true, true)
+	check(started2 and ops2[1] == "discard_capability" and ops2[2] == nil and #calls2 == 1 and calls2[1].kind == "supersede_forget",
+		"an absent session skips the preview and goes straight to the idempotent discard")
+	local request2 = codec.decode_forget_request(calls2[1].fields.request_bytes)
+	check(request2 ~= nil and request2.dispatch_revision == 0, "the absent-session discard carries no observed revision")
+	local started3, _, calls3 = scenario(false, false)
+	check(not started3 and #calls3 == 0, "a different owner identity is refused: only the exact retained identity recovers")
 end
 if section == nil or section == "host_withdrawal" then
 	local f = fixture(); f:catalog(0)

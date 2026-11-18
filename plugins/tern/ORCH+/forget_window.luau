@@ -55,13 +55,25 @@ function M.new(api: any): any
 		if code == "changed" or code == "stale_challenge" or code == "blocked" then return text.CHANGED end
 		return text.UNSUPPORTED
 	end
+	local IDENTITY = { "owner_id", "owner_generation", "host_pane_id", "alias_nonce", "window_key", "native_session_id", "window_host_id" }
+	-- Recovery after a reload: the window epoch changed, the owner did not. The cursor comparison in api.current includes the
+	-- old epoch, so recovery compares the exact retained identity WITHOUT the epoch (design parts 4 and 7), then supersedes.
+	function self.may_act(cx: WindowCx, source: number, origin: any, data: any, recover: boolean): boolean
+		if api.current(cx, source, origin) then return true end
+		if not recover then return false end
+		local session = data.session_control
+		local retained = if session and session.close and session.close.control_origin then session.close.control_origin.binding else nil
+		if not retained or not api.context(cx, source, origin) then return false end
+		for _, name in IDENTITY do if retained[name] ~= origin[name] then return false end end
+		return true
+	end
 	local function binding_holds(job: any, data: any, origin: any): boolean
 		local session = data.session_control
 		return session ~= nil and session.admission_seq == job.admission and origin.owner_id == job.owner_id
 			and origin.owner_generation == job.owner_generation and data.authority_revision == job.authority_revision
 	end
 	local function confirmed(cx: WindowCx, job: any, data: any, origin: any)
-		if not binding_holds(job, data, origin) or not api.current(cx, job.source, origin) then return fail(cx, job, text.CHANGED) end
+		if not binding_holds(job, data, origin) or not self.may_act(cx, job.source, origin, data, job.recover) then return fail(cx, job, text.CHANGED) end
 		local bytes = build(job, data, origin, "discard_session", { challenge = job.challenge, dispatch_revision = job.preview.dispatch_revision, spawn_boot = job.spawn_boot })
 		job.phase = "persisting"
 		job.origin = api.intent(origin, data)
@@ -70,10 +82,28 @@ function M.new(api: any): any
 		if job.recover then api.authority(cx, job.source, job.origin, "supersede_forget", fields)
 		else api.authority(cx, job.source, job.origin, "begin_forget", fields) end
 	end
+	-- A clean preview (or an already-absent session) asks for the one confirmation; recovery needs none: the owner already
+	-- chose forgetting and cannot cancel it.
+	local function present_confirm(cx: WindowCx, job: any, data: any, origin: any)
+		job.phase = "confirm"
+		job.owner_snapshot = { owner_id = origin.owner_id, owner_generation = origin.owner_generation }
+		job.authority_revision = data.authority_revision
+		if job.recover then return confirmed(cx, job, data, origin) end
+		local source = job.source
+		api.capture(source, origin, cx:pick({ placeholder = text.confirm(data.session_control.name), items = { { label = text.KEEP }, { label = text.FORGET, confirm = true } } }),
+			function(choice: any, err: string?, fresh: WindowCx?)
+				if jobs[source] ~= job then return end
+				if not fresh or not choice or err or not choice.confirm then jobs[source] = nil; state(cx, source, { stage = "idle" }); return end
+				local current = api.snapshot(fresh, source)
+				local now = if current then api.origin(fresh, source) else nil
+				if not current or not now then return fail(fresh, job, text.CHANGED) end
+				confirmed(fresh, job, current, now)
+			end)
+	end
 	-- Start (or check again / continue): a fresh attempt always begins with the capability exchange.
 	function self.start(cx: WindowCx, source: number, origin: any, data: any, recover: boolean?): boolean
 		local session = data.session_control
-		if not session or not (api.current(cx, source, origin) or (recover == true and api.closing(cx, source, origin, true))) then return false end
+		if not session or not self.may_act(cx, source, origin, data, recover == true) then return false end
 		jobs[source] = { source = source, alias = data.source_nonce, attempt = api.id(), phase = "capability", deadline = tern.now() + CHECK_MS,
 			admission = session.admission_seq, owner_id = origin.owner_id, owner_generation = origin.owner_generation,
 			authority_revision = data.authority_revision, recover = recover == true }
@@ -100,6 +130,13 @@ function M.new(api: any): any
 					if body.status ~= "capable" then fail(cx, job, refusal_message(body)); return pending ~= nil end
 					job.challenge = body.payload.challenge; job.spawn_boot = body.spawn_boot; job.phase = "preview"; job.sent = nil
 					job.deadline = tern.now() + CHECK_MS
+					-- SPAWN no longer holds the session (an earlier discard completed and its reply was lost): there is nothing to
+					-- preview. Recovery goes straight to the idempotent discard under the fresh challenge.
+					if body.payload.absent == true then
+						job.preview = { dispatch_revision = 0 }
+						present_confirm(cx, job, data, origin)
+						return pending ~= nil
+					end
 				end
 			elseif job.phase == "preview" then
 				local body = exchange(cx, job, data, origin, "discard_preview", { challenge = job.challenge })
@@ -109,24 +146,8 @@ function M.new(api: any): any
 						job.phase = "blocked"
 						state(cx, source, { stage = "blocked", blockers = body.payload.blockers, pending = pending ~= nil })
 					else
-						job.preview = body.payload; job.phase = "confirm"
-						job.owner_snapshot = { owner_id = origin.owner_id, owner_generation = origin.owner_generation }
-						job.authority_revision = data.authority_revision
-						local name = session.name
-						if job.recover then
-							-- Continuing a persisted forget needs no second confirmation: the owner already chose it and cannot cancel.
-							confirmed(cx, job, data, origin)
-							return pending ~= nil
-						end
-						api.capture(source, origin, cx:pick({ placeholder = text.confirm(name), items = { { label = text.KEEP }, { label = text.FORGET, confirm = true } } }),
-							function(choice: any, err: string?, fresh: WindowCx?)
-								if jobs[source] ~= job then return end
-								if not fresh or not choice or err or not choice.confirm then jobs[source] = nil; state(cx, source, { stage = "idle" }); return end
-								local current = api.snapshot(fresh, source)
-								local now = if current then api.origin(fresh, source) else nil
-								if not current or not now then return fail(fresh, job, text.CHANGED) end
-								confirmed(fresh, job, current, now)
-							end)
+						job.preview = body.payload
+						present_confirm(cx, job, data, origin)
 					end
 				end
 			elseif job.phase == "persisting" then

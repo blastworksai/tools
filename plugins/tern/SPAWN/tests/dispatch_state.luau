@@ -245,6 +245,19 @@ do
  root.requests['other/launch'].pane_binding=pane('55')
  inv=State.forget_inventory(root,'session',observer({['55']='present',['57']='absent'}),'7')
  check(inv.blockers[1].kind=='shared_pane','a pane also retained by another orchestration is marked shared')
+ -- Fail closed on identity: another native session, an unreadable terminal proof, wake obligations retained on a worker.
+ inv=State.forget_inventory(root,'session',gone,'7','9')
+ check(#inv.blockers>=1 and inv.blockers[1].kind=='unobservable','a pane of another native session (restarted Tern, reused pane ids) is unobservable, never absent')
+ check(#State.forget_inventory(root,'session',gone,'7','3').blockers==0,'the same native session with the pane absent is clean')
+ local with_proof=build();with_proof.workers['session/w'].terminal_process={platform='not-this-os'}
+ check(State.forget_inventory(with_proof,'session',gone,'7','3').blockers[1].kind=='unobservable','a terminal process proof this host cannot read is unavailable evidence')
+ local woken=build()
+ woken.workers['session/w'].wakes={wake1={request_id='wake1',origin_binding=origin('session'),wake={phase='claimed'}}}
+ inv=State.forget_inventory(woken,'session',gone,'7','3')
+ check(#inv.blockers==1 and inv.blockers[1].kind=='uncertain','a claimed wake retained on a worker blocks')
+ woken.workers['session/w'].wakes.wake1.wake={phase='resolved',pane_binding=pane('58')}
+ inv=State.forget_inventory(woken,'session',observer({['55']='absent',['57']='absent',['58']='present'}),'7','3')
+ check(#inv.blockers==1 and inv.blockers[1].kind=='pane' and inv.blockers[1].pane=='58','a pane named only by a retained wake is observed too')
  root=build()
  root.requests['session/launch'].body.status='claimed'
  inv=State.forget_inventory(root,'session',gone,'7')

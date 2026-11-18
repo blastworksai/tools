@@ -380,14 +380,18 @@ end
 -- stops a process, and nothing outside the graph (agent roster, other sessions, watermarks, files) is touched.
 local function forget_panes(root,logical)
  local panes={}
- local function add(binding,agent)
-  if type(binding)=='table' and binding.pane_id then panes[binding.pane_id..'|'..tostring(binding.window_host_id)]={binding=binding,agent=agent or ''} end
+ local function add(binding,agent,proof)
+  if type(binding)=='table' and binding.pane_id then
+   local key=binding.pane_id..'|'..tostring(binding.window_host_id)
+   local known=panes[key]
+   panes[key]={binding=binding,agent=agent or (known and known.agent) or '',proof=proof or (known and known.proof)}
+  end
  end
  for _,e in pairs(root.requests) do
   local r=e.request
   if r.logical_session_id==logical then
    local agent=r.record_id
-   add(e.pane_binding,agent);add(r.pane_binding,agent)
+   add(e.pane_binding,agent,e.terminal_process);add(r.pane_binding,agent)
    add(e.attachment and e.attachment.pane_binding,agent);add(e.wake and e.wake.pane_binding,agent)
    add(e.body and type(e.body.payload)=='table' and e.body.payload.pane_binding,agent)
    add(e.native_result and e.native_result.result and e.native_result.result.pane_binding,agent)
@@ -396,7 +400,9 @@ local function forget_panes(root,logical)
  end
  for _,w in pairs(root.workers) do
   if w.logical_session_id==logical then
-   add(w.pane_binding,w.record_id);add(w.attachment and w.attachment.pane_binding,w.record_id);add(w.stopped and w.stopped.pane_binding,w.record_id)
+   add(w.pane_binding,w.record_id,w.terminal_process);add(w.attachment and w.attachment.pane_binding,w.record_id);add(w.stopped and w.stopped.pane_binding,w.record_id)
+   -- Wake obligations retained on the worker (publications kept by acknowledge()) carry their own pane bindings.
+   for _,p in pairs(w.wakes or {}) do add(p.wake and p.wake.pane_binding,w.record_id) end
   end
  end
  return panes
@@ -415,6 +421,14 @@ local function forget_uncertain(root,logical)
    if running then note(r.record_id,r.origin_binding and r.origin_binding.window_host_id) end
   end
  end
+ for _,w in pairs(root.workers) do
+  if w.logical_session_id==logical then
+   for _,p in pairs(w.wakes or {}) do
+    local phase=p.wake and p.wake.phase
+    if phase=='claimed' or phase=='launching' or phase=='uncertain' then note(w.record_id,p.origin_binding and p.origin_binding.window_host_id) end
+   end
+  end
+ end
  for _,g in pairs(root.mailboxes.generations) do
   if g.binding and g.binding.logical_session_id==logical then
    local uncertain=g.active~=nil
@@ -426,7 +440,7 @@ local function forget_uncertain(root,logical)
 end
 -- `observe(pane_binding)` answers 'absent', 'present' or anything else for unobservable. `host` is the one execution
 -- host this peer can observe (the retained owner's window host); evidence from any other host is unavailable.
-function M.forget_inventory(root,logical,observe,host)
+function M.forget_inventory(root,logical,observe,host,native_session)
  local blockers,counts={},{requests=0,workers=0,generations=0}
  for _,e in pairs(root.requests) do if e.request.logical_session_id==logical then counts.requests+=1 end end
  for _,w in pairs(root.workers) do if w.logical_session_id==logical then counts.workers+=1 end end
@@ -439,7 +453,11 @@ function M.forget_inventory(root,logical,observe,host)
  local keys={};for key in pairs(mine) do keys[#keys+1]=key end;table.sort(keys)
  for _,key in ipairs(keys) do
   local p=mine[key];local binding=p.binding
-  local state=if binding.window_host_id~=host then 'unknown' else observe(binding)
+  -- Fail closed: evidence from another host, another native session (a restarted Tern reuses pane ids) or a terminal
+  -- process proof this host cannot read is unavailable evidence, never absence.
+  local proof=p.proof
+  local state=if binding.window_host_id~=host or (native_session~=nil and binding.native_session_id~=native_session)
+    or (type(proof)=='table' and proof.platform~=nil and proof.platform~=tern.runtime.os) then 'unknown' else observe(binding)
   if state=='present' then
    blockers[#blockers+1]={kind=if others[key] then 'shared_pane' else 'pane',agent=p.agent,pane=binding.pane_id,host=tostring(binding.window_host_id)}
   elseif state~='absent' then
@@ -450,8 +468,8 @@ function M.forget_inventory(root,logical,observe,host)
  return {blockers=blockers,inventory=counts,dispatch_revision=root.revision}
 end
 -- Deletes exactly this session's graph. Returns the inventory, or nil and the blocking inventory.
-function M.forget_discard(root,logical,observe,host)
- local inventory=M.forget_inventory(root,logical,observe,host)
+function M.forget_discard(root,logical,observe,host,native_session)
+ local inventory=M.forget_inventory(root,logical,observe,host,native_session)
  if #inventory.blockers>0 then return nil,inventory end
  for key,e in pairs(root.requests) do if e.request.logical_session_id==logical then root.requests[key]=nil end end
  for key,w in pairs(root.workers) do

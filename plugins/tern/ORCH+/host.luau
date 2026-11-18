@@ -399,13 +399,25 @@ local handling_event = false
 -- missing, corrupt or unreadable storage never clears anything.
 local FORGOTTEN_VIEW_FIELDS = { "scoped_results", "dispatch_command_result", "dispatch_action", "recovery",
 	"attestation", "close_armed", "relay_notice", "creation_ready", "setup_result", "migration_result", "orchestration_result", "forget" }
-local function normalize_view(view: any)
+-- Any session id the loaded authority no longer holds is cleared with its scoped results. A forgotten orchestration clears at
+-- once and shows the completion notice; any other absent id (an ordinary close) is kept for a short grace so the closed bridge
+-- view can still release through its session_closed alias, and is never written to saved data.
+local ABSENT_GRACE_MS = 5000
+local function authority_lacks(view: any): boolean
 	local registry = authority.registry
-	if authority.status ~= "ready" or registry == nil or registry.forgotten == nil or view.orch_session_id == nil then return end
-	if view.orch_session_id ~= registry.forgotten.orch_session_id or registry.sessions[view.orch_session_id] ~= nil then return end
+	return authority.status == "ready" and registry ~= nil and view.orch_session_id ~= nil and registry.sessions[view.orch_session_id] == nil
+end
+local function normalize_view(view: any)
+	if not authority_lacks(view) then view.absent_since = nil; return end
+	local forgotten = authority.registry.forgotten
+	if forgotten == nil or forgotten.orch_session_id ~= view.orch_session_id then
+		if view.absent_since == nil then view.absent_since = tern.now(); return end
+		if tern.now() - view.absent_since < ABSENT_GRACE_MS then return end
+	else
+		view.notice = require("./forget_text").DONE
+	end
 	for _, field in FORGOTTEN_VIEW_FIELDS do view[field] = nil end
-	view.orch_session_id = nil
-	view.notice = require("./forget_text").DONE
+	view.orch_session_id, view.absent_since = nil, nil
 end
 local function render_all()
 	if handling_event then return end
@@ -1323,12 +1335,22 @@ function relay.observed_control(message: any): boolean
 	end
 	return false
 end
+-- The dedicated forget protocol has its own frame and closed schema. Its responses are read-only observations from the host's
+-- point of view: classification never adopts a request, and a lost completion is recovered by an idempotent authenticated retry.
+function relay.forget_body(bytes: any): any?
+	if type(bytes) ~= "string" or #bytes > codec.FORGET.limit or bytes:sub(1, #codec.FORGET.prefix) ~= codec.FORGET.prefix then return nil end
+	local body, problem = codec.strict_decode(bytes:sub(#codec.FORGET.prefix + 1), codec.FORGET.limit)
+	if problem or not codec.validate_forget_response(body) then return nil end
+	return body
+end
+local FORGET_ACTS = { discard_capability = true, discard_preview = true, discard_session = true }
 function relay.retirable_projection(message: any): boolean
 	-- Execution still needs the peer's exact consumption proof. Results can retire
 	-- only as read-only observations or after durable domain consumption.
 	if message.route == "spawn.execution" then return false end
 	if message.body == "" or message.route == "spawn.current" then return true end
 	if message.route ~= "spawn.response" then return false end
+	if relay.forget_body(message.body) ~= nil then return true end
 	local body = relay.response_body(message.body)
 	if body ~= nil and table.find({ "catalog", "owner_status", "status", "mailbox_inventory", "mailbox_allocation" }, body.op) ~= nil then return true end
 	if authority.status ~= "ready" or authority.uncommitted_observation
@@ -1348,7 +1370,7 @@ function relay.reject(message: any, code: string, view: any?): boolean
 	-- exact ORCH obligation; no new outcome ledger or inferred completion is created.
 	if message.route == "spawn.response" and message.body ~= "" then
 		local body = relay.response_body(message.body)
-		local readonly = body and table.find({ "catalog", "owner_status", "status", "mailbox_inventory", "mailbox_allocation" }, body.op)
+		local readonly = relay.forget_body(message.body) ~= nil or body and table.find({ "catalog", "owner_status", "status", "mailbox_inventory", "mailbox_allocation" }, body.op)
 		if not readonly then
 			local registry = authority.registry
 			local pending = if body and registry and registry.dispatch then registry.dispatch.actions[body.action_id] else nil
@@ -1504,7 +1526,7 @@ function relay.spawn_event(view: any, input: any)
 		local retained = lane.received[key]
 		if retained and retained.message.route == "spawn.response" and retained.message.body ~= "" then
 			local response = relay.response_body(retained.message.body)
-			if not response or not table.find({ "catalog", "owner_status", "status", "mailbox_inventory", "mailbox_allocation" }, response.op) then return end
+			if relay.forget_body(retained.message.body) == nil and (not response or not table.find({ "catalog", "owner_status", "status", "mailbox_inventory", "mailbox_allocation" }, response.op)) then return end
 		end
 		if retained and retained.message.route == proof.route and retained.message.incarnation == proof.incarnation
 			and relay.ack(view, retained) then lane.received[key] = nil end
@@ -1537,6 +1559,19 @@ function relay.spawn_event(view: any, input: any)
 			if not request or request.op ~= "catalog" or not view.setup_catalog_request
 				or not same_value(request, view.setup_catalog_request, 0)
 				or not same_value(request.setup_origin, lane.source.origin, 0) then return end
+		elseif FORGET_ACTS[input.act] then
+			-- Own decoder end to end. The owner identity (without its window epoch) must be this lane's bound source.
+			request = codec.decode_forget_request(input.bytes)
+			local o = lane.source.origin
+			if not request or request.op ~= input.act or request.logical_session_id ~= o.logical_session_id or request.controller_pane ~= lane.source.host_pane_id then return end
+			for _, name in { "owner_id", "owner_generation", "host_pane_id", "alias_nonce", "window_key", "native_session_id", "window_host_id" } do
+				if request.owner[name] ~= o[name] then relay.failure(view, "origin_changed", lane.metadata); return end
+			end
+			if input.act == "discard_session" and (next(relay.unresolved) ~= nil or view.spawn_relay.held or lane.metadata.held) then
+				relay.failure(view, "relay_held", lane.metadata); return
+			end
+			local sent = relay.send(view, lane, "spawn", "spawn.request", input.relay_endpoint .. ":" .. input.lane_id .. ":" .. input.act .. ":" .. input.peer_boot, input.act, input.bytes, nil)
+			return
 		else request = codec.decode_dispatch_request(input.bytes) end
 		if not request or (not RELAY_CALLBACKS[input.act] and not migration and request.op ~= input.act) then return end
 		if not RELAY_CALLBACKS[input.act] and ((migration and migration.operation ~= "source")
@@ -2665,7 +2700,7 @@ local definition: BlockDef<any> = {
 	event = handle_event,
 	save = function(view: any): any
 		normalize_view(view)
-		return { pane = view.pane, alias_nonce = view.alias_nonce, orch_session_id = view.orch_session_id, established = authority.established,
+		return { pane = view.pane, alias_nonce = view.alias_nonce, orch_session_id = if authority_lacks(view) then nil else view.orch_session_id, established = authority.established,
 			dispatch_command_result = view.dispatch_command_result, notice = view.notice, relay_notice = view.relay_notice }
 	end,
 }

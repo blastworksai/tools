@@ -1291,6 +1291,7 @@ end
 -- request. A challenge is bound to both namespaces, the session/admission, the retained owner identity, this boot and one
 -- attempt id; only the latest per identity is honoured and it lives in memory, so a SPAWN reload invalidates it.
 local forget_challenges={}
+local forget_done={} -- identity -> the exact completed attempt, so an exact retry of a lost completion answers closed again
 local function forget_body(r,status,payload,err)
  return {schema=1,op=r.op,request_id=r.request_id,attempt_id=r.attempt_id,status=status,spawn_namespace=r.spawn_namespace,authority_namespace=r.authority_namespace,logical_session_id=r.logical_session_id,admission_seq=r.admission_seq,spawn_boot=boot,payload=payload,error=err}
 end
@@ -1335,7 +1336,11 @@ function M.forget(r,binding,session,observe)
    current={attempt_id=r.attempt_id,challenge=string.format('forget-%08x-%08x-%08x-%08x',math.random(1,2147483647),math.random(1,2147483647),math.random(1,2147483647),math.random(1,2147483647)),boot=boot}
    forget_challenges[identity]=current
   end
-  return forget_body(r,'capable',{challenge=current.challenge})
+  return forget_body(r,'capable',{challenge=current.challenge,absent=if s==nil then true else nil})
+ end
+ local done=forget_done[identity]
+ if r.op=='discard_session' and s==nil and done and done.attempt_id==r.attempt_id and done.challenge==r.challenge then
+  return forget_body(r,'closed',{admission_cursor=root.admission_cursor})
  end
  if not current or current.attempt_id~=r.attempt_id or current.challenge~=r.challenge or current.boot~=boot then
   return forget_refuse(r,'stale_challenge','The challenge is not the latest for this attempt and boot')
@@ -1348,17 +1353,18 @@ function M.forget(r,binding,session,observe)
  end
  local host=r.owner.window_host_id
  if r.op=='discard_preview' then
-  local inventory=State.forget_inventory(root,r.logical_session_id,observe,host)
+  local inventory=State.forget_inventory(root,r.logical_session_id,observe,host,r.owner.native_session_id)
   if #inventory.blockers>0 then return forget_body(r,'blocked',{dispatch_revision=inventory.dispatch_revision,blockers=inventory.blockers}) end
   return forget_body(r,'clean',{dispatch_revision=inventory.dispatch_revision,inventory=inventory.inventory})
  end
  -- discard_session: the preview's boot and revision must still hold, then everything is observed again immediately before commit.
  if r.spawn_boot~=boot or r.dispatch_revision~=root.revision then return forget_refuse(r,'changed','The orchestration changed after it was checked') end
- local inventory,blocked=State.forget_discard(root,r.logical_session_id,observe,host)
+ local inventory,blocked=State.forget_discard(root,r.logical_session_id,observe,host,r.owner.native_session_id)
  if not inventory then return forget_refuse(r,'blocked','Execution is not provably quiescent') end
  local saved,why=save(root,true)
  if not saved then return forget_refuse(r,'busy',tostring(why):sub(1,400)) end
  forget_challenges[identity]=nil
+ forget_done[identity]={attempt_id=r.attempt_id,challenge=r.challenge}
  return forget_body(r,'closed',{admission_cursor=root.admission_cursor})
 end
 local function execution_in(root,r,bridge,relay_binding)

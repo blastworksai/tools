@@ -2451,7 +2451,22 @@ sections.forget=function()
  check(done.status=='closed' and done.payload.admission_cursor==root.admission_cursor and root.sessions.session==nil and left==0,'dispatch-v1 holds no session, request, worker or mailbox generation of the forgotten session')
  check(f.p.equal(f.snapshot.records,roster) and f.effects.reserves==1,'the agent roster is untouched and no native effect ran')
  -- Lost completion: the graph is gone; an authenticated retry with a fresh capability is idempotent.
- check(ask('discard_session','attempt-2',bound).error.code=='stale_challenge','a consumed challenge is not reusable')
+ check(ask('discard_session','attempt-2',bound).status=='closed','an exact retry of a lost completion answers closed again (design part 7)')
+ local wrong=copy(bound);wrong.challenge='forget-ffffffffffffffff'
+ check(ask('discard_session','attempt-2',wrong).error.code=='stale_challenge','a different challenge is never accepted for the retry')
+ -- A SPAWN reload (new boot, no in-memory challenge or completion record) with the session already deleted.
+ local reloaded=fixture(copy(f.saved))
+ local ask2=function(op,attempt,extra)
+  local r=request(op,attempt,extra)
+  local body=reloaded.d.forget(r,reloaded.binding,1,gone)
+  assert(f.c.encode_forget_response(body),runtime.json.encode(body):sub(1,200))
+  return body
+ end
+ local fresh=ask2('discard_capability','attempt-9')
+ check(fresh.status=='capable' and fresh.payload.absent==true,'after a reload an absent session is reported absent so recovery can skip the preview')
+ local completes=ask2('discard_session','attempt-9',{challenge=fresh.payload.challenge,dispatch_revision=0,spawn_boot=fresh.spawn_boot})
+ check(completes.status=='closed','a lost completion with a reload still completes: absent session, matching namespaces, admission within the watermark')
+ check(ask2('discard_preview','attempt-9',{challenge=fresh.payload.challenge}).error.code=='not_found','a preview of an absent session is not offered')
  local again=ask('discard_capability','attempt-3')
  check(again.status=='capable','an absent session whose admission existed can be re-authenticated')
  local retry=ask('discard_session','attempt-3',{challenge=again.payload.challenge,dispatch_revision=0,spawn_boot=again.spawn_boot})
