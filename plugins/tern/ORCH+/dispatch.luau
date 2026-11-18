@@ -1299,7 +1299,7 @@ local function reclaim_gates(d: any)
 		for _, item in (d.landing or {}).items or {} do if item.gate_id == key and not LANDING_TERMINAL[item.status] then dependent = true end end
 		for _, rec in d.intakes or {} do if rec.label and rec.label.gate_id == key then dependent = true end end
 		if not dependent and not g.ruling and not gate_open(g) and (not g.delivery or g.delivery.acknowledged)
-			and not g.delivery_uncertain and (not g.execution or g.execution.state ~= "pending") and not config.kept_open(g) then
+			and not g.delivery_uncertain and (not g.execution or g.execution.state ~= "pending") and not config.kept_open(g) and not (g.execution and g.execution.notice and g.execution.notice.state == "pending") then
 			local w = d.workers[g.worker_id]
 			if w then
 				local entries = flow(w).thread
@@ -2017,7 +2017,7 @@ local function valid_workflow(d: any, registry: any, legacy: boolean?): boolean
 		if g.execution ~= nil then
 			local e = g.execution
 			local proposal = if g.proposal then codec.decode_report(g.proposal, w) else nil
-			if not closed(e, "state gate_revision effect_ref at_ms") or not table.find({ "pending", "done", "refused" }, e.state) or not pos(e.gate_revision)
+			if not closed(e, "state gate_revision effect_ref at_ms notice") or (e.notice ~= nil and (e.state ~= "refused" or not closed(e.notice, "state code text") or not table.find({ "pending", "dropped" }, e.notice.state) or not str(e.notice.code, 1024) or not wire_text(e.notice.text, 8192))) or not table.find({ "pending", "done", "refused" }, e.state) or not pos(e.gate_revision)
 				or e.gate_revision > g.revision or not wire_text(e.effect_ref, 1024) or not (e.at_ms == 0 or pos(e.at_ms))
 				or not g.answer or g.answer.choice_id ~= "approve" or not proposal or proposal.payload.kind == "rollover" then return false end
 		end
@@ -6423,7 +6423,7 @@ end
 -- True when a live (non-refused) proposal gate of this coordinator already holds the id.
 function config.proposal_id_taken(d: any, w: any, proposal_id: string): boolean
 	for _, g in d.gates or {} do
-		if g.worker_id == w.worker_id and g.proposal and not config.refused_proposal(g) then
+		if g.worker_id == w.worker_id and config.proposal_live(g) then
 			local prior = codec.decode_report(g.proposal, w)
 			if prior and prior.payload.proposal_id == proposal_id then return true end
 		end
@@ -6463,21 +6463,48 @@ function config.refuse_proposal(d: any, w: any, p: any, bytes: string, code: str
 	if listed then text ..= " Eligible records (record_id@revision): " .. config.eligible_text(d, w.logical_session_id, 3000) .. "." end
 	return config.settle_refusal(d, w, p, bytes, text, code, if listed and (p.kind == "dispatch" or p.kind == "new_work") then "retarget:open" else nil, clock)
 end
--- An approved proposal ORCH+ then refused to run is told to the coordinator as one more typed reject, so
--- it never waits for an effect that will not happen; a stale record stays open for the owner to re-target.
-function config.refuse_execution(d: any, w: any, g: any, p: any, code: string, message: string, clock: any): boolean
-	if code == "gate_cancelled" then return true end
-	-- Room first: a refusal that cannot be told must leave the execution pending, never terminally silent.
-	if count(d.gates or {}) >= 64 then reclaim_gates(d) end
-	if count(d.gates or {}) >= 64 or #flow(w).thread + 2 > 128 then return false end
-	local text = "ORCH+ refused to run approved proposal " .. p.proposal_id .. " (" .. p.kind .. ", gate " .. g.id .. ", " .. code .. "): " .. message
-	local listed = code == "catalog_changed" and (p.kind == "dispatch" or p.kind == "new_work")
-	if listed then text ..= " Eligible records (record_id@revision): " .. config.eligible_text(d, w.logical_session_id, 3000) .. "." end
-	local _, problem = config.settle_refusal(d, w, p, g.proposal, text, "execution_refused", if listed then "retarget:open" else "notice:open", clock)
-	return problem == nil
+-- An approved proposal ORCH+ then refused to run is terminal at once (the effect is never retried). Telling the
+-- coordinator is a separate, bounded obligation kept on the execution record (notice): it is delivered as one more
+-- typed reject when a gate slot and thread room exist, never blocks reclamation, retirement or close, and is
+-- dropped (the owner still sees it on the window card) when more than eight wait. A stale record stays open to re-target.
+config.NOTICE_LIMIT = 8
+function config.queue_refusal_notice(d: any, w: any, g: any, p: any, code: string, message: string)
+	if code == "gate_cancelled" then return end
+	local waiting = {}
+	for key, other in d.gates or {} do
+		if other.logical_session_id == g.logical_session_id and other.execution and other.execution.notice and other.execution.notice.state == "pending" then table.insert(waiting, key) end
+	end
+	table.sort(waiting, function(a: string, b: string): boolean return (tonumber(a:match("%d+$")) or 0) < (tonumber(b:match("%d+$")) or 0) end)
+	for index = 1, #waiting - (config.NOTICE_LIMIT - 1) do d.gates[waiting[index]].execution.notice.state = "dropped" end
+	g.execution.notice = { state = "pending", code = code, text = bounded("ORCH+ refused to run approved proposal " .. p.proposal_id .. " (" .. p.kind .. ", gate " .. g.id .. ", " .. code .. "): " .. message, 8192) }
+end
+function config.deliver_notices(d: any, sid: string, clock: any)
+	local waiting = {}
+	for key, g in d.gates or {} do
+		if g.logical_session_id == sid and g.execution and g.execution.notice and g.execution.notice.state == "pending" then table.insert(waiting, key) end
+	end
+	table.sort(waiting, function(a: string, b: string): boolean return (tonumber(a:match("%d+$")) or 0) < (tonumber(b:match("%d+$")) or 0) end)
+	for _, key in waiting do
+		local g = d.gates[key]; local w = d.workers[g.worker_id]
+		local proposal = if w and g.proposal then codec.decode_report(g.proposal, w) else nil
+		if not proposal then g.execution.notice.state = "dropped"; continue end
+		if count(d.gates) >= 64 then reclaim_gates(d) end
+		if count(d.gates) >= 64 or #flow(w).thread + 2 > 128 then return end
+		local notice, p = g.execution.notice, proposal.payload
+		local listed = notice.code == "catalog_changed" and (p.kind == "dispatch" or p.kind == "new_work")
+		local text = notice.text
+		if listed then text ..= " Eligible records (record_id@revision): " .. config.eligible_text(d, sid, 3000) .. "." end
+		local _, problem = config.settle_refusal(d, w, p, g.proposal, text, "execution_refused", if listed then "retarget:open" else "notice:open", clock)
+		if problem then return end
+		g.execution.notice = nil
+	end
 end
 function config.refused_proposal(g: any): boolean
 	return g.answer ~= nil and type(g.answer.source) == "table" and g.answer.source.kind == "refusal"
+end
+-- A proposal gate still holds its proposal id: not an ORCH+ refusal, and not an execution ORCH+ refused.
+function config.proposal_live(g: any): boolean
+	return g.proposal ~= nil and not config.refused_proposal(g) and not (g.execution ~= nil and g.execution.state == "refused")
 end
 -- Policy answer (Contract E): recorded on the gate and the thread with its tagged source, then
 -- delivered like any decision. Nothing is answered when the thread has no room.
@@ -6643,12 +6670,10 @@ function config.execute_proposal(registry: any, n: any, gate_id: string, event: 
 	g = d.gates[gate_id]; w = d.workers[g.worker_id]
 	local prior = g.execution
 	if prior and prior.state == state and prior.effect_ref == ref then return message end
-	if state == "refused" and not config.refuse_execution(d, w, g, proposal.payload, ref, message, clock) then
-		state, ref, message = "pending", "refusal_undelivered", "ORCH+ could not yet tell the coordinator why " .. ref .. " refused this approved proposal; it is retried on a later commit."
-		if prior and prior.state == state and prior.effect_ref == ref then return message end
-	end
 	g.execution = { state = state, gate_revision = g.revision, effect_ref = bounded(ref, 1024), at_ms = stamp(clock).at_ms }
+	if state == "refused" then config.queue_refusal_notice(d, w, g, proposal.payload, ref, message) end
 	append(d, w, "execution", bounded("Proposal " .. proposal.payload.proposal_id .. " (" .. proposal.payload.kind .. ", gate " .. g.id .. ") " .. state .. ": " .. message, 32768), clock)
+	if state == "refused" then config.deliver_notices(d, g.logical_session_id, clock) end
 	return message
 end
 -- Runs at the end of every dispatch commit for the event's session. Pause answers nothing by policy:
@@ -6688,6 +6713,7 @@ function config.advance_proposals(registry: any, n: any, event: any, clock: any,
 		and g.answer.choice_id == "approve" and (g.execution == nil or g.execution.state == "pending") end, oldest) do
 		config.execute_proposal(registry, n, key, event, clock, reserve)
 	end
+	config.deliver_notices(d, sid, clock)
 end
 -- Rule H review evidence: the latest unvoided review of this work with a reviewer-worker result
 -- (approved, changes_required or capped), so a landing hold names why the review does not prove it.
@@ -7856,7 +7882,7 @@ local function semantic(n: any, w: any, report: any, bytes: string, clock: any):
 		end
 		if restored_coordinator(d, w.logical_session_id) then return fail("coordinator_restored", "A retired coordinator pane was observed alive again; coordinator effects are held until it is reconciled.") end
 		for _, g in d.gates or {} do
-			if g.worker_id == w.worker_id and g.proposal and not config.refused_proposal(g) then
+			if g.worker_id == w.worker_id and config.proposal_live(g) then
 				local prior = codec.decode_report(g.proposal, w)
 				if prior.payload.proposal_id == p.proposal_id then return fail("proposal_conflict", "Proposal ID already exists; replay its exact original report instead.") end
 			end

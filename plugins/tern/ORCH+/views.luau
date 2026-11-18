@@ -641,6 +641,13 @@ local function proposal_refusals(view: any, projection: any, selected: any): any
 			end
 		end
 	end
+	-- An execution refusal not yet told to the coordinator (or dropped) is still shown to the owner.
+	for _, gate in flow.gates do
+		local notice = if gate.execution then gate.execution.notice else nil
+		if type(notice) == "table" then
+			table.insert(rows, ui.text(ui.span("Your orchestrator's proposal was refused (execution_refused): " .. tostring(notice.text), "warning")))
+		end
+	end
 	if #rows == 0 then return nil end
 	return ui.card("Proposal refused", rows)
 end
