@@ -429,4 +429,15 @@ do
 	local off_native = record("omp-off"); off_native.provider = "OMP"; off_native.backend = "native-agent"; off_native.command = "omp"; off_native.prompt = "Begin."; off_native.enabled = false
 	refused((function() local v = result({ off_native }); v.paid_checks = { "omp-off" }; return native(v) end)(), nil, "paid_checks cannot name a disabled agent")
 end
+-- SKILLS-209: the shape the setup skill writes for another POSIX account is the stored shape:
+-- `user` plus that account's own executable, no sudo wrapper.
+do
+	local own = record("grok-bwai"); own.provider = "Grok"; own.provider_family = "xai"; own.account_label = "BWAI"
+	own.command = "/home/grokbwai/.local/bin/grok"; own.arguments = { "--yolo" }; own.user = "grokbwai"; own.cwd = "/opt/glitch"
+	local review = accepted(result({ own }))
+	check(review.records[1].user == "grokbwai" and review.records[1].command == "/home/grokbwai/.local/bin/grok" and review.records[1].backend == "local-terminal",
+		"a terminal record for another account carries user and that account's own executable")
+	local plan = Review.automatic_plan(review.records, review.paid_checks)
+	check(plan.action == "prepare" and plan.prepare_ids[1] == "grok-bwai", "a user-shaped terminal record is prepared automatically, not held for review")
+end
 return "PASS setup_review " .. tostring(checks)
