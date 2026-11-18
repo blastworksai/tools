@@ -91,17 +91,34 @@ fe() {
 printable() { case $1 in *[![:print:]]*) return 1 ;; esac; return 0; }
 
 # Run one command with stdin closed, output to a private file, killed after TMO seconds.
+# Each call is started as the leader of its own process group (setsid where there is one, else perl's setpgrp,
+# both exec in place so $! is the group id), so TERM then KILL reaches the whole tree a CLI wrapper started,
+# a straggler is killed even when the wrapper exits normally, and the watcher is a group of its own whose
+# sleep is reaped with it. Where neither tool exists only the leader's pid is signalled.
 # bounded <merge-stderr 0|1> command words...; prints the output, returns the status.
+GRP=""
+if command -v setsid >/dev/null 2>&1; then GRP="setsid"
+elif command -v perl >/dev/null 2>&1; then GRP="perl -e setpgrp(0,0);exec(@ARGV)||exit(127) --"; fi
+gkill() { # signal, pid: the pid's whole process group when it leads one
+	if [ -n "$GRP" ]; then kill -s "$1" -- "-$2" 2>/dev/null || kill -s "$1" "$2" 2>/dev/null; else kill -s "$1" "$2" 2>/dev/null; fi
+	return 0
+}
 bounded() {
 	bmerge=$1; shift
 	bf=$T/b.out
-	if [ "$bmerge" = 1 ]; then "$@" >"$bf" 2>&1 </dev/null & else "$@" >"$bf" 2>/dev/null </dev/null & fi
+	if [ "$bmerge" = 1 ]; then $GRP "$@" >"$bf" 2>&1 </dev/null & else $GRP "$@" >"$bf" 2>/dev/null </dev/null & fi
 	bpid=$!
-	( sleep "$TMO"; kill -TERM "$bpid"; sleep 2; kill -KILL "$bpid" ) >/dev/null 2>&1 </dev/null &
+	if [ -n "$GRP" ]; then
+		$GRP /bin/sh -c 'sleep "$1"; kill -s TERM -- "-$2"; sleep 2; kill -s KILL -- "-$2"' watcher "$TMO" "$bpid" >/dev/null 2>&1 </dev/null &
+	else
+		( sleep "$TMO"; kill -s TERM "$bpid"; sleep 2; kill -s KILL "$bpid" ) >/dev/null 2>&1 </dev/null &
+	fi
 	wpid=$!
-	wait "$bpid"; brc=$?
-	kill "$wpid" >/dev/null 2>&1
-	wait "$wpid" >/dev/null 2>&1
+	wait "$bpid" 2>/dev/null; brc=$?
+	gkill TERM "$bpid"
+	gkill KILL "$bpid"
+	gkill KILL "$wpid"
+	wait "$wpid" 2>/dev/null
 	cat "$bf"
 	return $brc
 }
@@ -133,6 +150,26 @@ resolve_operator() { # cli
 }
 omp_family() { # config text on stdin
 	awk '/^modelRoles:/{m=1;next} m&&/^[^ \t]/{m=0} m&&$1=="default:"{v=$0;sub(/^[^:]*:[ \t]*/,"",v);gsub(/["'"'"']/,"",v);n=split(v,a,"/");if(n>=2&&a[1]~/^[a-z0-9._-]+$/)print a[1];exit}'
+}
+
+# Does this --help text list the flag as its own token (so --yolo-extra is not --yolo), and, for a valued
+# flag, the value in that flag's own entry (its line plus indented continuation lines)?
+help_has() { # help text, flag, value-or-empty
+	printf '%s\n' "$1" | LC_ALL=C awk -v f="$2" -v v="$3" '
+	function has(s, t,   i, off, b, a) {
+		off = 0
+		while ((i = index(substr(s, off + 1), t)) > 0) {
+			i += off; b = (i > 1) ? substr(s, i - 1, 1) : " "; a = substr(s, i + length(t), 1)
+			if (b !~ /[A-Za-z0-9_-]/ && a !~ /[A-Za-z0-9_-]/) return 1
+			off = i
+		}
+		return 0
+	}
+	function judge() { if (v == "" || has(cur, v)) ok = 1 }
+	{ if (coll && $0 ~ /^[ \t]+[^ \t-]/) { cur = cur " " $0; next }
+	  if (coll) { judge(); coll = 0 }
+	  if (has($0, f)) { coll = 1; cur = $0 } }
+	END { if (coll) judge(); exit ok ? 0 : 1 }'
 }
 
 # Candidate OS accounts: named for a provider, a real login, not the operator.
@@ -203,7 +240,9 @@ while IFS="$TAB" read -r p kind acct cli; do
 	if [ "$kind" = seat ]; then help=$(login_run 1 "$acct" "$cli" --help) || help=""; else help=$(bounded 1 "$cli" --help) || help=""; fi
 	perm_lines "$p" | while IFS="|" read -r label flag argv desc; do
 		[ -n "$flag" ] || continue
-		if printf '%s\n' "$help" | grep -F -q -e "$flag"; then sup=1; else sup=0; fi
+		val=""
+		case $argv in *" "*) val=${argv#* } ;; esac
+		if help_has "$help" "$flag" "$val"; then sup=1; else sup=0; fi
 		printf 'SUP\t%s\t%s\t%s\t%s\t%s\n' "$p" "$acct" "$kind" "$label" "$sup" >>"$FACTS"
 	done
 done <"$T/acc.list"

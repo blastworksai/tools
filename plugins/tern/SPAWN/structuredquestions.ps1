@@ -8,6 +8,39 @@ $ErrorActionPreference = 'Stop'
 # Every external call is bounded (SPAWN_QUESTIONS_TIMEOUT seconds, default 20): WaitForExit(ms), then Kill.
 $timeoutMs = 20000
 if ($env:SPAWN_QUESTIONS_TIMEOUT -match '^\d+$') { $timeoutMs = [int]$env:SPAWN_QUESTIONS_TIMEOUT * 1000 }
+# How to start a discovered program. Get-Command -CommandType Application also returns .cmd/.bat shims (npm
+# installs them), which Process.Start with UseShellExecute=$false cannot run: they go through cmd.exe /d /c with
+# the path in one pair of quotes, and a path cmd.exe would still interpret inside quotes (quote, %, !, line
+# break) is refused. Only .exe/.com start directly. Pure function of the path, so it can be tested from source.
+$script:CmdShim = '(?i)\.(cmd|bat)$'
+$script:DirectExe = '(?i)\.(exe|com)$'
+$script:UnsafeForCmd = '["%!\r\n]'
+function Get-LaunchPlan([string]$Path) {
+  if ($Path -match $script:CmdShim) {
+    if ($Path -match $script:UnsafeForCmd) { return @{ ok = $false; reason = 'its path has characters cmd.exe would interpret' } }
+    $shell = $env:ComSpec; if ([string]::IsNullOrWhiteSpace($shell)) { $shell = 'cmd.exe' }
+    return @{ ok = $true; file = $shell; arguments = ('/d /c ""' + $Path + '" --help"') }
+  }
+  if ($Path -match $script:DirectExe) { return @{ ok = $true; file = $Path; arguments = '--help' } }
+  return @{ ok = $false; reason = 'it is not a program Windows can start directly' }
+}
+# A flag counts only as its own token (--yolo-extra is not --yolo); a valued flag also needs its value in that
+# flag's own entry (its line plus indented continuation lines).
+$script:TokenBefore = '(?<![A-Za-z0-9_-])'
+$script:TokenAfter = '(?![A-Za-z0-9_-])'
+function Test-Token([string]$Text, [string]$Token) {
+  return [regex]::IsMatch($Text, $script:TokenBefore + [regex]::Escape($Token) + $script:TokenAfter)
+}
+function Test-HelpFlag([string]$Help, [string]$Flag, [string]$Value) {
+  $entry = $null
+  foreach ($line in ($Help -split "\r?\n")) {
+    if ($null -ne $entry -and $line -match '^\s+[^\s-]') { $entry += ' ' + $line; continue }
+    if ($null -ne $entry -and ($Value -eq '' -or (Test-Token $entry $Value))) { return $true }
+    $entry = $null
+    if (Test-Token $line $Flag) { $entry = $line }
+  }
+  return ($null -ne $entry -and ($Value -eq '' -or (Test-Token $entry $Value)))
+}
 function Invoke-Bounded([string]$File, [string]$Arguments) {
   $info = New-Object System.Diagnostics.ProcessStartInfo
   $info.FileName = $File; $info.Arguments = $Arguments; $info.UseShellExecute = $false; $info.CreateNoWindow = $true
@@ -69,21 +102,23 @@ function Section($id, $title, $qs, $note) {
 $dash = [string][char]0x2014
 $arrow = [string][char]0x2192
 $dot = [string][char]0x00B7
-$found = @(); $missing = @(); $accounts = @(); $used = @{}; $permOut = [ordered]@{}; $noflag = @()
+$found = @(); $missing = @(); $accounts = @(); $used = @{}; $permOut = [ordered]@{}; $noflag = @(); $unavailable = @()
 foreach ($p in $providers) {
   $cmd = Get-Command $p.cli -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
   if (-not $cmd) { $missing += $p.name; continue }
+  # One provider that cannot be started is reported and skipped; discovery of the others goes on.
+  $plan = Get-LaunchPlan $cmd.Source
+  if (-not $plan.ok) { $unavailable += "Unavailable: $($p.name) ($($plan.reason))."; continue }
+  try { $help = Invoke-Bounded $plan.file $plan.arguments } catch { $unavailable += "Unavailable: $($p.name) (it could not be started: $($_.Exception.Message))."; continue }
+  if ($null -eq $help) { $help = '' }
   $found += "$($p.name) you"
   $family = $p.family
   if ($p.cli -eq 'omp') { $family = Get-OmpFamily (Join-Path $userHome '.omp\agent\config.yml') }
   $id = "$($p.cli)-$($operator.ToLower())"
   $accounts += [ordered]@{ id = $id; provider = $p.name; provider_family = $family; account_label = $operator.ToUpper(); account = $operator; operator = $true; command = $cmd.Source; home = $userHome; option = "$operator (you) $dash $($cmd.Source)"; row = "$operator $arrow ID $id, label $($operator.ToUpper())" }
-  $help = ''
-  $help = Invoke-Bounded $cmd.Source '--help'
-  if ($null -eq $help) { $help = '' }
   $list = @()
   foreach ($choice in $perm[$p.cli]) {
-    if ($choice[1] -eq '' -or $help.Contains($choice[1])) { $list += , [ordered]@{ label = $choice[0]; arguments = @($choice[2] -split ' ' | Where-Object { $_ }) } }
+    if ($choice[1] -eq '' -or (Test-HelpFlag $help $choice[1] ($choice[2] -split ' ' | Select-Object -Skip 1 | Select-Object -First 1))) { $list += , [ordered]@{ label = $choice[0]; arguments = @($choice[2] -split ' ' | Where-Object { $_ }) } }
     else { $noflag += "$($p.name) offers Normal only for flags its --help does not show ($($choice[1]))." }
   }
   $permOut[$p.name] = $list
@@ -102,6 +137,7 @@ if ($glitch.Count -eq 1) { $intro += "Glitch folder detected: $($glitch[0])." }
 elseif ($glitch.Count -gt 1) { $intro += "Glitch folders detected: $($glitch -join ', ')." }
 if ($glitch.Count -gt 3) { $intro += "More Glitch folders found, not listed as choices (pick Other and type one): $(($glitch | Select-Object -Skip 3) -join ', ')." }
 if ($glitch.Count -eq 0) { $intro += "Glitch folder: not found in $userHome\Glitch, the launch folder and its parents." }
+$intro += $unavailable
 $intro += $noflag
 # Prompt 1: one multi-select per provider (a lone operator row gets a Skip row: every question needs 2 options).
 $qs = @()

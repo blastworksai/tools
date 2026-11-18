@@ -20,11 +20,11 @@ GOLDEN = Path(__file__).with_name("structuredquestions.golden.json")
 PROVIDERS = ["claude", "codex", "kimi", "grok", "agy", "muse", "omp"]
 SEATS = ["claudework", "claudehome", "codexone", "codextwo", "kimione", "grokone",
          "agyone", "agytwo", "agythree", "agyfour", "museone", "ompone"]
-HELP_ALL = "usage: tool [--dangerously-skip-permissions] [--dangerously-bypass-approvals-and-sandbox] [--yolo] [--auto] [--permission-mode MODE] [--approval-mode MODE]\n"
+HELP_ALL = "usage: tool [--dangerously-skip-permissions] [--dangerously-bypass-approvals-and-sandbox] [--yolo] [--auto] [--permission-mode default|bypassPermissions] [--approval-mode always-ask|yolo]\n"
 
 
 class Fixture:
-    def __init__(self, base, seats=SEATS, operator_clis=PROVIDERS, help_text=HELP_ALL, glitch=True, sudo=True, no_cli=(), help_by=None, hang=(), omp_family="openai"):
+    def __init__(self, base, seats=SEATS, operator_clis=PROVIDERS, help_text=HELP_ALL, glitch=True, sudo=True, no_cli=(), help_by=None, hang=(), omp_family="openai", fork=(), leak=(), groups="setsid"):
         self.base = Path(base)
         self.bin = self.base / "bin"
         self.bin.mkdir()
@@ -32,7 +32,7 @@ class Fixture:
         self.sys = self.base / "sys"
         self.sys.mkdir()
         # No `timeout` here on purpose (macOS has none): the script must bound calls itself.
-        for tool in ("sh", "awk", "grep", "mktemp", "rm", "cat", "env", "test", "true", "tail", "sed", "tr", "head", "od", "sleep", "kill"):
+        for tool in ("sh", "awk", "grep", "mktemp", "rm", "cat", "env", "test", "true", "tail", "sed", "tr", "head", "od", "sleep", "kill", groups):
             found = shutil.which(tool)
             if found:
                 (self.sys / tool).symlink_to(found)
@@ -43,7 +43,7 @@ class Fixture:
         for account in seats:
             provider = next(p for p in PROVIDERS if account.startswith(p))
             if account not in no_cli:
-                self.cli(account, provider, (help_by or {}).get(account, help_text), hang=account in hang)
+                self.cli(account, provider, (help_by or {}).get(account, help_text), hang=account in hang, mode=("fork" if account in fork else "leak" if account in leak else None), who=account)
         for provider in operator_clis:
             self.cli("you", provider, (help_by or {}).get("you", help_text), hang="you" in hang)
         omp = self.home / "ompone/.omp/agent"
@@ -70,7 +70,7 @@ account=$3; shift 3
 shift
 [ -d "$FIX/home/$account" ] || exit 1
 cd "$FIX/home/$account" || exit 1
-exec env -i HOME="$FIX/home/$account" PATH="$FIX/home/$account/.local/bin:$FIX/sys" "$@"
+exec env -i FIX="$FIX" HOME="$FIX/home/$account" PATH="$FIX/home/$account/.local/bin:$FIX/sys" "$@"
 ''')
         self.glitch = self.base / "glitch"
         if glitch:
@@ -84,9 +84,13 @@ exec env -i HOME="$FIX/home/$account" PATH="$FIX/home/$account/.local/bin:$FIX/s
         path.write_text("#!/bin/sh\n" + body)
         path.chmod(0o755)
 
-    def cli(self, account, provider, help_text, hang=False):
+    def cli(self, account, provider, help_text, hang=False, mode=None, who=""):
         path = self.home / account / ".local/bin" / provider
         body = "sleep 300\n" if hang else f"printf '%s' '{help_text}'\n"
+        if mode == "fork":    # forks a child, then hangs: the child must not outlive the script
+            body = f'sleep 301 &\necho $! > "$FIX/child-{who}.pid"\nsleep 300\n'
+        elif mode == "leak":  # answers, exits at once and leaves a child behind
+            body = f"sleep 302 &\necho $! > \"$FIX/child-{who}.pid\"\nprintf '%s' '{help_text}'\n"
         path.write_text("#!/bin/sh\n" + body)
         path.chmod(0o755)
 
@@ -97,6 +101,16 @@ exec env -i HOME="$FIX/home/$account" PATH="$FIX/home/$account/.local/bin:$FIX/s
         done = subprocess.run(args, env=env, capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=timeout)
         self.assert_clean = (done.returncode, done.stderr)
         return done
+
+
+def alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return Path(f"/proc/{pid}/stat").read_text().split(")")[-1].split()[0] != "Z"
 
 
 def decode_login(line):
@@ -382,6 +396,74 @@ class StructuredQuestions(unittest.TestCase):
         self.assertIn("every entry of its `candidates` in any state", skill)
         self.assertIn("`unsupported_by`", skill)
         self.assertLessEqual(len(json.dumps(skill)), 8957, "stays within main's JSON-encoded size")
+
+
+    # ---- cross-family review round 2 (SKILLS-210) ----
+    def test_a_killed_call_leaves_no_child_behind(self):
+        # P2: only the wrapper's pid was killed; its children, and a straggler of a wrapper that exited, survived.
+        for groups in ("setsid", "perl"):  # the two ways a process group is made (macOS has perl, not setsid)
+            with self.subTest(groups=groups):
+                fx = self.fixture(fork=("claudework",), leak=("claudehome",), groups=groups)
+                pids = []
+                try:
+                    done = fx.run("--glitch-root", str(fx.glitch), timeout=90, seconds="1")
+                    self.assertEqual((done.returncode, done.stderr), (0, ""), done.stderr)
+                    pids = [int((fx.base / f"child-{who}.pid").read_text()) for who in ("claudework", "claudehome")]
+                    deadline = time.monotonic() + 5
+                    while time.monotonic() < deadline and any(alive(p) for p in pids):
+                        time.sleep(0.2)
+                    self.assertEqual([p for p in pids if alive(p)], [], "a child of a bounded call outlived the script")
+                finally:
+                    for p in pids:
+                        if alive(p):
+                            os.kill(p, 9)
+
+    def test_a_flag_counts_only_as_its_own_token(self):
+        # P2: `--yolo-extra` matched `--yolo` by substring.
+        fx = self.fixture(help_text="usage: tool [--yolo-extra] [--auto-approve] [--dangerously-skip-permissions-now]\n")
+        data = self.output(fx, "--glitch-root", str(fx.glitch))
+        self.assertEqual([q for q in questions(data) if q["question"].endswith("which permission mode?")], [], "no look-alike flag enables an option")
+        self.assertTrue(any(line.startswith("Permissions: Kimi offers Normal only") for line in data["intro"]))
+
+    def test_a_valued_flag_needs_its_value_in_its_own_help_entry(self):
+        # P2: `--approval-mode MODE` enabled `--approval-mode yolo` without ever showing `yolo`.
+        listed = "  --approval-mode=<value>   Override tools.approvalMode (always-ask|always-ask-cached|write|yolo)\n  --permission-mode <MODE>\n      Permission mode [possible values: default, acceptEdits, bypassPermissions, plan]\n"
+        unlisted = "usage: tool [--approval-mode MODE] [--permission-mode MODE]\n  --other   mentions yolo and bypassPermissions elsewhere\n"
+        wrong = "  --approval-mode=<value>   Override (always-ask|yolo-extra)\n  --permission-mode <MODE>\n      Permission mode [possible values: default, bypassPermissions-x]\n"
+        for text, expected in ((listed, True), (unlisted, False), (wrong, False)):
+            fx = self.fixture(help_text=text)
+            data = self.output(fx, "--glitch-root", str(fx.glitch))
+            asked = {q["when"]["provider"] for q in questions(data) if q["question"].endswith("which permission mode?")}
+            self.assertEqual({"Grok", "OMP"} <= asked, expected, text)
+            self.assertEqual(bool({"Grok", "OMP"} & asked), expected, text)
+
+    def test_windows_launch_plan_and_flag_tokens_from_the_ps1_source(self):
+        # No PowerShell on the build host. The launch decision and the token boundary are literal patterns in the
+        # twin's source; they are read from it and applied here, so the source itself is what is exercised.
+        ps1 = (PACKAGE / "structuredquestions.ps1").read_text()
+
+        def literal(name):
+            m = re.search(r"\$script:" + name + r" = '((?:[^']|'')*)'", ps1)
+            self.assertIsNotNone(m, name)
+            return m.group(1).replace("''", "'")
+        shim, direct, unsafe = re.compile(literal("CmdShim")), re.compile(literal("DirectExe")), re.compile(literal("UnsafeForCmd"))
+        for path in (r"C:\Users\you\AppData\Roaming\npm\claude.cmd", r"C:\Program Files (x86)\tools\codex.BAT"):
+            self.assertTrue(shim.search(path) and not direct.search(path) and not unsafe.search(path), path)
+        for path in (r"C:\tools\kimi.exe", r"C:\tools\grok.COM"):
+            self.assertTrue(direct.search(path) and not shim.search(path), path)
+        for path in (r"C:\x\a%PATH%.cmd", 'C:\\x\\a"b.cmd', "C:\\x\\a!b.bat", "C:\\x\\a\nb.cmd"):
+            self.assertTrue(shim.search(path) and unsafe.search(path), "refused: " + path)
+        self.assertFalse(shim.search(r"C:\x\tool.ps1") or direct.search(r"C:\x\tool.ps1"), "a script is not started directly")
+        # The plan routes shims through cmd.exe /d /c, catches a launch failure per provider and keeps going.
+        self.assertIn("'/d /c \"\"' + $Path + '\" --help\"'", ps1)
+        self.assertRegex(ps1, r"try \{ \$help = Invoke-Bounded \$plan\.file \$plan\.arguments \} catch \{ \$unavailable \+= ")
+        before, after = re.compile(literal("TokenBefore")), re.compile(literal("TokenAfter"))
+
+        def token(text, tok):
+            return re.search(before.pattern + re.escape(tok) + after.pattern, text) is not None
+        self.assertTrue(token("  --yolo, -y   run", "--yolo") and token("[--approval-mode=<value>]", "--approval-mode"))
+        self.assertFalse(token("--yolo-extra", "--yolo") or token("x--yolo", "--yolo") or token("--approval-mode-x", "--approval-mode"))
+        self.assertTrue(token("(always-ask|yolo)", "yolo") and not token("(always-ask|yolo-extra)", "yolo"))
 
 
     def test_script_is_read_only_and_forbids_model_questions(self):
