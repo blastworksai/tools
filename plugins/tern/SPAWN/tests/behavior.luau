@@ -799,6 +799,8 @@ do
 		and words[2]=="TERN_CONFIG_DIR="..context.config_dir and words[3]=="${TERN_EXE:?Native Tern executable is missing}","helper refuses missing native endpoint and never falls back to PATH/default daemon")
 	local envelope=assert(config.decode_setup_json(words[offset+4]))
 	check(envelope.path==context.result_path and envelope.binding==context.binding and envelope.setup_run_id=="run-1","shell-safe helper contains exact per-run path and binding")
+	local withScript=copy(context);withScript.questions_script="/plugin dir/structuredquestions.sh"
+	check(assert(backend.setup_prompt({},"run-1","host-A","host-A/session-1",withScript,skill,"posix")):find('"questions_script":"/plugin dir/structuredquestions.sh"',1,true)~=nil,"the helper context carries the shipped question script path")
 	local powershell=assert(backend.setup_prompt({},"run-1","host-A","host-A/session-1",context,skill,"powershell"))
 	check(powershell:find("$start.FileName=$env:TERN_EXE",1,true)~=nil and powershell:find("$start.EnvironmentVariables['TERN_DAEMON_SOCKET']=$env:TERN_PANE_SOCKET",1,true)~=nil
 		and powershell:find("window'' quoted",1,true)~=nil and powershell:find("$start.Arguments=",1,true)~=nil,"PowerShell helper uses native executable/socket, literal shell quoting and the existing Windows argv serializer")

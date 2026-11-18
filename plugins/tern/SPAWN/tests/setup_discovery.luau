@@ -54,4 +54,60 @@ check(detector.devices({machines[1],machines[1]},machines[1])==nil,'duplicate de
 check(detector.devices(machines,{id=8,name='Renamed VM',kind='remote',address='existing@example.test'})==nil,'current host identity drift cannot choose a same-numbered replacement')
 machines[1].sessions[1]=999
 check(primary.sessions[1]==81,'captured native membership is isolated from later SDK table mutation')
+-- SKILLS-210: a Glitch installation outside the launch folder's ancestors is found from /opt/glitch, the home
+-- Glitch folder or WORK's saved root, and verified exactly like an ancestor.
+local function direct(directories,files,options)
+ options=options or {}
+ local fake={plugin={dir='/plugins/spawn',data='/plugins-data/spawn'},runtime={os=options.os or 'linux'},
+  getenv=function(name)return (options.env or {})[name] end,
+  json={decode=function(text)return assert(loadstring('return '..text))()end},
+  fs={list=function(path)return assert(directories[path],'inaccessible directory')end,read=function(path,maximum)
+   assert(path~=options.unreadable,'permission denied')
+   local bytes=assert(files[path],'missing regular file');assert(#bytes<=maximum);return bytes
+  end}}
+ local chunk=assert(loadstring(runtime.fs.read(root..'/setup_discovery.luau'),'setup_discovery'))
+ setfenv(chunk,setmetatable({tern=fake},{__index=environment}))
+ return chunk().glitch(options.cwd or '/home/you')
+end
+local function installation(directories,files,path)
+ directories[path]={'.claude'};directories[path..'/.claude']={'scripts'};directories[path..'/.claude/scripts']={'workspaces.py','plan_check.py'}
+ files[path..'/.claude/scripts/workspaces.py']='workspace discovery';files[path..'/.claude/scripts/plan_check.py']='member gate'
+end
+local function machine()
+ return {['/']={'home','opt'},['/home']={'you'},['/home/you']={},['/opt']={},['/plugins']={'spawn'},['/plugins/spawn']={}},{}
+end
+do
+ local directories,files=machine()
+ installation(directories,files,'/opt/glitch')
+ local found=direct(directories,files)
+ check(found.state=='detected' and found.root=='/opt/glitch','a /home/<operator> launch folder finds the Glitch folder at /opt/glitch')
+ local missing,none=machine()
+ check(direct(missing,none).state=='not_detected_in_known_ancestors','no candidate anywhere is a genuine bounded miss, not unavailable')
+ local homeDirectories,homeFiles=machine()
+ installation(homeDirectories,homeFiles,'/home/you/Glitch')
+ local home=direct(homeDirectories,homeFiles,{env={HOME='/home/you'},cwd='/opt'})
+ check(home.state=='detected' and home.root=='/home/you/Glitch','the Glitch folder in the operator home is found')
+ local windowsDirectories,windowsFiles=machine()
+ installation(windowsDirectories,windowsFiles,'C:/Users/you/Glitch');windowsDirectories['C:/Users/you']={'Glitch'}
+ local windows=direct(windowsDirectories,windowsFiles,{os='windows',env={USERPROFILE='C:\\Users\\you'}})
+ check(windows.state=='detected' and windows.root=='C:/Users/you/Glitch','on Windows the folder is %USERPROFILE%\\Glitch')
+ local savedDirectories,savedFiles=machine()
+ installation(savedDirectories,savedFiles,'/srv/saved-glitch')
+ savedFiles['/plugins-data/tern-work/config.json']='{glitch_root="/srv/saved-glitch"}'
+ local saved=direct(savedDirectories,savedFiles)
+ check(saved.state=='detected' and saved.root=='/srv/saved-glitch','WORK\'s saved Glitch root is a candidate when its configuration is readable')
+ local unreadableSaved=direct(savedDirectories,savedFiles,{unreadable='/plugins-data/tern-work/config.json'})
+ check(unreadableSaved.state=='not_detected_in_known_ancestors','an unreadable WORK configuration is skipped, never an error')
+ local both,bothFiles=machine()
+ installation(both,bothFiles,'/opt/glitch');installation(both,bothFiles,'/srv/saved-glitch')
+ bothFiles['/plugins-data/tern-work/config.json']='{glitch_root="/srv/saved-glitch"}'
+ local ambiguous=direct(both,bothFiles)
+ check(ambiguous.state=='ambiguous' and #ambiguous.candidates==2 and ambiguous.root==nil,'two verified candidates stay an explicit ambiguity')
+ local sameDirectories,sameFiles=machine()
+ installation(sameDirectories,sameFiles,'/opt/glitch');sameFiles['/plugins-data/tern-work/config.json']='{glitch_root="/opt/glitch"}'
+ check(direct(sameDirectories,sameFiles,{cwd='/opt/glitch'}).state=='detected','the same root reached as ancestor and as candidate is one installation')
+ local marker,markerFiles=machine()
+ installation(marker,markerFiles,'/opt/glitch')
+ check(direct(marker,markerFiles,{unreadable='/opt/glitch/.claude/scripts/workspaces.py'}).state=='unavailable','a candidate whose marker cannot be read is unavailable, never selected')
+end
 return 'PASS setup_discovery '..tostring(checks)
