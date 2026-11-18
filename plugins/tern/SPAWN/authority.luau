@@ -1372,6 +1372,8 @@ local function dispatch(root,key,r,now,context)
 			-- The helper runs `tern send --window` on the host daemon: use the host's own key.
 			if context.host_window~=nil then prompt_context.window=context.host_window end
 			prompt_context.glitch_installation=SetupDiscovery.glitch(route.cwd)
+			-- SKILLS-210: the exact question script ships in this package, beside the skill that tells the helper to run it once.
+			prompt_context.questions_script=tern.plugin.dir.."/structuredquestions."..(if route.shell=="powershell" then "ps1" else "sh")
 			initial_prompt,why=Backend.setup_prompt(records(root),d.setup_run_id,root.host_key,key,prompt_context,skill,route.shell)
 			if not initial_prompt then return nil,why end
 			record={id="setup-default",provider="Tern default",account_label="Guided setup",backend="setup-default",placement="tab",cwd=route.cwd}

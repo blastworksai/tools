@@ -1,0 +1,851 @@
+{
+ "intro": [
+  "Found on this machine: Claude 2 · Codex 2 · Kimi 1 · Grok 1 · Agy 4 · Muse 1 · OMP 1.",
+  "Glitch folder detected: @FIX@/glitch."
+ ],
+ "prompts": [
+  {
+   "id": "accounts-1",
+   "title": "Accounts (1 of 2)",
+   "questions": [
+    {
+     "question": "Claude: which accounts should SPAWN run?",
+     "header": "Claude",
+     "multiSelect": true,
+     "options": [
+      {
+       "label": "claudework — @FIX@/home/claudework/.local/bin/claude",
+       "description": "Seat account. ID claude-work, label WORK.",
+       "preselected": true
+      },
+      {
+       "label": "claudehome — @FIX@/home/claudehome/.local/bin/claude",
+       "description": "Seat account. ID claude-home, label HOME.",
+       "preselected": true
+      },
+      {
+       "label": "you (you) — @FIX@/home/you/.local/bin/claude",
+       "description": "Your own login on this machine. ID claude-you, label YOU.",
+       "preselected": false
+      }
+     ]
+    },
+    {
+     "question": "Codex: which accounts should SPAWN run?",
+     "header": "Codex",
+     "multiSelect": true,
+     "options": [
+      {
+       "label": "codexone — @FIX@/home/codexone/.local/bin/codex",
+       "description": "Seat account. ID codex-one, label ONE.",
+       "preselected": true
+      },
+      {
+       "label": "codextwo — @FIX@/home/codextwo/.local/bin/codex",
+       "description": "Seat account. ID codex-two, label TWO.",
+       "preselected": true
+      },
+      {
+       "label": "you (you) — @FIX@/home/you/.local/bin/codex",
+       "description": "Your own login on this machine. ID codex-you, label YOU.",
+       "preselected": false
+      }
+     ]
+    },
+    {
+     "question": "Kimi: which accounts should SPAWN run?",
+     "header": "Kimi",
+     "multiSelect": true,
+     "options": [
+      {
+       "label": "kimione — @FIX@/home/kimione/.local/bin/kimi",
+       "description": "Seat account. ID kimi-one, label ONE.",
+       "preselected": true
+      },
+      {
+       "label": "you (you) — @FIX@/home/you/.local/bin/kimi",
+       "description": "Your own login on this machine. ID kimi-you, label YOU.",
+       "preselected": false
+      }
+     ]
+    },
+    {
+     "question": "Grok: which accounts should SPAWN run?",
+     "header": "Grok",
+     "multiSelect": true,
+     "options": [
+      {
+       "label": "grokone — @FIX@/home/grokone/.local/bin/grok",
+       "description": "Seat account. ID grok-one, label ONE.",
+       "preselected": true
+      },
+      {
+       "label": "you (you) — @FIX@/home/you/.local/bin/grok",
+       "description": "Your own login on this machine. ID grok-you, label YOU.",
+       "preselected": false
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "accounts-2",
+   "title": "Accounts (2 of 2)",
+   "questions": [
+    {
+     "question": "Agy: which accounts should SPAWN run? (1 of 2)",
+     "header": "Agy 1/2",
+     "multiSelect": true,
+     "options": [
+      {
+       "label": "agyone — @FIX@/home/agyone/.local/bin/agy",
+       "description": "Seat account. ID agy-one, label ONE.",
+       "preselected": true
+      },
+      {
+       "label": "agytwo — @FIX@/home/agytwo/.local/bin/agy",
+       "description": "Seat account. ID agy-two, label TWO.",
+       "preselected": true
+      },
+      {
+       "label": "agythree — @FIX@/home/agythree/.local/bin/agy",
+       "description": "Seat account. ID agy-three, label THREE.",
+       "preselected": true
+      }
+     ]
+    },
+    {
+     "question": "Agy: which accounts should SPAWN run? (2 of 2)",
+     "header": "Agy 2/2",
+     "multiSelect": true,
+     "options": [
+      {
+       "label": "agyfour — @FIX@/home/agyfour/.local/bin/agy",
+       "description": "Seat account. ID agy-four, label FOUR.",
+       "preselected": true
+      },
+      {
+       "label": "you (you) — @FIX@/home/you/.local/bin/agy",
+       "description": "Your own login on this machine. ID agy-you, label YOU.",
+       "preselected": false
+      }
+     ]
+    },
+    {
+     "question": "Muse: which accounts should SPAWN run?",
+     "header": "Muse",
+     "multiSelect": true,
+     "options": [
+      {
+       "label": "museone — @FIX@/home/museone/.local/bin/muse",
+       "description": "Seat account. ID muse-one, label ONE.",
+       "preselected": true
+      },
+      {
+       "label": "you (you) — @FIX@/home/you/.local/bin/muse",
+       "description": "Your own login on this machine. ID muse-you, label YOU.",
+       "preselected": false
+      }
+     ]
+    },
+    {
+     "question": "OMP: which accounts should SPAWN run?",
+     "header": "OMP",
+     "multiSelect": true,
+     "options": [
+      {
+       "label": "ompone — @FIX@/home/ompone/.local/bin/omp",
+       "description": "Seat account. ID omp-one, label ONE.",
+       "preselected": true
+      },
+      {
+       "label": "you (you) — @FIX@/home/you/.local/bin/omp",
+       "description": "Your own login on this machine. ID omp-you, label YOU.",
+       "preselected": false
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "ids",
+   "title": "IDs and labels",
+   "show_first": "derived.accounts[].row for the chosen accounts, one per line",
+   "questions": [
+    {
+     "question": "Use these IDs and labels?",
+     "header": "IDs",
+     "multiSelect": false,
+     "options": [
+      {
+       "label": "Use these (Recommended)",
+       "description": "Use the IDs and labels in the table above.",
+       "preselected": true
+      },
+      {
+       "label": "Change some",
+       "description": "Say which IDs or labels to change.",
+       "preselected": false
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "folder",
+   "title": "Folder",
+   "questions": [
+    {
+     "question": "Which folder should every agent start in?",
+     "header": "Folder",
+     "multiSelect": false,
+     "options": [
+      {
+       "label": "Glitch folder: @FIX@/glitch (Recommended)",
+       "description": "Every agent starts in this Glitch installation.",
+       "preselected": true
+      },
+      {
+       "label": "Each account's own home folder",
+       "description": "Each agent starts in its own account's home folder.",
+       "preselected": false
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "permissions-1",
+   "title": "Permissions (1 of 2)",
+   "ask_only_for": "providers with a chosen account",
+   "questions": [
+    {
+     "question": "Claude: which permission mode?",
+     "header": "Claude",
+     "multiSelect": false,
+     "options": [
+      {
+       "label": "Normal (asks before actions)",
+       "description": "Claude asks before it edits files or runs commands.",
+       "preselected": true
+      },
+      {
+       "label": "Skip permission prompts (--dangerously-skip-permissions)",
+       "description": "Claude acts without asking first.",
+       "preselected": false
+      }
+     ],
+     "when": {
+      "provider": "Claude"
+     }
+    },
+    {
+     "question": "Codex: which permission mode?",
+     "header": "Codex",
+     "multiSelect": false,
+     "options": [
+      {
+       "label": "Normal",
+       "description": "Codex keeps its approvals and its sandbox.",
+       "preselected": true
+      },
+      {
+       "label": "YOLO, no sandbox (--dangerously-bypass-approvals-and-sandbox)",
+       "description": "Codex runs with no approvals and no sandbox.",
+       "preselected": false
+      }
+     ],
+     "when": {
+      "provider": "Codex"
+     }
+    },
+    {
+     "question": "Kimi: which permission mode?",
+     "header": "Kimi",
+     "multiSelect": false,
+     "options": [
+      {
+       "label": "Normal",
+       "description": "Kimi uses its default mode.",
+       "preselected": true
+      },
+      {
+       "label": "Ask when needed (--yolo)",
+       "description": "Kimi asks only when it needs to.",
+       "preselected": false
+      },
+      {
+       "label": "Never ask (--auto)",
+       "description": "Kimi never asks for approval.",
+       "preselected": false
+      }
+     ],
+     "when": {
+      "provider": "Kimi"
+     }
+    },
+    {
+     "question": "Grok: which permission mode?",
+     "header": "Grok",
+     "multiSelect": false,
+     "options": [
+      {
+       "label": "Normal",
+       "description": "Grok uses its default permission mode.",
+       "preselected": true
+      },
+      {
+       "label": "Bypass permissions (--permission-mode bypassPermissions)",
+       "description": "Grok skips its permission checks.",
+       "preselected": false
+      }
+     ],
+     "when": {
+      "provider": "Grok"
+     }
+    }
+   ]
+  },
+  {
+   "id": "permissions-2",
+   "title": "Permissions (2 of 2)",
+   "ask_only_for": "providers with a chosen account",
+   "questions": [
+    {
+     "question": "Agy: which permission mode?",
+     "header": "Agy",
+     "multiSelect": false,
+     "options": [
+      {
+       "label": "Normal",
+       "description": "Agy asks before actions.",
+       "preselected": true
+      },
+      {
+       "label": "Skip permission prompts (--dangerously-skip-permissions)",
+       "description": "Agy acts without asking first.",
+       "preselected": false
+      }
+     ],
+     "when": {
+      "provider": "Agy"
+     }
+    },
+    {
+     "question": "Muse: which permission mode?",
+     "header": "Muse",
+     "multiSelect": false,
+     "options": [
+      {
+       "label": "Normal",
+       "description": "Muse asks before actions.",
+       "preselected": true
+      },
+      {
+       "label": "No approval prompts (--yolo)",
+       "description": "Muse runs without approval prompts.",
+       "preselected": false
+      }
+     ],
+     "when": {
+      "provider": "Muse"
+     }
+    },
+    {
+     "question": "OMP: which permission mode?",
+     "header": "OMP",
+     "multiSelect": false,
+     "options": [
+      {
+       "label": "Normal",
+       "description": "OMP asks before tool actions.",
+       "preselected": true
+      },
+      {
+       "label": "YOLO (--approval-mode yolo)",
+       "description": "OMP runs tools without approval.",
+       "preselected": false
+      }
+     ],
+     "when": {
+      "provider": "OMP"
+     }
+    }
+   ]
+  },
+  {
+   "id": "omp",
+   "title": "OMP service",
+   "ask_only_for": "chosen OMP accounts",
+   "questions": [
+    {
+     "question": "Which service runs omp-one's model?",
+     "header": "OMP service",
+     "multiSelect": false,
+     "options": [
+      {
+       "label": "anthropic (from its config) (Recommended)",
+       "description": "The service named in this account's own OMP configuration.",
+       "preselected": true
+      },
+      {
+       "label": "openai",
+       "description": "Run this account's OMP model through openai.",
+       "preselected": false
+      },
+      {
+       "label": "google",
+       "description": "Run this account's OMP model through google.",
+       "preselected": false
+      }
+     ],
+     "when": {
+      "account_id": "omp-one"
+     }
+    },
+    {
+     "question": "Which service runs omp-you's model?",
+     "header": "OMP service",
+     "multiSelect": false,
+     "options": [
+      {
+       "label": "openai (from its config) (Recommended)",
+       "description": "The service named in this account's own OMP configuration.",
+       "preselected": true
+      },
+      {
+       "label": "google",
+       "description": "Run this account's OMP model through google.",
+       "preselected": false
+      },
+      {
+       "label": "anthropic",
+       "description": "Run this account's OMP model through anthropic.",
+       "preselected": false
+      }
+     ],
+     "when": {
+      "account_id": "omp-you"
+     }
+    }
+   ]
+  },
+  {
+   "id": "review",
+   "title": "Review",
+   "show_first": "derived.review table for the chosen accounts; {N} is their count",
+   "questions": [
+    {
+     "question": "Save these {N} agents?",
+     "header": "Save",
+     "multiSelect": false,
+     "options": [
+      {
+       "label": "Save and set up (Recommended)",
+       "description": "Save the roster and let SPAWN prepare it.",
+       "preselected": true
+      },
+      {
+       "label": "Change something",
+       "description": "Go back and change a choice.",
+       "preselected": false
+      }
+     ]
+    }
+   ]
+  }
+ ],
+ "derived": {
+  "operator": "you",
+  "launch_folder": "@FIX@/nothing",
+  "providers": [
+   {
+    "name": "Claude",
+    "cli": "claude",
+    "seats": 2,
+    "operator": true
+   },
+   {
+    "name": "Codex",
+    "cli": "codex",
+    "seats": 2,
+    "operator": true
+   },
+   {
+    "name": "Kimi",
+    "cli": "kimi",
+    "seats": 1,
+    "operator": true
+   },
+   {
+    "name": "Grok",
+    "cli": "grok",
+    "seats": 1,
+    "operator": true
+   },
+   {
+    "name": "Agy",
+    "cli": "agy",
+    "seats": 4,
+    "operator": true
+   },
+   {
+    "name": "Muse",
+    "cli": "muse",
+    "seats": 1,
+    "operator": true
+   },
+   {
+    "name": "OMP",
+    "cli": "omp",
+    "seats": 1,
+    "operator": true
+   }
+  ],
+  "accounts": [
+   {
+    "id": "claude-work",
+    "provider": "Claude",
+    "provider_family": "anthropic",
+    "account_label": "WORK",
+    "account": "claudework",
+    "operator": false,
+    "command": "@FIX@/home/claudework/.local/bin/claude",
+    "home": "@FIX@/home/claudework",
+    "option": "claudework — @FIX@/home/claudework/.local/bin/claude",
+    "row": "claudework → ID claude-work, label WORK"
+   },
+   {
+    "id": "claude-home",
+    "provider": "Claude",
+    "provider_family": "anthropic",
+    "account_label": "HOME",
+    "account": "claudehome",
+    "operator": false,
+    "command": "@FIX@/home/claudehome/.local/bin/claude",
+    "home": "@FIX@/home/claudehome",
+    "option": "claudehome — @FIX@/home/claudehome/.local/bin/claude",
+    "row": "claudehome → ID claude-home, label HOME"
+   },
+   {
+    "id": "claude-you",
+    "provider": "Claude",
+    "provider_family": "anthropic",
+    "account_label": "YOU",
+    "account": "you",
+    "operator": true,
+    "command": "@FIX@/home/you/.local/bin/claude",
+    "home": "@FIX@/home/you",
+    "option": "you (you) — @FIX@/home/you/.local/bin/claude",
+    "row": "you → ID claude-you, label YOU"
+   },
+   {
+    "id": "codex-one",
+    "provider": "Codex",
+    "provider_family": "openai",
+    "account_label": "ONE",
+    "account": "codexone",
+    "operator": false,
+    "command": "@FIX@/home/codexone/.local/bin/codex",
+    "home": "@FIX@/home/codexone",
+    "option": "codexone — @FIX@/home/codexone/.local/bin/codex",
+    "row": "codexone → ID codex-one, label ONE"
+   },
+   {
+    "id": "codex-two",
+    "provider": "Codex",
+    "provider_family": "openai",
+    "account_label": "TWO",
+    "account": "codextwo",
+    "operator": false,
+    "command": "@FIX@/home/codextwo/.local/bin/codex",
+    "home": "@FIX@/home/codextwo",
+    "option": "codextwo — @FIX@/home/codextwo/.local/bin/codex",
+    "row": "codextwo → ID codex-two, label TWO"
+   },
+   {
+    "id": "codex-you",
+    "provider": "Codex",
+    "provider_family": "openai",
+    "account_label": "YOU",
+    "account": "you",
+    "operator": true,
+    "command": "@FIX@/home/you/.local/bin/codex",
+    "home": "@FIX@/home/you",
+    "option": "you (you) — @FIX@/home/you/.local/bin/codex",
+    "row": "you → ID codex-you, label YOU"
+   },
+   {
+    "id": "kimi-one",
+    "provider": "Kimi",
+    "provider_family": "moonshot",
+    "account_label": "ONE",
+    "account": "kimione",
+    "operator": false,
+    "command": "@FIX@/home/kimione/.local/bin/kimi",
+    "home": "@FIX@/home/kimione",
+    "option": "kimione — @FIX@/home/kimione/.local/bin/kimi",
+    "row": "kimione → ID kimi-one, label ONE"
+   },
+   {
+    "id": "kimi-you",
+    "provider": "Kimi",
+    "provider_family": "moonshot",
+    "account_label": "YOU",
+    "account": "you",
+    "operator": true,
+    "command": "@FIX@/home/you/.local/bin/kimi",
+    "home": "@FIX@/home/you",
+    "option": "you (you) — @FIX@/home/you/.local/bin/kimi",
+    "row": "you → ID kimi-you, label YOU"
+   },
+   {
+    "id": "grok-one",
+    "provider": "Grok",
+    "provider_family": "xai",
+    "account_label": "ONE",
+    "account": "grokone",
+    "operator": false,
+    "command": "@FIX@/home/grokone/.local/bin/grok",
+    "home": "@FIX@/home/grokone",
+    "option": "grokone — @FIX@/home/grokone/.local/bin/grok",
+    "row": "grokone → ID grok-one, label ONE"
+   },
+   {
+    "id": "grok-you",
+    "provider": "Grok",
+    "provider_family": "xai",
+    "account_label": "YOU",
+    "account": "you",
+    "operator": true,
+    "command": "@FIX@/home/you/.local/bin/grok",
+    "home": "@FIX@/home/you",
+    "option": "you (you) — @FIX@/home/you/.local/bin/grok",
+    "row": "you → ID grok-you, label YOU"
+   },
+   {
+    "id": "agy-one",
+    "provider": "Agy",
+    "provider_family": "google",
+    "account_label": "ONE",
+    "account": "agyone",
+    "operator": false,
+    "command": "@FIX@/home/agyone/.local/bin/agy",
+    "home": "@FIX@/home/agyone",
+    "option": "agyone — @FIX@/home/agyone/.local/bin/agy",
+    "row": "agyone → ID agy-one, label ONE"
+   },
+   {
+    "id": "agy-two",
+    "provider": "Agy",
+    "provider_family": "google",
+    "account_label": "TWO",
+    "account": "agytwo",
+    "operator": false,
+    "command": "@FIX@/home/agytwo/.local/bin/agy",
+    "home": "@FIX@/home/agytwo",
+    "option": "agytwo — @FIX@/home/agytwo/.local/bin/agy",
+    "row": "agytwo → ID agy-two, label TWO"
+   },
+   {
+    "id": "agy-three",
+    "provider": "Agy",
+    "provider_family": "google",
+    "account_label": "THREE",
+    "account": "agythree",
+    "operator": false,
+    "command": "@FIX@/home/agythree/.local/bin/agy",
+    "home": "@FIX@/home/agythree",
+    "option": "agythree — @FIX@/home/agythree/.local/bin/agy",
+    "row": "agythree → ID agy-three, label THREE"
+   },
+   {
+    "id": "agy-four",
+    "provider": "Agy",
+    "provider_family": "google",
+    "account_label": "FOUR",
+    "account": "agyfour",
+    "operator": false,
+    "command": "@FIX@/home/agyfour/.local/bin/agy",
+    "home": "@FIX@/home/agyfour",
+    "option": "agyfour — @FIX@/home/agyfour/.local/bin/agy",
+    "row": "agyfour → ID agy-four, label FOUR"
+   },
+   {
+    "id": "agy-you",
+    "provider": "Agy",
+    "provider_family": "google",
+    "account_label": "YOU",
+    "account": "you",
+    "operator": true,
+    "command": "@FIX@/home/you/.local/bin/agy",
+    "home": "@FIX@/home/you",
+    "option": "you (you) — @FIX@/home/you/.local/bin/agy",
+    "row": "you → ID agy-you, label YOU"
+   },
+   {
+    "id": "muse-one",
+    "provider": "Muse",
+    "provider_family": "meta",
+    "account_label": "ONE",
+    "account": "museone",
+    "operator": false,
+    "command": "@FIX@/home/museone/.local/bin/muse",
+    "home": "@FIX@/home/museone",
+    "option": "museone — @FIX@/home/museone/.local/bin/muse",
+    "row": "museone → ID muse-one, label ONE"
+   },
+   {
+    "id": "muse-you",
+    "provider": "Muse",
+    "provider_family": "meta",
+    "account_label": "YOU",
+    "account": "you",
+    "operator": true,
+    "command": "@FIX@/home/you/.local/bin/muse",
+    "home": "@FIX@/home/you",
+    "option": "you (you) — @FIX@/home/you/.local/bin/muse",
+    "row": "you → ID muse-you, label YOU"
+   },
+   {
+    "id": "omp-one",
+    "provider": "OMP",
+    "provider_family": "anthropic",
+    "account_label": "ONE",
+    "account": "ompone",
+    "operator": false,
+    "command": "@FIX@/home/ompone/.local/bin/omp",
+    "home": "@FIX@/home/ompone",
+    "option": "ompone — @FIX@/home/ompone/.local/bin/omp",
+    "row": "ompone → ID omp-one, label ONE"
+   },
+   {
+    "id": "omp-you",
+    "provider": "OMP",
+    "provider_family": "openai",
+    "account_label": "YOU",
+    "account": "you",
+    "operator": true,
+    "command": "@FIX@/home/you/.local/bin/omp",
+    "home": "@FIX@/home/you",
+    "option": "you (you) — @FIX@/home/you/.local/bin/omp",
+    "row": "you → ID omp-you, label YOU"
+   }
+  ],
+  "permissions": {
+   "Claude": [
+    {
+     "label": "Normal (asks before actions)",
+     "arguments": []
+    },
+    {
+     "label": "Skip permission prompts (--dangerously-skip-permissions)",
+     "arguments": [
+      "--dangerously-skip-permissions"
+     ]
+    }
+   ],
+   "Codex": [
+    {
+     "label": "Normal",
+     "arguments": []
+    },
+    {
+     "label": "YOLO, no sandbox (--dangerously-bypass-approvals-and-sandbox)",
+     "arguments": [
+      "--dangerously-bypass-approvals-and-sandbox"
+     ]
+    }
+   ],
+   "Kimi": [
+    {
+     "label": "Normal",
+     "arguments": []
+    },
+    {
+     "label": "Ask when needed (--yolo)",
+     "arguments": [
+      "--yolo"
+     ]
+    },
+    {
+     "label": "Never ask (--auto)",
+     "arguments": [
+      "--auto"
+     ]
+    }
+   ],
+   "Grok": [
+    {
+     "label": "Normal",
+     "arguments": []
+    },
+    {
+     "label": "Bypass permissions (--permission-mode bypassPermissions)",
+     "arguments": [
+      "--permission-mode",
+      "bypassPermissions"
+     ]
+    }
+   ],
+   "Agy": [
+    {
+     "label": "Normal",
+     "arguments": []
+    },
+    {
+     "label": "Skip permission prompts (--dangerously-skip-permissions)",
+     "arguments": [
+      "--dangerously-skip-permissions"
+     ]
+    }
+   ],
+   "Muse": [
+    {
+     "label": "Normal",
+     "arguments": []
+    },
+    {
+     "label": "No approval prompts (--yolo)",
+     "arguments": [
+      "--yolo"
+     ]
+    }
+   ],
+   "OMP": [
+    {
+     "label": "Normal",
+     "arguments": []
+    },
+    {
+     "label": "YOLO (--approval-mode yolo)",
+     "arguments": [
+      "--approval-mode",
+      "yolo"
+     ]
+    }
+   ]
+  },
+  "glitch_folders": [
+   "@FIX@/glitch"
+  ],
+  "omp_prompt": "Follow the explicitly assigned task. Role text is guidance, not identity isolation.",
+  "review": {
+   "columns": [
+    "ID",
+    "account",
+    "CLI",
+    "permission flags",
+    "folder",
+    "paid check"
+   ],
+   "paid_check_native": "one harmless paid model message",
+   "paid_check_terminal": "offline checks only"
+  }
+ },
+ "limits": {
+  "questions_per_prompt": 4,
+  "options_per_question": 4,
+  "header_characters": 12
+ }
+}

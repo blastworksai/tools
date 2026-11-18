@@ -177,6 +177,7 @@ function Backend.setup_prompt(records: any, run_id: any, host_key: any, session_
 		setup_run_id=run_id,host_key=host_key,session_key=session_key,binding=setup.binding,
 		result_path=setup.result_path,config_dir=setup.config_dir,existing_records=canonical,
 		glitch_installation=setup.glitch_installation,
+		questions_script=setup.questions_script,
 	}) .. "\nHelper interpreter: "..(if shell=="powershell" then "PowerShell (not cmd.exe)" else "POSIX shell")
 		..". Use the native agent process's injected TERN_EXE and TERN_PANE_SOCKET; missing values refuse, never substitute a PATH executable or default daemon."
 		.."\nWrite the complete schema-2 JSON to that exact result_path, then run this exact submission command once:\n"

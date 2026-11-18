@@ -2286,6 +2286,8 @@ sections.setup_default=function()
 	check(f.job.setup.command=="truthful-default --profile 'work account' --opaque=$VALUE" and f.job.setup.config_pane==700 and f.job.setup.host_config_pane==10,"opaque command and separate SDK/native Config IDs are immutable")
 	check(f.job.setup.result_path:match("setup%-result%-%x+%.json$")~=nil and not f.job.setup.result_path:find(f.run,1,true),"unsafe run IDs never become filenames")
 	check(f.job.initial_prompt:find(f.job.setup.binding,1,true) and f.job.initial_prompt:find("submission command",1,true),"provider-neutral skill carries exact run binding and helper")
+	-- SKILLS-210: the helper is told where the shipped question script is, in the immutable run context.
+	check(f.job.initial_prompt:find('"questions_script":'..runtime.json.encode(root.."/structuredquestions.sh"),1,true)~=nil,"the appended run context names the packaged structuredquestions script")
 	local before=f.db.image()
 	for _,field in ipairs({"backend","user","host","record_id"}) do
 		local bad=request(f.b,"bad",1,0,"start_setup",{setup_run_id="other",command="default",cwd=f.job.cwd,window=f.context.window,config_pane=700})

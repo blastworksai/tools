@@ -48,6 +48,35 @@ local function names(path)
  for _,name in ipairs(entries) do if type(name)~='string' then return nil end;found[name:gsub('[/\\]+$','')]=true end
  return found
 end
+-- A folder is the Glitch installation only when its two marker scripts are regular, readable files.
+local function verify(path,entries,roots,unavailable)
+ if not entries['.claude'] then return end
+ local config=names(path..'/.claude')
+ if not config then table.insert(unavailable,path..'/.claude')
+ elseif config.scripts then
+  local scripts=names(path..'/.claude/scripts')
+  if not scripts then table.insert(unavailable,path..'/.claude/scripts')
+  elseif scripts['workspaces.py'] and scripts['plan_check.py'] then
+   local workspace_ok=pcall(tern.fs.read,path..'/.claude/scripts/workspaces.py',262144)
+   local gate_ok=pcall(tern.fs.read,path..'/.claude/scripts/plan_check.py',262144)
+   if workspace_ok and gate_ok then table.insert(roots,path) else table.insert(unavailable,path..'/.claude/scripts') end
+  end
+ end
+end
+-- SKILLS-210: the Glitch root WORK saved on this host, if its configuration is readable. A suggestion only; it is verified like any other candidate.
+local function work_root()
+ local data=tern.plugin.data
+ if type(data)~='string' or type(tern.json)~='table' then return nil end
+ local parent_dir=parent((data:gsub('\\','/')))
+ if not parent_dir then return nil end
+ local ok,text=pcall(tern.fs.read,parent_dir..'/tern-work/config.json',65536)
+ if not ok or type(text)~='string' then return nil end
+ local decoded_ok,value=pcall(tern.json.decode,text)
+ if not decoded_ok or type(value)~='table' or type(value.glitch_root)~='string' or value.glitch_root=='' then return nil end
+ local root=value.glitch_root:gsub('\\','/'):gsub('/+$','')
+ if root:sub(1,1)~='/' and not root:match('^%a:/') then return nil end
+ return root
+end
 function M.glitch(cwd)
  local seen,roots,unavailable={},{},{}
  for _,start in ipairs({cwd,tern.plugin.dir}) do
@@ -56,28 +85,30 @@ function M.glitch(cwd)
    if type(path)~='string' or path=='' or seen[path] then break end
    seen[path]=true
    local entries=names(path)
-   if not entries then table.insert(unavailable,path)
-   elseif entries['.claude'] then
-    local config=names(path..'/.claude')
-    if not config then table.insert(unavailable,path..'/.claude')
-    elseif config.scripts then
-     local scripts=names(path..'/.claude/scripts')
-     if not scripts then table.insert(unavailable,path..'/.claude/scripts')
-     elseif scripts['workspaces.py'] and scripts['plan_check.py'] then
-      local workspace_ok=pcall(tern.fs.read,path..'/.claude/scripts/workspaces.py',262144)
-      local gate_ok=pcall(tern.fs.read,path..'/.claude/scripts/plan_check.py',262144)
-      if workspace_ok and gate_ok then table.insert(roots,path) else table.insert(unavailable,path..'/.claude/scripts') end
-     end
-    end
-   end
+   if not entries then table.insert(unavailable,path) else verify(path,entries,roots,unavailable) end
    local next_path=parent(path)
    if not next_path or next_path==path then break end
    if depth==32 and not seen[next_path] then table.insert(unavailable,next_path);break end
    path=next_path
   end
  end
+ -- Direct candidates: an absent or unlistable folder is simply not an installation here; a folder that lists
+ -- and carries the markers is verified exactly like an ancestor (an unreadable marker is still unavailable).
+ local home=if tern.runtime and tern.runtime.os=='windows' then tern.getenv and tern.getenv('USERPROFILE') else tern.getenv and tern.getenv('HOME')
+ local direct={}
+ local saved=work_root()
+ if saved then table.insert(direct,saved) end
+ table.insert(direct,'/opt/glitch')
+ if type(home)=='string' and home~='' then table.insert(direct,(home:gsub('\\','/'):gsub('/+$',''))..'/Glitch') end
+ for _,path in ipairs(direct) do
+  if type(path)=='string' and path~='' and not seen[path] then
+   seen[path]=true
+   local entries=names(path)
+   if entries then verify(path,entries,roots,unavailable) end
+  end
+ end
  if #unavailable>0 then return {state='unavailable',candidates=roots,inaccessible=unavailable,evidence='Known ancestor discovery was incomplete or exceeded its read bound; no installation choice or integration enablement was made'} end
- if #roots>1 then return {state='ambiguous',candidates=roots,evidence='Multiple verified installation candidates were found in the working-folder/plugin ancestors; no root was selected'} end
+ if #roots>1 then return {state='ambiguous',candidates=roots,evidence='Multiple verified installation candidates were found in the working-folder/plugin ancestors, WORK saved root, /opt/glitch or the home Glitch folder; no root was selected'} end
  if #roots==1 then return {state='detected',root=roots[1],evidence='Regular bounded Glitch workspace and plan-check scripts were observed on this execution host'} end
  return {state='not_detected_in_known_ancestors',evidence='All known ancestors were accessible; no installation was established and no integration was enabled'}
 end

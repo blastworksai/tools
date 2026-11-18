@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.9
+
+- **Guided setup asks one exact, fixed set of questions.** The helper used to improvise its questions: one list titled "Claude (anthropic)" held every provider's accounts, and "Glitch installation not detected" meant it had never looked. SPAWN now ships `structuredquestions.sh` (and `structuredquestions.ps1` for Windows) beside the setup skill. The helper runs it once. It is read-only: it finds every provider CLI as each candidate account (`sudo -n -i -u <account>`), reads each OMP account's own service from its config, checks permission flags against the installed `--help`, and prints the prompts already filled in: Accounts (one list per provider), IDs and labels, Folder, Permissions (one question per provider, Normal preselected), the OMP service per OMP account, and the final Save. The helper shows them word for word in its own question tool. It never asks for a model or a startup prompt (OMP records get the fixed default prompt).
+- The script splits prompts to the stricter of Claude Code's AskUserQuestion (1-4 questions per prompt, 2-4 options per question) and OMP's ask tool, for example "Agy: which accounts should SPAWN run? (1 of 2)" when five accounts would not fit one list.
+- The setup skill shrank by about 2 KB (it is stored in durable authority metadata at its byte budget), and the run context SPAWN appends now names the script's path.
+- **Glitch is searched in more places.** Besides the launch folder's and the plugin's parent folders, setup now checks the Glitch root WORK saved on that host, `/opt/glitch` and `~/Glitch` (`%USERPROFILE%\Glitch` on Windows), each verified the same way (SKILLS-210).
+
 ## 0.6.8
 
 - **Guided setup resolves each agent's CLI as the account that runs it.** On a host with several OS accounts, the setup helper looked up `grok` as the operator and wrote the operator's `/home/<operator>/.local/bin/grok` into another account's record; that account cannot run the file, and preparation stopped at that record. The setup skill now resolves every cross-account CLI through the same login route SPAWN launches with (`sudo -n -i -u <account> -- sh -c 'command -v <cli>'`), checks that the account can execute it, shows an account without the CLI as unavailable instead of borrowing another account's file, and proposes the account, provider and CLI table itself, so the operator approves it without typing paths.
