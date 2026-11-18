@@ -633,19 +633,12 @@ local function proposal_refusals(view: any, projection: any, selected: any): any
 	if not flow then return nil end
 	local _, _, admitted = controller(view, selected)
 	local rows = {}
-	for _, gate in flow.gates do
-		if gate.answer and type(gate.answer.source) == "table" and gate.answer.source.kind == "refusal" and (table.find(gate.evidence or {}, "retarget:open") or table.find(gate.evidence or {}, "notice:open")) then
-			table.insert(rows, ui.text(ui.span("Your orchestrator's proposal was refused (" .. tostring(gate.answer.source.code) .. "): " .. tostring(gate.answer.answer), "warning")))
-			if admitted and table.find(gate.evidence or {}, "retarget:open") then
-				table.insert(rows, dispatch_link(view, "retarget_proposal", "Choose another agent…", { gate_id = gate.id, gate_revision = gate.revision, worker_id = gate.worker_id }))
+	for _, entry in flow.refusals or {} do
+		if entry.retargetable or entry.notice ~= "delivered" then
+			table.insert(rows, ui.text(ui.span("Your orchestrator's proposal was refused (" .. tostring(entry.code) .. "): " .. tostring(entry.text), "warning")))
+			if admitted and entry.retargetable then
+				table.insert(rows, dispatch_link(view, "retarget_proposal", "Choose another agent…", { refusal_id = entry.refusal_id }))
 			end
-		end
-	end
-	-- An execution refusal not yet told to the coordinator (or dropped) is still shown to the owner.
-	for _, gate in flow.gates do
-		local notice = if gate.execution then gate.execution.notice else nil
-		if type(notice) == "table" then
-			table.insert(rows, ui.text(ui.span("Your orchestrator's proposal was refused (execution_refused): " .. tostring(notice.text), "warning")))
 		end
 	end
 	if #rows == 0 then return nil end
