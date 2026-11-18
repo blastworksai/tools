@@ -1022,7 +1022,8 @@ local function workflow_view(view: any, projection: any, selected: any): (any, a
 	-- Window contract for the USAGE capacity reader: catalog join, candidate records (pending
 	-- routed work first, then the allowlist, then other eligible records), evidence lease and
 	-- routed launches that need a fresh USAGE `validate` before their claim.
-	local catalog = if projection.dispatch then projection.dispatch.catalog else nil
+	-- Candidates for capacity reads come from the assembled roster, never from the last page read.
+	local catalog = if projection.dispatch then (projection.dispatch.roster or projection.dispatch.catalog) else nil
 	local now = math.floor(os.time() * 1000)
 	local routed, pending, priority = {}, false, {}
 	for _, worker in flow.workers do
@@ -1061,14 +1062,16 @@ local function workflow_view(view: any, projection: any, selected: any): (any, a
 		evidence = if evidence then pick(evidence, "revision auth_revision expires_at_ms") else nil,
 		refresh_due = policy.quota_routing and catalog ~= nil and catalog.namespace ~= nil and (evidence == nil or evidence.expires_at_ms <= now + 15000 or pending),
 		workers = routed }, 65536)
-	-- Config pickers retain page identity and availability even when filtering leaves no choices.
+	-- Config pickers retain page identity and availability even when filtering leaves no choices:
+	-- the node describes the page just read, and `total` counts the assembled roster.
+	local page = if projection.dispatch then projection.dispatch.catalog else nil
 	local listed = {}
-	for _, record in enabled_records(catalog) do table.insert(listed, pick(record, "id revision provider account_label capabilities cwd placement backend label eligible enabled definition_revision")) end
-	machine("catalog-index", "orchplus.catalog", { version = 1, loaded = catalog ~= nil, catalog_complete = projection.dispatch.catalog_complete == true,
-		namespace = if catalog then catalog.namespace else nil, host_key = if catalog then catalog.host_key else nil,
-		config_revision = if catalog then catalog.config_revision else nil, revision = if catalog then catalog.revision else nil,
-		catalog_version = if catalog then catalog.catalog_version else nil, setup = if catalog then catalog.setup else nil,
-		next_cursor = if catalog then catalog.next_cursor else nil, total = if catalog then #catalog.records else 0,
+	for _, record in enabled_records(page) do table.insert(listed, pick(record, "id revision provider account_label capabilities cwd placement backend label eligible enabled definition_revision")) end
+	machine("catalog-index", "orchplus.catalog", { version = 1, loaded = page ~= nil, catalog_complete = projection.dispatch.catalog_complete == true,
+		namespace = if page then page.namespace else nil, host_key = if page then page.host_key else nil,
+		config_revision = if page then page.config_revision else nil, revision = if page then page.revision else nil,
+		catalog_version = if page then page.catalog_version else nil, setup = if page then page.setup else nil,
+		next_cursor = if page then page.next_cursor else nil, total = if catalog then #catalog.records else 0,
 		records = listed }, 65536)
 	return ui.card("Health, owner inbox and durable threads", rows), nodes
 end
@@ -1139,7 +1142,7 @@ local function project_panel(view: any, projection: any, selected: any): any
 		table.insert(rows, ui.row({ pause_link(view, flow.policy), dispatch_link(view, "orchestration_menu", "Orchestration menu") }))
 	end
 	local catalog, pane_titles, native_titles, native_workers, workers = {}, {}, {}, {}, {}
-	for _, record in (if d.catalog then d.catalog.records else {}) do catalog[record.id] = record end
+	for _, record in (if d.roster then d.roster.records elseif d.catalog then d.catalog.records else {}) do catalog[record.id] = record end
 	for _, pane in (if view.session_panes then view.session_panes.panes else {}) do
 		local title = if pane.title ~= "" then pane.title else nil
 		native_titles[tostring(pane.pane)] = title

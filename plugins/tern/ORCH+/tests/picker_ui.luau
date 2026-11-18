@@ -99,6 +99,17 @@ do
 	check(#f.selected == 1 and f.selected[1].row.id == "a" and f.selected[1].row.cwd == "/saved/a" and not f.ui.active(), "matching receipt commits only the selected authoritative record")
 end
 do
+	-- Requester evidence (SKILLS-200): after the roster is whole, choosing a record from a later page makes the
+	-- picker send that page's cursor to the host with no first page in the same request chain.
+	local f = fixture(); f:open()
+	f:settle(page({ record("a"), record("b") }, { revision = 7, index = 3 }))
+	f:settle(page({ record("c"), record("d") }))
+	check(#f.requests == 2 and f.requests[2].cursor.index == 3, "the picker walks the pages with SPAWN's cursor shape")
+	f:select(3)
+	check(#f.requests == 3 and f.requests[3].cursor ~= nil and f.requests[3].cursor.revision == 7 and f.requests[3].cursor.index == 3,
+		"selecting a later-page record sends that page's bare cursor, a cursor page the host did not just chain from page one")
+end
+do
 	local f = fixture()
 	local callback_owned = false
 	f.on_selected = function()
