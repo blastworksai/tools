@@ -374,6 +374,96 @@ local function reconnectable(root,s,r)
  end
  return true
 end
+-- Explicit forget (SKILLS-205). SPAWN is the quiescence authority: it inventories everything this one session's graph
+-- retains, requires fresh native absence for every retained pane (stopped ones included), treats any claimed, executing,
+-- uncertain or unobservable effect as a blocker, and only then deletes exactly that graph. Nothing here closes a pane or
+-- stops a process, and nothing outside the graph (agent roster, other sessions, watermarks, files) is touched.
+local function forget_panes(root,logical)
+ local panes={}
+ local function add(binding,agent)
+  if type(binding)=='table' and binding.pane_id then panes[binding.pane_id..'|'..tostring(binding.window_host_id)]={binding=binding,agent=agent or ''} end
+ end
+ for _,e in pairs(root.requests) do
+  local r=e.request
+  if r.logical_session_id==logical then
+   local agent=r.record_id
+   add(e.pane_binding,agent);add(r.pane_binding,agent)
+   add(e.attachment and e.attachment.pane_binding,agent);add(e.wake and e.wake.pane_binding,agent)
+   add(e.body and type(e.body.payload)=='table' and e.body.payload.pane_binding,agent)
+   add(e.native_result and e.native_result.result and e.native_result.result.pane_binding,agent)
+   add(e.stopped and e.stopped.pane_binding,agent)
+  end
+ end
+ for _,w in pairs(root.workers) do
+  if w.logical_session_id==logical then
+   add(w.pane_binding,w.record_id);add(w.attachment and w.attachment.pane_binding,w.record_id);add(w.stopped and w.stopped.pane_binding,w.record_id)
+  end
+ end
+ return panes
+end
+local function forget_uncertain(root,logical)
+ local out={}
+ local function note(agent,host) out[#out+1]={agent=agent or '',host=host or ''} end
+ for _,e in pairs(root.requests) do
+  local r=e.request
+  if r.logical_session_id==logical then
+   local status=e.body and e.body.status
+   local running=status=='claimed' or status=='launching' or status=='uncertain' or status=='pending' and e.operation~=nil
+    or e.wake and (e.wake.phase=='claimed' or e.wake.phase=='launching' or e.wake.phase=='uncertain')
+    or e.authorization and e.authorization.phase=='consumed'
+    or e.claim~=nil and status~='rejected' and status~='stopped' and status~='retired' and status~='published' and e.native_result==nil and e.attempt_pending
+   if running then note(r.record_id,r.origin_binding and r.origin_binding.window_host_id) end
+  end
+ end
+ for _,g in pairs(root.mailboxes.generations) do
+  if g.binding and g.binding.logical_session_id==logical then
+   local uncertain=g.active~=nil
+   for _,w in pairs(g.writes or {}) do if w.status=='uncertain' or w.status=='active' then uncertain=true end end
+   if uncertain then note(g.record_id,'') end
+  end
+ end
+ return out
+end
+-- `observe(pane_binding)` answers 'absent', 'present' or anything else for unobservable. `host` is the one execution
+-- host this peer can observe (the retained owner's window host); evidence from any other host is unavailable.
+function M.forget_inventory(root,logical,observe,host)
+ local blockers,counts={},{requests=0,workers=0,generations=0}
+ for _,e in pairs(root.requests) do if e.request.logical_session_id==logical then counts.requests+=1 end end
+ for _,w in pairs(root.workers) do if w.logical_session_id==logical then counts.workers+=1 end end
+ for _,g in pairs(root.mailboxes.generations) do if g.binding and g.binding.logical_session_id==logical then counts.generations+=1 end end
+ local mine=forget_panes(root,logical)
+ local others={}
+ for other,s in pairs(root.sessions) do
+  if other~=logical then for key,p in pairs(forget_panes(root,other)) do others[key]=p end end
+ end
+ local keys={};for key in pairs(mine) do keys[#keys+1]=key end;table.sort(keys)
+ for _,key in ipairs(keys) do
+  local p=mine[key];local binding=p.binding
+  local state=if binding.window_host_id~=host then 'unknown' else observe(binding)
+  if state=='present' then
+   blockers[#blockers+1]={kind=if others[key] then 'shared_pane' else 'pane',agent=p.agent,pane=binding.pane_id,host=tostring(binding.window_host_id)}
+  elseif state~='absent' then
+   blockers[#blockers+1]={kind='unobservable',agent=p.agent,host=tostring(binding.window_host_id)}
+  end
+ end
+ for _,u in ipairs(forget_uncertain(root,logical)) do blockers[#blockers+1]={kind='uncertain',agent=u.agent,host=u.host} end
+ return {blockers=blockers,inventory=counts,dispatch_revision=root.revision}
+end
+-- Deletes exactly this session's graph. Returns the inventory, or nil and the blocking inventory.
+function M.forget_discard(root,logical,observe,host)
+ local inventory=M.forget_inventory(root,logical,observe,host)
+ if #inventory.blockers>0 then return nil,inventory end
+ for key,e in pairs(root.requests) do if e.request.logical_session_id==logical then root.requests[key]=nil end end
+ for key,w in pairs(root.workers) do
+  if w.logical_session_id==logical then
+   root.workers[key]=nil
+   if views[root] then views[root][key]=nil end
+  end
+ end
+ for handle,g in pairs(root.mailboxes.generations) do if g.binding and g.binding.logical_session_id==logical then root.mailboxes.generations[handle]=nil end end
+ root.sessions[logical]=nil
+ return inventory
+end
 function M.control(root,r,binding,session,peer)
  if root.migration or r.compatibility.kind~='current' then return nil,'migration_blocked' end
  if not peer_valid(peer,r,root) or r.compatibility.spawn_namespace~=root.namespace then return nil,'stale_authority' end

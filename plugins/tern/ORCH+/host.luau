@@ -394,9 +394,22 @@ end
 -- renders every block only when committed authority changed, else just the originating block
 -- when its own view-visible state changed (window drivers read its result/receipt surfaces).
 local handling_event = false
+-- A forgotten orchestration leaves no selection, scoped result or saved id behind. Only a successfully LOADED authority
+-- (ready, with the installation-level notice naming this exact session and the session truly gone) may authorize this:
+-- missing, corrupt or unreadable storage never clears anything.
+local FORGOTTEN_VIEW_FIELDS = { "scoped_results", "dispatch_command_result", "dispatch_action", "recovery",
+	"attestation", "close_armed", "relay_notice", "creation_ready", "setup_result", "migration_result", "orchestration_result", "forget" }
+local function normalize_view(view: any)
+	local registry = authority.registry
+	if authority.status ~= "ready" or registry == nil or registry.forgotten == nil or view.orch_session_id == nil then return end
+	if view.orch_session_id ~= registry.forgotten.orch_session_id or registry.sessions[view.orch_session_id] ~= nil then return end
+	for _, field in FORGOTTEN_VIEW_FIELDS do view[field] = nil end
+	view.orch_session_id = nil
+	view.notice = require("./forget_text").DONE
+end
 local function render_all()
 	if handling_event then return end
-	for _, entry in contexts do entry.cx:render() end
+	for _, entry in contexts do normalize_view(entry.view); entry.cx:render() end
 end
 local function authority_signature(): string
 	return tostring(authority.status) .. "\0" .. tostring(authority.diagnostic) .. "\0" .. tostring(authority.uncommitted_observation)
@@ -2114,6 +2127,25 @@ local function handle(view: any, ev: any, cx: any)
 		render_all()
 		return
 	end
+	if ev.act == "forget-state" then
+		-- Window-side progress of "Forget this orchestration…": a closed set of stages and bounded blocker rows, never free text.
+		local input = decode(ev.value)
+		if type(input) ~= "table" or not table.find({ "idle", "checking", "blocked", "pending" }, input.stage) then return end
+		local blockers: { any } = {}
+		if input.stage == "blocked" and type(input.blockers) == "table" then
+			for _, row in input.blockers do
+				if #blockers >= 32 then break end
+				if type(row) == "table" and table.find({ "pane", "unobservable", "uncertain", "shared_pane" }, row.kind)
+					and type(row.agent) == "string" and #row.agent <= 96 and type(row.host) == "string" and #row.host <= 256
+					and (row.pane == nil or (type(row.pane) == "string" and #row.pane <= 32)) then
+					table.insert(blockers, { kind = row.kind, agent = row.agent, host = row.host, pane = row.pane })
+				end
+			end
+		end
+		view.forget = if input.stage == "idle" then nil else { stage = input.stage, blockers = blockers, pending = input.pending == true }
+		render_all()
+		return
+	end
 	if ev.act == "authority-command" or ev.act == "authority-operator-command" then
 		local input = decode(ev.value)
 		local event = if input then input.event else nil
@@ -2122,7 +2154,7 @@ local function handle(view: any, ev: any, cx: any)
 			or input.origin.alias_nonce ~= view.alias_nonce or input.origin.host_pane_id ~= tostring(view.pane)
 			or input.origin.logical_session_id ~= view.orch_session_id
 			or not event or event.orch_session_id ~= view.orch_session_id
-			or not table.find({ "begin_close", "release_controller", "confirm_close" }, event.kind) then return end
+			or not table.find({ "begin_close", "release_controller", "confirm_close", "begin_forget", "supersede_forget", "complete_forget" }, event.kind) then return end
 		if operator and event.kind ~= "release_controller" then return end
 		local session = session_for(view)
 		local owner = if session then session.controller else nil
@@ -2130,12 +2162,17 @@ local function handle(view: any, ev: any, cx: any)
 		local active = owner and owner.owner_id == input.origin.owner_id and owner.generation == input.origin.owner_generation
 			and owner.pane_binding and owner.pane_binding.alias_nonce == view.alias_nonce
 		if not active and not (closing and same_value(closing.binding, input.origin, 0)) then return end
-		if event.kind == "begin_close" and (not event.control_origin or not same_value(event.control_origin.binding, input.origin, 0)) then return end
+		if (event.kind == "begin_close" or event.kind == "begin_forget" or event.kind == "supersede_forget")
+			and (not event.control_origin or not same_value(event.control_origin.binding, input.origin, 0)) then return end
 		if event.kind == "release_controller" and ((not operator and not session.close) or event.expected_owner_id ~= input.origin.owner_id
 			or event.expected_generation ~= input.origin.owner_generation) then return end
 		local notice = view.notice
 		local response = action(view, event)
-		if operator then view.dispatch_command_result = response else view.dispatch_background_result = response; view.notice = notice end
+		if operator then view.dispatch_command_result = response
+		else
+			view.dispatch_background_result = response
+			if event.kind ~= "complete_forget" then view.notice = notice end -- the completion notice stays
+		end
 		return
 	end
 	if ev.act == "dispatch-command" or ev.act == "dispatch-operator-command" then
@@ -2589,6 +2626,7 @@ local definition: BlockDef<any> = {
 			else view.notice = dispatch_notice(saved.notice) end
 			if type(saved.relay_notice) == "string" and #saved.relay_notice <= 512 then view.relay_notice = saved.relay_notice end
 		end
+		normalize_view(view)
 		-- Native page args are a one-shot launch request, never restored from saved block args.
 		if saved == nil and view.config_open and args[2] ~= nil then page_entry(view, args[2]) end
 		contexts[cx.pane] = { cx = cx, view = view }
@@ -2598,6 +2636,7 @@ local definition: BlockDef<any> = {
 	end,
 	title = function(_view: any): string return "ORCHESTRATED WORK" end,
 	view = function(view: any, _cx: BlockCx): BlockView
+		normalize_view(view)
 		view.host_pane_titles = {}
 		for _, pane in tern.pane.list() do view.host_pane_titles[tostring(pane.pane)] = pane.title end
 		local root = authority.registry or authority.migration_source
@@ -2625,6 +2664,7 @@ local definition: BlockDef<any> = {
 	end,
 	event = handle_event,
 	save = function(view: any): any
+		normalize_view(view)
 		return { pane = view.pane, alias_nonce = view.alias_nonce, orch_session_id = view.orch_session_id, established = authority.established,
 			dispatch_command_result = view.dispatch_command_result, notice = view.notice, relay_notice = view.relay_notice }
 	end,

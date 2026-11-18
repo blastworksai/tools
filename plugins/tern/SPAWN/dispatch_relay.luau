@@ -101,6 +101,7 @@ function M.install()
   return receipt
  end
  local function response(lane)
+  if lane.forget_bytes then return lane.forget_bytes end
   if not lane.body then return '' end
   return P.encode(lane.body)
  end
@@ -328,6 +329,25 @@ local function migration_result(lane,pending,value,problem,disposition,code)
   if not native_source(source) then return false,'source_unavailable' end
   local bridge=tonumber(source.host_pane_id)
   local value,r
+  lane.forget_bytes=nil
+  if act=='discard_capability' or act=='discard_preview' or act=='discard_session' then
+   -- Dedicated forget protocol: its own closed schema, never the legacy dispatch request decoder.
+   local request=Codec.decode_forget_request(bytes)
+   local o=source.origin
+   if not request or request.op~=act then return false,'invalid_action' end
+   for _,name in ipairs({'owner_id','owner_generation','host_pane_id','alias_nonce','window_key','native_session_id','window_host_id'}) do
+    if request.owner[name]~=o[name] then return false,'origin_changed' end
+   end
+   if request.controller_pane~=source.host_pane_id or request.logical_session_id~=o.logical_session_id then return false,'origin_changed' end
+   local session=tonumber(o.native_session_id)
+   local binding,err=Authority.binding(session)
+   local body
+   if not binding then body=Dispatch.forget_unavailable(request,err) else body=Dispatch.forget(request,binding,session) end
+   lane.request=nil;lane.request_json=nil;lane.body=nil;lane.setup_read=nil;lane.control_response=nil;lane.control_response_body=nil
+   lane.forget_bytes=Codec.encode_forget_response(body)
+   if not lane.forget_bytes then return false,'invalid_response' end
+   return true
+  end
   if act=='migration' then
    value=Codec.strict_decode(bytes,65536)
    if type(value)~='table' or type(value.request_json)~='string' then return false,'invalid_migration' end

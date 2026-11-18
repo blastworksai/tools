@@ -505,5 +505,104 @@ if section == nil or section == "decision_subject" then
  g.authority.registry = changed; g.memory.value = api.clone(changed)
  check(not g.authority:apply(exact).ok and gate(g,question).phase == "pending", "same global revision cannot conceal changed question bytes")
 end
-assert(section == nil or table.find({ "lifecycle", "cancel", "native", "capacity", "settled_history", "stale_claim", "autonomy", "rulings", "rulings_remote", "rulings_reissue", "decision_subject" }, section), "unknown gates section")
+-- Explicit forget (SKILLS-205): durable intent, recovery supersede, one-commit completion. No cancel exists.
+if section == nil or section == "forget" then
+ local W = load_test("workflow", "workflow-helpers", "helpers", api)
+ local f = W.fixture({ reviewer_records = W.arr({ "codex" }) })
+ local sid = f.origin.logical_session_id
+ local b = W.builder(f, "builder", { source = W.PLAN, files = W.arr({ "src/feature.luau" }) })
+ W.settle(f, b); assert(W.send(f, b, "CHECKPOINT", W.cp("cp-1", "rev-1")).ok)
+ local cid = W.coordinator(f)
+ assert(W.propose(f, cid, "report", W.worker(f, b).work_id).ok)
+ local proposal = W.proposal_gate(f)
+ local question = ask(f, b)
+ check(proposal.phase == "pending" and gate(f, question).phase == "pending", "fixture holds a worker, a question gate and a pending proposal")
+ local other = f.authority:apply(f:state_event("register_session", { orch_session_id = "other-session", name = "Other session" }))
+ assert(other.ok, other.message)
+ local other_before = tern.json.encode(f.authority.registry.sessions["other-session"])
+ local codec = api.codec
+ local function session() return f.authority.registry.sessions[sid] end
+ local function binding(epoch) local o = api.clone(f.origin); o.window_epoch = epoch or o.window_epoch; return o end
+ local function request_bytes(attempt, who, revision, boot)
+  local o = who or binding()
+  local r = { schema = 1, origin = "orchplus", op = "discard_session", request_id = "forget-" .. attempt, attempt_id = attempt,
+   authority_namespace = f.authority.registry.authority_namespace, spawn_namespace = session().spawn_namespace, logical_session_id = sid,
+   admission_seq = session().admission_seq, controller_pane = "9001", challenge = "forget-0000000000000000",
+   dispatch_revision = revision or 7, spawn_boot = boot or "boot-1",
+   owner = { owner_id = o.owner_id, owner_generation = o.owner_generation, host_pane_id = o.host_pane_id, alias_nonce = o.alias_nonce,
+    window_key = o.window_key, native_session_id = o.native_session_id, window_host_id = o.window_host_id } }
+  return tern.json.encode(r)
+ end
+ local function begin(kind, attempt, who, bytes)
+  local o = who or binding()
+  return f.authority:apply(f:state_event(kind, { attempt_id = attempt, request_bytes = bytes or request_bytes(attempt, o),
+   preview = { spawn_boot = "boot-1", dispatch_revision = 7 },
+   control_origin = { kind = "closing", binding = o, controller_pane = "9001", close_id = attempt } }))
+ end
+ local function closed_bytes(attempt, cursor)
+  local request = codec.decode_forget_request(session().close.forget.request_bytes)
+  return codec.encode_forget_response({ schema = 1, op = "discard_session", request_id = request.request_id, attempt_id = attempt, status = "closed",
+   spawn_namespace = request.spawn_namespace, authority_namespace = request.authority_namespace, logical_session_id = sid, admission_seq = request.admission_seq,
+   spawn_boot = "boot-1", payload = { admission_cursor = cursor } })
+ end
+ local foreign = binding(); foreign.alias_nonce = "someone-else"
+ check(begin("begin_forget", "attempt-a", foreign).code == "owner_mismatch" and session().phase == "open", "only the exact current controller can begin; nothing changes otherwise")
+ local bad_admission = tern.json.decode(request_bytes("attempt-a")); bad_admission.admission_seq += 5
+ check(begin("begin_forget", "attempt-a", nil, tern.json.encode(bad_admission)).code == "invalid_event", "the persisted request must name this session's exact admission")
+ check(begin("begin_forget", "attempt-a", nil, "{}").code == "invalid_event", "a request that is not the canonical discard schema is refused")
+ local ordinary = f.authority:apply(f:state_event("begin_close", { close_id = "ordinary", control_origin = { kind = "closing", binding = binding(), controller_pane = "9001", close_id = "ordinary" } }))
+ check(not ordinary.ok, "an ordinary close still refuses while obligations remain (waived only by Forget)")
+ local started = begin("begin_forget", "attempt-a")
+ local fenced = session()
+ check(started.ok and fenced.phase == "closing" and fenced.close.forget.attempt_id == "attempt-a" and fenced.bridge_control == nil and fenced.close.peer_closed == false,
+  "begin persists the intent, origin, attempt id and exact request bytes and fences the session")
+ check(api.state.rehydrate(api.clone(f.authority.registry)) ~= nil, "the fenced, pending forget restores")
+ check(begin("begin_forget", "attempt-b").code == "forget_pending", "a second begin is refused: recovery supersedes, nothing cancels")
+ check(not f.authority:apply(f:state_event("confirm_close", { close_id = "attempt-a" })).ok, "ordinary close confirmation cannot complete a pending forget")
+ local ctl = f:apply("bridge_control", { operation = "close_session", compatibility = api.clone(f.authority.registry.compatibility) })
+ check(not ctl.ok and ctl.code == "forget_pending", "ordinary controls never run beside a pending forget")
+ check(f.authority:apply(f:state_event("complete_forget", { attempt_id = "attempt-z", response_bytes = closed_bytes("attempt-a", 3) })).code == "forget_superseded", "only the pending attempt can complete")
+ local refused_body = tern.json.decode(closed_bytes("attempt-a", 3):sub(#codec.FORGET.prefix + 1)); refused_body.status = "refused"; refused_body.payload = nil
+ refused_body.error = { code = "blocked", message = "x" }
+ local unproven = f.authority:apply(f:state_event("complete_forget", { attempt_id = "attempt-a", response_bytes = codec.FORGET.prefix .. tern.json.encode(refused_body) }))
+ check(unproven.code == "forget_unproven" and session() ~= nil, "only SPAWN's exact closed result completes forgetting")
+ -- A crash before SPAWN processed it: the window reloads with a new epoch and recovers from the current origin.
+ local reloaded = binding("reloaded-window")
+ check(begin("supersede_forget", "attempt-a", reloaded).code == "forget_not_pending", "recovery must be a different attempt")
+ local foreign_recovery = api.clone(reloaded); foreign_recovery.alias_nonce = "someone-else"
+ check(begin("supersede_forget", "attempt-b", foreign_recovery).code == "owner_mismatch", "recovery from a different owner identity is refused")
+ local recovered = begin("supersede_forget", "attempt-b", reloaded)
+ check(recovered.ok and session().close.forget.attempt_id == "attempt-b" and session().close.control_origin.binding.window_epoch == "reloaded-window"
+  and f.authority.registry.dispatch.command_cursors[sid].origin.window_epoch == "reloaded-window",
+  "recovery atomically replaces the pending request bytes and rebinds the command cursor to the verified controller")
+ check(f.authority:apply(f:state_event("complete_forget", { attempt_id = "attempt-a", response_bytes = closed_bytes("attempt-b", 3) })).code == "forget_superseded",
+  "a superseded attempt can never complete locally")
+ local next_before = f.authority.registry.next_admission_seq
+ local done = f.authority:apply(f:state_event("complete_forget", { attempt_id = "attempt-b", response_bytes = closed_bytes("attempt-b", next_before + 40) }))
+ local registry = f.authority.registry
+ check(done.ok and registry.sessions[sid] == nil, "SPAWN's closed result completes forgetting in one commit")
+ local d = registry.dispatch
+ local left = 0
+ for _, field in { "workers", "gates", "reviews", "plans", "intakes", "chains", "projects" } do
+  for _, row in d[field] or {} do if row.logical_session_id == sid then left += 1 end end
+ end
+ for _, a in d.actions do if a.request.origin_binding.logical_session_id == sid then left += 1 end end
+ check(left == 0 and d.policies[sid] == nil and d.catalogs[sid] == nil and d.command_cursors[sid] == nil, "no worker, gate, proposal, action, setting or cursor of the session remains")
+ check(registry.next_admission_seq == next_before + 41, "next_admission_seq advances above SPAWN's returned cursor so the admission is never reissued")
+ check(registry.forgotten ~= nil and registry.forgotten.name == "Dispatch fixture" and registry.forgotten.revision == registry.revision, "an installation-level completion notice is persisted in the same commit")
+ check(tern.json.encode(registry.sessions["other-session"]) == other_before, "another session is untouched byte for byte")
+ check(api.state.rehydrate(api.clone(registry)) ~= nil, "the registry restores with no dangling reference and a valid notice")
+ -- A session SPAWN never admitted holds nothing there: one local commit.
+ local fresh = f.authority:apply(f:state_event("register_session", { orch_session_id = "local-session", name = "Never admitted" }))
+ assert(fresh.ok, fresh.message)
+ local admitted = f.authority:apply(f:state_event("admit_controller", { orch_session_id = "local-session", pane_binding = { host_pane_id = "77", alias_nonce = "local-alias" } }))
+ assert(admitted.ok, admitted.message)
+ local lo = { logical_session_id = "local-session", owner_id = admitted.owner_id, owner_generation = admitted.generation, host_pane_id = "77", alias_nonce = "local-alias",
+  window_key = "", window_epoch = "w", native_session_id = "7", window_host_id = "local" }
+ local local_done = f.authority:apply(f:state_event("begin_forget", { orch_session_id = "local-session", attempt_id = "attempt-l",
+  control_origin = { kind = "closing", binding = lo, controller_pane = "9001", close_id = "attempt-l" } }))
+ check(local_done.ok and f.authority.registry.sessions["local-session"] == nil and f.authority.registry.forgotten.name == "Never admitted",
+  "a session never admitted to SPAWN is forgotten locally in one commit")
+end
+assert(section == nil or table.find({ "lifecycle", "cancel", "native", "capacity", "settled_history", "stale_claim", "autonomy", "rulings", "rulings_remote", "rulings_reissue", "decision_subject", "forget" }, section), "unknown gates section")
 return "gates/" .. tostring(section or "all") .. ": " .. tostring(checks) .. " checks passed"

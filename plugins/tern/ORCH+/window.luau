@@ -330,7 +330,7 @@ local function origin_now(cx: WindowCx, source: number, request: any): any?
 	if not data.owner_id then
 		local close = if data.session_control then data.session_control.close else nil
 		local binding = if close and close.control_origin then close.control_origin.binding else nil
-		if not binding or not table.find({ "close_session", "bridge_reconcile" }, request.command)
+		if not binding or not table.find({ "close_session", "bridge_reconcile", "forget_session", "forget_continue" }, request.command)
 			or binding.window_key ~= cx:window_key() or binding.native_session_id ~= tostring(current.id)
 			or binding.window_host_id ~= tostring(host.id) or binding.alias_nonce ~= data.source_nonce then return nil end
 		return intent_origin(binding, if request.authority_namespace ~= nil then request else data)
@@ -2471,7 +2471,8 @@ local function schedule(cx: WindowCx)
 			elseif close and close.control_origin then intent_origin(close.control_origin.binding, data) else nil
 		if not origin then continue end
 		if automatic_connection and current_context(cx, source, origin) then automatic_connection(cx, source, data, origin) end
-		bridge_control_tick(cx, source, data, origin)
+		-- A persisted or running forget owns this session's closing pipeline; ordinary close never runs beside it.
+		if not conversation_ui.forget.tick_source(cx, source, data, origin) then bridge_control_tick(cx, source, data, origin) end
 		if not data.owner_id or (data.session_control and data.session_control.phase == "closing") then continue end
 		local flow = workflow_node(cx, source, "workflow-index", "orchplus.workflow")
 		if not flow or type(flow.worker_ids) ~= "table" or type(flow.policy) ~= "table" then continue end
@@ -4128,6 +4129,14 @@ local function dispatch_control(cx: WindowCx, source: number, request: any)
 				control_origin = { kind = "closing", binding = origin, controller_pane = tostring(source), close_id = close_id } })
 		end, function(fresh) return current_origin(fresh, source, origin) or closing_context(fresh, source, origin, true) end)
 		return
+	elseif command == "forget_session" or command == "forget_continue" then
+		local data = snapshot(cx, source)
+		if data then conversation_ui.forget.start(cx, source, origin, data, command == "forget_continue") end
+		arm()
+		return
+	elseif command == "forget_back" then
+		conversation_ui.forget.clear(cx, source)
+		return
 	elseif command == "close_handover" then
 		ask_decision(cx, source, origin, "Close retired handover without a successor?", {
 			{ label = "Keep handover pending" }, { label = "Leave no coordinator; require an explicit new start", confirm = true },
@@ -4574,6 +4583,10 @@ setup_api.picker = picker_ui
 source_ui = require("./source_window").new(ui_api)
 ui_api.picker, ui_api.sources = picker_ui, source_ui
 conversation_ui = require("./conversation_window").new(ui_api)
+-- (window.luau is at Luau's 200-local limit: the forget module hangs off conversation_ui instead of a new local.)
+ui_api.bridge = function(cx: WindowCx, source: number, origin: any) return acquire_bridge(cx, source, origin, "control") end
+ui_api.peer, ui_api.relay, ui_api.closing, ui_api.authority, ui_api.intent = peer_surface, relay_event, closing_context, authority_command, intent_origin
+conversation_ui.forget = require("./forget_window").new(ui_api)
 tern.route.link(function(link: any, cx: WindowCx)
 	if source_ui.route and source_ui.route(cx, link) then return { handled = true } end
 	return nil
@@ -4885,7 +4898,7 @@ local function intent_step(cx: WindowCx, source: number, current: boolean)
 		local origin = origin_now(cx, source, request)
 		local stamped = intent.window == nil or stamped_window(cx, source, intent.window)
 		if not stamped or not origin or not (current_origin(cx, source, origin)
-			or (table.find({ "bridge_reconcile", "close_session" }, request.command) and closing_context(cx, source, origin, true))) then
+			or (table.find({ "bridge_reconcile", "close_session", "forget_session", "forget_continue" }, request.command) and closing_context(cx, source, origin, true))) then
 			local data = snapshot(cx, source)
 			local cursor = data and data.command_cursor and data.command_cursor.origin
 			local binding = intent.window or cursor

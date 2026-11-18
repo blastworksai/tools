@@ -217,6 +217,80 @@ do
  local observed=State.observation(root,unknown)
  check(observed.category=='admission_absent','missing admission is observation, not effect success or never-executed proof')
 end
+-- Explicit forget: SPAWN is the quiescence authority. Inventory, fresh native absence and one-graph deletion.
+do
+ local function pane(id,host) return {pane_id=id,window_epoch='epoch',window_key='',native_session_id='3',window_host_id=host or '7'} end
+ local function build()
+  local root=fresh();admit(root,'session',1);admit(root,'other',2)
+  root.requests['session/launch']={request={op='launch',logical_session_id='session',request_id='launch',record_id='claude-a',origin_binding=origin('session')},body={status='accepted'},pane_binding=pane('55')}
+  root.requests['other/launch']={request={op='launch',logical_session_id='other',request_id='launch',record_id='omp-b',origin_binding=origin('other')},body={status='accepted'},pane_binding=pane('66')}
+  root.workers['session/w']={logical_session_id='session',record_id='claude-a',pane_binding=pane('55'),stopped={pane_binding=pane('57'),observation='exited'}}
+  root.mailboxes.generations.mine={binding={logical_session_id='session'}};root.mailboxes.generations.theirs={binding={logical_session_id='other'}}
+  return root
+ end
+ local function observer(map) return function(b) return map[b.pane_id] end end
+ local gone=observer({['55']='absent',['57']='absent'})
+ local root=build()
+ local inv=State.forget_inventory(root,'session',gone,'7')
+ check(#inv.blockers==0 and inv.inventory.requests==1 and inv.inventory.workers==1 and inv.inventory.generations==1 and inv.dispatch_revision==root.revision,
+  'closed panes, historically stopped ones included, give a clean inventory of exactly this graph')
+ inv=State.forget_inventory(root,'session',observer({['55']='present',['57']='absent'}),'7')
+ check(#inv.blockers==1 and inv.blockers[1].kind=='pane' and inv.blockers[1].pane=='55' and inv.blockers[1].agent=='claude-a' and inv.blockers[1].host=='7','a live pane of this session is a named blocker')
+ inv=State.forget_inventory(root,'session',observer({['55']='absent',['57']='present'}),'7')
+ check(#inv.blockers==1 and inv.blockers[1].pane=='57','a historically stopped pane must be freshly absent too')
+ inv=State.forget_inventory(root,'session',observer({['55']='unknown',['57']='absent'}),'7')
+ check(#inv.blockers==1 and inv.blockers[1].kind=='unobservable','a failed lookup is unavailable evidence, never absence')
+ inv=State.forget_inventory(root,'session',gone,'9')
+ check(#inv.blockers==2 and inv.blockers[1].kind=='unobservable','a pane of another host cannot be observed and blocks')
+ root.requests['other/launch'].pane_binding=pane('55')
+ inv=State.forget_inventory(root,'session',observer({['55']='present',['57']='absent'}),'7')
+ check(inv.blockers[1].kind=='shared_pane','a pane also retained by another orchestration is marked shared')
+ root=build()
+ root.requests['session/launch'].body.status='claimed'
+ inv=State.forget_inventory(root,'session',gone,'7')
+ check(#inv.blockers==1 and inv.blockers[1].kind=='uncertain','a claimed effect blocks even with every pane absent')
+ root=build();root.mailboxes.generations.mine.active={id='op'}
+ check(#State.forget_inventory(root,'session',gone,'7').blockers==1,'a running mailbox child blocks')
+ root=build();root.requests['session/launch'].authorization={phase='requested'}
+ check(#State.forget_inventory(root,'session',gone,'7').blockers==0,'a positively unconsumed grant does not block (it is revoked with the graph)')
+ root.requests['session/launch'].authorization={phase='consumed'}
+ check(#State.forget_inventory(root,'session',gone,'7').blockers==1,'a consumed grant is uncertain execution and blocks')
+ root=build()
+ local before_other=P.clone(root.sessions.other);local theirs=P.clone(root.mailboxes.generations.theirs)
+ local rest={version=root.version,namespace=root.namespace,authority_namespace=root.authority_namespace,admission_cursor=root.admission_cursor,gates=P.clone(root.gates),next_id=root.next_id}
+ local blocked,why=State.forget_discard(root,'session',observer({['55']='present',['57']='absent'}),'7')
+ check(blocked==nil and why and #why.blockers==1 and root.sessions.session~=nil and count(root.requests)==2,'a blocked discard changes nothing')
+ local done=State.forget_discard(root,'session',gone,'7')
+ check(done and root.sessions.session==nil and count(root.requests)==1 and root.requests['other/launch']~=nil and count(root.workers)==0,'only the matching session graph is removed')
+ check(root.mailboxes.generations.mine==nil and P.equal(root.mailboxes.generations.theirs,theirs) and P.equal(root.sessions.other,before_other),'its mailbox generations go; another session is untouched')
+ for key,value in pairs(rest) do check(P.equal(root[key],value),'roster-side fields, counters and the admission watermark are untouched: '..key) end
+ local plain=control(build(),'close_session','session',1)
+ plain.discard=true
+ check(Codec.decode_dispatch_request(tern.json.encode(plain))==nil,'the legacy close_session schema is unchanged: it does not accept a discard field')
+ -- Wire: dedicated operations, closed schemas, legacy untouched.
+ local owner={owner_id='owner',owner_generation=1,host_pane_id='12',alias_nonce='alias',window_key='',native_session_id='3',window_host_id='7'}
+ local request={schema=1,origin='orchplus',op='discard_capability',request_id='r1',attempt_id='a1',authority_namespace='orch-authority',spawn_namespace='spawn-authority',logical_session_id='session',admission_seq=1,owner=owner,controller_pane='44'}
+ check(Codec.decode_forget_request(tern.json.encode(request))~=nil,'a capability request is a closed, valid object')
+ local with_epoch=P.clone(request);with_epoch.owner.window_epoch='epoch'
+ check(Codec.decode_forget_request(tern.json.encode(with_epoch))==nil,'the owner identity carries no window epoch field')
+ local preview=P.clone(request);preview.op='discard_preview'
+ check(Codec.decode_forget_request(tern.json.encode(preview))==nil,'a preview must carry the challenge')
+ preview.challenge='forget-0000000000000000'
+ check(Codec.decode_forget_request(tern.json.encode(preview))~=nil,'a preview with its challenge is valid')
+ local discard=P.clone(preview);discard.op='discard_session'
+ check(Codec.decode_forget_request(tern.json.encode(discard))==nil,'a discard must bind the observed revision and SPAWN boot')
+ discard.dispatch_revision=5;discard.spawn_boot='boot-1'
+ check(Codec.decode_forget_request(tern.json.encode(discard))~=nil,'a discard with its binding is valid')
+ check(Codec.decode_dispatch_request(tern.json.encode(request))==nil,'legacy decoders refuse the forget operations')
+ local body={schema=1,op='discard_preview',request_id='r1',attempt_id='a1',status='blocked',spawn_namespace='spawn-authority',authority_namespace='orch-authority',logical_session_id='session',admission_seq=1,spawn_boot='boot-1',
+  payload={dispatch_revision=5,blockers=array({kind='pane',agent='claude-a',pane='55',host='7'},{kind='unobservable',agent='x',host='9'})}}
+ local bytes=Codec.encode_forget_response(body)
+ check(bytes~=nil and Codec.decode_forget_response(bytes,preview)~=nil,'a blocked preview response round-trips against its request')
+ local other_request=P.clone(preview);other_request.attempt_id='a2'
+ check(Codec.decode_forget_response(bytes,other_request)==nil,'a response bound to another attempt is refused')
+ body.payload.blockers=array({kind='pane',agent='claude-a',host='7'})
+ check(Codec.encode_forget_response(body)==nil,'a pane blocker must name its pane')
+end
 -- Enrollment's copied/submitted distinction survives immutable request retirement.
 for _,delivery in ipairs({'native_ask','clipboard'}) do
  local root=fresh();admit(root,'session',1)

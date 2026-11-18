@@ -93,6 +93,13 @@ local validators: any = {
 	operator_verified = function(v: any): boolean return v == true end,
 	executors_verified = function(v: any): boolean return v == true end,
 	quiescent = function(v: any): boolean return v == true end,
+	attempt_id = function(v: any): boolean return text(v, 96) and v:match("^[%w_-]+$") ~= nil end,
+	request_bytes = function(v: any): boolean return text(v, codec.FORGET.limit) end,
+	response_bytes = function(v: any): boolean return text(v, codec.FORGET.limit + 64) end,
+	preview = function(v: any): boolean
+		return type(v) == "table" and fields(v, { spawn_boot = true, dispatch_revision = true }) and text(v.spawn_boot, 96)
+			and integer(v.dispatch_revision, 0)
+	end,
 }
 
 -- true = required; false = optional. Unknown fields are never part of a request identity.
@@ -110,6 +117,10 @@ local operations: any = {
 	confirm_recovery = { target = true, expected_owner_id = true, expected_generation = true, expected_revision = true, intent_id = true, operator_verified = true, evidence = true },
 	begin_close = { close_id = true, control_origin = false },
 	confirm_close = { close_id = true },
+	-- Explicit forget (SKILLS-205). Never a cancel: once persisted, only supersede (recovery) or complete exist.
+	begin_forget = { attempt_id = true, control_origin = true, request_bytes = false, preview = false },
+	supersede_forget = { attempt_id = true, control_origin = true, request_bytes = true, preview = true },
+	complete_forget = { attempt_id = true, response_bytes = true },
 }
 
 local function decode_event(raw: any): any?
@@ -375,12 +386,17 @@ end
 
 local function valid_registry(raw: any, local_v4: boolean?): boolean
 	if not fields(raw, { version = true, authority_namespace = true, revision = true, next_admission_seq = true, next_owner_id = true,
-		execution_epoch = true, sessions = true, dispatch = true, setup = true, installation_defaults = true, compatibility = true, migration = true })
+		execution_epoch = true, sessions = true, dispatch = true, setup = true, installation_defaults = true, compatibility = true, migration = true,
+		forgotten = true })
 		or raw.version ~= (if local_v4 then 4 else 5) or not validators.authority_namespace(raw.authority_namespace)
 		or not integer(raw.revision, 0) or not integer(raw.next_admission_seq, 1) or not integer(raw.next_owner_id, 0)
 		or not integer(raw.execution_epoch, 1) or not valid_defaults(raw.installation_defaults, local_v4)
 		or raw.installation_defaults.revision > raw.revision or not valid_setup(raw.setup, raw.installation_defaults.revision)
 		or type(raw.sessions) ~= "table" or raw.sessions == tern.json.null or count(raw.sessions) > LIMITS.sessions then return false end
+	-- Installation-level, bounded completion notice of the last forgotten orchestration.
+	if raw.forgotten ~= nil and (not fields(raw.forgotten, { name = true, revision = true, orch_session_id = true }) or not text(raw.forgotten.name, 256)
+		or not validators.orch_session_id(raw.forgotten.orch_session_id)
+		or not integer(raw.forgotten.revision, 1, raw.revision)) then return false end
 	if raw.compatibility ~= nil and (not codec.validate_dispatch_compatibility(raw.compatibility)
 		or raw.compatibility.kind ~= "current" or raw.compatibility.authority_namespace ~= raw.authority_namespace) then return false end
 	if raw.migration ~= nil and (raw.compatibility ~= nil or not codec.validate_dispatch_compatibility(raw.migration)
@@ -407,8 +423,18 @@ local function valid_registry(raw: any, local_v4: boolean?): boolean
 		if (session.phase == "closing") ~= (session.close ~= nil) then return false end
 		if session.close ~= nil then
 			local close = session.close
-			if not fields(close, { close_id = true, control_origin = true, peer_closed = true }) or not validators.close_id(close.close_id)
+			if not fields(close, { close_id = true, control_origin = true, peer_closed = true, forget = true }) or not validators.close_id(close.close_id)
 				or type(close.peer_closed) ~= "boolean" then return false end
+			if close.forget ~= nil then
+				local forget = close.forget
+				if not fields(forget, { attempt_id = true, request_bytes = true, preview = true }) or not validators.attempt_id(forget.attempt_id)
+					or forget.attempt_id ~= close.close_id or close.control_origin == nil or close.peer_closed ~= false
+					or not validators.request_bytes(forget.request_bytes) or not validators.preview(forget.preview) then return false end
+				local request = codec.decode_forget_request(forget.request_bytes)
+				if request == nil or request.op ~= "discard_session" or request.attempt_id ~= forget.attempt_id
+					or request.logical_session_id ~= key or request.admission_seq ~= session.admission_seq
+					or request.dispatch_revision ~= forget.preview.dispatch_revision or request.spawn_boot ~= forget.preview.spawn_boot then return false end
+			end
 			if close.control_origin ~= nil and (not validators.control_origin(close.control_origin)
 				or close.control_origin.close_id ~= close.close_id or close.control_origin.binding.logical_session_id ~= key) then return false end
 			if session.admission_seq ~= nil and close.control_origin == nil then return false end
@@ -866,6 +892,85 @@ function M.apply(registry: any, raw: any, clock: any?): (any?, any)
 	end
 	if session and session.phase ~= "open" and (kind == "admit_controller" or kind == "reserve_coordinator" or kind == "bind_coordinator") then
 		return nil, response(false, "session_closing", "Closing sessions cannot admit new ownership.")
+	end
+	if kind == "begin_forget" or kind == "supersede_forget" or kind == "complete_forget" then
+		local pending = if session.close then session.close.forget else nil
+		local function checked_clone(): any
+			local candidate = table.clone(registry)
+			candidate.sessions = table.clone(registry.sessions)
+			candidate.revision += 1
+			return candidate
+		end
+		local function forgotten(candidate: any, cursor: number): (any?, any)
+			dispatch.reclaim_session(candidate, event.orch_session_id)
+			candidate.sessions[event.orch_session_id] = nil
+			-- A forgotten admission must never be reissued: stay above SPAWN's own watermark.
+			candidate.next_admission_seq = math.max(registry.next_admission_seq, cursor + 1)
+			candidate.forgotten = { name = session.name, revision = candidate.revision, orch_session_id = event.orch_session_id }
+			return checked(registry, candidate, response(true, "session_forgotten", "Orchestration forgotten.", { revision = candidate.revision, orch_session_id = event.orch_session_id }))
+		end
+		if kind == "complete_forget" then
+			if pending == nil or pending.attempt_id ~= event.attempt_id then
+				return nil, response(false, "forget_superseded", "This forget attempt is no longer the pending one; it cannot complete.")
+			end
+			local request = codec.decode_forget_request(pending.request_bytes)
+			local body = if request then codec.decode_forget_response(event.response_bytes, request) else nil
+			if body == nil or body.op ~= "discard_session" or body.status ~= "closed" then
+				return nil, response(false, "forget_unproven", "Only SPAWN's exact closed result for the pending request completes forgetting.")
+			end
+			return forgotten(checked_clone(), body.payload.admission_cursor)
+		end
+		-- begin / supersede: the exact current controller proves ownership, restored or reloaded included.
+		local binding = event.control_origin.binding
+		local controller = session.controller
+		if event.control_origin.close_id ~= event.attempt_id or binding.logical_session_id ~= event.orch_session_id or controller == nil
+			or controller.owner_id ~= binding.owner_id or controller.generation ~= binding.owner_generation
+			or controller.pane_binding == nil or controller.pane_binding.host_pane_id ~= binding.host_pane_id
+			or controller.pane_binding.alias_nonce ~= binding.alias_nonce then
+			return nil, response(false, "owner_mismatch", "Forget must be issued by the orchestration's exact current controller.")
+		end
+		if kind == "begin_forget" and pending ~= nil then return nil, response(false, "forget_pending", "Forgetting is already pending; recover it instead of starting another.") end
+		if kind == "supersede_forget" and (pending == nil or pending.attempt_id == event.attempt_id) then
+			return nil, response(false, "forget_not_pending", "Only a different attempt supersedes a pending forget.")
+		end
+		if session.admission_seq == nil then
+			-- Never admitted to SPAWN: it holds nothing there, so the local discard is one commit.
+			if event.request_bytes ~= nil then return nil, response(false, "invalid_event", "A session SPAWN never admitted has nothing to ask SPAWN.") end
+			return forgotten(checked_clone(), 0)
+		end
+		local request = if event.request_bytes then codec.decode_forget_request(event.request_bytes) else nil
+		local preview = event.preview
+		if request == nil or preview == nil or request.op ~= "discard_session" or request.attempt_id ~= event.attempt_id
+			or request.logical_session_id ~= event.orch_session_id or request.admission_seq ~= session.admission_seq
+			or request.authority_namespace ~= registry.authority_namespace
+			or (session.spawn_namespace ~= nil and request.spawn_namespace ~= session.spawn_namespace)
+			or request.dispatch_revision ~= preview.dispatch_revision or request.spawn_boot ~= preview.spawn_boot
+			or request.owner.owner_id ~= binding.owner_id or request.owner.owner_generation ~= binding.owner_generation
+			or request.owner.host_pane_id ~= binding.host_pane_id or request.owner.alias_nonce ~= binding.alias_nonce
+			or request.owner.window_key ~= binding.window_key or request.owner.native_session_id ~= binding.native_session_id
+			or request.owner.window_host_id ~= binding.window_host_id or request.controller_pane ~= event.control_origin.controller_pane then
+			return nil, response(false, "invalid_event", "The persisted request must be the exact discard for this session, admission and owner.")
+		end
+		local candidate = checked_clone()
+		local closing = copy(session)
+		closing.phase = "closing"
+		-- Promotion of an ordinary close happens only through this explicit transition; any older control is superseded.
+		closing.bridge_control = nil
+		closing.close = { close_id = event.attempt_id, control_origin = copy(event.control_origin), peer_closed = false,
+			forget = { attempt_id = event.attempt_id, request_bytes = event.request_bytes, preview = copy(event.preview) } }
+		candidate.sessions[event.orch_session_id] = closing
+		-- Recovery supersedes the older window's cursor: closing controls must follow the re-verified controller.
+		local cursors = if registry.dispatch then registry.dispatch.command_cursors else nil
+		if cursors and cursors[event.orch_session_id] then
+			candidate.dispatch = table.clone(registry.dispatch)
+			candidate.dispatch.command_cursors = table.clone(cursors)
+			local cursor = table.clone(cursors[event.orch_session_id])
+			cursor.origin = copy(binding)
+			cursor.controller_pane = event.control_origin.controller_pane
+			candidate.dispatch.command_cursors[event.orch_session_id] = cursor
+		end
+		return checked(registry, candidate, response(true, if kind == "begin_forget" then "forget_fenced" else "forget_superseded_fenced", "Forgetting is persisted and the orchestration is fenced.",
+			{ revision = candidate.revision, orch_session_id = event.orch_session_id }))
 	end
 	if kind == "begin_close" or kind == "confirm_close" then
 		if kind == "begin_close" then

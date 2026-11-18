@@ -512,6 +512,8 @@ function M.new(api: any): any
 				{ label = "Start from template…", source = "start-template" },
 				{ label = "Open ORCH+ Board", source = "open-plan-board" },
 				{ label = "Close orchestration…", command = "close_session" },
+				{ label = "Forget this orchestration…", command = "forget_session" },
+				{ label = "Forget this orchestration…", command = "forget_session" },
 			}, function(fresh: any, choice: any)
 				if choice.source then api.sources.start(fresh, source, origin, choice.source, request)
 				else api.control(fresh, source, choice.command, origin) end

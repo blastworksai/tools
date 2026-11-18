@@ -1,6 +1,6 @@
 -- Real HOST blocks and canonical reducers; no production KV, native effects or copied host logic.
 local root, section = ...
-assert(section == nil or table.find({ "host_retirement", "host_stale_result", "host_withdrawal", "project_history" }, section), "unknown reclamation section")
+assert(section == nil or table.find({ "host_retirement", "host_stale_result", "host_withdrawal", "project_history", "host_forget" }, section), "unknown reclamation section")
 local runtime, environment = tern, getfenv()
 local fixture_chunk = assert(loadstring(runtime.fs.read(root .. "/tests/dispatch.luau"), "reclamation-fixture"))
 setfenv(fixture_chunk, setmetatable({}, { __index = environment }))
@@ -78,7 +78,7 @@ local function fixture()
 				origin = f.origin, event = input }) }, contexts[42])
 			response = view.dispatch_background_result
 		end
-		assert(response and response.request_id == input.request_id, "actual HOST callback must return this request's correlated result, not an earlier operator receipt")
+		assert(response and response.request_id == input.request_id, "actual HOST callback must return this request's correlated result, not an earlier operator receipt: " .. tostring(input.kind))
 		return response
 	end
 	f.authority = proxy
@@ -131,6 +131,9 @@ local function fixture()
 	end
 	function f:redraw() definition.view(views[43], contexts[43]) end
 	f.views = views
+	function f:saved(pane) return definition.save(views[pane]) end
+	function f:render(pane) return definition.view(views[pane], contexts[pane]) end
+	function f:host_event(pane, act, value) definition.event(views[pane], { ev = "action", act = act, value = runtime.json.encode(value) }, contexts[pane]) end
 	function f:create(pane, name)
 		definition.event(views[pane], { ev = "action", act = "orchestration-create", value = runtime.json.encode({
 			source_nonce = views[pane].alias_nonce, request_id = "create-" .. name, name = name,
@@ -212,6 +215,85 @@ if section == nil or section == "host_retirement" then
 	check(closed.views[44].orchestration_result == survivor
 		and runtime.json.encode(closed.authority.registry.sessions[survivor.orch_session_id]) == survivor_session,
 		"confirmed removal preserves unrelated creation results and current session ownership")
+end
+if section == nil or section == "host_forget" then
+	local f = fixture()
+	local id, bytes = f:catalog_delivery(); assert(f:deliver(id, bytes).ok)
+	local sid = f.origin.logical_session_id
+	local survivor = f:create(44, "Surviving creation"); assert(survivor.ok)
+	local survivor_session = runtime.json.encode(f.authority.registry.sessions[survivor.orch_session_id])
+	f.views[43].orch_session_id = sid
+	f.views[42].relay_notice = "stale relay notice"
+	check(f.views[42].dispatch_command_result ~= nil and f:saved(42).orch_session_id == sid and f:saved(43).orch_session_id == sid,
+		"before forgetting, saved window data names the session and its last command result")
+	local codec = shared.codec
+	local function bound(epoch)
+		local o = clone(f.origin); o.window_epoch = epoch or o.window_epoch; return o
+	end
+	local function request_bytes(attempt, o)
+		local session = f.authority.registry.sessions[sid]
+		return runtime.json.encode({ schema = 1, origin = "orchplus", op = "discard_session", request_id = "forget-" .. attempt, attempt_id = attempt,
+			authority_namespace = f.authority.registry.authority_namespace, spawn_namespace = session.spawn_namespace, logical_session_id = sid,
+			admission_seq = session.admission_seq, controller_pane = "9001", challenge = "forget-0000000000000000", dispatch_revision = 7, spawn_boot = "boot-1",
+			owner = { owner_id = o.owner_id, owner_generation = o.owner_generation, host_pane_id = o.host_pane_id, alias_nonce = o.alias_nonce,
+				window_key = o.window_key, native_session_id = o.native_session_id, window_host_id = o.window_host_id } })
+	end
+	local function forget(kind, attempt, o)
+		return f.authority:apply(f:state_event(kind, { attempt_id = attempt, request_bytes = request_bytes(attempt, o), preview = { spawn_boot = "boot-1", dispatch_revision = 7 },
+			control_origin = { kind = "closing", binding = o, controller_pane = "9001", close_id = attempt } }))
+	end
+	local ordinary = f.authority:apply(f:state_event("begin_close", { close_id = "ordinary",
+		control_origin = { kind = "closing", binding = clone(f.origin), controller_pane = "9001", close_id = "ordinary" } }))
+	check(not ordinary.ok and ordinary.code == "session_busy", "an ordinary close refuses unconfirmed executor evidence")
+	-- Window-side progress reaches the actual host view as a closed set of stages and bounded rows.
+	local card = { { kind = "pane", agent = "claude-a", host = "7", pane = "55" }, { kind = "unobservable", agent = "omp-b", host = "9" }, { kind = "shared_pane", agent = "x", host = "7", pane = "66" } }
+	f:host_event(42, "forget-state", { stage = "blocked", blockers = card, pending = false })
+	check(f.views[42].forget ~= nil and f.views[42].forget.stage == "blocked" and #f.views[42].forget.blockers == 3, "the host keeps the blocker rows of the preview")
+	f:host_event(42, "forget-state", { stage = "exploit", blockers = card })
+	check(f.views[42].forget.stage == "blocked", "an unknown stage is ignored")
+	local function texts(tree, out)
+		out = out or {}
+		if type(tree) ~= "table" then return out end
+		if tree.p and tree.p.spans and not tree.p.hidden then for _, span in tree.p.spans do if type(span) == "table" and span.t then table.insert(out, span.t) end end end
+		for _, child in tree.c or {} do texts(child, out) end
+		return out
+	end
+	local shown = table.concat(texts(f:render(42).main), "\n")
+	for _, expected in { "Cannot forget yet. Review the blockers below.", "Close these panes using Tern, then check again:", "claude-a · pane 55 · 7",
+		"omp-b · cannot be checked on 9", "x · pane 66 on 7 is associated with another orchestration. Do not close it for this reset." } do
+		check(shown:find(expected, 1, true) ~= nil, "the blocker card shows: " .. expected)
+	end
+	local close_at, shared_at = shown:find("Close these panes using Tern", 1, true), shown:find("associated with another orchestration", 1, true)
+	check(close_at ~= nil and shared_at ~= nil and select(1, shown:find("claude-a · pane 55", 1, true)) > close_at and shared_at > close_at
+		and shown:find("Close these panes", shared_at, true) == nil, "only the exclusive pane group carries the close-through-Tern instruction")
+	local begun = forget("begin_forget", "attempt-a", bound()); assert(begun.ok, runtime.json.encode(begun))
+	check(f.authority.registry.sessions[sid].close.forget.attempt_id == "attempt-a", "the owner's confirmed forget fences the session despite unconfirmed executor evidence")
+	f:host_event(42, "forget-state", { stage = "idle" })
+	local pending_tree = f:render(42).main
+	local pending_text = table.concat(texts(pending_tree), "\n")
+	check(pending_text:find("Forgetting is pending. This orchestration remains fenced. Resolve the listed blockers, then continue.", 1, true) ~= nil
+		and runtime.json.encode(pending_tree):find("Continue forgetting", 1, true) ~= nil, "a persisted forget shows the pending notice and Continue forgetting even after a reload (no window state)")
+	-- Crash/reload after fencing: the window epoch is new; recovery supersedes the pending bytes from the current origin.
+	f.origin.window_epoch = "reloaded-window"
+	local recovered = forget("supersede_forget", "attempt-b", bound()); assert(recovered.ok, runtime.json.encode(recovered))
+	check(f.authority.registry.sessions[sid].close.control_origin.binding.window_epoch == "reloaded-window", "recovery is accepted through the actual host from the reloaded window's origin")
+	local session = f.authority.registry.sessions[sid]
+	local request = codec.decode_forget_request(session.close.forget.request_bytes)
+	local closed = codec.encode_forget_response({ schema = 1, op = "discard_session", request_id = request.request_id, attempt_id = "attempt-b", status = "closed",
+		spawn_namespace = request.spawn_namespace, authority_namespace = request.authority_namespace, logical_session_id = sid, admission_seq = request.admission_seq,
+		spawn_boot = "boot-1", payload = { admission_cursor = 9 } })
+	local before_next = f.authority.registry.next_admission_seq
+	local done = f.authority:apply(f:state_event("complete_forget", { attempt_id = "attempt-b", response_bytes = closed }))
+	assert(done.ok, runtime.json.encode(done))
+	check(f.authority.registry.sessions[sid] == nil and f.authority.registry.next_admission_seq == math.max(before_next, 10), "host authority no longer holds the session and its admission is never reissued")
+	for _, pane in { 42, 43 } do
+		local saved = f:saved(pane)
+		check(saved.orch_session_id == nil and saved.dispatch_command_result == nil and saved.relay_notice == nil
+			and saved.notice == "Orchestration forgotten. Mailbox files were kept. You can create a new orchestration.", "saved window data of every view on the forgotten session keeps no session, result or relay trace, and shows the completion notice")
+		check(f.views[pane].scoped_results == nil and f.views[pane].orchestration_result == nil and f.views[pane].forget == nil, "live view results of the session are cleared too")
+	end
+	check(f:saved(44).orch_session_id ~= sid and runtime.json.encode(f.authority.registry.sessions[survivor.orch_session_id]) == survivor_session,
+		"an unrelated session and its view are untouched")
 end
 if section == nil or section == "host_withdrawal" then
 	local f = fixture(); f:catalog(0)

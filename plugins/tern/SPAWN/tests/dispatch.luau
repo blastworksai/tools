@@ -2398,6 +2398,120 @@ sections.allocation=function()
  local missing=fixture(nil,true)
  check(missing.raw.stage(proof,missing.binding,1,77).status=='uncertain','no matching request or generation is unknown, never a fake empty allocation')
 end
+-- Explicit forget through the real engine: read-only preview, boot-bound latest-only challenge, quiescence recheck at commit.
+sections.forget=function()
+ local f=launched_fixture(true)
+ local root=f.saved['dispatch-v1']
+ root.mailboxes.generations.mine={binding={logical_session_id='session'}}
+ local roster=copy(f.snapshot.records)
+ local function request(op,attempt,extra)
+  local o=f.origin
+  local r={schema=1,origin='orchplus',op=op,request_id='forget-'..op..'-'..attempt,attempt_id=attempt,authority_namespace='orch-authority',spawn_namespace='spawn-authority',
+   logical_session_id='session',admission_seq=1,controller_pane='44',
+   owner={owner_id=o.owner_id,owner_generation=o.owner_generation,host_pane_id=o.host_pane_id,alias_nonce=o.alias_nonce,window_key=o.window_key,native_session_id=o.native_session_id,window_host_id=o.window_host_id}}
+  for k,v in pairs(extra or {}) do r[k]=v end
+  assert(f.c.decode_forget_request(runtime.json.encode(r)),'fixture request must satisfy the canonical forget schema: '..op)
+  return r
+ end
+ local live=function(b)return 'present' end
+ local gone=function(b)return 'absent' end
+ local function ask(op,attempt,extra,observe)
+  local body=f.d.forget(request(op,attempt,extra),f.binding,1,observe or gone)
+  assert(f.c.encode_forget_response(body),'response must satisfy the canonical schema: '..runtime.json.encode(body):sub(1,200))
+  return body
+ end
+ local cap=ask('discard_capability','attempt-1')
+ check(cap.status=='capable' and ask('discard_capability','attempt-1').payload.challenge==cap.payload.challenge,'the same attempt is idempotent and returns the same challenge')
+ local older=cap.payload.challenge
+ cap=ask('discard_capability','attempt-2')
+ check(cap.payload.challenge~=older and ask('discard_preview','attempt-1',{challenge=older}).error.code=='stale_challenge','a replacement attempt invalidates the older challenge')
+ local wrong_owner=request('discard_capability','attempt-2');wrong_owner.owner.alias_nonce='someone-else'
+ check(f.d.forget(wrong_owner,f.binding,1).error.code=='owner_mismatch','a different retained owner identity is refused')
+ local wrong_ns=request('discard_capability','attempt-2');wrong_ns.spawn_namespace='other-spawn'
+ check(f.d.forget(wrong_ns,f.binding,1).error.code=='changed','another SPAWN namespace is refused')
+ local before=f.image();local writes=f.effects.writes
+ local blocked=ask('discard_preview','attempt-2',{challenge=cap.payload.challenge},live)
+ check(blocked.status=='blocked' and blocked.payload.blockers[1].kind=='pane' and blocked.payload.blockers[1].pane=='55'
+  and f.p.equal(before,f.image()) and f.effects.writes==writes,'a blocked preview names the pane and writes nothing (no loader recovery, no revocation, no ACK)')
+ local clean=ask('discard_preview','attempt-2',{challenge=cap.payload.challenge})
+ check(clean.status=='clean' and f.p.equal(before,f.image()) and f.effects.writes==writes,'a clean preview is also read-only')
+ local bound={challenge=cap.payload.challenge,dispatch_revision=clean.payload.dispatch_revision,spawn_boot=clean.spawn_boot}
+ local stale=copy(bound);stale.dispatch_revision+=1
+ check(ask('discard_session','attempt-2',stale).error.code=='changed','a changed dispatch revision requires another preview')
+ local reboot=copy(bound);reboot.spawn_boot='old-boot'
+ check(ask('discard_session','attempt-2',reboot).error.code=='changed','a preview from another SPAWN boot is refused')
+ local raced=ask('discard_session','attempt-2',bound,live)
+ check(raced.error and raced.error.code=='blocked' and f.p.equal(before,f.image()),'execution that reappears before commit blocks it and changes nothing')
+ local done=ask('discard_session','attempt-2',bound)
+ root=f.saved['dispatch-v1']
+ local left=0
+ for _,e in pairs(root.requests) do if e.request.logical_session_id=='session' then left+=1 end end
+ for _,w in pairs(root.workers) do if w.logical_session_id=='session' then left+=1 end end
+ for _,g in pairs(root.mailboxes.generations) do if g.binding.logical_session_id=='session' then left+=1 end end
+ check(done.status=='closed' and done.payload.admission_cursor==root.admission_cursor and root.sessions.session==nil and left==0,'dispatch-v1 holds no session, request, worker or mailbox generation of the forgotten session')
+ check(f.p.equal(f.snapshot.records,roster) and f.effects.reserves==1,'the agent roster is untouched and no native effect ran')
+ -- Lost completion: the graph is gone; an authenticated retry with a fresh capability is idempotent.
+ check(ask('discard_session','attempt-2',bound).error.code=='stale_challenge','a consumed challenge is not reusable')
+ local again=ask('discard_capability','attempt-3')
+ check(again.status=='capable','an absent session whose admission existed can be re-authenticated')
+ local retry=ask('discard_session','attempt-3',{challenge=again.payload.challenge,dispatch_revision=0,spawn_boot=again.spawn_boot})
+ check(retry.status=='closed','an authenticated retry after SPAWN already deleted the graph returns idempotent completion')
+ local never=request('discard_capability','attempt-4');never.admission_seq=99
+ check(f.d.forget(never,f.binding,1).error.code=='not_found','an admission SPAWN never recorded is not completed')
+end
+-- The actual relay carries the dedicated forget operations on their own protocol, bound to the bound source's identity.
+sections.forget_relay=function()
+ local f=launched_fixture(true)
+ -- The fixture admits through native session 1 but its origin names session 3; the relay passes the bound source's session.
+ f.saved['dispatch-v1'].sessions.session.host_session=3
+ local inbox,sent,sequence={},{},0
+ local endpoint={}
+ function endpoint.send(frame) table.insert(sent,copy(frame));return {id=frame.id} end
+ function endpoint.receive(limit) local out={};for index=1,math.min(limit,#inbox)do table.insert(out,inbox[index])end;return out end
+ function endpoint.ack(message) for index,item in ipairs(inbox)do if item.id==message.id then table.remove(inbox,index);break end end;return true end
+ function endpoint.settle()return 0 end
+ function endpoint.acknowledged()return false end
+ f.load('channel/channel').open=function()return endpoint end
+ f.runtime.plugin={data='/fixture/spawn'}
+ f.runtime.pane={list=function()return {{pane=12,program='orchplus.orchestrator'}}end}
+ f.runtime.timer=function()return {cancel=function()end}end
+ f.authority.binding=function(session) return f.binding end
+ local relay=f.load('dispatch_relay').install()
+ local function enqueue(act,bytes)
+  sequence+=1
+  table.insert(inbox,{peer='orchplus',route='spawn.request',incarnation='forget-orch',id='m-'..tostring(sequence),binding='forget:lane:'..act..(if act=='bind' then '' else ':'..relay.boot),body=bytes})
+ end
+ enqueue('bind',runtime.json.encode({schema=1,relay_endpoint='forget',relay_boot='forget-orch',lane_id='lane',host_pane_id='12',source_nonce=f.origin.alias_nonce,
+  origin=copy(f.origin),desktop_proof='delegated_native_window',host_program='orchplus.orchestrator'}))
+ relay.poll()
+ local o=f.origin
+ local function request(op,extra)
+  local r={schema=1,origin='orchplus',op=op,request_id='relay-'..op,attempt_id='relay-attempt',authority_namespace='orch-authority',spawn_namespace='spawn-authority',
+   logical_session_id='session',admission_seq=1,controller_pane='12',
+   owner={owner_id=o.owner_id,owner_generation=o.owner_generation,host_pane_id=o.host_pane_id,alias_nonce=o.alias_nonce,window_key=o.window_key,native_session_id=o.native_session_id,window_host_id=o.window_host_id}}
+  for k,v in pairs(extra or {}) do r[k]=v end
+  return r
+ end
+ local function ask(op,extra)
+  local r=request(op,extra);local before=#sent
+  enqueue(op,runtime.json.encode(r));relay.poll();relay.poll()
+  local body
+  for index=#sent,before+1,-1 do
+   if sent[index].route=='spawn.response' then body=f.c.decode_forget_response(sent[index].body,r);if body then break end end
+  end
+  return body
+ end
+ local cap=ask('discard_capability')
+ check(cap and cap.status=='capable','the relay answers a capability request on the forget protocol')
+ local clean=ask('discard_preview',{challenge=cap.payload.challenge})
+ check(clean and clean.status=='clean','the relay answers a preview with the same read-only engine')
+ local before=f.image()
+ local forged=request('discard_capability');forged.owner.alias_nonce='other-owner'
+ enqueue('discard_capability',runtime.json.encode(forged));relay.poll()
+ check(f.p.equal(before,f.image()),'a request whose owner is not the bound source identity changes nothing and is not answered')
+ local closed=ask('discard_session',{challenge=cap.payload.challenge,dispatch_revision=clean.payload.dispatch_revision,spawn_boot=clean.spawn_boot})
+ check(closed and closed.status=='closed' and f.saved['dispatch-v1'].sessions.session==nil,'the relay carries the discard and SPAWN persists exactly one deletion')
+end
 if section then
  assert(sections[section],'unknown dispatch section '..section)
  sections[section]()
