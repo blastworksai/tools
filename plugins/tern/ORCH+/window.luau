@@ -1577,7 +1577,16 @@ local function advance(cx: WindowCx, driver: any)
 		-- A loading selector or ordinary form must not strand its read-only catalog
 		-- or an already-authorized exact route attachment. Other controls stay fenced.
 		local form_independent = request.op == "catalog" or (request.op == "attach_worker" and driver.attachment_action_id == request.action_id)
-		if not claims_in_flight[request.action_id] and control_pending(driver.source, form_independent) then return end
+		if not claims_in_flight[request.action_id] and control_pending(driver.source, form_independent) then
+			-- Only an open form or menu is silent to the owner; say so once, until the launch issues.
+			if not form_independent and not driver.form_hold_notice and forms_ui.active(driver.source) then
+				driver.form_hold_notice = true
+				local name = forms_ui.title and forms_ui.title(driver.source) or "the open menu or form"
+				notice(cx, driver.source, driver.origin.alias_nonce, "Launch waits until you close " .. name, "info")
+			end
+			return
+		end
+		driver.form_hold_notice = nil
 		if a.retry_after_serial then
 			if not driver.retry_notice then
 				driver.retry_notice = true
@@ -2475,7 +2484,22 @@ local function schedule(cx: WindowCx)
 		end
 		-- Give captured native controls, work-source dialogs and write preparation priority.
 		-- Timers and captured effect drivers continue; no deadline or fence is changed.
-		if control_pending(source) then continue end
+		if control_pending(source) then
+			-- Only an open form holds here: a capacity-refused launch has no driver, so a due backoff
+			-- still gets one, and its guard tells the owner the form is why it waits.
+			if not control_pending(source, true) then
+				for action_id, wait in capacity_waits do
+					local key = tostring(source) .. ":capacity:" .. action_id
+					if wait.source == source and not drivers[key] and not held_actions[action_id] and awake_now() >= wait.next_at and not scope_busy(source, action_id) then
+						local scoped = snapshot(cx, source, action_id)
+						if scoped and scoped.action and scoped.action.phase == "ready" and not scoped.action.start_blocked and not lane_busy(source, scoped.action.worker_id) then
+							drivers[key] = { key = key, source = source, origin = origin, scope = action_id, worker_id = scoped.action.worker_id, stale_result = wait.stale }
+						end
+					end
+				end
+			end
+			continue
+		end
 		if native_scope.authorized_origin(cx, source, origin) and source_ui and source_ui.sync then source_ui.sync(cx, source, origin) end
 		if native_scope.authorized_origin(cx, source, origin) then
 			setup_api.proposals = setup_api.proposals or {}

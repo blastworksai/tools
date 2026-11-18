@@ -214,6 +214,12 @@ function M.new(api: any): any
 	return { open = open, choose = choose, input = input, tick = tick, cancel = cancel,
 		active = function(source: number, tag: string?): boolean
 			local s = forms[source]; return s ~= nil and (tag == nil or s.spec.tag == tag)
+		end,
+		-- The open form's name, for a notice that says why work is waiting.
+		title = function(source: number): string?
+			local s = forms[source]; if not s then return nil end
+			local name = s.spec.title or s.spec.placeholder
+			return if type(name) == "string" and name ~= "" then name else nil
 		end, update = update,
 		focus = function(cx: any, source: number): boolean
 			local s = forms[source]; if not s or not current(cx, s) then return false end
