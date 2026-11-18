@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.7
+
+- **Forget protocol `spawn-work-v1`.** SPAWN now answers the Forget exchange used by ORCH+: a capability check, a read-only preview of what would be discarded, and the discard itself. The discard is protected by a durable fence, a reservation cleanup journal, and accounting for helper child processes, so a repeated or interrupted discard is safe (SKILLS-205).
+- Agents run as another OS account now start through a real `sudo -i` login, so they get that account's own PATH, including `/usr/local/bin` and `uv`. The program, its arguments and the folder cross to the other account as encoded data, so nothing in them is interpreted by a shell on the way. A launch with an empty folder is refused (SKILLS-208).
+
 ## 0.6.6
 
 - **A helper result that SPAWN refuses is no longer silent.** Guided setup could finish with 0 agents saved and no message. Cause 1: the helper (OMP) moved itself out of its launch folder after SPAWN bound it, and SPAWN refused the result because the pane's folder no longer equalled the launch folder; the pane is now identified by its id, session, command and window incarnation only. Cause 2: the helper wrote the OMP startup prompt as `startup_prompt` instead of `prompt`; that refusal is legitimate, now names the field, and the setup skill names `prompt` exactly. Every refusal is also published to the window, so Recover setup result shows "SPAWN refused the helper's result: ..." instead of "No complete explicit submission is available".
