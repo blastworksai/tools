@@ -12,6 +12,8 @@ local function nonblank(value: any): boolean
 	return type(value) == "string" and value:find("%S") ~= nil
 end
 function Backend.posix_quote(value: string): string
+	-- The one marker word of an OS-user launch typed into the pane that already stands in the launch folder (records cannot hold NUL).
+	if value == Resolution.PWD then return '"$PWD"' end
 	return "'" .. value:gsub("'", "'\\''") .. "'"
 end
 function Backend.powershell_quote(value: string): string
@@ -251,7 +253,7 @@ function Backend.build(record: any, host: any, options: any?): (any?, string?)
 		table.insert(resolved.arguments, slot, prompt)
 		table.insert(capabilities, "argv-v1")
 	end
-	local selected, user_error = Resolution.select_user(resolved, host_kind, true)
+	local selected, user_error = Resolution.select_user(resolved, host_kind, true, cwd)
 	if not selected then return nil, user_error end
 	-- Native/local cwd belongs to pane/start options, not a second cd.
 	-- Managed remote cwd is literal, unlike ordinary SSH's home shorthand.

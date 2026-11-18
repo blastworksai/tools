@@ -60,31 +60,47 @@ function Resolution.resolve(source: any, mode: string, shell: string): (any?, st
 	return { record = record, executable = executable, arguments = argv }, nil
 end
 -- A bare `sudo -u account -- cli` reads none of the account's login files, so PATH additions such as
--- ~/.local/bin and tokens exported in ~/.profile are missing. The account's login shell is entered, chosen
--- from its passwd entry (getent, or dscl on macOS) and never from the environment, which sudo may preserve.
--- `sudo -i` is not used: it leaves `$` unescaped for the login shell, so `$HOME` in an argument would expand.
--- The approved program and arguments travel as one fully single-quoted command text, run by the login shell
--- AFTER its profile: a profile can neither move the folder (the launch folder is restored from $0) nor replace
--- the argv (the text does not use positional parameters). Every lookup runs with a fixed PATH set first, so a
--- caller-controlled PATH (sudoers without secure_path) cannot supply getent; the login shell's own profile then
--- builds the real PATH, and the plain /bin/sh fallback gets the original PATH back. A shell that is not a known one (nologin, false) or
--- a missing passwd tool falls back to /bin/sh with the same text, as before the login shell was added.
-local LOGIN_SCRIPT = [==[o=$PATH; PATH=/usr/bin:/bin:/usr/sbin:/sbin; export PATH; u=$(id -un); d=$PWD; sh=$(getent passwd "$u" 2>/dev/null | cut -d: -f7); [ -n "$sh" ] || sh=$(dscl . -read "/Users/$u" UserShell 2>/dev/null | sed -n 's/^UserShell: //p'); case "${sh##*/}" in bash|zsh|sh|dash|ksh) [ -x "$sh" ] && exec "$sh" -lc "$1" "$d";; esac; PATH=$o; export PATH; exec /bin/sh -c "$1" "$d"]==]
+-- ~/.local/bin, /usr/local/bin and tokens exported in ~/.profile are missing. The launch therefore takes the road
+-- the owner walks by hand: `sudo -i -u account`, then `cd <folder>`, then `exec <program> <arguments>`. sudo -i
+-- enters the account's own login shell (named by the account database, with sudo's secure_path and the account's
+-- profiles), so no shell discovery, PATH override or getent/dscl call is needed here.
+-- sudo -i does not pass its command through untouched: it backslash-escapes every byte except letters, digits,
+-- `_`, `-` and `$`, drops an escaped newline, and leaves `$` live, so the login shell would expand `$HOME` in an
+-- argument. Only words that are plain data survive that, so the approved program and arguments travel as ONE
+-- word of single-quoted shell text in which `\`, `$`, `%` and newline are replaced by octal escapes. A constant
+-- /bin/sh script (written without `$` before a live character, so the login shell leaves it alone) decodes the
+-- word with printf and evals it, which ends in `exec`. sudo -i starts in the account's home, so the launch folder
+-- is carried too: inside the text when the caller knows it, or as the pane's own "$PWD" (a marker word the
+-- renderers turn into that unquoted expansion) when the line is typed into the pane that already stands there.
+Resolution.PWD = "\0spawn-pwd"
+local LOGIN_SCRIPT = [==[eval "$(printf "${1}")"]==]
+local LOGIN_SCRIPT_PWD = [==[cd -- "${1}" || exit 1; eval "$(printf "${2}")"]==]
+local function octal(text: string): string
+	return (string.gsub(text, "[\\$%%\n]", function(char) return string.format("\\%03o", string.byte(char)) end))
+end
 local SHELL_TARGETS = { sh = true, bash = true, dash = true, zsh = true, ksh = true }
 local function sh_quote(word: string): string
 	return "'" .. (string.gsub(word, "'", "'\\''")) .. "'"
 end
--- Replaces argv[at..] (the program and its arguments) with the login wrapper carrying them as quoted text.
--- A program named like an option would be read by `exec` as one, so it is never wrapped (callers refuse it).
-local function login_wrap(argv: {string}, at: number)
+-- Replaces argv[at..] (the program and its arguments) with the login wrapper carrying them as encoded text, and
+-- makes the sudo call a login (`-i`). A program named like an option would be read by `exec` as one, so it is
+-- never wrapped (callers refuse it).
+local function login_wrap(argv: {string}, at: number, cwd: string?)
 	local quoted = {}
 	for index = at, #argv do table.insert(quoted, sh_quote(argv[index])) end
 	for index = #argv, at, -1 do argv[index] = nil end
-	for _, word in ipairs({ "/bin/sh", "-c", LOGIN_SCRIPT, "spawn-login", 'cd -- "$0" || exit 1; exec ' .. table.concat(quoted, " ") }) do table.insert(argv, word) end
+	local text = "exec " .. table.concat(quoted, " ")
+	local words
+	if cwd ~= nil then
+		words = { "/bin/sh", "-c", LOGIN_SCRIPT, "spawn-login", octal("cd -- " .. sh_quote(cwd) .. " && " .. text) }
+	else
+		words = { "/bin/sh", "-c", LOGIN_SCRIPT_PWD, "spawn-login", Resolution.PWD, octal(text) }
+	end
+	for _, word in ipairs(words) do table.insert(argv, word) end
 end
 -- One parser for literal sudo forms, shared with record validation so the two cannot disagree.
 local parse_sudo = Config.parse_sudo
-function Resolution.select_user(resolved: any, shell: string, noninteractive: boolean?): (boolean, string?)
+function Resolution.select_user(resolved: any, shell: string, noninteractive: boolean?, cwd: string?): (boolean, string?)
 	local record, executable, argv = resolved.record, resolved.executable, resolved.arguments
 	if record.backend == "ssh-command" then return true, nil end
 	local configured = nonblank(record.user)
@@ -94,7 +110,7 @@ function Resolution.select_user(resolved: any, shell: string, noninteractive: bo
 		if shell ~= "posix" or executable:match("([^/]+)$") ~= "sudo" then return true, nil end
 		local selected, index, login = parse_sudo(argv)
 		if selected == nil or argv[index] == nil or argv[index] == "" or argv[index]:find("=", 1, true) or argv[index]:sub(1, 1) == "-" then return true, nil end
-		if not login and not SHELL_TARGETS[argv[index]:match("([^/]+)$")] then login_wrap(argv, index) end
+		if not login and not SHELL_TARGETS[argv[index]:match("([^/]+)$")] then login_wrap(argv, index, cwd); table.insert(argv, 1, "-i") end
 		if noninteractive then table.insert(argv, 1, "-n") end
 		return true, nil
 	end
@@ -108,13 +124,13 @@ function Resolution.select_user(resolved: any, shell: string, noninteractive: bo
 			return false, "Configured sudo does not explicitly select the configured OS user"
 		end
 		if argv[index]:sub(1, 1) == "-" then return false, "The program name must not start with -" end
-		if not login and not SHELL_TARGETS[argv[index]:match("([^/]+)$")] then login_wrap(argv, index) end
+		if not login and not SHELL_TARGETS[argv[index]:match("([^/]+)$")] then login_wrap(argv, index, cwd); table.insert(argv, 1, "-i") end
 		if noninteractive then table.insert(argv,1,"-n") end
 	else
 		if executable:sub(1, 1) == "-" then return false, "The program name must not start with -" end
-		local wrapped = { "-u", record.user, "-H", "--", executable }
+		local wrapped = { "-u", record.user, "--", executable }
 		for _, argument in ipairs(argv) do table.insert(wrapped, argument) end
-		if not SHELL_TARGETS[executable:match("([^/]+)$")] then login_wrap(wrapped, 5) end
+		if not SHELL_TARGETS[executable:match("([^/]+)$")] then login_wrap(wrapped, 4, cwd); table.insert(wrapped, 1, "-i") end
 		if noninteractive then table.insert(wrapped,1,"-n") end
 		resolved.executable, resolved.arguments = "sudo", wrapped
 	end
