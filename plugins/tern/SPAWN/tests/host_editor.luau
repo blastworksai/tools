@@ -432,7 +432,8 @@ do
  local sel=record('selclaude');sel.provider='claude';sel.command='claude';sel.account_label='Sel'
  local plain=record('selcodex');plain.provider='codex';plain.command='codex';plain.account_label='Sel2'
  local unknown=record('selunknown')
- local prior=clone(snapshot().records);local list=clone(prior);table.insert(list,sel);table.insert(list,plain);table.insert(list,unknown)
+ local awesome=record('selawesome');awesome.provider='Claude';awesome.command='/home/ann/acct2/ClaudeSUPERAWESOMEACCOUNT';awesome.account_label='Awesome'
+ local prior=clone(snapshot().records);local list=clone(prior);table.insert(list,sel);table.insert(list,plain);table.insert(list,unknown);table.insert(list,awesome)
  local legacy=record('sellegacy');legacy.provider='claude';legacy.command='claude';legacy.account_label='Old';legacy.model='Claude Opus 4.7'
  local conflict=record('selconf');conflict.provider='claude';conflict.command='claude';conflict.account_label='Conf';conflict.arguments={'--model','opus'};conflict.model='sonnet';conflict.model_selector=true
  table.insert(list,legacy);table.insert(list,conflict)
@@ -446,7 +447,8 @@ do
  for _,option in ipairs(rows[rid('selclaude','effort')].control.options) do table.insert(values,option.value) end
  check(table.concat(values,',')==',low,medium,high,xhigh,max','effort dropdown lists the CLI default and only the real values')
  check(rows[rid('selcodex','model')]~=nil and rows[rid('selcodex','effort')]==nil,'a CLI without a verified effort flag shows a model control and no effort control')
- check(rows[rid('selunknown','model')]==nil and rows[rid('selunknown','effort')]==nil,'an unknown CLI shows neither control')
+ check(rows[rid('selunknown','model')]==nil and rows[rid('selunknown','effort')]==nil,'a provider outside the seven shows neither control')
+ check(rows[rid('selawesome','model')]~=nil and rows[rid('selawesome','effort')]~=nil,'provider Claude on a program named ClaudeSUPERAWESOMEACCOUNT shows both controls (SKILLS-213)')
  definition.event(state,{ev='change',item=rid('selclaude','model'),value='claude-opus-5-5'},cx)
  check(saved_record('selclaude').model=='claude-opus-5-5','the model is saved exactly as typed')
  definition.event(state,{ev='change',item=rid('selclaude','effort'),value='high'},cx)
@@ -565,7 +567,8 @@ do
  local wrap=clone(saved_record('listgrok'));wrap.id='listwrap';wrap.account_label='W';wrap.command='sudo';wrap.arguments={'-n','-H','-u','workeracct','--','grok'}
  local plain_omp_a=record('listompa');plain_omp_a.provider='omp';plain_omp_a.command='/opt/install-a/bin/omp';plain_omp_a.account_label='A';plain_omp_a.cwd='/project'
  local plain_omp_b=record('listompb');plain_omp_b.provider='omp';plain_omp_b.command='/opt/install-b/bin/omp';plain_omp_b.account_label='B';plain_omp_b.cwd='/project'
- local more2=clone(snapshot().records);table.insert(more2,wrap);table.insert(more2,plain_omp_a);table.insert(more2,plain_omp_b)
+ local renamed=record('listrenamed');renamed.provider='Grok';renamed.command='/home/ann/acct2/GrokSUPERAWESOMEACCOUNT';renamed.account_label='Renamed';renamed.cwd='/project'
+ local more2=clone(snapshot().records);table.insert(more2,wrap);table.insert(more2,plain_omp_a);table.insert(more2,plain_omp_b);table.insert(more2,renamed)
  check(A.edit(state.binding,snapshot().config_revision,'replace-records',{records=more2}),'seed sudo-wrapper and custom-executable records');refresh()
  rows=rows_of('agents')
  check(rows['model-list-listwrap']~=nil,'a literal sudo-wrapper agent offers listing')
@@ -587,6 +590,11 @@ do
  local oa,ob=rows[rid('listompa','model')],rows[rid('listompb','model')]
  check(oa.control.k=='choice' and oa.control.options[2].value=='alpha-1' and #oa.control.options==2,'install A keeps its own catalog')
  check(ob.control.k=='choice' and ob.control.options[2].value=='beta-2' and #ob.control.options==2,'install B has a different catalog')
+ -- SKILLS-213: provider Grok on a program named anything: List models runs that program with grok's listing arguments
+ check(rows['model-list-listrenamed']~=nil,'a provider-grok agent whose program has another name offers List models')
+ fake.process.run=function(argv,_,callback) ran=argv;callback({status=0,timed_out=false,stdout=grok_out,stderr=''}) end
+ definition.event(state,{ev='action',act='model-list:listrenamed@'..state.snapshot.config_revision},cx)
+ check(ran~=nil and ran[1]=='/home/ann/acct2/GrokSUPERAWESOMEACCOUNT' and ran[2]=='models' and #ran==2,'List models runs the agent\'s own program: '..tostring(ran and table.concat(ran,' ')))
  -- the listing takes launch's own route: SUDO (not the literal sudo launch reads) is a different program, so no listing
  local upper=clone(wrap);upper.id='listupper';upper.account_label='U';upper.command='/opt/bin/SUDO'
  -- relative executables resolve from the record's launch folder, for the current account and across accounts
@@ -596,7 +604,7 @@ do
  local more4=clone(snapshot().records);for _,item in ipairs({upper,rel,relx,nocwd}) do table.insert(more4,item) end
  check(A.edit(state.binding,snapshot().config_revision,'replace-records',{records=more4}),'seed SUDO and relative-path records');refresh()
  rows=rows_of('agents')
- check(rows['model-list-listupper']==nil,'/opt/bin/SUDO offers no listing (launch does not treat it as sudo)')
+ check(rows['model-list-listupper']~=nil,'/opt/bin/SUDO is not sudo to launch: it is this provider-grok agent\'s own program, so it lists through itself (SKILLS-213)')
  check(rows['model-list-listnocwd']==nil,'a relative launch folder offers no listing')
  local ran_options
  fake.process.run=function(argv,options,callback) ran=argv;ran_options=options;callback({status=0,timed_out=false,stdout=grok_out,stderr=''}) end

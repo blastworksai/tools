@@ -400,25 +400,26 @@ end
 function Config.selectors_active(record: any): boolean
 	return record.model_selector == true or record.effort ~= nil
 end
--- The CLI the record's own launch runs (fresh first), for forms that show model/effort controls.
+-- The CLI the record's provider names, for forms that show model/effort controls (SKILLS-213: the
+-- provider is the CLI being launched; the program's file name may be anything the person chose).
 function Config.record_cli(record: any): string?
-	local modes = launch_modes(record)
-	table.sort(modes, function(a, b) return a.name == "fresh" and b.name ~= "fresh" end)
-	local mode = modes[1]
-	if mode == nil then return nil end
-	return Selectors.program_key((Config.program_of(mode.executable, mode.argv)))
+	return Selectors.provider_key(record.provider)
 end
 -- Identity and value rules for the selectors a record sets. Only records that set a 0.7 selector
 -- (`model_selector` or `effort`) are checked, so a saved roster with display-text models loads and
--- launches as before. The CLI is the program each launch really runs, never the provider label.
+-- launches as before. The CLI is the record's provider (einh, 19 Nov 2026: "Which CLI tool are we launching?
+-- (That's provider)"), never the program's file name: a second install or a wrapper may be named anything.
 function Config.selector_identity_error(record: any): string?
 	if not Config.selectors_active(record) then return nil end
 	if record.model_selector == true then
 		local why = Selectors.model_error(record.model)
 		if why ~= nil then return why end
 	end
-	local provider_key = Selectors.provider_key(record.provider)
-	local seen
+	local key = Selectors.provider_key(record.provider)
+	if key == nil then
+		return "Model and effort need a known CLI as the provider (Claude, Codex, Kimi, Grok, Agy, Muse or OMP). The provider is " .. tostring(record.provider) .. "; clear model and effort, or set the provider to the CLI this agent runs."
+	end
+	local seen = false
 	local modes, ambiguous = launch_modes(record)
 	if ambiguous then return AMBIGUOUS_COMMAND end
 	for _, mode in ipairs(modes) do
@@ -426,22 +427,13 @@ function Config.selector_identity_error(record: any): string?
 			local _, _, login = Config.parse_sudo(mode.argv)
 			if login then return "Model and effort cannot be added to a sudo -i or -s launch: the target's login shell reads the arguments a second time. Remove -i or -s and set the OS user, so SPAWN's own login wrapper enters the login shell." end
 		end
-		local program = Config.program_of(mode.executable, mode.argv)
-		local key = Selectors.program_key(program)
-		if key == nil then
-			return "Model and effort need a known CLI (claude, codex, kimi, grok, agy, muse or omp). The " .. mode.name .. " launch runs " .. tostring(program or mode.executable) .. "; clear model and effort, or run a known CLI."
-		end
-		if provider_key ~= nil and provider_key ~= key then
-			return "Provider " .. tostring(record.provider) .. " names " .. provider_key .. " but the " .. mode.name .. " launch runs " .. key .. ". Fix the provider or the command."
-		end
-		if seen ~= nil and seen ~= key then return "The ordinary and fresh launches run different CLIs (" .. seen .. " and " .. key .. ")." end
-		seen = key
-		if record.effort ~= nil then
-			local why = Selectors.effort_error(key, record.effort)
-			if why ~= nil then return why end
-		end
+		seen = true
 	end
-	if seen == nil then return "Model and effort need a launch command to apply to." end
+	if not seen then return "Model and effort need a launch command to apply to." end
+	if record.effort ~= nil then
+		local why = Selectors.effort_error(key, record.effort)
+		if why ~= nil then return why end
+	end
 	return nil
 end
 -- The launch contract a duplicate-flag decision depends on: the selector fields and each
@@ -463,8 +455,8 @@ function Config.selector_error(record: any, previous: any?): string?
 	if why ~= nil then return why end
 	if previous ~= nil and Config.selectors_active(previous) and selector_contract(previous) == selector_contract(record) then return nil end
 	for _, mode in ipairs((launch_modes(record))) do
-		local program, first = Config.program_of(mode.executable, mode.argv)
-		local key = Selectors.program_key(program)
+		local _, first = Config.program_of(mode.executable, mode.argv)
+		local key = Selectors.provider_key(record.provider)
 		local model = if record.model_selector == true then record.model else nil
 		local hit = Selectors.duplicate(key, Selectors.region(mode.argv, first), model, record.effort)
 		if hit ~= nil then

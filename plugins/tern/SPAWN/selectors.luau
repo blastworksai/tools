@@ -49,8 +49,7 @@ local ALIASES = { antigravity = "agy" }
 -- The ONE program-name normalization (also used by config.luau for ordinary launches): lower case,
 -- last path part, launcher suffix removed. Ordinary launch detection (ACP servers, sudo) strips the
 -- 0.6.6 list .exe/.cmd/.bat and nothing else, so records without model or effort behave as before.
--- Selector identity passes { ps1 = true }: SPAWN's launch scripts (backend.luau, host_executor.luau)
--- run a PATH-resolved .ps1 through PowerShell, so a .ps1 shim names its CLI for model and effort.
+-- The provider label is normalized the same way with { ps1 = true } (SKILLS-211's shim rule, kept harmless).
 local SUFFIXES = { "%.exe$", "%.cmd$", "%.bat$" }
 function Selectors.basename(value: string, options: { ps1: boolean? }?): string
 	local normalized = string.gsub(value, "\\", "/")
@@ -69,11 +68,9 @@ local function known(name: string?): string?
 	if CLIS[name] then return name end
 	return nil
 end
--- The CLI a program word names (its executable name only), or nil for any other program.
-function Selectors.program_key(program: any): string?
-	return known(base(program))
-end
--- The CLI a provider label names, or nil for a descriptive label. Never decides a launch.
+-- The CLI a record's provider names, or nil for any other provider. SKILLS-213: this is the one selector
+-- identity (model and effort flags, the Agent settings controls, the model listing); the program's file name
+-- never decides it, so a second install or a wrapper may be named anything.
 function Selectors.provider_key(provider: any): string?
 	return known(base(provider))
 end

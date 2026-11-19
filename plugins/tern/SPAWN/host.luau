@@ -906,8 +906,7 @@ local function managed_sections(state)
 		table.insert(rows,text_row("managed:"..field,labels[field],text(draft[field]),hints[field]))
 	end
 	do
-		local program=Config.program_of(draft.executable,(Config.parse_arguments(draft.arguments)) or {})
-		local key=Selectors.program_key(program)
+		local key=Selectors.provider_key(draft.provider)
 		if Selectors.supports_model(key) then
 			table.insert(rows,text_row("managed:model","Model",draft.model or "","Exact model id passed to the CLI. Empty keeps the CLI's own default. SPAWN never guesses an alias. "..(Selectors.helper(key) or "")))
 			local values=Selectors.efforts(key)
@@ -962,8 +961,8 @@ end
 -- The listing is the CLI's own listing command run through the SAME route the launch takes: the record is
 -- resolved by launch's resolver, a literal sudo form is read by Backend.same_host_route (the function
 -- launch and preparation use), and the folder is the record's launch folder. Nothing here parses sudo.
--- No route (not POSIX, SSH, a relative or empty folder, a route launch itself refuses, or a program
--- that is not the CLI) means no listing and the Model field stays free text.
+-- No route (not POSIX, SSH, a relative or empty folder, or a route launch itself refuses) means no listing
+-- and the Model field stays free text. The record's own program runs the listing, whatever its file name.
 local function listing_route(state,record,key)
 	local lister=Selectors.lister(key)
 	if lister==nil or state.snapshot.host_os=="windows" then return nil end
@@ -973,7 +972,7 @@ local function listing_route(state,record,key)
 	local resolved=Resolution.resolve(record,if Resolution.fresh_available(record) then "fresh" else "ordinary","posix")
 	if resolved==nil then return nil end
 	local route=Backend.same_host_route(resolved.executable,resolved.arguments,if type(record.user)=="string" then record.user else "")
-	if route==nil or Selectors.program_key(route.executable)~=key then return nil end
+	if route==nil then return nil end
 	local argv={route.executable}
 	for index=2,#lister do table.insert(argv,lister[index]) end
 	return {argv=argv,user=route.user,cwd=cwd}

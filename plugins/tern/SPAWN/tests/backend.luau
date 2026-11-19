@@ -618,7 +618,10 @@ do
  same(argv_of({provider="muse",command="muse",model_selector=true,model="m2",effort="ultra"}),"--model|m2|--reasoning-effort|ultra","muse model and effort")
  same(argv_of({provider="omp",command="omp",model_selector=true,model="anthropic/claude-sonnet-5-5",effort="medium"}),"--model=anthropic/claude-sonnet-5-5|--thinking=medium","omp joined model and thinking")
  same(argv_of({provider="Antigravity",command="agy",model_selector=true,model="m1"}),"--model|m1","provider alias antigravity maps to agy")
- same(argv_of({provider="Claude Work",command="claude",model_selector=true,model="m"}),"--model|m","provider label falls back to the executable name")
+ -- SKILLS-213: no fall-back to the executable name; a provider that is not one of the seven CLIs refuses selectors
+ local labelled=Config.selector_identity_error(record({provider="Claude Work",command="claude",model_selector=true,model="m"}))
+ check(labelled~=nil and labelled:find("The provider is Claude Work",1,true)~=nil,"a descriptive provider label no longer falls back to the executable name: "..tostring(labelled))
+ same(argv_of({provider="Claude",command="claude",model_selector=true,model="m"}),"--model|m","the provider Claude gives --model")
  -- existing arguments stay exactly, flags are added after them; the task slot moves with them
  same(argv_of({provider="claude",command="claude",arguments={"--keep"},model_selector=true,model="m"}),"--keep|--model|m","existing args kept, flags appended")
  local a,slot=fresh_of({provider="claude",fresh_executable="claude",fresh_arguments={"--keep"},task_argument_index=2,model_selector=true,model="m",effort="low"})
@@ -663,14 +666,16 @@ do
  for _,case in ipairs({{"codex","codex.cmd","-m|gpt-new"},{"claude","claude.bat","--model|gpt-new"},{"kimi","kimi.ps1","-m|gpt-new"},{"codex","CODEX.CMD","-m|gpt-new"},{"claude","Claude.Bat","--model|gpt-new"},{"kimi","KIMI.PS1","-m|gpt-new"},{"grok","grok.exe","-m|gpt-new"},{"omp","omp.cmd","--model=gpt-new"}}) do
   local fields={provider=case[1],command=case[2],arguments={"--keep"},model_selector=true,model="gpt-new"}
   same(argv_of(fields),"--keep|"..case[3],"ordinary shim launch gets flags: "..case[2])
-  check(Config.selector_error(record(fields))==nil,"shim command is a known CLI: "..case[2])
-  check(Config.record_cli(record(fields))==case[1],"record_cli identifies "..case[2])
+  check(Config.selector_error(record(fields))==nil,"a shim command with a known provider takes selectors: "..case[2])
+  check(Config.record_cli(record(fields))==case[1],"record_cli reads the provider for "..case[2])
   local fresh=table.clone(fields);fresh.fresh_executable=case[2];fresh.fresh_arguments={"--keep"};fresh.task_argument_index=2;fresh.arguments=nil
   same(fresh_of(fresh),case[3].."|--keep","fresh shim launch gets flags: "..case[2])
   local plain=record({provider=case[1],command=case[2],arguments={"--keep","x y"}})
   same(table.concat(assert(Resolution.resolve(plain,"ordinary","posix")).arguments,"|"),"--keep|x y","selector-free shim record unchanged: "..case[2])
  end
- check(Config.selector_error(record({provider="codex",command="codex.cmd.txt",model_selector=true,model="m"}))~=nil,"a non-launcher suffix is still an unknown CLI")
+ -- SKILLS-213: the provider is the CLI; a program file name, launcher suffix or not, never decides it
+ check(Config.selector_error(record({provider="codex",command="codex.cmd.txt",model_selector=true,model="m"}))==nil,"a program named codex.cmd.txt with provider codex takes codex selectors")
+ same(argv_of({provider="codex",command="codex.cmd.txt",model_selector=true,model="m"}),"-m|m","provider codex gives -m whatever the program is named")
  -- round 7: a model id carries no character cmd.exe or PowerShell acts on, for every CLI and shim
  for _,bad in ipairs({"m&calc","m|x","m<x","m>x","m^x","m%PATH%","m!x","m\"x","m'x","m`x","m$x","m(x)","m;x","m,x","m x"}) do
   for _,command in ipairs({"codex.cmd","claude.bat","kimi.ps1","codex"}) do
@@ -716,15 +721,21 @@ do
  check(Config.validate_record(record({provider="claude",command="claude",model="m",model_selector=false}))==nil,"model_selector must be true or absent")
  check(Config.validate_record(record({provider="claude",command="claude",model_selector=true}))==nil,"model_selector needs a model")
  check(Config.validate_record(record({provider="claude",command="claude",model_selector=true,model="m"}))~=nil,"explicit selector is accepted")
- -- finding 2: the CLI is the program this launch runs, not the label
- check(Config.validate_record(record({provider="claude",command="/usr/bin/codex",effort="high"}))==nil,"effort for a claude label on a codex program is refused")
- check(Config.validate_record(record({provider="claude",command="/usr/bin/codex",model_selector=true,model="m"}))==nil,"provider and executable naming different CLIs are refused")
- check(Config.validate_record(record({provider="muse",command="muse",fresh_executable="codex",fresh_arguments={},task_argument_index=1,model_selector=true,model="m"}))==nil,"fresh and ordinary naming different CLIs are refused")
- check(Config.validate_record(record({provider="x",command="codex",fresh_executable="muse",fresh_arguments={},task_argument_index=1,model_selector=true,model="m"}))==nil,"fresh Muse with ordinary Codex is refused")
- local unknown_why=Config.selector_identity_error(record({provider="custom",command="worker",model_selector=true,model="m"}))
- check(unknown_why~=nil and unknown_why:find("known CLI",1,true),"an unknown program refuses model and effort with a clear message")
- same(argv_of({provider="Work account",command="sudo",arguments={"-n","-u","other","--","/opt/bin/claude","--keep"},model_selector=true,model="m",effort="low"}),"-n|-u|other|--|/opt/bin/claude|--keep|--model|m|--effort|low","descriptive provider with sudo -- /path/claude gets claude flags after the program")
- same(argv_of({provider="Work",command="/usr/bin/codex",arguments={},model_selector=true,model="m"}),"-m|m","the executable decides, so codex gets -m")
+ -- SKILLS-213 (einh, 19 Nov 2026: "Which CLI tool are we launching? (That's provider)"): the provider decides the
+ -- CLI for model and effort; the program may be a second install or a wrapper named anything.
+ local awesome={provider="Claude",command="/home/ann/acct2/ClaudeSUPERAWESOMEACCOUNT",model_selector=true,model="claude-opus-5-5",effort="medium"}
+ check(Config.validate_record(record(awesome))~=nil,"provider Claude on a program named ClaudeSUPERAWESOMEACCOUNT saves with model and effort")
+ same(argv_of(awesome),"--model|claude-opus-5-5|--effort|medium","and launches with Claude's --model and --effort")
+ local better={provider="Claude",command="/home/ann/acct3/ClaudeEVENBETTERACCOUNT",model_selector=true,model="claude-fable-5-2",effort="high"}
+ same(argv_of(better),"--model|claude-fable-5-2|--effort|high","a second install with its own model and effort")
+ same(argv_of({provider="Claude",command="/usr/bin/codex",effort="high"}),"--effort|high","provider Claude gives Claude flags even when the program is named codex")
+ check(Config.validate_record(record({provider="muse",command="muse",fresh_executable="codex",fresh_arguments={},task_argument_index=1,model_selector=true,model="m"}))~=nil,"ordinary and fresh programs may be named differently: the provider decides")
+ for _,provider in ipairs({"x","Work account","custom"}) do
+  local why=Config.selector_identity_error(record({provider=provider,command="/usr/bin/claude",model_selector=true,model="m"}))
+  check(why~=nil and why:find("known CLI as the provider",1,true)~=nil,"a provider outside the seven refuses model and effort: "..provider.." -> "..tostring(why))
+  check(Config.validate_record(record({provider=provider,command="/usr/bin/claude",effort="high"}))==nil,"validate_record refuses effort for provider "..provider)
+ end
+ same(argv_of({provider="Claude",command="sudo",arguments={"-n","-u","other","--","/opt/bin/anything","--keep"},model_selector=true,model="m",effort="low"}),"-n|-u|other|--|/opt/bin/anything|--keep|--model|m|--effort|low","a literal sudo still unwraps: the flags go after the program, in its option region")
  -- finding 3: only the program's option region counts as typed flags
  same(argv_of({provider="claude",command="claude",arguments={"--","--model"},model_selector=true,model="sonnet"}),"--model|sonnet|--|--model","text after -- is positional: the flag is still added, before the --")
  check(Config.selector_error(record({provider="claude",command="claude",arguments={"--","--model"},model_selector=true,model="sonnet"}))==nil,"positional --model after -- is not a duplicate")
@@ -771,12 +782,12 @@ do
  check(Config.validate_record(mismatch)==nil,"validate_record refuses /tmp/codex\\claude.exe under selectors")
  check(Executor.render(mismatch,"/bin/bash","linux")==nil,"Executor.render refuses /tmp/codex\\claude.exe under selectors")
  -- launch time: selectors never silently dropped on an unknown CLI (a record that bypassed validation)
- local unknown=record({provider="claude",command="/tmp/codexclaude.exe",model_selector=true,model="sonnet"})
+ local unknown=record({provider="custom",command="/tmp/codexclaude.exe",model_selector=true,model="sonnet"})
  local real_validate=Config.validate_record
  Config.validate_record=function(source) return source end -- bypass validation to reach the launch-time guard
  local resolved,resolve_why=Resolution.resolve(unknown,"ordinary","posix")
  Config.validate_record=real_validate
- check(resolved==nil and resolve_why~=nil,"launch resolution refuses selectors on an unknown CLI: "..tostring(resolve_why))
+ check(resolved==nil and resolve_why~=nil and resolve_why:find("known CLI as the provider",1,true)~=nil,"launch resolution refuses selectors for a provider outside the seven: "..tostring(resolve_why))
 
 end
 

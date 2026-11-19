@@ -10,7 +10,7 @@ local M={}
 local sequence=0
 local ASSETS={'mailbox_target.sh','mailbox_worker.sh','mailbox_json.awk','mailbox_reply.jq','mailbox_target.ps1','mailbox_worker.ps1','setup_argv.ps1','setup_route.sh','setup_route.ps1'}
 function M.defaults(cwd)
- return {id='managed-local',provider=if tern.runtime.os=='windows' then 'Local worker' else 'Native agent',account_label='Current OS account',backend=if tern.runtime.os=='windows' then 'local-terminal' else 'native-agent',executable=if tern.runtime.os=='windows' then '' else 'omp',arguments='',task_argument_index='',model='',effort='',cwd=if Adapter.absolute_path(cwd,tern.runtime.os=='windows') then cwd else '',root=tern.plugin.data..'/managed',user=''}
+ return {id='managed-local',provider=if tern.runtime.os=='windows' then 'Local worker' else 'OMP',account_label='Current OS account',backend=if tern.runtime.os=='windows' then 'local-terminal' else 'native-agent',executable=if tern.runtime.os=='windows' then '' else 'omp',arguments='',task_argument_index='',model='',effort='',cwd=if Adapter.absolute_path(cwd,tern.runtime.os=='windows') then cwd else '',root=tern.plugin.data..'/managed',user=''}
 end
 local function ordinary_route(record,user)
  local words,why=Config.parse_arguments(record.command or 'omp')
