@@ -658,6 +658,7 @@ class StructuredQuestions(unittest.TestCase):
         self.assertIn("--check-args", skill)
         self.assertIn("`when`", skill)
         self.assertIn("`for_each`", skill)
+        self.assertLessEqual(len(json.dumps(skill)), 8957, "stays within 0.6.9's JSON-encoded size; the whole helper prompt is bounded at 32000 bytes")
 
     def test_script_is_read_only_and_forbids_model_questions(self):
         text = SCRIPT.read_text()
