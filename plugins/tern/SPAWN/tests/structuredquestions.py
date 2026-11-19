@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""SKILLS-210: structuredquestions.sh prints the exact Guided-setup questions for a fixture host.
+"""SKILLS-210 / SKILLS-213: structuredquestions.sh prints the exact Guided-setup questions for a fixture host.
 
 Hermetic: fake getent/id/sudo and fake provider CLIs on PATH, twelve neutral seat accounts plus the
-operator "you". Nothing here touches a real account, provider or login."""
+operator "you", or the common case of one user. Nothing here touches a real account, provider or login.
+Phase 1 asks only about accounts; phase 2 (given the labels) proposes the installs and asks the rest."""
 
 import json
 import os
@@ -16,15 +17,24 @@ import unittest
 
 PACKAGE = Path(__file__).resolve().parents[1]
 SCRIPT = Path(os.environ.get("SPAWN_SQ_SCRIPT", PACKAGE / "structuredquestions.sh"))  # the override exists to show a test red on the old script
-GOLDEN = Path(__file__).with_name("structuredquestions.golden.json")
+HERE = Path(__file__).parent
+GOLDEN = HERE / "structuredquestions.golden.json"                 # phase 1, twelve seats
+GOLDEN_P2 = HERE / "structuredquestions.phase2.golden.json"       # phase 2, twelve seats, einh's shape
+GOLDEN_SINGLE = HERE / "structuredquestions.single.golden.json"   # both phases, one user, one install each
+GOLDEN_TWO = HERE / "structuredquestions.twoinstall.golden.json"  # phase 2, one user, two Claude installs
+GOLDEN_SHORT = HERE / "structuredquestions.short.golden.json"     # phase 2, one user, three Claude accounts, one install
 PROVIDERS = ["claude", "codex", "kimi", "grok", "agy", "muse", "omp"]
 SEATS = ["claudework", "claudehome", "codexone", "codextwo", "kimione", "grokone",
          "agyone", "agytwo", "agythree", "agyfour", "museone", "ompone"]
+EINH = ["--accounts", "claude=Work,Home", "--accounts", "codex=One,Two", "--accounts", "agy=Four,Two,One,Three"]
 HELP_ALL = "usage: tool [--dangerously-skip-permissions] [--dangerously-bypass-approvals-and-sandbox] [--yolo] [--auto] [--permission-mode default|bypassPermissions] [--approval-mode always-ask|yolo]\n"
+LIMIT = "Claude 3: no third install or OS user found. Each Claude account needs its own install with its own login. Type its path, or skip it."
+AGY = "Agy keeps its login per OS user; a second install may share the first one's login."
 
 
 class Fixture:
-    def __init__(self, base, seats=SEATS, operator_clis=PROVIDERS, help_text=HELP_ALL, glitch=True, sudo=True, no_cli=(), help_by=None, hang=(), omp_family="openai", fork=(), leak=(), groups="setsid"):
+    def __init__(self, base, seats=SEATS, operator_clis=PROVIDERS, help_text=HELP_ALL, glitch=True, sudo=True, no_cli=(), help_by=None, hang=(), omp_family="openai", fork=(), leak=(), groups="setsid",
+                 extra_installs=(), others=()):
         self.base = Path(base)
         self.bin = self.base / "bin"
         self.bin.mkdir()
@@ -38,21 +48,31 @@ class Fixture:
                 (self.sys / tool).symlink_to(found)
         self.home = self.base / "home"
         self.seats = seats
-        for account in ["you", *seats]:
+        for account in ["you", *seats, *others]:
             (self.home / account / ".local/bin").mkdir(parents=True)
         for account in seats:
             provider = next(p for p in PROVIDERS if account.startswith(p))
             if account not in no_cli:
                 self.cli(account, provider, (help_by or {}).get(account, help_text), hang=account in hang, mode=("fork" if account in fork else "leak" if account in leak else None), who=account)
+        for account in others:  # an OS account not named for a provider that can run Claude
+            self.cli(account, "claude", help_text)
         for provider in operator_clis:
             self.cli("you", provider, (help_by or {}).get("you", help_text), hang="you" in hang)
+        # Further installs of the operator, in folders after ~/.local/bin on PATH: (folder, cli).
+        self.extra_dirs = []
+        for folder, provider in extra_installs:
+            d = self.home / "you" / folder
+            d.mkdir(parents=True, exist_ok=True)
+            if d not in self.extra_dirs:
+                self.extra_dirs.append(d)
+            self.cli("you", provider, (help_by or {}).get(folder, help_text), where=d)
         omp = self.home / "ompone/.omp/agent"
         omp.mkdir(parents=True)
         (omp / "config.yml").write_text("modelRoles:\n  default: anthropic/claude-model\nsetupVersion: 3\n")
         mine = self.home / "you/.omp/agent"
         mine.mkdir(parents=True)
         (mine / "config.yml").write_text(f"modelRoles:\n  default: {omp_family}/some-model\n")
-        passwd = "".join(f"{a}:x:{1100 + i}:{1100 + i}::{self.home / a}:/bin/bash\n" for i, a in enumerate(seats))
+        passwd = "".join(f"{a}:x:{1100 + i}:{1100 + i}::{self.home / a}:/bin/bash\n" for i, a in enumerate([*seats, *others]))
         passwd += f"you:x:1000:1000::{self.home / 'you'}:/bin/bash\n"
         passwd += "nobody:x:65534:65534::/nonexistent:/usr/sbin/nologin\nclaudeservice:x:1200:1200::/nonexistent:/usr/sbin/nologin\n"
         passwd += "root:x:0:0::/root:/bin/bash\nplainuser:x:1300:1300::/home/plainuser:/bin/bash\n"
@@ -74,18 +94,22 @@ exec env -i FIX="$FIX" HOME="$FIX/home/$account" PATH="$FIX/home/$account/.local
 ''')
         self.glitch = self.base / "glitch"
         if glitch:
-            (self.glitch / ".claude/scripts").mkdir(parents=True)
-            (self.glitch / ".claude/scripts/workspaces.py").write_text("x")
-            (self.glitch / ".claude/scripts/plan_check.py").write_text("x")
+            self.make_glitch(self.glitch)
         (self.base / "nothing").mkdir()
+
+    @staticmethod
+    def make_glitch(root):
+        (root / ".claude/scripts").mkdir(parents=True)
+        (root / ".claude/scripts/workspaces.py").write_text("x")
+        (root / ".claude/scripts/plan_check.py").write_text("x")
 
     def script(self, name, body):
         path = self.bin / name
         path.write_text("#!/bin/sh\n" + body)
         path.chmod(0o755)
 
-    def cli(self, account, provider, help_text, hang=False, mode=None, who=""):
-        path = self.home / account / ".local/bin" / provider
+    def cli(self, account, provider, help_text, hang=False, mode=None, who="", where=None):
+        path = (where or self.home / account / ".local/bin") / provider
         body = "sleep 300\n" if hang else f"printf '%s' '{help_text}'\n"
         if mode == "fork":    # forks a child, then hangs: the child must not outlive the script
             body = f'sleep 301 &\necho $! > "$FIX/child-{who}.pid"\nsleep 300\n'
@@ -95,12 +119,11 @@ exec env -i FIX="$FIX" HOME="$FIX/home/$account" PATH="$FIX/home/$account/.local
         path.chmod(0o755)
 
     def run(self, *extra, cwd=None, timeout=120, seconds="20"):
-        env = {"SPAWN_QUESTIONS_TIMEOUT": seconds, "PATH": f"{self.bin}:{self.home / 'you/.local/bin'}:{self.sys}", "HOME": str(self.home / "you"),
+        path = ":".join([str(self.bin), str(self.home / "you/.local/bin"), *map(str, self.extra_dirs), str(self.sys)])
+        env = {"SPAWN_QUESTIONS_TIMEOUT": seconds, "PATH": path, "HOME": str(self.home / "you"),
                "FIX": str(self.base), "TMPDIR": str(self.base), "SPAWN_QUESTIONS_SYSTEM_GLITCH": str(self.base / "no-system-glitch")}
         args = ["/bin/sh", str(SCRIPT), "--cwd", str(cwd or self.base / "nothing"), *extra]
-        done = subprocess.run(args, env=env, capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=timeout)
-        self.assert_clean = (done.returncode, done.stderr)
-        return done
+        return subprocess.run(args, env=env, capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=timeout)
 
 
 def alive(pid):
@@ -129,8 +152,20 @@ def by_id(data, prompt_id):
     return next(p for p in data["prompts"] if p["id"] == prompt_id)
 
 
+def q_id(data, qid):
+    return next(q for q in questions(data) if q["id"] == qid)
+
+
 def labels(question):
     return [o["label"] for o in question["options"]]
+
+
+def lines(data, prompt_id):
+    return by_id(data, prompt_id).get("lines", [])
+
+
+def agents(data):
+    return {a["id"]: a for a in data["derived"]["accounts"]}
 
 
 class StructuredQuestions(unittest.TestCase):
@@ -145,260 +180,369 @@ class StructuredQuestions(unittest.TestCase):
 
     def output(self, fx, *extra, cwd=None):
         done = fx.run(*extra, cwd=cwd)
-        self.assertEqual((done.returncode, done.stderr), (0, ""), done.stderr)
+        self.assertEqual((done.returncode, done.stderr), (0, ""), done.stdout + done.stderr)
         return json.loads(done.stdout)
 
-    def test_twelve_seats_and_operator_exact_output(self):
-        fx = self.fixture()
-        data = self.output(fx, "--glitch-root", str(fx.glitch))
-        # Exact intro, in the approved order and wording.
-        self.assertEqual(data["intro"], ["Found on this machine: Claude 2 · Codex 2 · Kimi 1 · Grok 1 · Agy 4 · Muse 1 · OMP 1.",
-                                         f"Glitch folder detected: {fx.glitch}."])
-        # Pinned whole-output comparison for the fixture (paths normalised).
+    def refused(self, fx, *extra):
+        done = fx.run(*extra)
+        self.assertEqual(done.returncode, 3, done.stdout + done.stderr)
+        data = json.loads(done.stdout)
+        self.assertFalse(data["ok"])
+        return data["why"]
+
+    def golden(self, path, data, fx):
         text = json.dumps(data, ensure_ascii=False, indent=1, sort_keys=False).replace(str(fx.base), "@FIX@")
         if os.environ.get("UPDATE_GOLDEN"):
-            GOLDEN.write_text(text + "\n")
-        self.assertEqual(text + "\n", GOLDEN.read_text(), "output differs from tests/structuredquestions.golden.json")
+            path.write_text(text + "\n")
+        self.assertEqual(text + "\n", path.read_text(), f"output differs from tests/{path.name}")
 
-    def test_exact_titles_options_and_limits(self):
+    # ---- phase 1: accounts only ----
+    def test_phase1_twelve_seats_exact_output(self):
         fx = self.fixture()
         data = self.output(fx, "--glitch-root", str(fx.glitch))
-        accounts = [q for q in questions(data) if q["question"].endswith("which accounts should SPAWN run?") or "which accounts should SPAWN run? (" in q["question"]]
-        self.assertEqual([q["question"] for q in accounts], [
-            "Claude: which accounts should SPAWN run?", "Codex: which accounts should SPAWN run?",
-            "Kimi: which accounts should SPAWN run?", "Grok: which accounts should SPAWN run?",
-            "Agy: which accounts should SPAWN run? (1 of 2)", "Agy: which accounts should SPAWN run? (2 of 2)",
-            "Muse: which accounts should SPAWN run?", "OMP: which accounts should SPAWN run?"])
-        home = fx.base / "home"
-        claude = accounts[0]
-        self.assertEqual(labels(claude), [f"claudework — {home}/claudework/.local/bin/claude",
-                                          f"claudehome — {home}/claudehome/.local/bin/claude",
-                                          f"you (you) — {home}/you/.local/bin/claude"])
-        self.assertEqual([o["preselected"] for o in claude["options"]], [True, True, False])
-        self.assertTrue(all(q["multiSelect"] for q in accounts))
-        # Agy: four seats + the operator = five options, split into two questions of at most four.
-        self.assertEqual([len(q["options"]) for q in accounts[4:6]], [3, 2])
-        self.assertEqual([q["header"] for q in accounts[4:6]], ["Agy 1/2", "Agy 2/2"])
-        ids = by_id(data, "ids")["questions"][0]
-        self.assertEqual((ids["question"], labels(ids)), ("Use these IDs and labels?", ["Use these (Recommended)", "Change some"]))
-        folder = by_id(data, "folder")["questions"][0]
-        self.assertEqual((folder["question"], labels(folder)), ("Which folder should every agent start in?", [f"Glitch folder: {fx.glitch} (Recommended)", "Each account's own home folder"]))
-        permissions = {q["when"]["provider"]: labels(q) for q in questions(data) if q["question"].endswith("which permission mode?")}
-        self.assertEqual(permissions, {
-            "Claude": ["Normal (asks before actions)", "Skip permission prompts (--dangerously-skip-permissions)"],
-            "Codex": ["Normal", "YOLO, no sandbox (--dangerously-bypass-approvals-and-sandbox)"],
-            "Kimi": ["Normal", "Ask when needed (--yolo)", "Never ask (--auto)"],
-            "Grok": ["Normal", "Bypass permissions (--permission-mode bypassPermissions)"],
-            "Agy": ["Normal", "Skip permission prompts (--dangerously-skip-permissions)"],
-            "Muse": ["Normal", "No approval prompts (--yolo)"],
-            "OMP": ["Normal", "YOLO (--approval-mode yolo)"]})
-        for q in questions(data):
-            if q["question"].endswith("which permission mode?"):
-                self.assertEqual([o["preselected"] for o in q["options"]][0], True, "Normal is preselected")
-                self.assertEqual(sum(o["preselected"] for o in q["options"]), 1)
-        omp = {q["when"]["account_id"]: labels(q) for q in by_id(data, "omp")["questions"]}
-        self.assertEqual(omp, {"omp-one": ["anthropic (from its config) (Recommended)", "openai", "google"],
-                               "omp-you": ["openai (from its config) (Recommended)", "google", "anthropic"]})
-        review = by_id(data, "review")["questions"][0]
-        self.assertEqual((review["question"], labels(review)), ("Save these {N} agents?", ["Save and set up (Recommended)", "Change something"]))
-        self.assertEqual(data["derived"]["omp_prompt"], "Follow the explicitly assigned task. Role text is guidance, not identity isolation.")
-        # No model question, and the limits of both tools hold on every prompt.
-        for q in questions(data):
-            self.assertNotRegex(q["question"].lower(), r"which model|startup prompt")
-            self.assertGreaterEqual(len(q["options"]), 2)
-            self.assertLessEqual(len(q["options"]), 4)
-            self.assertLessEqual(len(q["header"]), 12, q["header"])
-        for prompt in data["prompts"]:
-            self.assertTrue(1 <= len(prompt["questions"]) <= 4, prompt["id"])
-        self.assertEqual(data["limits"], {"questions_per_prompt": 4, "options_per_question": 4, "header_characters": 12})
+        self.assertEqual(data["phase"], 1)
+        # einh's wording: providers only, no counts and no account names.
+        self.assertEqual(data["intro"], ["Found on this machine: Claude, Codex, Kimi, Grok, Agy, Muse, OMP.", f"Glitch folder detected: {fx.glitch}."])
+        self.golden(GOLDEN, data, fx)
 
-    def test_ids_and_labels_derive_from_account_names(self):
-        fx = self.fixture()
-        accounts = {a["account"]: a for a in self.output(fx, "--glitch-root", str(fx.glitch))["derived"]["accounts"]}
-        self.assertEqual((accounts["claudework"]["id"], accounts["claudework"]["account_label"]), ("claude-work", "WORK"))
-        self.assertEqual((accounts["agythree"]["id"], accounts["agythree"]["account_label"]), ("agy-three", "THREE"))
-        self.assertEqual(accounts["claudework"]["row"], "claudework → ID claude-work, label WORK")
-        self.assertEqual(accounts["claudework"]["provider_family"], "anthropic")
-        self.assertEqual(accounts["ompone"]["provider_family"], "anthropic")
-        every = self.output(fx)["derived"]["accounts"]
-        self.assertEqual(len([a for a in every if a["operator"]]), 7)
-        self.assertEqual(len({a["id"] for a in every}), len(every), "IDs are unique")
-
-    def test_each_seat_resolves_as_its_own_account_through_sudo_login(self):
+    def test_phase1_asks_the_gate_providers_count_and_labels(self):
         fx = self.fixture()
         data = self.output(fx, "--glitch-root", str(fx.glitch))
-        calls = [decode_login(line) for line in (fx.base / "sudo.log").read_text().splitlines()]
-        self.assertNotIn(None, calls, "every seat call is the constant login wrapper with one encoded word")
-        self.assertNotIn("-n true", (fx.base / "sudo.log").read_text().splitlines(), "root is never probed: only the per-account route")
-        for account in ("claudework", "grokone", "ompone"):
-            provider = next(p for p in PROVIDERS if account.startswith(p))
-            self.assertIn((account, f"exec 'sh' '-c' 'command -v {provider}'"), calls)
-            self.assertIn((account, f"exec 'test' '-x' '{fx.base}/home/{account}/.local/bin/{provider}'"), calls)
-        for a in data["derived"]["accounts"]:
-            if not a["operator"]:
-                self.assertTrue(a["command"].startswith(f"{fx.base}/home/{a['account']}/"), "a seat never gets another account's CLI path")
-        # The operator's own CLI is a separate row, found as the operator.
-        operator = [a for a in data["derived"]["accounts"] if a["operator"] and a["provider"] == "Grok"][0]
-        self.assertEqual(operator["command"], f"{fx.base}/home/you/.local/bin/grok")
+        self.assertEqual([p["id"] for p in data["prompts"]], ["accounts", "providers", "count", "labels"])
+        gate = q_id(data, "multi")
+        self.assertEqual((gate["question"], labels(gate), [o["preselected"] for o in gate["options"]]),
+                         ("Are there any providers for which you have more than one account?", ["No", "Yes"], [True, False]))
+        picks = [q for q in questions(data) if q["id"].startswith("providers")]
+        self.assertEqual([q["question"] for q in picks], ["Which providers have more than one account? (1 of 2)", "Which providers have more than one account? (2 of 2)"])
+        self.assertEqual([labels(q) for q in picks], [["Claude", "Codex", "Kimi", "Grok"], ["Agy", "Muse", "OMP"]])
+        self.assertEqual([o["value"] for q in picks for o in q["options"]], PROVIDERS)
+        self.assertTrue(all(q["multiSelect"] and q["when"] == {"question": "multi", "is": "Yes"} for q in picks))
+        count = q_id(data, "count")
+        self.assertEqual((count["question"], labels(count)), ("How many {provider} accounts?", ["2", "3", "4"]))
+        self.assertEqual((count["for_each"], count["other"]), ({"questions": ["providers-1", "providers-2"]}, {"whole_number": [2, 16]}))
+        names = q_id(data, "labels")
+        self.assertEqual((names["question"], labels(names)), ("Labels for your {N} {provider} accounts?", ["Number them ({provider} 1, {provider} 2)", "Type my own labels"]))
+        self.assertEqual(([o.get("value") for o in names["options"]], names["for_each_count"]), (["numbered", "typed"], {"question": "count"}))
+        self.assertEqual(data["next"], {"argv": ["--phase", "2"], "per_answer": {"question": "labels", "argv": ["--accounts", "{cli}={labels}"]},
+                                        "numbered": "{provider} 1,{provider} 2,...,{provider} {N}"})
 
-    def test_an_account_without_the_cli_is_unavailable_never_substituted(self):
-        fx = self.fixture(no_cli=("agyfour",))
+    def test_phase1_never_proposes_a_label_or_names_an_account(self):
+        # einh: "dont propose labels, BWAI and KK are me-only labels". Seat names chosen so no English word contains them.
+        seats = ["claudeqzx", "claudewvk", "codexjrm", "agyplu", "agyxor"]
+        fx = self.fixture(seats=seats, extra_installs=[("acctbzz", "claude")])
         data = self.output(fx, "--glitch-root", str(fx.glitch))
-        self.assertNotIn("agyfour", [a["account"] for a in data["derived"]["accounts"]])
-        self.assertIn("Unavailable: agyfour (it has no agy it can run).", data["intro"])
+        forbidden = [*seats, "qzx", "wvk", "jrm", "plu", "xor", "acctbzz", str(fx.home)]
+        shown = [q["question"] for q in questions(data)] + [p["title"] for p in data["prompts"]]
+        shown += [t for q in questions(data) for o in q["options"] for t in (o["label"], o["description"], str(o.get("value", "")))]
+        for text in shown:
+            for word in forbidden:
+                self.assertNotIn(word.lower(), text.lower(), f"phase 1 shows {word!r}: {text!r}")
+        self.assertNotIn("accounts", data["derived"], "phase 1 carries no account rows")
+        self.assertIn(f"Glitch folder detected: {fx.glitch}.", data["intro"], "the Glitch intro line keeps its path")
+
+    def test_phase1_one_provider_skips_the_provider_question(self):
+        fx = self.fixture(seats=[], operator_clis=["claude"])
+        data = self.output(fx)
+        self.assertEqual([p["id"] for p in data["prompts"]], ["accounts", "count", "labels"])
+        self.assertEqual(q_id(data, "count")["for_each"], {"items": [{"label": "Claude", "value": "claude"}]})
+        self.assertEqual(data["intro"][:2], ["Found on this machine: Claude.", "Not found: Codex, Kimi, Grok, Agy, Muse, OMP."])
 
     def test_missing_providers_and_missing_glitch_are_said_plainly(self):
         fx = self.fixture(seats=["claudework", "claudehome"], operator_clis=["claude", "codex"])
         data = self.output(fx)
-        self.assertEqual(data["intro"][0], "Found on this machine: Claude 2 · Codex you.")
+        self.assertEqual(data["intro"][0], "Found on this machine: Claude, Codex.")
         self.assertEqual(data["intro"][1], "Not found: Kimi, Grok, Agy, Muse, OMP.")
         self.assertRegex(data["intro"][2], r"^Glitch folder: not found in .+no-system-glitch.+Glitch.+the launch folder and its parents\.$")
-        folder = by_id(data, "folder")["questions"][0]
-        self.assertEqual(labels(folder)[0], "Each account's own home folder")
-        self.assertEqual(len(labels(folder)), 2, "a question needs two options even without a Glitch folder")
-        # A provider with a lone row still gets two options (the second skips it).
-        codex = [q for q in questions(data) if q["question"].startswith("Codex: which accounts")][0]
-        self.assertEqual(labels(codex)[1], "Skip Codex")
+        p2 = self.output(fx, "--phase", "2")
+        self.assertNotIn("folder", [p["id"] for p in p2["prompts"]], "no Glitch: the folder question is not asked")
+        self.assertEqual({a["home"] for a in p2["derived"]["accounts"]}, {str(fx.home / "claudehome"), str(fx.home / "you")}, "one account: the first seat in name order")
 
-    def test_flags_the_installed_help_does_not_show_are_not_offered(self):
-        fx = self.fixture(help_text="usage: tool [--yolo]\n")
+    def test_an_account_without_the_cli_is_unavailable_never_substituted(self):
+        fx = self.fixture(no_cli=("agyfour",))
         data = self.output(fx, "--glitch-root", str(fx.glitch))
-        permissions = {q["when"]["provider"]: labels(q) for q in questions(data) if q["question"].endswith("which permission mode?")}
-        self.assertEqual(set(permissions), {"Kimi", "Muse"}, "a provider whose only flag is unconfirmed is not asked")
-        self.assertEqual(permissions["Kimi"], ["Normal", "Ask when needed (--yolo)"])
-        self.assertTrue(any(line.startswith("Permissions: Claude offers Normal only") for line in data["intro"]))
+        self.assertIn("Unavailable: agyfour (it has no agy it can run).", data["intro"])
+        p2 = self.output(fx, "--glitch-root", str(fx.glitch), *EINH)
+        self.assertNotIn("agyfour", [a["account"] for a in p2["derived"]["accounts"]])
+        self.assertNotIn("agyfour", [c["account"] for c in p2["derived"]["candidates"]])
 
     def test_without_sudo_seat_accounts_are_not_guessed(self):
         fx = self.fixture(sudo=False)
         data = self.output(fx, "--glitch-root", str(fx.glitch))
-        self.assertTrue(all(a["operator"] for a in data["derived"]["accounts"]))
         self.assertTrue(any("sudo is not installed" in line for line in data["intro"]))
+        p2 = self.output(fx, "--glitch-root", str(fx.glitch), "--phase", "2")
+        self.assertTrue(all(c["operator"] for c in p2["derived"]["candidates"]))
+
+    # ---- phase 2: the mapping ----
+    def test_phase2_twelve_seats_map_by_label_exact_output(self):
+        fx = self.fixture()
+        data = self.output(fx, "--glitch-root", str(fx.glitch), *EINH)
+        self.assertEqual(data["phase"], 2)
+        self.golden(GOLDEN_P2, data, fx)
+        got = {a["id"]: (a["account"], a["account_label"]) for a in data["derived"]["accounts"]}
+        self.assertEqual(got, {
+            "claude-work": ("claudework", "Work"), "claude-home": ("claudehome", "Home"), "codex-one": ("codexone", "One"),
+            "codex-two": ("codextwo", "Two"), "kimi": ("kimione", "Kimi"), "grok": ("grokone", "Grok"),
+            "agy-four": ("agyfour", "Four"), "agy-two": ("agytwo", "Two"), "agy-one": ("agyone", "One"), "agy-three": ("agythree", "Three"),
+            "muse": ("museone", "Muse"), "omp": ("ompone", "OMP")})
+        mapping = q_id(data, "mapping")
+        self.assertEqual((mapping["question"], labels(mapping)), ("Use this mapping?", ["Use it (Recommended)", "Change some"]))
+        rows = lines(data, "mapping")
+        self.assertEqual(rows[0], f"Claude Work — claudework — {fx.home}/claudework/.local/bin/claude")
+        self.assertIn(f"Not used for Claude: you (you) — {fx.home}/you/.local/bin/claude.", rows, "the operator is listed as not used")
+        for a in data["derived"]["accounts"]:
+            self.assertTrue(a["command"].startswith(f"{fx.home}/{a['account']}/"), "an agent never gets another account's CLI path")
+            self.assertEqual(a["home"], str(fx.home / a["account"]))
+
+    def test_one_user_one_install_is_one_confirm(self):
+        fx = self.fixture(seats=[])
+        first = self.output(fx, "--glitch-root", str(fx.glitch))
+        data = self.output(fx, "--glitch-root", str(fx.glitch), "--phase", "2")
+        self.golden(GOLDEN_SINGLE, {"phase1": first, "phase2": data}, fx)
+        mapping = q_id(data, "mapping")
+        self.assertEqual((mapping["question"], labels(mapping)), ("All agents run as you?", ["Yes (Recommended)", "Change some"]))
+        self.assertEqual(lines(data, "mapping"), [], "the table is not shown when everything is the first install")
+        self.assertEqual({a["id"]: a["account_label"] for a in data["derived"]["accounts"]},
+                         {p: n for p, n in zip(PROVIDERS, ["Claude", "Codex", "Kimi", "Grok", "Agy", "Muse", "OMP"])})
+        self.assertTrue(all(a["operator"] and a["account"] == "you" for a in data["derived"]["accounts"]))
+        # The common case reaches the review after: accounts gate, this confirm, the permission gate and the folder.
+        self.assertEqual([p["id"] for p in data["prompts"]], ["mapping", "permissions", "permission-modes-1", "permission-modes-2", "folder", "folder-agents", "omp", "review"])
+
+    def test_two_installs_under_one_user_map_to_two_accounts(self):
+        fx = self.fixture(seats=[], operator_clis=["claude"], extra_installs=[("acct2", "claude")])
+        data = self.output(fx, "--accounts", "claude=Claude 1,Claude 2")
+        self.golden(GOLDEN_TWO, data, fx)
+        a = agents(data)
+        self.assertEqual((a["claude-1"]["command"], a["claude-2"]["command"]), (f"{fx.home}/you/.local/bin/claude", f"{fx.home}/you/acct2/claude"))
+        self.assertEqual(q_id(data, "mapping")["question"], "All agents run as you?")
+        self.assertEqual(lines(data, "mapping"), [f"Claude 1 — you (you) — {fx.home}/you/.local/bin/claude", f"Claude 2 — you (you) — {fx.home}/you/acct2/claude"],
+                         "a second install in use shows the table")
+        # A label naming the install's folder takes it, whatever its place on PATH.
+        named = agents(self.output(fx, "--accounts", "claude=acct2,Main"))
+        self.assertEqual((named["claude-acct2"]["command"], named["claude-main"]["command"]), (f"{fx.home}/you/acct2/claude", f"{fx.home}/you/.local/bin/claude"))
+
+    def test_an_account_with_no_install_left_gets_the_limitation_sentence(self):
+        fx = self.fixture(seats=[], operator_clis=["claude", "agy"], extra_installs=[("acct2", "claude")])
+        data = self.output(fx, "--accounts", "claude=Claude 1,Claude 2,Claude 3", "--accounts", "agy=KK,BWAI")
+        self.golden(GOLDEN_SHORT, data, fx)
+        self.assertIn(LIMIT, lines(data, "mapping"))
+        self.assertIn("Agy BWAI: no second install or OS user found. Each Agy account needs its own install with its own login. Type its path, or skip it.", lines(data, "mapping"))
+        self.assertEqual(lines(data, "mapping")[-1], AGY)
+        q = q_id(data, "missing-claude-3")
+        self.assertEqual((q["question"], labels(q), q["agent_id"]), ("Claude 3: type its path, or skip it?", ["Skip it (Recommended)", "Type its path"], "claude-3"))
+        self.assertNotIn("claude-3", agents(data))
+        self.assertEqual([m["id"] for m in data["derived"]["missing"]], ["claude-3", "agy-bwai"])
+        # Two Agy installs under one OS user: the warning is said even when nothing is missing.
+        fx2 = self.fixture(seats=[], operator_clis=["agy"], extra_installs=[("second", "agy")])
+        self.assertIn(AGY, lines(self.output(fx2, "--accounts", "agy=A,B"), "mapping"))
+        self.assertNotIn(AGY, lines(self.output(fx2, "--accounts", "agy=A,B", "--skip", "agy-b"), "mapping"))
+
+    def test_other_os_accounts_are_listed_never_proposed(self):
+        # "every OS user with the CLI" is a candidate; one not named for the provider is only proposed when chosen.
+        fx = self.fixture(seats=[], operator_clis=["claude"], others=("partner",))
+        data = self.output(fx, "--accounts", "claude=Mine,Theirs")
+        self.assertEqual(agents(data)["claude-mine"]["account"], "you")
+        self.assertNotIn("claude-theirs", agents(data))
+        self.assertIn("Claude Theirs: no second install or OS user found. Each Claude account needs its own install with its own login. Type its path, or skip it.", lines(data, "mapping"))
+        self.assertIn(f"Not used for Claude: partner — {fx.home}/partner/.local/bin/claude.", lines(data, "mapping"))
+        chosen = self.output(fx, "--accounts", "claude=Mine,Theirs", "--map", "claude-theirs=partner#1")
+        self.assertEqual((agents(chosen)["claude-theirs"]["account"], agents(chosen)["claude-theirs"]["operator"]), ("partner", False))
+        self.assertEqual(q_id(chosen, "mapping")["question"], "Use this mapping?")
+
+    def test_a_seat_named_with_a_dash_maps_like_any_other(self):
+        fx = self.fixture(seats=["claude-work", "claudehome"], operator_clis=[])
+        a = agents(self.output(fx, "--accounts", "claude=Home,Work"))
+        self.assertEqual((a["claude-work"]["account"], a["claude-home"]["account"]), ("claude-work", "claudehome"))
+
+    def test_map_and_skip_overrides(self):
+        fx = self.fixture()
+        data = self.output(fx, "--glitch-root", str(fx.glitch), *EINH, "--map", "claude-work=you#1", "--skip", "agy-three", "--skip", "muse")
+        a = agents(data)
+        self.assertEqual((a["claude-work"]["account"], a["claude-work"]["command"]), ("you", f"{fx.home}/you/.local/bin/claude"))
+        self.assertEqual(a["claude-home"]["account"], "claudehome")
+        self.assertNotIn("agy-three", a)
+        self.assertNotIn("muse", a)
+        self.assertEqual(data["derived"]["rerun"]["argv"], ["--phase", "2", *EINH, "--map", "claude-work=you#1", "--skip", "agy-three", "--skip", "muse"])
+        used = {c["key"]: c["used_by"] for c in data["derived"]["candidates"] if c["provider"] == "Claude"}
+        self.assertEqual(used, {"claudework#1": "", "claudehome#1": "claude-home", "you#1": "claude-work"})
+        # A typed path is checked as the account that will run it (the one whose home holds it, else the operator).
+        typed = self.output(fx, *EINH, "--map", f"claude-work={fx.home}/claudework/.local/bin/claude")
+        self.assertEqual(agents(typed)["claude-work"]["account"], "claudework")
+        self.assertIn("cannot run", self.refused(fx, *EINH, "--map", "claude-work=/nowhere/claude"))
+
+    def test_refused_answers_say_why(self):
+        fx = self.fixture()
+        self.assertEqual(self.refused(fx, "--accounts", "claude=Work,work"), 'Two Claude accounts have the label "work".')
+        self.assertEqual(self.refused(fx, "--accounts", "claude=Work, ,Home"), "A Claude label is empty.")
+        self.assertEqual(self.refused(fx, "--accounts", "claude=" + "x" * 33), 'The Claude label "' + "x" * 33 + '" is longer than 32 characters.')
+        self.assertEqual(self.refused(fx, "--accounts", "claude=a\tb"), "A Claude label has a control character, such as a tab or a line break.")
+        self.assertEqual(self.refused(fx, "--accounts", "claude=" + ",".join(map(str, range(17)))), "At most 16 Claude accounts.")
+        self.assertEqual(self.refused(fx, "--accounts", "claude=A", "--accounts", "claude=B"), "Claude accounts were given twice.")
+        self.assertEqual(self.refused(fx, "--accounts", "nope=A"), "SPAWN knows no CLI with that name.")
+        self.assertEqual(self.refused(fx, "--skip", "claude-nobody"), 'No agent has the ID "claude-nobody".')
+        self.assertEqual(self.refused(fx, *EINH, "--map", "claude-work=codexone#1"), '"codexone#1" is not a Claude install found on this machine.')
+        self.assertEqual(self.refused(fx, *EINH, "--map", "claude-work=claudehome#1", "--map", "claude-home=claudehome#1"), "Two agents cannot use the same install: claudehome#1.")
+        self.assertEqual(self.refused(fx, *EINH, "--map", "claude-work=claudehome#1", "--map", f"claude-home={fx.home}/claudehome/.local/bin/claude"), "Two agents cannot use the same install: claudehome#1.")
+        loose = fx.home / "you/loose/claude"  # an install not on any PATH, typed for two agents
+        loose.parent.mkdir()
+        loose.write_text("#!/bin/sh\n")
+        loose.chmod(0o755)
+        self.assertEqual(self.refused(fx, *EINH, "--map", f"claude-work={loose}", "--map", f"claude-home={loose}"), "claude-work and claude-home would run the same install as the same account, so they would share one login.")
+        self.assertEqual(agents(self.output(fx, *EINH, "--map", "claude-work=claudehome#1"))["claude-home"]["account"], "claudework", "an override wins; the rest adapt in candidate order")
+        none = self.fixture(seats=[], operator_clis=["claude"])
+        self.assertEqual(self.refused(none, "--accounts", "codex=A,B"), "No Codex was found on this machine, so it cannot have accounts.")
+        # Labels keep their own characters; IDs are slugs, unique per provider.
+        ok = self.output(none, "--accounts", "claude=Ünïcode Work!,Work")
+        self.assertEqual({k: v["account_label"] for k, v in agents(ok).items()}, {"claude-n-code-work": "Ünïcode Work!"})
+        self.assertEqual([(m["id"], m["account_label"]) for m in ok["derived"]["missing"]], [("claude-work", "Work")])
+
+    def test_each_seat_resolves_as_its_own_account_through_sudo_login(self):
+        fx = self.fixture()
+        data = self.output(fx, "--glitch-root", str(fx.glitch), *EINH)
+        log = (fx.base / "sudo.log").read_text().splitlines()
+        calls = [decode_login(line) for line in log]
+        self.assertNotIn(None, calls, "every seat call is the constant login wrapper with one encoded word")
+        self.assertNotIn("-n true", log, "root is never probed: only the per-account route")
+        walks = [(acct, text) for acct, text in calls if "'spawn-walk'" in text]
+        self.assertEqual(sorted(acct for acct, _ in walks), sorted([*SEATS, "plainuser"]), "one PATH walk per OS login account, named for a provider or not")
+        self.assertTrue(all(text.endswith("'spawn-walk' 'claude' 'codex' 'kimi' 'grok' 'agy' 'muse' 'omp'") for _, text in walks))
+        for account in ("claudework", "grokone", "ompone"):
+            provider = next(p for p in PROVIDERS if account.startswith(p))
+            self.assertIn((account, f"exec '{fx.home}/{account}/.local/bin/{provider}' '--help'"), calls)
+        self.assertEqual(agents(data)["omp"]["provider_family"], "anthropic", "an OMP seat's family is read from its own config")
+
+    def test_permission_gate_then_per_agent_choices(self):
+        fx = self.fixture(help_by={"claudehome": "usage: claude [--other]\n"})
+        data = self.output(fx, "--glitch-root", str(fx.glitch), *EINH)
+        gate = q_id(data, "perm-gate")
+        self.assertEqual((gate["question"], labels(gate)), ("Do you want to set special permission modes to start some of these agents with?", ["No, all Default (Recommended)", "Yes"]))
+        per = [q for q in questions(data) if q["id"].startswith("perm-") and q["id"] != "perm-gate"]
+        self.assertEqual(len(per), 12)
+        self.assertTrue(all(q["when"] == {"question": "perm-gate", "is": "Yes"} for q in per))
+        self.assertEqual(labels(q_id(data, "perm-claude-work")), ["Default (no arguments)", "YOLO (--dangerously-skip-permissions)", "Custom (type the arguments)"])
+        self.assertEqual(labels(q_id(data, "perm-claude-home")), ["Default (no arguments)", "Custom (type the arguments)"], "YOLO is dropped where --help lacks it")
+        self.assertIn("YOLO is not offered for Claude Home: its --help does not show --dangerously-skip-permissions.", lines(data, "permission-modes-1"))
+        yolo = {k: v[-1]["arguments"] for k, v in data["derived"]["permissions"].items() if len(v) == 2}
+        self.assertEqual(yolo, {"claude-work": ["--dangerously-skip-permissions"], "codex-one": ["--dangerously-bypass-approvals-and-sandbox"], "codex-two": ["--dangerously-bypass-approvals-and-sandbox"],
+                                "kimi": ["--auto"], "grok": ["--permission-mode", "bypassPermissions"], "agy-four": ["--dangerously-skip-permissions"],
+                                "agy-two": ["--dangerously-skip-permissions"], "agy-one": ["--dangerously-skip-permissions"], "agy-three": ["--dangerously-skip-permissions"],
+                                "muse": ["--yolo"], "omp": ["--approval-mode", "yolo"]})
+        self.assertEqual(data["derived"]["permissions"]["claude-home"], [{"label": "Default (no arguments)", "arguments": []}])
+        self.assertNotIn("Ask when needed", json.dumps(data), "Kimi's --yolo choice is gone: einh's three choices")
+
+    def test_custom_arguments_are_checked_as_data(self):
+        # --check-args is the first argument and needs no discovery: run the script directly.
+        script = lambda *a: subprocess.run(["/bin/sh", str(SCRIPT), *a], capture_output=True, text=True, stdin=subprocess.DEVNULL)
+        done = script("--check-args", "omp", "--profile", "work", "--model=a/b:c@1")
+        self.assertEqual((done.returncode, json.loads(done.stdout)), (0, {"ok": True, "arguments": ["--profile", "work", "--model=a/b:c@1"]}))
+        for word, why in ((";", "a semicolon (;)"), ("$HOME", "a dollar sign ($)"), ("`x`", "a backtick (`)"), ("a'b", "a single quote (')"), ('a"b', 'a double quote (")'),
+                          ("a\\b", "a backslash (\\)"), ("a|b", "a vertical bar (|)"), ("~/x", "a tilde (~)"), ("*", "an asterisk (*)"), ("(x)", "a parenthesis (()")):
+            done = script("--check-args", "omp", "--ok", word)
+            self.assertEqual((done.returncode, json.loads(done.stdout)), (3, {"ok": False, "why": f"Arguments cannot contain {why}."}), word)
+        for words, why in ((["a\tb"], "Arguments cannot contain control characters, such as a tab or a line break."), ([""], "An argument is empty."),
+                           (["=x"], "An argument cannot start with =."), ([], "Type at least one argument.")):
+            done = script("--check-args", "omp", *words)
+            self.assertEqual(json.loads(done.stdout)["why"], why)
+        self.assertEqual(json.loads(script("--check-args", "nope", "a").stdout)["why"], "SPAWN knows no such CLI.")
+
+    def test_folder_all_choose_none_and_glitch_choices(self):
+        fx = self.fixture(seats=[], operator_clis=["claude", "codex"])
+        data = self.output(fx, "--glitch-root", str(fx.glitch), "--phase", "2")
+        folder = q_id(data, "folder")
+        self.assertEqual((folder["question"], labels(folder)), (f"I detected Glitch at {fx.glitch}. Would you like to start all these agents within Glitch?", ["All (Recommended)", "Choose per agent", "None"]))
+        pick = q_id(data, "folder-agents")
+        self.assertEqual((labels(pick), [o["value"] for o in pick["options"]], pick["when"], pick["multiSelect"]),
+                         (["Claude", "Codex"], ["claude", "codex"], {"question": "folder", "is": "Choose per agent"}, True))
+        one = self.output(self.fixture(seats=[], operator_clis=["claude"]), "--glitch-root", str(fx.glitch), "--phase", "2")
+        self.assertEqual(labels(q_id(one, "folder")), ["All (Recommended)", "None"], "one agent: no per-agent choice")
+        self.assertNotIn("folder-agents", [p["id"] for p in one["prompts"]])
+        # Two roots: which one first, then the same question; more than three: Other, and the rest named.
+        roots = [fx.glitch]
+        for n in range(3):
+            extra = fx.base / f"glitch{n}"
+            Fixture.make_glitch(extra)
+            roots.append(extra)
+        two = self.output(fx, "--glitch-root", str(roots[0]), "--glitch-root", str(roots[1]), "--phase", "2")
+        which = q_id(two, "glitch-root")
+        self.assertEqual((which["question"], labels(which), sum(o["preselected"] for o in which["options"])), ("Which Glitch folder?", [str(roots[0]), str(roots[1])], 0))
+        self.assertEqual(q_id(two, "folder")["question"], "Would you like to start all these agents within Glitch?")
+        four = self.output(fx, *[a for r in roots for a in ("--glitch-root", str(r))], "--phase", "2")
+        self.assertEqual(len(q_id(four, "glitch-root")["options"]), 3)
+        self.assertTrue(any(line.startswith("More Glitch folders found, not listed as choices") and str(roots[3]) in line for line in lines(four, "folder")))
+
+    def test_omp_service_per_omp_agent(self):
+        fx = self.fixture(seats=["ompone"], operator_clis=["omp"], omp_family="moonshot")
+        data = self.output(fx, "--accounts", "omp=Seat,Mine")
+        self.assertEqual({q["agent_id"]: labels(q) for q in by_id(data, "omp")["questions"]},
+                         {"omp-seat": ["anthropic (from its config) (Recommended)", "openai", "google"], "omp-mine": ["moonshot (from its config) (Recommended)", "openai", "google"]})
+        self.assertEqual(q_id(data, "omp-omp-seat")["question"], "Which service runs omp-seat's model?")
+        self.assertEqual({a["id"]: a["provider_family"] for a in data["derived"]["accounts"]}, {"omp-seat": "anthropic", "omp-mine": "moonshot"})
+        self.assertEqual(data["derived"]["omp_prompt"], "Follow the explicitly assigned task. Role text is guidance, not identity isolation.")
+
+    def test_limits_and_absolutes_on_every_output(self):
+        outputs = []
+        fx = self.fixture()
+        outputs += [self.output(fx, "--glitch-root", str(fx.glitch)), self.output(fx, "--glitch-root", str(fx.glitch), *EINH)]
+        single = self.fixture(seats=[], extra_installs=[("acct2", "claude")])
+        outputs += [self.output(single), self.output(single, "--accounts", "claude=A,B,C", "--accounts", "agy=A,B")]
+        for data in outputs:
+            text = json.dumps(data).lower()
+            self.assertNotRegex(text, r"which model|startup prompt|token|password|credential|\.credentials|auth\.json")
+            for q in questions(data):
+                self.assertTrue(2 <= len(q["options"]) <= 4, q["id"])
+                self.assertLessEqual(len(q["header"]), 12, q["header"])
+                self.assertEqual(sum(o["preselected"] for o in q["options"]) <= 1 or q["multiSelect"], True, q["id"])
+            for prompt in data["prompts"]:
+                self.assertTrue(1 <= len(prompt["questions"]) <= 4, prompt["id"])
+            ids = [q["id"] for q in questions(data)]
+            self.assertEqual(len(ids), len(set(ids)), "question ids are unique")
+            self.assertEqual(data["limits"], {"questions_per_prompt": 4, "options_per_question": 4, "header_characters": 12})
+            if data["phase"] == 2:
+                review = q_id(data, "review")
+                self.assertEqual((review["question"], labels(review)), ("Save these {N} agents?", ["Save and set up (Recommended)", "Change something"]))
 
     def test_output_is_deterministic_and_leaves_nothing_behind(self):
         fx = self.fixture()
-        first = fx.run("--glitch-root", str(fx.glitch)).stdout
-        second = fx.run("--glitch-root", str(fx.glitch)).stdout
-        self.assertEqual(first, second)
+        for extra in ((), EINH):
+            first = fx.run("--glitch-root", str(fx.glitch), *extra).stdout
+            second = fx.run("--glitch-root", str(fx.glitch), *extra).stdout
+            self.assertEqual(first, second)
         self.assertEqual([p for p in fx.base.iterdir() if p.name.startswith("spawn-questions.")], [])
 
-    def test_windows_twin_carries_the_same_exact_wording(self):
-        sh, ps1 = SCRIPT.read_text(), (PACKAGE / "structuredquestions.ps1").read_text()
-        for exact in ["which accounts should SPAWN run?", "Use these IDs and labels?", "Use these (Recommended)", "Change some",
-                      "Which folder should every agent start in?", "Each account", "which permission mode?", "Save these {N} agents?",
-                      "Save and set up (Recommended)", "Change something", "Normal (asks before actions)",
-                      "Skip permission prompts (--dangerously-skip-permissions)", "YOLO, no sandbox (--dangerously-bypass-approvals-and-sandbox)",
-                      "Ask when needed (--yolo)", "Never ask (--auto)", "Bypass permissions (--permission-mode bypassPermissions)",
-                      "No approval prompts (--yolo)", "YOLO (--approval-mode yolo)", "(from its config) (Recommended)",
-                      "Follow the explicitly assigned task. Role text is guidance, not identity isolation.",
-                      "Found on this machine", "Not found: ", "Glitch folder detected: "]:
-            self.assertIn(exact, sh)
-            self.assertIn(exact, ps1)
-
-    # ---- cross-family review round 1 (SKILLS-210) ----
+    # ---- cross-family review round 1 (SKILLS-210), kept for the redesigned flow ----
     def test_a_path_is_never_put_inside_a_shell_string(self):
         # P1: the resolved CLI path crossed `sh -c` unquoted, so spaces broke and metacharacters ran as the seat.
         fx = self.fixture(name="a b;touch PWNED;'q$(touch PWNED2)")
-        data = self.output(fx, "--glitch-root", str(fx.glitch))
+        data = self.output(fx, "--glitch-root", str(fx.glitch), *EINH)
         self.assertEqual([p for p in fx.base.rglob("PWNED*")], [], "a metacharacter in a path executed")
-        claude = [a for a in data["derived"]["accounts"] if a["account"] == "claudework"][0]
-        self.assertEqual(claude["command"], f"{fx.base}/home/claudework/.local/bin/claude")
-        self.assertIn("Claude 2", data["intro"][0])
-        perm = [q for q in questions(data) if q["question"] == "Claude: which permission mode?"]
-        self.assertEqual(len(perm), 1, "help still read for a path with spaces and quotes")
+        self.assertEqual(agents(data)["claude-work"]["command"], f"{fx.base}/home/claudework/.local/bin/claude")
+        self.assertIn("YOLO (--dangerously-skip-permissions)", labels(q_id(data, "perm-claude-work")), "help still read for a path with spaces and quotes")
 
     def test_a_forged_row_in_an_input_is_only_data(self):
-        # P2: paths went into an unescaped tab-separated file; a newline in --cwd forged an ACC row.
+        # P2: paths went into an unescaped tab-separated file; a newline in --cwd forged a row.
         fx = self.fixture()
-        evil = "x\nACC\tclaude\tevil\tseat\t/evil/claude\t/evil\tanthropic\nGLITCH\t/evil\tq"
-        data = self.output(fx, "--glitch-root", str(fx.glitch), cwd=evil)
-        self.assertNotIn("evil", [a["account"] for a in data["derived"]["accounts"]])
+        evil = "x\nCAND\tclaude\tevil\tuser\t/evil/claude\t/evil\nGLITCH\t/evil\tq"
+        data = self.output(fx, "--glitch-root", str(fx.glitch), "--phase", "2", cwd=evil)
+        self.assertNotIn("evil", [c["account"] for c in data["derived"]["candidates"]])
         self.assertEqual(data["derived"]["launch_folder"], evil)
         self.assertEqual(data["derived"]["glitch_folders"], [str(fx.glitch)])
-        tabbed = self.output(fx, "--glitch-root", str(fx.glitch), cwd="a\tb c%41")
+        tabbed = self.output(fx, "--glitch-root", str(fx.glitch), "--phase", "2", cwd="a\tb c%41")
         self.assertEqual(tabbed["derived"]["launch_folder"], "a\tb c%41", "tabs and percent signs survive intact")
+        self.assertEqual(self.refused(fx, "--accounts", "claude=Work\nAG\tx,Home"), "A Claude label has a control character, such as a tab or a line break.")
+        self.assertEqual(agents(self.output(fx, "--accounts", "claude=Work,Home%41"))["claude-home-41"]["account_label"], "Home%41")
 
     def test_a_hanging_command_is_bounded_without_gnu_timeout(self):
         # P2: no `timeout` on macOS, none on Windows, and GNU timeout had no kill fallback.
         fx = self.fixture(hang=("claudework", "you"))
         started = time.monotonic()
-        done = fx.run("--glitch-root", str(fx.glitch), timeout=90, seconds="1")
+        done = fx.run("--glitch-root", str(fx.glitch), *EINH, "--map", "codex-one=you#1", timeout=90, seconds="1")
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertLess(time.monotonic() - started, 60)
         data = json.loads(done.stdout)
-        claude = [q for q in questions(data) if q["question"] == "Claude: which permission mode?"][0]
-        unsupported = claude["options"][1]["unsupported_by"]
-        self.assertIn("claude-work", unsupported, "an account whose --help hangs supports nothing")
-        self.assertIn("claude-you", unsupported)
-        self.assertNotIn("claude-home", unsupported)
+        self.assertNotIn("YOLO (--dangerously-skip-permissions)", labels(q_id(data, "perm-claude-work")), "an install whose --help hangs supports nothing")
+        self.assertNotIn("YOLO (--dangerously-bypass-approvals-and-sandbox)", labels(q_id(data, "perm-codex-one")))
+        self.assertIn("YOLO (--dangerously-skip-permissions)", labels(q_id(data, "perm-claude-home")))
         self.assertEqual([p for p in fx.base.iterdir() if p.name.startswith("spawn-questions.")], [])
 
-    def test_permission_flags_are_checked_per_account(self):
-        # P2: the flag list came from the first account's --help only.
-        fx = self.fixture(help_by={"claudehome": "usage: claude [--other]\n"})
-        data = self.output(fx, "--glitch-root", str(fx.glitch))
-        claude = [q for q in questions(data) if q["question"] == "Claude: which permission mode?"][0]
-        self.assertEqual(claude["options"][0].get("unsupported_by"), None)
-        self.assertEqual(claude["options"][1]["unsupported_by"], ["claude-home"])
-        self.assertEqual(data["derived"]["permissions"]["Claude"][1]["unsupported_by"], ["claude-home"])
-        # Every account supports it everywhere else: no unsupported_by at all.
-        codex = [q for q in questions(data) if q["question"] == "Codex: which permission mode?"][0]
-        self.assertTrue(all("unsupported_by" not in o for o in codex["options"]))
-        # No account supports the flag: the option is not offered and the intro says so.
-        none = self.output(self.fixture(help_text="usage: tool\n"), "--glitch-root", "/nonexistent")
-        self.assertEqual([q for q in questions(none) if q["question"].endswith("which permission mode?")], [])
-
-    def test_four_glitch_roots_still_fit_four_options(self):
-        # P2: 4 roots plus the home option made five options.
-        fx = self.fixture()
-        roots = [fx.glitch]
-        for n in range(3):
-            extra = fx.base / f"glitch{n}"
-            (extra / ".claude/scripts").mkdir(parents=True)
-            (extra / ".claude/scripts/workspaces.py").write_text("x")
-            (extra / ".claude/scripts/plan_check.py").write_text("x")
-            roots.append(extra)
-        args = [a for r in roots for a in ("--glitch-root", str(r))]
-        data = self.output(fx, *args)
-        folder = by_id(data, "folder")["questions"][0]
-        self.assertEqual(len(folder["options"]), 4)
-        self.assertEqual(labels(folder)[-1], "Each account's own home folder")
-        self.assertEqual(sum(o["preselected"] for o in folder["options"]), 0, "no single recommendation among several roots")
-        self.assertTrue(any(line.startswith("More Glitch folders found, not listed as choices") and str(roots[3]) in line for line in data["intro"]))
-
-    def test_an_operator_allowed_per_seat_but_not_root_resolves_every_seat(self):
-        # P2: `sudo -n true` tested root, not the per-account route.
-        fx = self.fixture()
-        data = self.output(fx, "--glitch-root", str(fx.glitch))
-        self.assertEqual(len([a for a in data["derived"]["accounts"] if not a["operator"]]), 12)
-        self.assertFalse(any(line.startswith("Unavailable:") for line in data["intro"]))
-        self.assertNotIn("-n true", (fx.base / "sudo.log").read_text().splitlines())
-
-    def test_an_omp_service_outside_the_three_is_offered_as_configured(self):
-        fx = self.fixture(omp_family="moonshot")
-        data = self.output(fx, "--glitch-root", str(fx.glitch))
-        omp = {q["when"]["account_id"]: labels(q) for q in by_id(data, "omp")["questions"]}
-        self.assertEqual(omp["omp-you"], ["moonshot (from its config) (Recommended)", "openai", "google"])
-        self.assertEqual([a["provider_family"] for a in data["derived"]["accounts"] if a["id"] == "omp-you"], ["moonshot"])
-
-    def test_windows_twin_reads_the_omp_config_and_bounds_every_call(self):
-        # No PowerShell on the build host: these are source checks of the Windows twin, not a run of it.
-        ps1 = (PACKAGE / "structuredquestions.ps1").read_text()
-        self.assertIn("WaitForExit($timeoutMs)", ps1)
-        self.assertIn("Stop-ProcessTree $id $since", ps1, "the whole tree is stopped, not only the launched process")
-        self.assertNotIn("& $cmd.Source --help", ps1, "no unbounded help call")
-        self.assertIn(".omp\\agent\\config.yml", ps1)
-        self.assertIn("modelRoles:", ps1)
-        self.assertIn("Get-OmpFamily", ps1)
-        self.assertIn("Select-Object -First 3", ps1)
-
-    def test_skill_forwards_every_observed_glitch_candidate(self):
-        skill = (PACKAGE / "skills/setup/SKILL.md").read_text()
-        self.assertIn("every entry of its `candidates` in any state", skill)
-        self.assertIn("`unsupported_by`", skill)
-        self.assertLessEqual(len(json.dumps(skill)), 8957, "stays within main's JSON-encoded size")
-
-
-    # ---- cross-family review round 2 (SKILLS-210) ----
     def test_a_killed_call_leaves_no_child_behind(self):
         # P2: only the wrapper's pid was killed; its children, and a straggler of a wrapper that exited, survived.
         for groups in ("setsid", "perl"):  # the two ways a process group is made (macOS has perl, not setsid)
@@ -406,7 +550,7 @@ class StructuredQuestions(unittest.TestCase):
                 fx = self.fixture(fork=("claudework",), leak=("claudehome",), groups=groups)
                 pids = []
                 try:
-                    done = fx.run("--glitch-root", str(fx.glitch), timeout=90, seconds="1")
+                    done = fx.run("--glitch-root", str(fx.glitch), *EINH, timeout=90, seconds="1")
                     self.assertEqual((done.returncode, done.stderr), (0, ""), done.stderr)
                     pids = [int((fx.base / f"child-{who}.pid").read_text()) for who in ("claudework", "claudehome")]
                     deadline = time.monotonic() + 5
@@ -418,59 +562,76 @@ class StructuredQuestions(unittest.TestCase):
                         if alive(p):
                             os.kill(p, 9)
 
+    def yolo_offered(self, help_text):
+        fx = self.fixture(help_text=help_text)
+        data = self.output(fx, "--glitch-root", str(fx.glitch), *EINH)
+        return {q["agent_id"] for q in questions(data) if q["id"].startswith("perm-") and any(o.startswith("YOLO") for o in labels(q))}
+
     def test_a_flag_counts_only_as_its_own_token(self):
         # P2: `--yolo-extra` matched `--yolo` by substring.
-        fx = self.fixture(help_text="usage: tool [--yolo-extra] [--auto-approve] [--dangerously-skip-permissions-now]\n")
-        data = self.output(fx, "--glitch-root", str(fx.glitch))
-        self.assertEqual([q for q in questions(data) if q["question"].endswith("which permission mode?")], [], "no look-alike flag enables an option")
-        self.assertTrue(any(line.startswith("Permissions: Kimi offers Normal only") for line in data["intro"]))
+        self.assertEqual(self.yolo_offered("usage: tool [--yolo-extra] [--auto-approve] [--dangerously-skip-permissions-now]\n"), set(), "no look-alike flag enables YOLO")
 
     def test_a_valued_flag_needs_its_value_in_its_own_help_entry(self):
         # P2: `--approval-mode MODE` enabled `--approval-mode yolo` without ever showing `yolo`.
         listed = "  --approval-mode=<value>   Override tools.approvalMode (always-ask|always-ask-cached|write|yolo)\n  --permission-mode <MODE>\n      Permission mode [possible values: default, acceptEdits, bypassPermissions, plan]\n"
         unlisted = "usage: tool [--approval-mode MODE] [--permission-mode MODE]\n  --other   mentions yolo and bypassPermissions elsewhere\n"
         wrong = "  --approval-mode=<value>   Override (always-ask|yolo-extra)\n  --permission-mode <MODE>\n      Permission mode [possible values: default, bypassPermissions-x]\n"
-        for text, expected in ((listed, True), (unlisted, False), (wrong, False)):
-            fx = self.fixture(help_text=text)
-            data = self.output(fx, "--glitch-root", str(fx.glitch))
-            asked = {q["when"]["provider"] for q in questions(data) if q["question"].endswith("which permission mode?")}
-            self.assertEqual({"Grok", "OMP"} <= asked, expected, text)
-            self.assertEqual(bool({"Grok", "OMP"} & asked), expected, text)
+        for text, expected in ((listed, {"grok", "omp"}), (unlisted, set()), (wrong, set())):
+            self.assertEqual(self.yolo_offered(text), expected, text)
 
     def test_a_sibling_entry_is_not_a_continuation_of_the_flag(self):
         # P2: any indented non-option line counted as a continuation, so a sibling `MODEL ... yolo` entry after
         # `--approval-mode MODE` enabled YOLO.
-        sibling = "  --approval-mode MODE\n  MODEL   pick a model (always-ask|yolo)\n  --permission-mode MODE\n  MODEL   bypassPermissions\n"
-        fx = self.fixture(help_text=sibling)
-        data = self.output(fx, "--glitch-root", str(fx.glitch))
-        asked = {q["when"]["provider"] for q in questions(data) if q["question"].endswith("which permission mode?")}
-        self.assertFalse({"Grok", "OMP"} & asked, "a sibling entry at the same indent ended the flag's entry")
+        self.assertEqual(self.yolo_offered("  --approval-mode MODE\n  MODEL   pick a model (always-ask|yolo)\n  --permission-mode MODE\n  MODEL   bypassPermissions\n"), set())
         # The same value on a continuation indented deeper than the flag still counts (the real grok layout).
-        deeper = "  --approval-mode MODE\n      pick one of always-ask|yolo\n  --permission-mode <MODE>\n      [possible values: default, bypassPermissions]\n"
-        fx = self.fixture(help_text=deeper)
-        asked = {q["when"]["provider"] for q in questions(self.output(fx, "--glitch-root", str(fx.glitch))) if q["question"].endswith("which permission mode?")}
-        self.assertTrue({"Grok", "OMP"} <= asked)
+        self.assertEqual(self.yolo_offered("  --approval-mode MODE\n      pick one of always-ask|yolo\n  --permission-mode <MODE>\n      [possible values: default, bypassPermissions]\n"), {"grok", "omp"})
+
+    # ---- the Windows twin (no PowerShell on the build host: source checks; the runtime test runs on Windows) ----
+    def test_windows_twin_carries_the_same_exact_wording(self):
+        sh, ps1 = SCRIPT.read_text(), (PACKAGE / "structuredquestions.ps1").read_text()
+        for exact in ["Found on this machine: ", "Not found: ", "Glitch folder detected: ", "Are there any providers for which you have more than one account?",
+                      "Which providers have more than one account?", "How many {provider} accounts?", "Labels for your {N} {provider} accounts?",
+                      "Number them ({provider} 1, {provider} 2)", "Type my own labels", "All agents run as ", "Use this mapping?", "Use it (Recommended)", "Change some",
+                      "no ", "install or OS user found. Each ", " account needs its own install with its own login. Type its path, or skip it.",
+                      "Agy keeps its login per OS user; a second install may share the first one", "Do you want to set special permission modes to start some of these agents with?",
+                      "No, all Default (Recommended)", "Default (no arguments)", "Custom (type the arguments)", "which permission mode?", "YOLO is not offered for ",
+                      "Would you like to start all these agents within Glitch?", "Choose per agent", "Which agents start in Glitch?", "Which Glitch folder?",
+                      "Save these {N} agents?", "Save and set up (Recommended)", "Change something", "(from its config) (Recommended)",
+                      "Follow the explicitly assigned task. Role text is guidance, not identity isolation.", "SPAWN knows no CLI with that name.",
+                      "--dangerously-skip-permissions", "--dangerously-bypass-approvals-and-sandbox", "--permission-mode bypassPermissions", "--approval-mode yolo",
+                      "Arguments cannot contain ", "Not used for "]:
+            self.assertIn(exact, sh, exact)
+            self.assertIn(exact.replace("one'", "one''"), ps1, exact)
+
+    def test_windows_twin_reads_the_omp_config_and_bounds_every_call(self):
+        ps1 = (PACKAGE / "structuredquestions.ps1").read_text()
+        self.assertIn("WaitForExit($timeoutMs)", ps1)
+        self.assertIn("Stop-ProcessTree $id $since", ps1, "the whole tree is stopped, not only the launched process")
+        self.assertNotIn("& $cmd.Source --help", ps1, "no unbounded help call")
+        self.assertIn(".omp\\agent\\config.yml", ps1)
+        self.assertIn("modelRoles:", ps1)
+        self.assertIn("Get-OmpFamily", ps1)
+        self.assertIn("Get-Command -All", ps1, "every install of a CLI on PATH is a candidate")
 
     def test_windows_launch_plan_and_flag_tokens_from_the_ps1_source(self):
-        # No PowerShell on the build host. The launch decision and the token boundary are literal patterns in the
-        # twin's source; they are read from it and applied here, so the source itself is what is exercised.
+        # The launch decision and the token boundary are literal patterns in the twin's source; they are read from it
+        # and applied here, so the source itself is what is exercised.
         ps1 = (PACKAGE / "structuredquestions.ps1").read_text()
 
         def literal(name):
             m = re.search(r"\$script:" + name + r" = '((?:[^']|'')*)'", ps1)
             self.assertIsNotNone(m, name)
             return m.group(1).replace("''", "'")
-        shim, direct, unsafe = re.compile(literal("CmdShim")), re.compile(literal("DirectExe")), re.compile(literal("UnsafeForCmd"))
+        shim, direct, script, unsafe = (re.compile(literal(n)) for n in ("CmdShim", "DirectExe", "PsScript", "UnsafeForCmd"))
         for path in (r"C:\Users\you\AppData\Roaming\npm\claude.cmd", r"C:\Program Files (x86)\tools\codex.BAT"):
             self.assertTrue(shim.search(path) and not direct.search(path) and not unsafe.search(path), path)
         for path in (r"C:\tools\kimi.exe", r"C:\tools\grok.COM"):
             self.assertTrue(direct.search(path) and not shim.search(path), path)
         for path in (r"C:\x\a%PATH%.cmd", 'C:\\x\\a"b.cmd', "C:\\x\\a!b.bat", "C:\\x\\a\nb.cmd"):
             self.assertTrue(shim.search(path) and unsafe.search(path), "refused: " + path)
-        self.assertFalse(shim.search(r"C:\x\tool.ps1") or direct.search(r"C:\x\tool.ps1"), "a script is not started directly")
-        # The plan routes shims through cmd.exe /d /c, catches a launch failure per provider and keeps going.
+        self.assertTrue(script.search(r"C:\x\tool.ps1") and not shim.search(r"C:\x\tool.ps1") and not direct.search(r"C:\x\tool.ps1"))
         self.assertIn("'/d /c \"\"' + $Path + '\" --help\"'", ps1)
-        self.assertRegex(ps1, r"try \{ \$help = Invoke-Bounded \$plan\.file \$plan\.arguments \} catch \{ \$unavailable \+= ")
+        self.assertIn("'-NoProfile -File \"' + $Path + '\" --help'", ps1, "a .ps1 install runs the way SPAWN launches it")
         before, after = re.compile(literal("TokenBefore")), re.compile(literal("TokenAfter"))
 
         def token(text, tok):
@@ -479,19 +640,26 @@ class StructuredQuestions(unittest.TestCase):
         self.assertFalse(token("--yolo-extra", "--yolo") or token("x--yolo", "--yolo") or token("--approval-mode-x", "--approval-mode"))
         self.assertTrue(token("(always-ask|yolo)", "yolo") and not token("(always-ask|yolo-extra)", "yolo"))
 
-
     @unittest.skipUnless(shutil.which("pwsh") or shutil.which("powershell"), "needs PowerShell (the build host has none; run on Windows)")
     def test_windows_runtime_hang_tree_kill_and_help_layouts(self):
         host = shutil.which("pwsh") or shutil.which("powershell")
         work = Path(self.tmp.name) / "win"
         work.mkdir()
-        done = subprocess.run([host, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(Path(__file__).with_name("structuredquestions_windows.ps1")),
+        done = subprocess.run([host, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(HERE / "structuredquestions_windows.ps1"),
                                "-Dir", str(work), "-Script", str(PACKAGE / "structuredquestions.ps1")], capture_output=True, text=True, timeout=300)
         self.assertIn("VERDICT PASS", done.stdout, done.stdout + done.stderr)
 
+    def test_skill_forwards_every_observed_glitch_candidate(self):
+        skill = (PACKAGE / "skills/setup/SKILL.md").read_text()
+        self.assertIn("every entry of its `candidates` in any state", skill)
+        self.assertIn("--check-args", skill)
+        self.assertIn("`when`", skill)
+        self.assertIn("`for_each`", skill)
+
     def test_script_is_read_only_and_forbids_model_questions(self):
         text = SCRIPT.read_text()
-        self.assertEqual(re.findall(r"\b(rm|mv|cp|chmod|chown|mkdir|install|apt|pip|curl|wget)\b(?=\s)", re.sub(r"#.*", "", text)).count("curl"), 0)
+        commands = re.findall(r"(?m)(?:^|[;&|(]|\bthen|\bdo|\belse)\s*(mv|cp|chmod|chown|mkdir|install|apt|pip|curl|wget|tee|touch|ln)\s", re.sub(r"#.*", "", text))
+        self.assertEqual(commands, [], "the script runs no command that changes the machine")
         self.assertNotIn("which model", text.lower())
 
 
