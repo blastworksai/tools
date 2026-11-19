@@ -35,11 +35,12 @@ end
 -- end), after any sudo wrapper, and move the slot so the task text still lands where it was set.
 local function derive(record: any, executable: string, argv: { string }, slot: number?): ({ string }, number?, string?)
 	if not Config.selectors_active(record) then return argv, slot, nil end
-	-- The CLI is the program this launch actually runs (a literal sudo is unwrapped), never the label.
-	local program, first = Config.program_of(executable, argv)
-	local key = Selectors.program_key(program)
-	-- A requested model or effort is never dropped silently: an unknown program refuses.
-	if key == nil then return argv, slot, "Model and effort need a known CLI (claude, codex, kimi, grok, agy, muse or omp). This launch runs " .. tostring(program or executable) .. "; clear model and effort, or run a known CLI." end
+	-- The CLI is the record's provider (SKILLS-213), never the program's file name; the program's own
+	-- option region (after a literal sudo is unwrapped) is still where the flags go.
+	local _, first = Config.program_of(executable, argv)
+	local key = Selectors.provider_key(record.provider)
+	-- A requested model or effort is never dropped silently: a provider outside the seven refuses.
+	if key == nil then return argv, slot, "Model and effort need a known CLI as the provider (Claude, Codex, Kimi, Grok, Agy, Muse or OMP). The provider is " .. tostring(record.provider) .. "; clear model and effort, or set the provider to the CLI this agent runs." end
 	-- A flag the saved arguments already carry in the program's option region wins: never a second copy.
 	local region = Selectors.region(argv, first)
 	local model = if record.model_selector == true then record.model else nil

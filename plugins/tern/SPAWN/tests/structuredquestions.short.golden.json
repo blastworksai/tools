@@ -1,0 +1,428 @@
+{
+ "phase": 2,
+ "intro": [],
+ "prompts": [
+  {
+   "id": "mapping",
+   "title": "Accounts",
+   "lines": [
+    "Claude 1 — you (you) — @FIX@/home/you/.local/bin/claude",
+    "Claude 2 — you (you) — @FIX@/home/you/acct2/claude",
+    "Agy KK — you (you) — @FIX@/home/you/.local/bin/agy",
+    "Claude 3: no third install or OS user found. Each Claude account needs its own install with its own login. Type its path, or skip it.",
+    "Agy BWAI: no second install or OS user found. Each Agy account needs its own install with its own login. Type its path, or skip it.",
+    "Agy keeps its login per OS user; a second install may share the first one's login."
+   ],
+   "questions": [
+    {
+     "id": "mapping",
+     "question": "All agents run as you?",
+     "header": "Accounts",
+     "multiSelect": false,
+     "options": [
+      {
+       "label": "Yes (Recommended)",
+       "description": "Every agent runs as you.",
+       "preselected": true
+      },
+      {
+       "label": "Change some",
+       "description": "Pick another install, type a path or skip an agent.",
+       "preselected": false
+      }
+     ]
+    },
+    {
+     "id": "missing-claude-3",
+     "question": "Claude 3: type its path, or skip it?",
+     "header": "Claude 3",
+     "multiSelect": false,
+     "options": [
+      {
+       "label": "Skip it (Recommended)",
+       "description": "Save no agent for Claude 3.",
+       "preselected": true
+      },
+      {
+       "label": "Type its path",
+       "description": "Type the absolute path of the Claude install that has this account's login.",
+       "preselected": false,
+       "type": true
+      }
+     ],
+     "agent_id": "claude-3"
+    },
+    {
+     "id": "missing-agy-bwai",
+     "question": "Agy BWAI: type its path, or skip it?",
+     "header": "Agy BWAI",
+     "multiSelect": false,
+     "options": [
+      {
+       "label": "Skip it (Recommended)",
+       "description": "Save no agent for Agy BWAI.",
+       "preselected": true
+      },
+      {
+       "label": "Type its path",
+       "description": "Type the absolute path of the Agy install that has this account's login.",
+       "preselected": false,
+       "type": true
+      }
+     ],
+     "agent_id": "agy-bwai"
+    }
+   ]
+  },
+  {
+   "id": "permissions",
+   "title": "Permissions",
+   "questions": [
+    {
+     "id": "perm-gate",
+     "question": "Do you want to set special permission modes to start some of these agents with?",
+     "header": "Permissions",
+     "multiSelect": false,
+     "options": [
+      {
+       "label": "No, all Default (Recommended)",
+       "description": "Every agent starts with no extra arguments.",
+       "preselected": true
+      },
+      {
+       "label": "Yes",
+       "description": "Choose Default, YOLO or Custom for each agent.",
+       "preselected": false
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "permission-modes",
+   "title": "Permission modes",
+   "questions": [
+    {
+     "id": "perm-claude-1",
+     "question": "Claude 1: which permission mode?",
+     "header": "Claude 1",
+     "multiSelect": false,
+     "options": [
+      {
+       "label": "Default (no arguments)",
+       "description": "Claude starts with no extra arguments.",
+       "preselected": true
+      },
+      {
+       "label": "YOLO (--dangerously-skip-permissions)",
+       "description": "Claude acts without asking first.",
+       "preselected": false
+      },
+      {
+       "label": "Custom (type the arguments)",
+       "description": "Type the arguments; SPAWN checks them before they are saved.",
+       "preselected": false,
+       "type": true
+      }
+     ],
+     "when": {
+      "question": "perm-gate",
+      "is": "Yes"
+     },
+     "agent_id": "claude-1"
+    },
+    {
+     "id": "perm-claude-2",
+     "question": "Claude 2: which permission mode?",
+     "header": "Claude 2",
+     "multiSelect": false,
+     "options": [
+      {
+       "label": "Default (no arguments)",
+       "description": "Claude starts with no extra arguments.",
+       "preselected": true
+      },
+      {
+       "label": "YOLO (--dangerously-skip-permissions)",
+       "description": "Claude acts without asking first.",
+       "preselected": false
+      },
+      {
+       "label": "Custom (type the arguments)",
+       "description": "Type the arguments; SPAWN checks them before they are saved.",
+       "preselected": false,
+       "type": true
+      }
+     ],
+     "when": {
+      "question": "perm-gate",
+      "is": "Yes"
+     },
+     "agent_id": "claude-2"
+    },
+    {
+     "id": "perm-agy-kk",
+     "question": "Agy KK: which permission mode?",
+     "header": "Agy KK",
+     "multiSelect": false,
+     "options": [
+      {
+       "label": "Default (no arguments)",
+       "description": "Agy starts with no extra arguments.",
+       "preselected": true
+      },
+      {
+       "label": "YOLO (--dangerously-skip-permissions)",
+       "description": "Agy acts without asking first.",
+       "preselected": false
+      },
+      {
+       "label": "Custom (type the arguments)",
+       "description": "Type the arguments; SPAWN checks them before they are saved.",
+       "preselected": false,
+       "type": true
+      }
+     ],
+     "when": {
+      "question": "perm-gate",
+      "is": "Yes"
+     },
+     "agent_id": "agy-kk"
+    }
+   ]
+  },
+  {
+   "id": "review",
+   "title": "Review",
+   "show_first": "derived.review table for the agents; {N} is their count",
+   "questions": [
+    {
+     "id": "review",
+     "question": "Save these {N} agents?",
+     "header": "Save",
+     "multiSelect": false,
+     "options": [
+      {
+       "label": "Save and set up (Recommended)",
+       "description": "Save the roster and let SPAWN prepare it.",
+       "preselected": true
+      },
+      {
+       "label": "Change something",
+       "description": "Go back and change a choice.",
+       "preselected": false
+      }
+     ]
+    }
+   ]
+  }
+ ],
+ "derived": {
+  "operator": "you",
+  "launch_folder": "@FIX@/nothing",
+  "providers": [
+   {
+    "name": "Claude",
+    "cli": "claude",
+    "found": true
+   },
+   {
+    "name": "Codex",
+    "cli": "codex",
+    "found": false
+   },
+   {
+    "name": "Kimi",
+    "cli": "kimi",
+    "found": false
+   },
+   {
+    "name": "Grok",
+    "cli": "grok",
+    "found": false
+   },
+   {
+    "name": "Agy",
+    "cli": "agy",
+    "found": true
+   },
+   {
+    "name": "Muse",
+    "cli": "muse",
+    "found": false
+   },
+   {
+    "name": "OMP",
+    "cli": "omp",
+    "found": false
+   }
+  ],
+  "accounts": [
+   {
+    "id": "claude-1",
+    "provider": "Claude",
+    "provider_family": "anthropic",
+    "account_label": "Claude 1",
+    "display": "Claude 1",
+    "account": "you",
+    "operator": true,
+    "command": "@FIX@/home/you/.local/bin/claude",
+    "home": "@FIX@/home/you",
+    "install": "you#1",
+    "row": "Claude 1 — you (you) — @FIX@/home/you/.local/bin/claude"
+   },
+   {
+    "id": "claude-2",
+    "provider": "Claude",
+    "provider_family": "anthropic",
+    "account_label": "Claude 2",
+    "display": "Claude 2",
+    "account": "you",
+    "operator": true,
+    "command": "@FIX@/home/you/acct2/claude",
+    "home": "@FIX@/home/you",
+    "install": "you#2",
+    "row": "Claude 2 — you (you) — @FIX@/home/you/acct2/claude"
+   },
+   {
+    "id": "agy-kk",
+    "provider": "Agy",
+    "provider_family": "google",
+    "account_label": "KK",
+    "display": "Agy KK",
+    "account": "you",
+    "operator": true,
+    "command": "@FIX@/home/you/.local/bin/agy",
+    "home": "@FIX@/home/you",
+    "install": "you#1",
+    "row": "Agy KK — you (you) — @FIX@/home/you/.local/bin/agy"
+   }
+  ],
+  "missing": [
+   {
+    "id": "claude-3",
+    "provider": "Claude",
+    "account_label": "Claude 3",
+    "display": "Claude 3"
+   },
+   {
+    "id": "agy-bwai",
+    "provider": "Agy",
+    "account_label": "BWAI",
+    "display": "Agy BWAI"
+   }
+  ],
+  "candidates": [
+   {
+    "key": "you#1",
+    "provider": "Claude",
+    "account": "you",
+    "operator": true,
+    "command": "@FIX@/home/you/.local/bin/claude",
+    "option": "you (you) — @FIX@/home/you/.local/bin/claude",
+    "used_by": "claude-1"
+   },
+   {
+    "key": "you#2",
+    "provider": "Claude",
+    "account": "you",
+    "operator": true,
+    "command": "@FIX@/home/you/acct2/claude",
+    "option": "you (you) — @FIX@/home/you/acct2/claude",
+    "used_by": "claude-2"
+   },
+   {
+    "key": "you#1",
+    "provider": "Agy",
+    "account": "you",
+    "operator": true,
+    "command": "@FIX@/home/you/.local/bin/agy",
+    "option": "you (you) — @FIX@/home/you/.local/bin/agy",
+    "used_by": "agy-kk"
+   }
+  ],
+  "permissions": {
+   "claude-1": [
+    {
+     "label": "Default (no arguments)",
+     "arguments": []
+    },
+    {
+     "label": "YOLO (--dangerously-skip-permissions)",
+     "arguments": [
+      "--dangerously-skip-permissions"
+     ]
+    }
+   ],
+   "claude-2": [
+    {
+     "label": "Default (no arguments)",
+     "arguments": []
+    },
+    {
+     "label": "YOLO (--dangerously-skip-permissions)",
+     "arguments": [
+      "--dangerously-skip-permissions"
+     ]
+    }
+   ],
+   "agy-kk": [
+    {
+     "label": "Default (no arguments)",
+     "arguments": []
+    },
+    {
+     "label": "YOLO (--dangerously-skip-permissions)",
+     "arguments": [
+      "--dangerously-skip-permissions"
+     ]
+    }
+   ]
+  },
+  "custom_arguments": {
+   "label": "Custom (type the arguments)",
+   "check": [
+    "--check-args",
+    "{cli}",
+    "{words}"
+   ]
+  },
+  "glitch_folders": [],
+  "rerun": {
+   "argv": [
+    "--phase",
+    "2",
+    "--accounts",
+    "claude=Claude 1,Claude 2,Claude 3",
+    "--accounts",
+    "agy=KK,BWAI"
+   ],
+   "map": [
+    "--map",
+    "{id}={install key or absolute path}"
+   ],
+   "skip": [
+    "--skip",
+    "{id}"
+   ]
+  },
+  "omp_prompt": "Follow the explicitly assigned task. Role text is guidance, not identity isolation.",
+  "review": {
+   "columns": [
+    "ID",
+    "account",
+    "CLI",
+    "permission flags",
+    "folder",
+    "paid check"
+   ],
+   "paid_check_native": "one harmless paid model message",
+   "paid_check_terminal": "offline checks only"
+  }
+ },
+ "limits": {
+  "questions_per_prompt": 4,
+  "options_per_question": 4,
+  "header_characters": 12
+ }
+}

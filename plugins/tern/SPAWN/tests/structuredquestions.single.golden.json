@@ -1,0 +1,1009 @@
+{
+ "phase1": {
+  "phase": 1,
+  "intro": [
+   "Found on this machine: Claude, Codex, Kimi, Grok, Agy, Muse, OMP.",
+   "Glitch folder detected: @FIX@/glitch."
+  ],
+  "prompts": [
+   {
+    "id": "accounts",
+    "title": "Accounts",
+    "questions": [
+     {
+      "id": "multi",
+      "question": "Are there any providers for which you have more than one account?",
+      "header": "Accounts",
+      "multiSelect": false,
+      "options": [
+       {
+        "label": "No",
+        "description": "One account for each provider found.",
+        "preselected": true
+       },
+       {
+        "label": "Yes",
+        "description": "Say which providers, how many accounts and their labels.",
+        "preselected": false
+       }
+      ]
+     }
+    ]
+   },
+   {
+    "id": "providers",
+    "title": "Providers",
+    "questions": [
+     {
+      "id": "providers-1",
+      "question": "Which providers have more than one account? (1 of 2)",
+      "header": "Providers 1",
+      "multiSelect": true,
+      "options": [
+       {
+        "label": "Claude",
+        "description": "More than one Claude account.",
+        "preselected": false,
+        "value": "claude"
+       },
+       {
+        "label": "Codex",
+        "description": "More than one Codex account.",
+        "preselected": false,
+        "value": "codex"
+       },
+       {
+        "label": "Kimi",
+        "description": "More than one Kimi account.",
+        "preselected": false,
+        "value": "kimi"
+       },
+       {
+        "label": "Grok",
+        "description": "More than one Grok account.",
+        "preselected": false,
+        "value": "grok"
+       }
+      ],
+      "when": {
+       "question": "multi",
+       "is": "Yes"
+      }
+     },
+     {
+      "id": "providers-2",
+      "question": "Which providers have more than one account? (2 of 2)",
+      "header": "Providers 2",
+      "multiSelect": true,
+      "options": [
+       {
+        "label": "Agy",
+        "description": "More than one Agy account.",
+        "preselected": false,
+        "value": "agy"
+       },
+       {
+        "label": "Muse",
+        "description": "More than one Muse account.",
+        "preselected": false,
+        "value": "muse"
+       },
+       {
+        "label": "OMP",
+        "description": "More than one OMP account.",
+        "preselected": false,
+        "value": "omp"
+       }
+      ],
+      "when": {
+       "question": "multi",
+       "is": "Yes"
+      }
+     }
+    ]
+   },
+   {
+    "id": "count",
+    "title": "Number of accounts",
+    "questions": [
+     {
+      "id": "count",
+      "question": "How many {provider} accounts?",
+      "header": "{provider}",
+      "multiSelect": false,
+      "options": [
+       {
+        "label": "2",
+        "description": "Two {provider} accounts.",
+        "preselected": true
+       },
+       {
+        "label": "3",
+        "description": "Three {provider} accounts.",
+        "preselected": false
+       },
+       {
+        "label": "4",
+        "description": "Four {provider} accounts.",
+        "preselected": false
+       }
+      ],
+      "when": {
+       "question": "multi",
+       "is": "Yes"
+      },
+      "for_each": {
+       "questions": [
+        "providers-1",
+        "providers-2"
+       ]
+      },
+      "other": {
+       "whole_number": [
+        2,
+        16
+       ]
+      }
+     }
+    ]
+   },
+   {
+    "id": "labels",
+    "title": "Labels",
+    "questions": [
+     {
+      "id": "labels",
+      "question": "Labels for your {N} {provider} accounts?",
+      "header": "{provider}",
+      "multiSelect": false,
+      "options": [
+       {
+        "label": "Number them ({provider} 1, {provider} 2)",
+        "description": "The labels are {provider} 1 to {provider} {N}.",
+        "preselected": true,
+        "value": "numbered"
+       },
+       {
+        "label": "Type my own labels",
+        "description": "Type {N} labels, separated by commas: at most 32 characters each.",
+        "preselected": false,
+        "value": "typed",
+        "type": true
+       }
+      ],
+      "when": {
+       "question": "multi",
+       "is": "Yes"
+      },
+      "for_each": {
+       "questions": [
+        "providers-1",
+        "providers-2"
+       ]
+      },
+      "for_each_count": {
+       "question": "count"
+      }
+     }
+    ]
+   }
+  ],
+  "next": {
+   "argv": [
+    "--phase",
+    "2"
+   ],
+   "per_answer": {
+    "question": "labels",
+    "argv": [
+     "--accounts",
+     "{cli}={labels}"
+    ]
+   },
+   "numbered": "{provider} 1,{provider} 2,...,{provider} {N}"
+  },
+  "derived": {
+   "providers": [
+    {
+     "name": "Claude",
+     "cli": "claude",
+     "found": true
+    },
+    {
+     "name": "Codex",
+     "cli": "codex",
+     "found": true
+    },
+    {
+     "name": "Kimi",
+     "cli": "kimi",
+     "found": true
+    },
+    {
+     "name": "Grok",
+     "cli": "grok",
+     "found": true
+    },
+    {
+     "name": "Agy",
+     "cli": "agy",
+     "found": true
+    },
+    {
+     "name": "Muse",
+     "cli": "muse",
+     "found": true
+    },
+    {
+     "name": "OMP",
+     "cli": "omp",
+     "found": true
+    }
+   ],
+   "glitch_folders": [
+    "@FIX@/glitch"
+   ]
+  },
+  "limits": {
+   "questions_per_prompt": 4,
+   "options_per_question": 4,
+   "header_characters": 12
+  }
+ },
+ "phase2": {
+  "phase": 2,
+  "intro": [],
+  "prompts": [
+   {
+    "id": "mapping",
+    "title": "Accounts",
+    "questions": [
+     {
+      "id": "mapping",
+      "question": "All agents run as you?",
+      "header": "Accounts",
+      "multiSelect": false,
+      "options": [
+       {
+        "label": "Yes (Recommended)",
+        "description": "Every agent runs as you.",
+        "preselected": true
+       },
+       {
+        "label": "Change some",
+        "description": "Pick another install, type a path or skip an agent.",
+        "preselected": false
+       }
+      ]
+     }
+    ]
+   },
+   {
+    "id": "permissions",
+    "title": "Permissions",
+    "questions": [
+     {
+      "id": "perm-gate",
+      "question": "Do you want to set special permission modes to start some of these agents with?",
+      "header": "Permissions",
+      "multiSelect": false,
+      "options": [
+       {
+        "label": "No, all Default (Recommended)",
+        "description": "Every agent starts with no extra arguments.",
+        "preselected": true
+       },
+       {
+        "label": "Yes",
+        "description": "Choose Default, YOLO or Custom for each agent.",
+        "preselected": false
+       }
+      ]
+     }
+    ]
+   },
+   {
+    "id": "permission-modes-1",
+    "title": "Permission modes (1 of 2)",
+    "questions": [
+     {
+      "id": "perm-claude",
+      "question": "Claude: which permission mode?",
+      "header": "Claude",
+      "multiSelect": false,
+      "options": [
+       {
+        "label": "Default (no arguments)",
+        "description": "Claude starts with no extra arguments.",
+        "preselected": true
+       },
+       {
+        "label": "YOLO (--dangerously-skip-permissions)",
+        "description": "Claude acts without asking first.",
+        "preselected": false
+       },
+       {
+        "label": "Custom (type the arguments)",
+        "description": "Type the arguments; SPAWN checks them before they are saved.",
+        "preselected": false,
+        "type": true
+       }
+      ],
+      "when": {
+       "question": "perm-gate",
+       "is": "Yes"
+      },
+      "agent_id": "claude"
+     },
+     {
+      "id": "perm-codex",
+      "question": "Codex: which permission mode?",
+      "header": "Codex",
+      "multiSelect": false,
+      "options": [
+       {
+        "label": "Default (no arguments)",
+        "description": "Codex starts with no extra arguments.",
+        "preselected": true
+       },
+       {
+        "label": "YOLO (--dangerously-bypass-approvals-and-sandbox)",
+        "description": "Codex runs with no approvals and no sandbox.",
+        "preselected": false
+       },
+       {
+        "label": "Custom (type the arguments)",
+        "description": "Type the arguments; SPAWN checks them before they are saved.",
+        "preselected": false,
+        "type": true
+       }
+      ],
+      "when": {
+       "question": "perm-gate",
+       "is": "Yes"
+      },
+      "agent_id": "codex"
+     },
+     {
+      "id": "perm-kimi",
+      "question": "Kimi: which permission mode?",
+      "header": "Kimi",
+      "multiSelect": false,
+      "options": [
+       {
+        "label": "Default (no arguments)",
+        "description": "Kimi starts with no extra arguments.",
+        "preselected": true
+       },
+       {
+        "label": "YOLO (--auto)",
+        "description": "Kimi never asks for approval.",
+        "preselected": false
+       },
+       {
+        "label": "Custom (type the arguments)",
+        "description": "Type the arguments; SPAWN checks them before they are saved.",
+        "preselected": false,
+        "type": true
+       }
+      ],
+      "when": {
+       "question": "perm-gate",
+       "is": "Yes"
+      },
+      "agent_id": "kimi"
+     },
+     {
+      "id": "perm-grok",
+      "question": "Grok: which permission mode?",
+      "header": "Grok",
+      "multiSelect": false,
+      "options": [
+       {
+        "label": "Default (no arguments)",
+        "description": "Grok starts with no extra arguments.",
+        "preselected": true
+       },
+       {
+        "label": "YOLO (--permission-mode bypassPermissions)",
+        "description": "Grok skips its permission checks.",
+        "preselected": false
+       },
+       {
+        "label": "Custom (type the arguments)",
+        "description": "Type the arguments; SPAWN checks them before they are saved.",
+        "preselected": false,
+        "type": true
+       }
+      ],
+      "when": {
+       "question": "perm-gate",
+       "is": "Yes"
+      },
+      "agent_id": "grok"
+     }
+    ]
+   },
+   {
+    "id": "permission-modes-2",
+    "title": "Permission modes (2 of 2)",
+    "questions": [
+     {
+      "id": "perm-agy",
+      "question": "Agy: which permission mode?",
+      "header": "Agy",
+      "multiSelect": false,
+      "options": [
+       {
+        "label": "Default (no arguments)",
+        "description": "Agy starts with no extra arguments.",
+        "preselected": true
+       },
+       {
+        "label": "YOLO (--dangerously-skip-permissions)",
+        "description": "Agy acts without asking first.",
+        "preselected": false
+       },
+       {
+        "label": "Custom (type the arguments)",
+        "description": "Type the arguments; SPAWN checks them before they are saved.",
+        "preselected": false,
+        "type": true
+       }
+      ],
+      "when": {
+       "question": "perm-gate",
+       "is": "Yes"
+      },
+      "agent_id": "agy"
+     },
+     {
+      "id": "perm-muse",
+      "question": "Muse: which permission mode?",
+      "header": "Muse",
+      "multiSelect": false,
+      "options": [
+       {
+        "label": "Default (no arguments)",
+        "description": "Muse starts with no extra arguments.",
+        "preselected": true
+       },
+       {
+        "label": "YOLO (--yolo)",
+        "description": "Muse runs without approval prompts.",
+        "preselected": false
+       },
+       {
+        "label": "Custom (type the arguments)",
+        "description": "Type the arguments; SPAWN checks them before they are saved.",
+        "preselected": false,
+        "type": true
+       }
+      ],
+      "when": {
+       "question": "perm-gate",
+       "is": "Yes"
+      },
+      "agent_id": "muse"
+     },
+     {
+      "id": "perm-omp",
+      "question": "OMP: which permission mode?",
+      "header": "OMP",
+      "multiSelect": false,
+      "options": [
+       {
+        "label": "Default (no arguments)",
+        "description": "OMP starts with no extra arguments.",
+        "preselected": true
+       },
+       {
+        "label": "YOLO (--approval-mode yolo)",
+        "description": "OMP runs tools without approval.",
+        "preselected": false
+       },
+       {
+        "label": "Custom (type the arguments)",
+        "description": "Type the arguments; SPAWN checks them before they are saved.",
+        "preselected": false,
+        "type": true
+       }
+      ],
+      "when": {
+       "question": "perm-gate",
+       "is": "Yes"
+      },
+      "agent_id": "omp"
+     }
+    ]
+   },
+   {
+    "id": "folder",
+    "title": "Folder",
+    "questions": [
+     {
+      "id": "folder",
+      "question": "I detected Glitch at @FIX@/glitch. Would you like to start all these agents within Glitch?",
+      "header": "Folder",
+      "multiSelect": false,
+      "options": [
+       {
+        "label": "All (Recommended)",
+        "description": "Every agent starts in Glitch.",
+        "preselected": true
+       },
+       {
+        "label": "Choose per agent",
+        "description": "Pick the agents that start in Glitch; the rest start in their own home folder.",
+        "preselected": false
+       },
+       {
+        "label": "None",
+        "description": "Every agent starts in its own home folder.",
+        "preselected": false
+       }
+      ]
+     }
+    ]
+   },
+   {
+    "id": "folder-agents",
+    "title": "Agents in Glitch",
+    "questions": [
+     {
+      "id": "folder-agents-1",
+      "question": "Which agents start in Glitch? (1 of 2)",
+      "header": "Glitch 1",
+      "multiSelect": true,
+      "options": [
+       {
+        "label": "Claude",
+        "description": "Starts in Glitch.",
+        "preselected": false,
+        "value": "claude"
+       },
+       {
+        "label": "Codex",
+        "description": "Starts in Glitch.",
+        "preselected": false,
+        "value": "codex"
+       },
+       {
+        "label": "Kimi",
+        "description": "Starts in Glitch.",
+        "preselected": false,
+        "value": "kimi"
+       },
+       {
+        "label": "Grok",
+        "description": "Starts in Glitch.",
+        "preselected": false,
+        "value": "grok"
+       }
+      ],
+      "when": {
+       "question": "folder",
+       "is": "Choose per agent"
+      }
+     },
+     {
+      "id": "folder-agents-2",
+      "question": "Which agents start in Glitch? (2 of 2)",
+      "header": "Glitch 2",
+      "multiSelect": true,
+      "options": [
+       {
+        "label": "Agy",
+        "description": "Starts in Glitch.",
+        "preselected": false,
+        "value": "agy"
+       },
+       {
+        "label": "Muse",
+        "description": "Starts in Glitch.",
+        "preselected": false,
+        "value": "muse"
+       },
+       {
+        "label": "OMP",
+        "description": "Starts in Glitch.",
+        "preselected": false,
+        "value": "omp"
+       }
+      ],
+      "when": {
+       "question": "folder",
+       "is": "Choose per agent"
+      }
+     }
+    ]
+   },
+   {
+    "id": "omp",
+    "title": "OMP service",
+    "questions": [
+     {
+      "id": "omp-omp",
+      "question": "Which service runs omp's model?",
+      "header": "OMP service",
+      "multiSelect": false,
+      "options": [
+       {
+        "label": "openai (from its config) (Recommended)",
+        "description": "The service named in this agent's own OMP configuration.",
+        "preselected": true
+       },
+       {
+        "label": "google",
+        "description": "Run this agent's OMP model through google.",
+        "preselected": false
+       },
+       {
+        "label": "anthropic",
+        "description": "Run this agent's OMP model through anthropic.",
+        "preselected": false
+       }
+      ],
+      "agent_id": "omp"
+     }
+    ]
+   },
+   {
+    "id": "review",
+    "title": "Review",
+    "show_first": "derived.review table for the agents; {N} is their count",
+    "questions": [
+     {
+      "id": "review",
+      "question": "Save these {N} agents?",
+      "header": "Save",
+      "multiSelect": false,
+      "options": [
+       {
+        "label": "Save and set up (Recommended)",
+        "description": "Save the roster and let SPAWN prepare it.",
+        "preselected": true
+       },
+       {
+        "label": "Change something",
+        "description": "Go back and change a choice.",
+        "preselected": false
+       }
+      ]
+     }
+    ]
+   }
+  ],
+  "derived": {
+   "operator": "you",
+   "launch_folder": "@FIX@/nothing",
+   "providers": [
+    {
+     "name": "Claude",
+     "cli": "claude",
+     "found": true
+    },
+    {
+     "name": "Codex",
+     "cli": "codex",
+     "found": true
+    },
+    {
+     "name": "Kimi",
+     "cli": "kimi",
+     "found": true
+    },
+    {
+     "name": "Grok",
+     "cli": "grok",
+     "found": true
+    },
+    {
+     "name": "Agy",
+     "cli": "agy",
+     "found": true
+    },
+    {
+     "name": "Muse",
+     "cli": "muse",
+     "found": true
+    },
+    {
+     "name": "OMP",
+     "cli": "omp",
+     "found": true
+    }
+   ],
+   "accounts": [
+    {
+     "id": "claude",
+     "provider": "Claude",
+     "provider_family": "anthropic",
+     "account_label": "Claude",
+     "display": "Claude",
+     "account": "you",
+     "operator": true,
+     "command": "@FIX@/home/you/.local/bin/claude",
+     "home": "@FIX@/home/you",
+     "install": "you#1",
+     "row": "Claude — you (you) — @FIX@/home/you/.local/bin/claude"
+    },
+    {
+     "id": "codex",
+     "provider": "Codex",
+     "provider_family": "openai",
+     "account_label": "Codex",
+     "display": "Codex",
+     "account": "you",
+     "operator": true,
+     "command": "@FIX@/home/you/.local/bin/codex",
+     "home": "@FIX@/home/you",
+     "install": "you#1",
+     "row": "Codex — you (you) — @FIX@/home/you/.local/bin/codex"
+    },
+    {
+     "id": "kimi",
+     "provider": "Kimi",
+     "provider_family": "moonshot",
+     "account_label": "Kimi",
+     "display": "Kimi",
+     "account": "you",
+     "operator": true,
+     "command": "@FIX@/home/you/.local/bin/kimi",
+     "home": "@FIX@/home/you",
+     "install": "you#1",
+     "row": "Kimi — you (you) — @FIX@/home/you/.local/bin/kimi"
+    },
+    {
+     "id": "grok",
+     "provider": "Grok",
+     "provider_family": "xai",
+     "account_label": "Grok",
+     "display": "Grok",
+     "account": "you",
+     "operator": true,
+     "command": "@FIX@/home/you/.local/bin/grok",
+     "home": "@FIX@/home/you",
+     "install": "you#1",
+     "row": "Grok — you (you) — @FIX@/home/you/.local/bin/grok"
+    },
+    {
+     "id": "agy",
+     "provider": "Agy",
+     "provider_family": "google",
+     "account_label": "Agy",
+     "display": "Agy",
+     "account": "you",
+     "operator": true,
+     "command": "@FIX@/home/you/.local/bin/agy",
+     "home": "@FIX@/home/you",
+     "install": "you#1",
+     "row": "Agy — you (you) — @FIX@/home/you/.local/bin/agy"
+    },
+    {
+     "id": "muse",
+     "provider": "Muse",
+     "provider_family": "meta",
+     "account_label": "Muse",
+     "display": "Muse",
+     "account": "you",
+     "operator": true,
+     "command": "@FIX@/home/you/.local/bin/muse",
+     "home": "@FIX@/home/you",
+     "install": "you#1",
+     "row": "Muse — you (you) — @FIX@/home/you/.local/bin/muse"
+    },
+    {
+     "id": "omp",
+     "provider": "OMP",
+     "provider_family": "openai",
+     "account_label": "OMP",
+     "display": "OMP",
+     "account": "you",
+     "operator": true,
+     "command": "@FIX@/home/you/.local/bin/omp",
+     "home": "@FIX@/home/you",
+     "install": "you#1",
+     "row": "OMP — you (you) — @FIX@/home/you/.local/bin/omp"
+    }
+   ],
+   "missing": [],
+   "candidates": [
+    {
+     "key": "you#1",
+     "provider": "Claude",
+     "account": "you",
+     "operator": true,
+     "command": "@FIX@/home/you/.local/bin/claude",
+     "option": "you (you) — @FIX@/home/you/.local/bin/claude",
+     "used_by": "claude"
+    },
+    {
+     "key": "you#1",
+     "provider": "Codex",
+     "account": "you",
+     "operator": true,
+     "command": "@FIX@/home/you/.local/bin/codex",
+     "option": "you (you) — @FIX@/home/you/.local/bin/codex",
+     "used_by": "codex"
+    },
+    {
+     "key": "you#1",
+     "provider": "Kimi",
+     "account": "you",
+     "operator": true,
+     "command": "@FIX@/home/you/.local/bin/kimi",
+     "option": "you (you) — @FIX@/home/you/.local/bin/kimi",
+     "used_by": "kimi"
+    },
+    {
+     "key": "you#1",
+     "provider": "Grok",
+     "account": "you",
+     "operator": true,
+     "command": "@FIX@/home/you/.local/bin/grok",
+     "option": "you (you) — @FIX@/home/you/.local/bin/grok",
+     "used_by": "grok"
+    },
+    {
+     "key": "you#1",
+     "provider": "Agy",
+     "account": "you",
+     "operator": true,
+     "command": "@FIX@/home/you/.local/bin/agy",
+     "option": "you (you) — @FIX@/home/you/.local/bin/agy",
+     "used_by": "agy"
+    },
+    {
+     "key": "you#1",
+     "provider": "Muse",
+     "account": "you",
+     "operator": true,
+     "command": "@FIX@/home/you/.local/bin/muse",
+     "option": "you (you) — @FIX@/home/you/.local/bin/muse",
+     "used_by": "muse"
+    },
+    {
+     "key": "you#1",
+     "provider": "OMP",
+     "account": "you",
+     "operator": true,
+     "command": "@FIX@/home/you/.local/bin/omp",
+     "option": "you (you) — @FIX@/home/you/.local/bin/omp",
+     "used_by": "omp"
+    }
+   ],
+   "permissions": {
+    "claude": [
+     {
+      "label": "Default (no arguments)",
+      "arguments": []
+     },
+     {
+      "label": "YOLO (--dangerously-skip-permissions)",
+      "arguments": [
+       "--dangerously-skip-permissions"
+      ]
+     }
+    ],
+    "codex": [
+     {
+      "label": "Default (no arguments)",
+      "arguments": []
+     },
+     {
+      "label": "YOLO (--dangerously-bypass-approvals-and-sandbox)",
+      "arguments": [
+       "--dangerously-bypass-approvals-and-sandbox"
+      ]
+     }
+    ],
+    "kimi": [
+     {
+      "label": "Default (no arguments)",
+      "arguments": []
+     },
+     {
+      "label": "YOLO (--auto)",
+      "arguments": [
+       "--auto"
+      ]
+     }
+    ],
+    "grok": [
+     {
+      "label": "Default (no arguments)",
+      "arguments": []
+     },
+     {
+      "label": "YOLO (--permission-mode bypassPermissions)",
+      "arguments": [
+       "--permission-mode",
+       "bypassPermissions"
+      ]
+     }
+    ],
+    "agy": [
+     {
+      "label": "Default (no arguments)",
+      "arguments": []
+     },
+     {
+      "label": "YOLO (--dangerously-skip-permissions)",
+      "arguments": [
+       "--dangerously-skip-permissions"
+      ]
+     }
+    ],
+    "muse": [
+     {
+      "label": "Default (no arguments)",
+      "arguments": []
+     },
+     {
+      "label": "YOLO (--yolo)",
+      "arguments": [
+       "--yolo"
+      ]
+     }
+    ],
+    "omp": [
+     {
+      "label": "Default (no arguments)",
+      "arguments": []
+     },
+     {
+      "label": "YOLO (--approval-mode yolo)",
+      "arguments": [
+       "--approval-mode",
+       "yolo"
+      ]
+     }
+    ]
+   },
+   "custom_arguments": {
+    "label": "Custom (type the arguments)",
+    "check": [
+     "--check-args",
+     "{cli}",
+     "{words}"
+    ]
+   },
+   "glitch_folders": [
+    "@FIX@/glitch"
+   ],
+   "rerun": {
+    "argv": [
+     "--phase",
+     "2"
+    ],
+    "map": [
+     "--map",
+     "{id}={install key or absolute path}"
+    ],
+    "skip": [
+     "--skip",
+     "{id}"
+    ]
+   },
+   "omp_prompt": "Follow the explicitly assigned task. Role text is guidance, not identity isolation.",
+   "review": {
+    "columns": [
+     "ID",
+     "account",
+     "CLI",
+     "permission flags",
+     "folder",
+     "paid check"
+    ],
+    "paid_check_native": "one harmless paid model message",
+    "paid_check_terminal": "offline checks only"
+   }
+  },
+  "limits": {
+   "questions_per_prompt": 4,
+   "options_per_question": 4,
+   "header_characters": 12
+  }
+ }
+}
