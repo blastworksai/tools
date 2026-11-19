@@ -2565,7 +2565,9 @@ local function schedule(cx: WindowCx)
 					scan.startup_until[worker.worker_id] = scan.startup_until[worker.worker_id] or now + 120000
 					startup = now < scan.startup_until[worker.worker_id]
 				else scan.startup_until[worker.worker_id] = nil end
-				local poll_ms = if startup then math.min(flow.policy.poll_ms, 2000) else flow.policy.poll_ms
+				-- The host decides each worker's cadence (coordinators look every 10 s, SKILLS-214).
+				local cadence = if type(worker.poll_ms) == "number" and worker.poll_ms > 0 then worker.poll_ms else flow.policy.poll_ms
+				local poll_ms = if startup then math.min(cadence, 2000) else cadence
 				if now >= (scan.observed[worker.worker_id] or 0) then
 					scan.observed[worker.worker_id] = now + poll_ms
 					local native, _reason, _pane, problem = native_observation(cx, source, worker)

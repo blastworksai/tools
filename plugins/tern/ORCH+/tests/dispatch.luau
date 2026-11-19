@@ -13,7 +13,7 @@ local sections = { fixture = true, core = true, control_rebind = true, receipts 
 	quota_normalize = true, quota_assembly = true, quota_routing = true, quota_gate = true, quota_claim = true,
 	quota_rollover = true, quota_coordinator_rollover = true, quota_ledger = true, quota_selector = true, quota_continuation = true, window_bookkeeping = true, intent_buttons = true,
 	background_settlement = true, foreground_bootstrap = true, background_launch = true, background_adjacent = true, stale_intent = true,
-	assembly_restore = true, assembly_capacity = true, poll_continuation = true,
+	assembly_restore = true, assembly_capacity = true, poll_continuation = true, read_owed = true, coordinator_cost = true,
 	withdraw_fenced = true, policy_keys = true, loop_caps_rollover = true, loop_caps_retry = true, loop_caps_reports = true, loop_caps_landing_migration = true, loop_caps_landing_caps = true, loop_caps_landing_transport = true, loop_caps_landing_target_moved = true, worker_fields = true,
 	current_retention = true, current_ack_holes = true, current_nonce = true, current_close = true, current_handover = true, consumed_scope = true,
 	stale_result = true, stale_result_lost = true, stale_result_unrelated = true, stale_result_kind = true, stale_result_grant = true,
@@ -358,7 +358,8 @@ local function fixture(clock, options)
 			-- its real non-native outbox first; never substitute a watermark for another selector.
 			local status = if request.op == "mailbox_publish_ack" or request.op == "mailbox_publish_reply" then "published"
 				elseif request.op == "accept" then "accepted"
-				elseif request.op == "mailbox_retire" and request.mode == "compact" then "compacted" else nil
+				elseif request.op == "mailbox_retire" and request.mode == "compact" then "compacted"
+				elseif request.op == "mailbox_read" and request.selector.stream == "report" and request.selector.part == "manifest" then "missing" else nil
 			must(status, { code = "unexpected_watermark_continuation", request = request })
 			local settled = self:finish(queued.action_id, status)
 			must(settled.ok, settled)
@@ -824,6 +825,16 @@ if section == nil or section == "poll_continuation" then
 		check(not projected().poll_continuation and not projected().due_poll, "a ready action suppresses duplicate continuation scheduling")
 		return queued.action_id
 	end
+	local function owed(label)
+		due("owed report read after " .. label)
+		local read = poll("mailbox_read", true)
+		local selector = f:action(read).request.selector
+		check(selector.stream == "report" and selector.part == "manifest" and selector.slot == worker().accepted_seq + 1,
+			"a poll spent on " .. label .. " owes the next report manifest at once (SKILLS-214)")
+		assert(f:finish(read, "missing", {}).ok)
+		check(worker().workflow.read_owed == nil and not projected().poll_continuation and not projected().due_poll,
+			"the owed read, once spent, returns to paced discovery")
+	end
 	local logical = f:report(id, 1, "ACCEPTED", { assignment_sha256 = worker().assignment_sha256 }) .. string.rep(" ", 5000)
 	local frames = assert(codec.frame(logical, "report", worker()))
 	check(#frames.chunks > 1, "continuation fixture exercises a partial multi-chunk report")
@@ -852,7 +863,7 @@ if section == nil or section == "poll_continuation" then
 	due("accept continuation")
 	local accepted = poll("accept", true)
 	assert(f:finish(accepted, "accepted", {}).ok)
-	check(not projected().poll_continuation and not projected().due_poll, "settled acceptance returns to paced discovery")
+	owed("acceptance")
 
 	assert(f:apply("observe", { worker_id = id, pane_binding = worker().pane_binding, native_state = "idle" }).ok)
 	assert(f:apply("reply", { worker_id = id }).ok)
@@ -877,12 +888,13 @@ if section == nil or section == "poll_continuation" then
 			and worker().replies["1"].bytes == reply_bytes, "reply parts and final manifest retain the original immutable reply")
 		assert(f:finish(next_part, "published", {}).ok)
 	end
-	check(not projected().poll_continuation, "fully published reply awaiting acknowledgement is not runnable continuation")
+	owed("reply publication")
 	assert(f:watermark(id).ok)
 	due("compaction continuation")
 	local compact = poll("mailbox_retire", true)
 	check(f:action(compact).request.mode == "compact", "periodic watermark yields to already-authorized compaction")
 	assert(f:finish(compact, "compacted", {}).ok)
+	owed("compaction")
 	assert(f:apply("observe", { worker_id = id, pane_binding = worker().pane_binding, native_state = "idle" }).ok)
 	check(not projected().poll_continuation and not projected().due_poll, "idle worker without known work is still paced")
 	local poll_ms = dispatch.policy(f.authority.registry, f.origin.logical_session_id).poll_ms
@@ -897,6 +909,131 @@ if section == nil or section == "poll_continuation" then
 		"idle discovery still reads the next report manifest")
 	assert(f:finish(discovery, "missing", {}).ok)
 	check(not projected().poll_continuation and not projected().due_poll, "missing discovery starts another idle interval, not a hot loop")
+end
+-- SKILLS-214 cost bound (einh's pick "Fast after activity"): a coordinator whose state Tern cannot
+-- see (OMP) costs about four store writes per check. Replay the window: a tick every 10 s and a poll
+-- only when the host says it is due. Measured 19 Nov 2026: 4 writes per 10 s inside the window,
+-- 49 writes an hour after it (the ordinary 5-minute cadence).
+if section == nil or section == "coordinator_cost" then
+	local clock = { now_ms = 1000, mono_ms = 1000, epoch = "cost-host" }
+	local f = fixture(function() return clone(clock) end); local id = f:accepted(true)
+	local function shown() for _, w in dispatch.project(f.authority.registry, f.origin.logical_session_id, f.origin.alias_nonce).workflow.workers do if w.worker_id == id then return w end end end
+	for _ = 1, 8 do
+		if not shown().poll_continuation then break end
+		local q = f:apply("poll", { worker_id = id }); local r = f:action(q.action_id).request
+		local st = if r.op == "mailbox_publish_ack" or r.op == "mailbox_publish_reply" then "published" elseif r.op == "accept" then "accepted"
+			elseif r.op == "mailbox_retire" then "compacted" else "missing"
+		assert(f:finish(q.action_id, st, {}).ok)
+	end
+	local function cycles(n)
+		local before, polls = f.memory.writes, 0
+		for _ = 1, n do
+			clock.mono_ms += 10000; clock.now_ms += 10000; assert(f:tick().ok)
+			if shown().due_poll then
+				polls += 1
+				local q = f:apply("poll", { worker_id = id })
+				if q.action_id then assert(f:finish(q.action_id, "missing", {}).ok) end
+			end
+		end
+		return (f.memory.writes - before) / n, polls
+	end
+	local fast, fast_polls = cycles(30)
+	check(fast_polls == 30 and fast <= 5, "inside the fast window an unknown-state coordinator is read every 10 s at a bounded cost")
+	cycles(60) -- leave the 10-minute window
+	local slow, slow_polls = cycles(360)
+	check(slow_polls == 12 and slow * 360 <= 60, "an hour after the window costs only the ordinary 5-minute cadence (" .. tostring(slow_polls) .. " polls)")
+end
+-- SKILLS-214 (take 1 of the filmed scene 6): the coordinator published a multi-chunk proposal as
+-- report 3 while a watermark had made compaction due. The next poll spent itself on compaction and
+-- the read of report 3 waited a whole poll_ms (5 min by default). A settlement poll now owes the
+-- report lane a read at once, and coordinators look for their next report every 10 s.
+if section == nil or section == "read_owed" then
+	local clock = { now_ms = 1000, mono_ms = 1000, epoch = "read-owed-host" }
+	local f = fixture(function() return clone(clock) end); local id = f:accepted(true)
+	local function worker() return f.authority.registry.dispatch.workers[id] end
+	local function projected(fx, wid)
+		for _, shown in dispatch.project(fx.authority.registry, fx.origin.logical_session_id, fx.origin.alias_nonce).workflow.workers do
+			if shown.worker_id == wid then return shown end
+		end
+		error("missing read_owed worker")
+	end
+	local function drain()
+		for _ = 1, 8 do
+			if not projected(f, id).poll_continuation then return end
+			local queued = f:apply("poll", { worker_id = id }); assert(queued.ok, queued.message)
+			local request = f:action(queued.action_id).request
+			local status = if request.op == "mailbox_publish_ack" or request.op == "mailbox_publish_reply" then "published"
+				elseif request.op == "accept" then "accepted"
+				elseif request.op == "mailbox_retire" and request.mode == "compact" then "compacted"
+				elseif request.op == "mailbox_read" and request.selector.stream == "report" and request.selector.part == "manifest" then "missing" else nil
+			assert(status, request.op)
+			assert(f:finish(queued.action_id, status, {}).ok)
+		end
+		error("continuation did not settle")
+	end
+	drain()
+	assert(f:read_report(id, f:report(id, worker().accepted_seq + 1, "HEARTBEAT", { state = "working" })).ok)
+	drain()
+	assert(f:watermark(id).ok)
+	check(worker().compaction_pending ~= nil and worker().compacted_floor == worker().accepted_seq, "the watermark makes compaction due")
+	-- The coordinator publishes its proposal (multi-chunk) before the next poll runs.
+	local seq = worker().accepted_seq + 1
+	local proposal = f:report(id, seq, "HEARTBEAT", { state = "working" }) .. string.rep(" ", 5000)
+	check(#assert(codec.frame(proposal, "report", worker())).chunks > 1, "the proposal spans several chunks, as report 3 did")
+	local compact = f:apply("poll", { worker_id = id }); assert(compact.ok, compact.message)
+	check(f:action(compact.action_id).request.op == "mailbox_retire" and f:action(compact.action_id).request.mode == "compact",
+		"settlement still outranks the read: the poll after the watermark compacts")
+	assert(f:finish(compact.action_id, "compacted", {}).ok)
+	local shown = projected(f, id)
+	check(worker().workflow.read_owed == true and shown.poll_continuation == true and shown.due_poll == true,
+		"the compaction poll owes the report lane a read, so the window polls again at once instead of after poll_ms")
+	local outcome = f:read_report(id, proposal)
+	check(outcome.ok and worker().accepted_seq == seq and worker().assembly == nil,
+		"the multi-chunk report waiting behind compaction is consumed by the very next polls")
+	drain()
+	check(not projected(f, id).poll_continuation, "after the owed read the coordinator is paced again, not hot-looping")
+	local stored = clone(f.authority.registry); stored.dispatch.workers[id].workflow.read_owed = true
+	check(state.rehydrate(clone(stored)) ~= nil, "a store holding an owed read restores")
+	stored.dispatch.workers[id].workflow.read_owed = false
+	check(state.rehydrate(clone(stored)) == nil, "read_owed is true or absent; any other value is corrupt")
+	-- Coordinators look for their next report every 10 s; other workers keep the policy cadence.
+	local plain_clock = { now_ms = 1000, mono_ms = 1000, epoch = "read-owed-plain" }
+	local plain = fixture(function() return clone(plain_clock) end); local pid = plain:accepted(false)
+	local policy_ms = dispatch.policy(f.authority.registry, f.origin.logical_session_id).poll_ms
+	check(policy_ms == 300000 and projected(f, id).poll_ms == 10000 and projected(plain, pid).poll_ms == policy_ms,
+		"the projected cadence is 10 s for a coordinator and the policy poll_ms for any other worker")
+	clock.mono_ms += 9999; clock.now_ms += 9999; assert(f:tick().ok)
+	check(not projected(f, id).due_poll, "a coordinator is not due before 10 s")
+	clock.mono_ms += 1; clock.now_ms += 1; assert(f:tick().ok)
+	check(projected(f, id).due_poll and not projected(f, id).poll_continuation, "a coordinator's discovery is due at 10 s, as paced discovery")
+	local read = f:apply("poll", { worker_id = id }); assert(read.ok, read.message)
+	check(f:action(read.action_id).request.op == "mailbox_read" and f:action(read.action_id).request.selector.slot == worker().accepted_seq + 1,
+		"the 10 s poll reads the coordinator's next report")
+	assert(f:finish(read.action_id, "missing", {}).ok)
+	-- Fast after activity: after 10 minutes with no report, activation or answer, the policy cadence returns.
+	clock.mono_ms += 600000; clock.now_ms += 600000; assert(f:tick().ok)
+	local late = f:apply("poll", { worker_id = id }); assert(late.ok, late.message)
+	assert(f:finish(late.action_id, "missing", {}).ok)
+	clock.mono_ms += 10000; clock.now_ms += 10000; assert(f:tick().ok)
+	check(not projected(f, id).due_poll and projected(f, id).poll_ms == 10000,
+		"after 10 quiet minutes a coordinator is no longer due every 10 s, though the window still checks at 10 s")
+	clock.mono_ms += 290000; clock.now_ms += 290000; assert(f:tick().ok)
+	check(projected(f, id).due_poll, "a quiet coordinator is due again at the policy poll_ms")
+	local quiet = f:apply("poll", { worker_id = id }); assert(quiet.ok, quiet.message)
+	assert(f:finish(quiet.action_id, "missing", {}).ok)
+	assert(f:apply("observe", { worker_id = id, pane_binding = worker().pane_binding, native_state = "idle" }).ok)
+	assert(f:apply("reply", { worker_id = id }).ok)
+	drain()
+	check(worker().workflow.active_at ~= nil, "an answer reaching the coordinator stamps its fast window")
+	clock.mono_ms += 10000; clock.now_ms += 10000; assert(f:tick().ok)
+	check(projected(f, id).due_poll, "an answer reaching a quiet coordinator restarts the 10 s window")
+	stored = clone(f.authority.registry); stored.dispatch.workers[id].workflow.active_at = { at_ms = 1, bogus = true }
+	check(state.rehydrate(clone(stored)) == nil, "a malformed fast-window stamp is corrupt")
+	plain_clock.mono_ms += 10000; plain_clock.now_ms += 10000; assert(plain:tick().ok)
+	check(not projected(plain, pid).due_poll or projected(plain, pid).poll_continuation, "an ordinary worker is not paced at 10 s")
+	assert(plain:apply("policy", { policy = { poll_ms = 5000 } }).ok)
+	assert(f:apply("policy", { policy = { poll_ms = 5000 } }).ok)
+	check(projected(f, id).poll_ms == 5000 and projected(plain, pid).poll_ms == 5000, "a shorter policy cadence still wins for coordinators")
 end
 if section == nil or section == "assembly_restore" then
 	local f = fixture(); local id = f:accepted(false)

@@ -6,6 +6,14 @@ param([string]$Root,[string]$Handle,[string]$Owner,[ValidateSet('init','report',
 $ErrorActionPreference='Stop'
 $utf8=New-Object Text.UTF8Encoding($false,$true)
 function Fail([string]$Code) { throw $Code }
+# A schema refusal names the field (At) and the rule it broke on a second line (SKILLS-214),
+# in the same words as the jq validator's explain mode.
+$script:schemaAt=''
+function At([string]$Path) { $script:schemaAt=$Path }
+function Refuse([string]$Rule) {
+ if ($script:schemaAt.Length -gt 0) { Fail ("invalid_schema`n"+$script:schemaAt+': '+$Rule) }
+ Fail ("invalid_schema`n"+$Rule)
+}
 function Full([string]$Resource,[long]$Current,[long]$Limit) { Fail ("full`n"+$Resource+"`n"+$Current+"`n"+$Limit) }
 function Hash([byte[]]$Bytes) { $sha=[Security.Cryptography.SHA256]::Create(); try { return ([BitConverter]::ToString($sha.ComputeHash($Bytes))).Replace('-','').ToLowerInvariant() } finally { $sha.Dispose() } }
 # Recursive RFC8259 reader. Unlike ConvertFrom-Json it preserves duplicate-key,
@@ -212,14 +220,11 @@ function MatchBinding($Value,[bool]$Token=$false) {
  foreach ($key in @('logical_session_id','worker_id','worker_generation','launch_request_id','work_id')) { if ($Value[$key] -cne $binding[$key]) { Fail 'binding_mismatch' } }
  if ($Token -and $Value.enrolment_token -cne $binding.enrolment_token) { Fail 'binding_mismatch' }
 }
-function Fields($Value,[string[]]$Required) {
- if ($Value -isnot [hashtable] -or $Value.Count -ne $Required.Length) { Fail 'invalid_schema' }
- foreach ($key in $Required) { if (-not $Value.ContainsKey($key)) { Fail 'invalid_schema' } }
-}
+function Fields($Value,[string[]]$Required) { ObjectFields $Value $Required }
 function ObjectFields($Value,[string[]]$Required,[string[]]$Optional=@()) {
- if ($Value -isnot [hashtable]) { Fail 'invalid_schema' }
- foreach ($key in $Required) { if (-not $Value.ContainsKey($key)) { Fail 'invalid_schema' } }
- foreach ($key in $Value.Keys) { if ($key -cnotin $Required -and $key -cnotin $Optional) { Fail 'invalid_schema' } }
+ if ($Value -isnot [hashtable]) { Refuse 'must be an object' }
+ foreach ($key in $Required) { if (-not $Value.ContainsKey($key)) { Refuse ('missing field '+$key) } }
+ foreach ($key in $Value.Keys) { if ($key -cnotin $Required -and $key -cnotin $Optional) { Refuse ('unknown field '+$key) } }
 }
 function ValueType($Value,[string]$Type) {
  $valid=$false
@@ -244,7 +249,12 @@ function ValueType($Value,[string]$Type) {
   'long' { $valid=$Value -is [string] -and $utf8.GetByteCount($Value) -ge 1 -and $utf8.GetByteCount($Value) -le 32768 }
   default { Fail 'invalid_schema' }
  }
- if (-not $valid) { Fail 'invalid_schema' }
+ if (-not $valid) {
+  $rules=@{ id='1-96 of A-Z a-z 0-9 _ -'; token='16-128 of A-Z a-z 0-9 _ -'; digest='64 lowercase hex characters'; revision='40 or 64 lowercase hex characters'
+   positive='whole number from 1'; nonnegative='whole number from 0'; percent='whole number from 0 to 100'; short='text of 1 to 1024 bytes'; long='text of 1 to 32768 bytes'
+   absolute='an absolute path'; relative='a relative path'; path='a path of 1 to 4096 bytes' }
+  if ($rules.ContainsKey($Type)) { Refuse $rules[$Type] } else { Refuse 'invalid value' }
+ }
 }
 function ContextMeasurement($p) {
  if ($p.ContainsKey('context_used_pct') -and $p.ContainsKey('context_snapshot')) { Fail 'invalid_schema' }
@@ -265,13 +275,13 @@ function Values($Value,[string]$Type,[int]$Minimum=0,[int]$Maximum=256) {
  foreach ($entry in $Value) { ValueType $entry $Type }
 }
 function Choice($Value,[string[]]$Allowed) {
- if ($Value -isnot [string] -or $Value -cnotin $Allowed) { Fail 'invalid_schema' }
+ if ($Value -isnot [string] -or $Value -cnotin $Allowed) { Refuse ('must be one of '+($Allowed -join ', ')) }
 }
 function Unique($Value,[string]$Key='') {
  $seen=[Collections.Hashtable]::new([StringComparer]::Ordinal)
  foreach ($entry in $Value) {
   $item=$entry; if ($Key.Length -gt 0) { $item=$entry[$Key] }
-  if ($seen.ContainsKey($item)) { Fail 'invalid_schema' }; $seen[$item]=$true
+  if ($seen.ContainsKey($item)) { Refuse ($(if ($Key.Length -gt 0) { $Key+' values' } else { 'values' })+' must be unique') }; $seen[$item]=$true
  }
 }
 function Findings($Value) {
@@ -284,38 +294,47 @@ function Findings($Value) {
  Unique $Value 'finding_id'
 }
 function BoundedText($Value,[int]$Maximum,[bool]$Nonblank=$false) {
- if ($Value -isnot [string] -or $utf8.GetByteCount($Value) -lt 1 -or $utf8.GetByteCount($Value) -gt $Maximum -or $Value.Contains([string][char]0)) { Fail 'invalid_schema' }
+ if ($Value -isnot [string] -or $utf8.GetByteCount($Value) -lt 1 -or $utf8.GetByteCount($Value) -gt $Maximum -or $Value.Contains([string][char]0)) { Refuse ('text of 1 to '+$Maximum+' bytes') }
  # Match the canonical Luau ASCII whitespace class, not .NET's Unicode \s.
- if ($Nonblank -and $Value -cnotmatch '[^ \t\r\n\x0b\x0c]') { Fail 'invalid_schema' }
+ if ($Nonblank -and $Value -cnotmatch '[^ \t\r\n\x0b\x0c]') { Refuse 'must not be blank' }
 }
 function ProposedWork($p) {
  $required=@('owner_id','owner_generation','activation_token','proposal_id','kind')
  $optional=@('orch_project_id','new_project_name')
  if ($p.kind -ceq 'new_work') {
-  ObjectFields $p ($required+@('record_id','record_revision','prompt','scope','checks')) ($optional+@('base_ref','repository_id','target_ref','target_revision'))
-  ValueType $p.record_id 'short'; ValueType $p.record_revision 'nonnegative'; BoundedText $p.prompt 32768 $true
-  ObjectFields $p.scope @('paths','systems')
+  At 'payload'; ObjectFields $p ($required+@('record_id','record_revision','prompt','scope','checks')) ($optional+@('base_ref','repository_id','target_ref','target_revision'))
+  At 'payload.record_id'; ValueType $p.record_id 'short'; At 'payload.record_revision'; ValueType $p.record_revision 'nonnegative'
+  At 'payload.prompt'; BoundedText $p.prompt 32768 $true
+  At 'payload.scope'; ObjectFields $p.scope @('paths','systems')
   foreach ($key in @('paths','systems')) {
    $maximum=64; $bytes=256; if ($key -ceq 'systems') { $maximum=16; $bytes=80 }
-   $items=$p.scope[$key]
-   if ($items -isnot [array] -or $items.Count -gt $maximum) { Fail 'invalid_schema' }
-   foreach ($item in $items) { BoundedText $item $bytes }
+   $items=$p.scope[$key]; At ('payload.scope.'+$key)
+   if ($items -isnot [array]) { Refuse 'must be a list' }
+   if ($items.Count -gt $maximum) { Refuse ('must hold 0 to '+$maximum+' entries, has '+$items.Count) }
+   for ($i=0; $i -lt $items.Count; $i++) { At ('payload.scope.'+$key+'['+$i+']'); BoundedText $items[$i] $bytes }
   }
-  if ($p.checks -isnot [array] -or $p.checks.Count -gt 16) { Fail 'invalid_schema' }
-  foreach ($check in $p.checks) {
-   ObjectFields $check @('check_id','argv'); ValueType $check.check_id 'id'
-   if ($check.argv -isnot [array] -or $check.argv.Count -lt 1 -or $check.argv.Count -gt 16) { Fail 'invalid_schema' }
-   foreach ($arg in $check.argv) { BoundedText $arg 512 }
+  At 'payload.checks'
+  if ($p.checks -isnot [array]) { Refuse 'must be a list' }
+  if ($p.checks.Count -gt 16) { Refuse ('must hold 0 to 16 entries, has '+$p.checks.Count) }
+  for ($c=0; $c -lt $p.checks.Count; $c++) {
+   $check=$p.checks[$c]; $at='payload.checks['+$c+']'
+   At $at; ObjectFields $check @('check_id','argv'); At ($at+'.check_id'); ValueType $check.check_id 'id'
+   At ($at+'.argv')
+   if ($check.argv -isnot [array]) { Refuse 'must be a list' }
+   if ($check.argv.Count -lt 1 -or $check.argv.Count -gt 16) { Refuse ('must hold 1 to 16 entries, has '+$check.argv.Count) }
+   for ($i=0; $i -lt $check.argv.Count; $i++) { At ($at+'.argv['+$i+']'); BoundedText $check.argv[$i] 512 }
   }
-  Unique $p.checks 'check_id'
-  foreach ($key in @('base_ref','target_ref')) { if ($p.ContainsKey($key)) { BoundedText $p[$key] 256 } }
-  if ($p.ContainsKey('repository_id')) { ValueType $p.repository_id 'id' }
-  if ($p.ContainsKey('target_revision')) { ValueType $p.target_revision 'revision' }
-  if ($p.ContainsKey('target_ref') -ne $p.ContainsKey('target_revision') -or ($p.ContainsKey('target_ref') -and -not $p.ContainsKey('repository_id'))) { Fail 'invalid_schema' }
+  At 'payload.checks'; Unique $p.checks 'check_id'
+  foreach ($key in @('base_ref','target_ref')) { if ($p.ContainsKey($key)) { At ('payload.'+$key); BoundedText $p[$key] 256 } }
+  if ($p.ContainsKey('repository_id')) { At 'payload.repository_id'; ValueType $p.repository_id 'id' }
+  if ($p.ContainsKey('target_revision')) { At 'payload.target_revision'; ValueType $p.target_revision 'revision' }
+  At 'payload'
+  if ($p.ContainsKey('target_ref') -ne $p.ContainsKey('target_revision')) { Refuse 'target_ref and target_revision go together' }
+  if ($p.ContainsKey('target_ref') -and -not $p.ContainsKey('repository_id')) { Refuse 'target_ref needs repository_id' }
  } else {
-  ObjectFields $p ($required+@('source')) $optional
-  $source=$p.source
-  if ($source -isnot [hashtable]) { Fail 'invalid_schema' }
+  At 'payload'; ObjectFields $p ($required+@('source')) $optional
+  $source=$p.source; At 'payload.source'
+  if ($source -isnot [hashtable]) { Refuse 'must be an object' }
   Choice $source.kind @('plan_file','board','template')
   if ($source.kind -ceq 'template') {
    ObjectFields $source @('kind','template_id','revision','input') @('custom_fields')
@@ -334,9 +353,10 @@ function ProposedWork($p) {
   }
   BoundedText $source.revision 1024 $true
  }
- if ($p.ContainsKey('orch_project_id') -eq $p.ContainsKey('new_project_name')) { Fail 'invalid_schema' }
- if ($p.ContainsKey('orch_project_id')) { ValueType $p.orch_project_id 'id' }
- if ($p.ContainsKey('new_project_name')) { BoundedText $p.new_project_name 160 $true }
+ At 'payload'
+ if ($p.ContainsKey('orch_project_id') -eq $p.ContainsKey('new_project_name')) { Refuse 'give exactly one of orch_project_id or new_project_name' }
+ if ($p.ContainsKey('orch_project_id')) { At 'payload.orch_project_id'; ValueType $p.orch_project_id 'id' }
+ if ($p.ContainsKey('new_project_name')) { At 'payload.new_project_name'; BoundedText $p.new_project_name 160 $true }
 }
 function ProjectStart($p) {
  ObjectFields $p @('owner_id','owner_generation','activation_token','orch_project_id','project_revision','decision_context')
@@ -366,18 +386,24 @@ function HandoverCheck($Report) {
  if ((Hash ($utf8.GetBytes($Report.handover_id+':'+$Report.handover_token))) -cne $issued.handover_sha256) { Fail 'binding_mismatch: handover_token differs from the provisioned handover digest; copy it verbatim from the launch preface and report ACCEPTED again' }
 }
 function ReportInput($Report) {
+ At ''
  ObjectFields $Report @('kind','payload') @('action_id','action_revision','handover_id','handover_token')
- Choice $Report.kind @('REGISTER','READY','ACCEPTED','HEARTBEAT','WAITING','BLOCKED','ASK','CHECKPOINT','REVIEW_READY','REVIEW_RESULT','DONE','ROLLOVER_REQUEST','LANDING_REQUEST','LANDING_RESULT','reply_ack','COORDINATOR_RELEASE','COORDINATOR_PROPOSAL','PROJECT_START_CLAIM','CHECK_RESULT','CHECKOUT','LABEL','DEPLOY_RESULT')
+ At 'kind'; Choice $Report.kind @('REGISTER','READY','ACCEPTED','HEARTBEAT','WAITING','BLOCKED','ASK','CHECKPOINT','REVIEW_READY','REVIEW_RESULT','DONE','ROLLOVER_REQUEST','LANDING_REQUEST','LANDING_RESULT','reply_ack','COORDINATOR_RELEASE','COORDINATOR_PROPOSAL','PROJECT_START_CLAIM','CHECK_RESULT','CHECKOUT','LABEL','DEPLOY_RESULT')
  $action=$Report.ContainsKey('action_id'); $handover=$Report.ContainsKey('handover_id')
  $required=$Report.kind -cin @('REVIEW_RESULT','LANDING_RESULT','reply_ack','COORDINATOR_RELEASE','PROJECT_START_CLAIM','LABEL','DEPLOY_RESULT')
  $optional=$Report.kind -cin @('CHECKPOINT','DONE','WAITING','BLOCKED')
- if ($action -ne $Report.ContainsKey('action_revision') -or ($required -and -not $action) -or ($action -and -not ($required -or $optional))) { Fail 'invalid_schema' }
- if ($handover -ne $Report.ContainsKey('handover_token') -or ($handover -and $Report.kind -cne 'ACCEPTED')) { Fail 'invalid_schema' }
- if ($action) { ValueType $Report.action_id 'id'; ValueType $Report.action_revision 'positive' }
+ At ''
+ if ($action -ne $Report.ContainsKey('action_revision')) { Refuse 'action_id and action_revision go together' }
+ if ($required -and -not $action) { Refuse 'this kind needs the issued action_id and action_revision' }
+ if ($action -and -not ($required -or $optional)) { Refuse 'this kind takes no action_id or action_revision' }
+ if ($handover -ne $Report.ContainsKey('handover_token') -or ($handover -and $Report.kind -cne 'ACCEPTED')) { Refuse 'handover_id and handover_token go together, on ACCEPTED only' }
+ if ($action) { At 'action_id'; ValueType $Report.action_id 'id'; At 'action_revision'; ValueType $Report.action_revision 'positive' }
+ At ''
  if ($handover) { ValueType $Report.handover_id 'id'; ValueType $Report.handover_token 'token' }
  foreach ($key in @('logical_session_id','worker_id','launch_request_id','work_id','mailbox_handle')) { ValueType $binding[$key] 'id' }
  ValueType $binding.worker_generation 'positive'; ValueType $binding.enrolment_token 'token'
  $p=$Report.payload
+ At 'payload'
  switch -CaseSensitive ($Report.kind) {
   'REGISTER' {
    ObjectFields $p @('capabilities')
@@ -471,10 +497,11 @@ function ReportInput($Report) {
    if ($p.outcome -cin @('rejected','uncertain') -and -not $p.ContainsKey('reason')) { Fail 'invalid_schema' }
   }
   'COORDINATOR_PROPOSAL' {
-   if ($p -isnot [hashtable]) { Fail 'invalid_schema' }
-   foreach ($key in @('owner_id','proposal_id')) { ValueType $p[$key] 'id' }
-   ValueType $p.owner_generation 'positive'; ValueType $p.activation_token 'digest'
-   Choice $p.kind @('dispatch','report','review','rollover','landing','new_work','add_source')
+   if ($p -isnot [hashtable]) { Refuse 'must be an object' }
+   foreach ($key in @('owner_id','proposal_id')) { At ('payload.'+$key); ValueType $p[$key] 'id' }
+   At 'payload.owner_generation'; ValueType $p.owner_generation 'positive'; At 'payload.activation_token'; ValueType $p.activation_token 'digest'
+   At 'payload.kind'; Choice $p.kind @('dispatch','report','review','rollover','landing','new_work','add_source')
+   At 'payload'
    if ($p.kind -cin @('new_work','add_source')) {
     ProposedWork $p
    } else {
@@ -1238,7 +1265,7 @@ if ($retire -and $Mode -eq 'retire-authorized') {
  else { [Console]::Out.Write("producer_retired`n") }
 }
 } catch {
- if ($_.Exception.Message.StartsWith("full`n")) {
+ if ($_.Exception.Message.StartsWith("full`n") -or $_.Exception.Message.StartsWith("invalid_schema`n")) {
   [Console]::Error.Write($_.Exception.Message+"`n"); exit 1
  }
  if ($Mode -eq 'retire-authorized' -and $_.Exception.Message -ceq 'producer_unsettled') { [Console]::Out.Write("producer_unsettled`n"); exit 0 }

@@ -771,6 +771,18 @@ try {
   EqualBytes $before (ReadFile $journalPath 1572864)
  }
  Assert (@([IO.Directory]::EnumerateFileSystemEntries((Join-Path $box 'reports'))).Count -eq 0) 'Invalid proposal published files'
+ # SKILLS-214: the refusal names the field and the rule on a second line, in the jq explain wording.
+ $named=@()
+ $bad=Decode (Encode $newWork); $bad.checks=@(@{check_id='c';argv=@('x')*49}); $named+=,@($bad,'payload.checks[0].argv: must hold 1 to 16 entries, has 49')
+ $bad=Decode (Encode $newWork); $bad.scope=@{paths=@('x')*65;systems=@()}; $named+=,@($bad,'payload.scope.paths: must hold 0 to 64 entries, has 65')
+ $bad=Decode (Encode $newWork); $bad.Remove('prompt'); $named+=,@($bad,'payload: missing field prompt')
+ $bad=Decode (Encode $newWork); $bad['extra']=$true; $named+=,@($bad,'payload: unknown field extra')
+ $bad=Decode (Encode $newWork); $bad['repository_id']='blastworksai/tools'; $named+=,@($bad,'payload.repository_id: 1-96 of A-Z a-z 0-9 _ -')
+ foreach ($pair in $named) {
+  $rejected=Worker 'report' ($utf8.GetString((Encode @{kind='COORDINATOR_PROPOSAL';payload=$pair[0]})))
+  Assert ($rejected.code -ne 0 -and $rejected.err.TrimEnd() -ceq ("invalid_schema`n"+$pair[1])) ('Named refusal differs: expected '+$pair[1]+', got '+$rejected.err)
+  EqualBytes $before (ReadFile $journalPath 1572864)
+ }
 
  # Parity with the POSIX helper: only ACCEPTED reads the provisioned handover. A malformed
  # one leaves authorized retirement and other reports unchanged and refuses ACCEPTED.

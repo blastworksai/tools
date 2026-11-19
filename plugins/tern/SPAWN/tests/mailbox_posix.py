@@ -348,6 +348,21 @@ class PosixMailboxTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn(b"invalid_schema", result.stderr)
         self.assertEqual(mailbox.journal_path.read_bytes(), before)
+        # SKILLS-214: a refused proposal names the field and the rule on a second line, so the
+        # coordinator fixes it at once (take 1 of the filmed scene 6 sent 49 argv entries).
+        named = [
+            (dict(work, checks=[dict(check_id="c", argv=["x"] * 49)]), b"payload.checks[0].argv: must hold 1 to 16 entries, has 49"),
+            (dict(work, scope=dict(paths=["x"] * 65, systems=[])), b"payload.scope.paths: must hold 0 to 64 entries, has 65"),
+            ({key: value for key, value in work.items() if key != "prompt"}, b"payload: missing field prompt"),
+            (dict(work, extra=True), b"payload: unknown field extra"),
+            (dict(work, target_ref="main"), b"payload: target_ref and target_revision go together"),
+            (dict(work, repository_id="blastworksai/tools"), b"payload.repository_id: 1-96 of A-Z a-z 0-9 _ -"),
+        ]
+        for payload, why in named:
+            with self.subTest(why=why):
+                result = mailbox.worker("report", dict(kind="COORDINATOR_PROPOSAL", payload=payload))
+                self.assertEqual((result.returncode, result.stderr), (1, b"invalid_schema\n" + why + b"\n"))
+                self.assertEqual(mailbox.journal_path.read_bytes(), before)
         self.assertEqual({path: path.read_bytes() for path in (mailbox.box / "reports").rglob("*.json")},
                          published_before)
 
@@ -1295,7 +1310,7 @@ sys.exit(result.returncode)
                 self.assertEqual(mailbox.worker("consume").stderr, b"invalid_schema\n")
                 self.assertEqual(mailbox.journal_path.read_bytes(), before)
                 report = dict(kind="PROJECT_START_CLAIM", action_id="action", action_revision=1, payload=invalid)
-                self.assertEqual(mailbox.worker("report", report).stderr, b"invalid_schema\n")
+                self.assertRegex(mailbox.worker("report", report).stderr, rb"\Ainvalid_schema\n[^\n]+\n\Z")
                 self.assertEqual(mailbox.journal_path.read_bytes(), before)
                 self.assertEqual(list((mailbox.box / "reports").iterdir()), [])
         mailbox = Mailbox(self.root, "start_correlation", capabilities=START)
@@ -1309,7 +1324,7 @@ sys.exit(result.returncode)
         before = mailbox.journal_path.read_bytes()
         for report in invalid:
             with self.subTest(report=report):
-                self.assertEqual(mailbox.worker("report", report).stderr, b"invalid_schema\n")
+                self.assertRegex(mailbox.worker("report", report).stderr, rb"\Ainvalid_schema\n[^\n]+\n\Z")
                 self.assertEqual(mailbox.journal_path.read_bytes(), before)
 
     def test_project_start_requires_both_capabilities_on_fresh_retained_and_report_replay(self):

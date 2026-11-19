@@ -6,11 +6,33 @@ def positive: type=="number" and .>=1 and .<=9007199254740991 and .==floor;
 def percent: type=="number" and .>=0 and .<=100 and .==floor;
 def sha: type=="string" and test("^[0-9a-f]{64}\\z");
 def text($n): type=="string" and (utf8bytelength>=1) and (utf8bytelength<=$n);
+# Explain mode (--arg explain 1, run only after a refusal) evaluates the same rules but raises
+# "<field path>: <rule>" at the first one that fails, so the sender learns which field broke.
+# Without it every rule below is the plain boolean it always was.
+def explain: $ARGS.named.explain=="1";
+# A sentence (raised as ": ...") or an index joins without a dot; a field name joins with one.
+def under($path): if startswith("[") or startswith(": ") then $path+. else $path+"."+. end;
+def at($name;check;$rule):
+ if explain then (try (.[$name]|check) catch error(under($name))) as $ok | if $ok then true else error($name+": "+$rule) end
+ else .[$name]|check end;
+def rule(condition;$message): condition as $ok | if $ok or (explain|not) then $ok else error(": "+$message) end;
 def shape($required;$optional):
- type=="object" and (($required-keys)|length)==0 and ((keys-($required+$optional))|length)==0;
+ if explain then
+  if type!="object" then error(": must be an object")
+  else ($required-keys) as $missing | (keys-($required+$optional)) as $extra |
+   if ($missing|length)>0 then error(": missing field "+$missing[0]) elif ($extra|length)>0 then error(": unknown field "+$extra[0]) else true end end
+ else type=="object" and (($required-keys)|length)==0 and ((keys-($required+$optional))|length)==0 end;
 def fields($names): shape($names;[]);
-def optional($name;check): if has($name) then .[$name]|check else true end;
-def entries($minimum;$maximum;check): type=="array" and length>=$minimum and length<=$maximum and all(.[];check);
+def optional($name;check): if has($name) then at($name;check;"invalid value") else true end;
+def optional($name;check;$rule): if has($name) then at($name;check;$rule) else true end;
+def entries($minimum;$maximum;check):
+ if explain then
+  if type!="array" then error(": must be a list")
+  elif length<$minimum or length>$maximum then error(": must hold \($minimum) to \($maximum) entries, has \(length)")
+  else . as $list | all(range(0;$list|length); . as $i |
+   (try ($list[$i]|check) catch error("[\($i)]"+(if startswith("[") or startswith(": ") then . else "."+. end))) as $ok |
+   if $ok then true else error("[\($i)]: invalid entry") end) end
+ else type=="array" and length>=$minimum and length<=$maximum and all(.[];check) end;
 def references: entries(0;256;text(1024));
 def texts: entries(0;256;text(32768));
 def nonnegative: type=="number" and .>=0 and .<=9007199254740991 and .==floor;
@@ -33,7 +55,8 @@ def findings: entries(0;32;finding) and ((map(.finding_id)|unique|length)==lengt
 def bounded($n): text($n) and (contains("\u0000")|not);
 def nonblank($n): bounded($n) and test("[^ \t\r\n\u000b\u000c]");
 def project_choice:
- (has("orch_project_id")!=has("new_project_name")) and optional("orch_project_id";id) and optional("new_project_name";nonblank(160));
+ rule(has("orch_project_id")!=has("new_project_name");"give exactly one of orch_project_id or new_project_name") and
+ optional("orch_project_id";id) and optional("new_project_name";nonblank(160));
 def template_fields:
  type=="object" and length<=16 and all(to_entries[];
   (.key|class and .!="input") and (.value|type=="string" and utf8bytelength<=2048 and (contains("\u0000")|not)));
@@ -46,7 +69,7 @@ def project_start:
  (.owner_id|id) and (.owner_generation|positive) and (.activation_token|sha) and
  (.orch_project_id|id) and (.project_revision|positive) and (.decision_context|sha);
 def report_payload:
- .kind as $kind | .payload |
+ .kind as $kind | at("payload";
  if $kind=="REGISTER" then
   fields(["capabilities"]) and (.capabilities|entries(1;8;IN("report-files-v1","native-ask-v1","worker-poll-v1","argv-v1","coordinator-control-v1","project-start-v1","check-runner-v1","release-manager-v1")) and (length==(unique|length)) and index("report-files-v1")!=null)
  elif $kind=="READY" then shape(["state"];["summary","context_used_pct","context_snapshot"]) and .state=="idle" and optional("summary";text(1024)) and measured
@@ -96,18 +119,28 @@ def report_payload:
   (.outcome!="stale_target" or .observed_target_revision!=.target_revision) and
   (if .outcome=="landed" then has("reason")|not elif .outcome=="stale_target" then true else has("reason") end)
  elif $kind=="COORDINATOR_PROPOSAL" then
-  (.owner_id|id) and (.owner_generation|positive) and (.activation_token|sha) and (.proposal_id|id) and
+  rule(type=="object";"must be an object") and
+  at("owner_id";id;"copy owner_id verbatim from coordinator activation") and at("owner_generation";positive;"whole number from 1") and
+  at("activation_token";sha;"64 lowercase hex characters from coordinator activation") and at("proposal_id";id;"1-96 of A-Z a-z 0-9 _ -") and
   (if .kind=="new_work" then
    shape(["owner_id","owner_generation","activation_token","proposal_id","kind","record_id","record_revision","prompt","scope","checks"];["orch_project_id","new_project_name","base_ref","repository_id","target_ref","target_revision"]) and project_choice and
-   (.record_id|text(1024)) and (.record_revision|nonnegative) and (.prompt|nonblank(32768)) and
-   (.scope|fields(["paths","systems"]) and (.paths|entries(0;64;bounded(256))) and (.systems|entries(0;16;bounded(80)))) and
-   (.checks|entries(0;16;fields(["check_id","argv"]) and (.check_id|id) and (.argv|entries(1;16;bounded(512)))) and (map(.check_id)|unique|length)==length) and
-   optional("base_ref";bounded(256)) and optional("repository_id";id) and optional("target_ref";bounded(256)) and optional("target_revision";revision) and
-   (has("target_ref")==has("target_revision")) and ((has("target_ref")|not) or has("repository_id"))
+   at("record_id";text(1024);"1-1024 bytes, from the eligible records list") and at("record_revision";nonnegative;"whole number from 0") and
+   at("prompt";nonblank(32768);"non-blank text up to 32768 bytes") and
+   at("scope";fields(["paths","systems"]) and at("paths";entries(0;64;bounded(256));"up to 64 paths of at most 256 bytes") and
+    at("systems";entries(0;16;bounded(80));"up to 16 systems of at most 80 bytes");"{paths,systems}") and
+   at("checks";entries(0;16;fields(["check_id","argv"]) and at("check_id";id;"1-96 of A-Z a-z 0-9 _ -") and
+    at("argv";entries(1;16;bounded(512));"1 to 16 arguments of at most 512 bytes")) and
+    rule((map(.check_id)|unique|length)==length;"check_id values must be unique");"up to 16 checks") and
+   optional("base_ref";bounded(256);"text of 1 to 256 bytes") and optional("repository_id";id;"1-96 of A-Z a-z 0-9 _ -") and
+   optional("target_ref";bounded(256);"text of 1 to 256 bytes") and optional("target_revision";revision;"40 or 64 lowercase hex characters") and
+   rule(has("target_ref")==has("target_revision");"target_ref and target_revision go together") and
+   rule((has("target_ref")|not) or has("repository_id");"target_ref needs repository_id")
   elif .kind=="add_source" then
-   shape(["owner_id","owner_generation","activation_token","proposal_id","kind","source"];["orch_project_id","new_project_name"]) and project_choice and (.source|proposed_source)
+   shape(["owner_id","owner_generation","activation_token","proposal_id","kind","source"];["orch_project_id","new_project_name"]) and project_choice and
+   at("source";proposed_source;"{kind=plan_file|board,path,revision} or {kind=template,template_id,revision,input}")
   else
-   shape(["owner_id","owner_generation","activation_token","proposal_id","kind","work_id","project_id"];["checkpoint_id","record_id","record_revision","prompt"]) and (.work_id|id) and (.project_id|id) and
+   rule(.kind|IN("dispatch","report","review","rollover","landing");"kind must be new_work, add_source, dispatch, report, review, rollover or landing") and
+   shape(["owner_id","owner_generation","activation_token","proposal_id","kind","work_id","project_id"];["checkpoint_id","record_id","record_revision","prompt"]) and at("work_id";id;"1-96 of A-Z a-z 0-9 _ -") and at("project_id";id;"1-96 of A-Z a-z 0-9 _ -") and
    (if .kind=="dispatch" then (has("checkpoint_id")|not) and (.record_id|text(1024)) and (.record_revision|nonnegative) and (.prompt|text(32768))
     else (.kind|IN("report","review","rollover","landing")) and (has("record_id")|not) and (has("record_revision")|not) and (has("prompt")|not) and
      (if .kind=="report" then has("checkpoint_id")|not else .checkpoint_id|id end) end)
@@ -117,11 +150,11 @@ def report_payload:
   fields(["owner_id","owner_generation","activation_token","quiescent"]) and (.owner_id|id) and (.owner_generation|positive) and (.activation_token|sha) and .quiescent==true
  elif $kind=="reply_ack" then
   fields(["message_id","reply_seq","reply_sha256","status"]) and (.message_id|id) and (.reply_seq|positive) and (.reply_sha256|sha) and .status=="recorded"
- else false end;
+ else false end;"invalid payload for this kind");
 def correlations:
- (has("action_id")==has("action_revision")) and optional("action_id";id) and optional("action_revision";positive) and
- (if .kind|IN("REVIEW_RESULT","LANDING_RESULT","LABEL","DEPLOY_RESULT","reply_ack","COORDINATOR_RELEASE","PROJECT_START_CLAIM") then has("action_id")
-  elif .kind|IN("CHECKPOINT","DONE","WAITING","BLOCKED") then true else has("action_id")|not end) and
+ rule(has("action_id")==has("action_revision");"action_id and action_revision go together") and optional("action_id";id) and optional("action_revision";positive) and
+ (if .kind|IN("REVIEW_RESULT","LANDING_RESULT","LABEL","DEPLOY_RESULT","reply_ack","COORDINATOR_RELEASE","PROJECT_START_CLAIM") then rule(has("action_id");"this kind needs the issued action_id and action_revision")
+  elif .kind|IN("CHECKPOINT","DONE","WAITING","BLOCKED") then true else rule(has("action_id")|not;"this kind takes no action_id or action_revision") end) and
  (has("handover_id")==has("handover_token")) and optional("handover_id";id) and optional("handover_token";token) and
  (.kind=="ACCEPTED" or (has("handover_id")|not));
 def binding:
@@ -177,7 +210,9 @@ def reply:
  elif .kind=="coordinator_retirement" then
   .payload|fields(["owner_id","owner_generation","activation_token","reason"]) and (.owner_id|id) and (.owner_generation|positive) and (.activation_token|sha) and (.reason|text(1024))
  else false end);
+try (
 if $ARGS.named.schema=="report_input" then
  shape(["kind","payload"];["action_id","action_revision","handover_id","handover_token"]) and correlations and report_payload
 elif $ARGS.named.schema=="report" then report
 else reply end
+) catch (if explain and type=="string" then error(ltrimstr(": ")) else error end)

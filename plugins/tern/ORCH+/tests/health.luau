@@ -1776,7 +1776,8 @@ if section == nil or section == "timer" then
 	local w = window_fixture()
 	w:elapse(6000)
 	local discovery_at = w:now()
-	assert(not w:worker().poll_continuation, "accepted fixture must begin with only idle discovery")
+	-- SKILLS-214: acceptance is settlement, so the accepted fixture owes its first report read.
+	assert(w:worker().poll_continuation, "accepted fixture owes its first report read")
 	w.api.schedule(w.cx)
 	local first = assert(w:worker().active_action_id)
 	assert(w.f:finish(first, "missing", {}).ok)
@@ -1789,7 +1790,7 @@ if section == nil or section == "timer" then
 			"pending ACK projects continuation without adding persisted workflow schema")
 		w.api.schedule(w.cx)
 		local sent = polls(w)
-		local progressed = #sent == initial + seq - 1 and sent[#sent].bytes == nil
+		local progressed = #sent == initial + 2 * (seq - 2) + 1 and sent[#sent].bytes == nil
 		check(progressed, (if progressed then "" else w:poll_diagnostic(seq, initial, sent) .. " · ")
 			.. "known ACK bypasses the still-future discovery deadline without a fourth-poll watermark")
 		local active = assert(w:worker().active_action_id)
@@ -1801,6 +1802,14 @@ if section == nil or section == "timer" then
 		w.api.schedule(w.cx)
 		check(#polls(w) == #sent, "settled action with an outstanding driver cannot duplicate continuation")
 		w:tick()
+		-- The published ACK owes the report lane one read (SKILLS-214); it runs at once, then settles.
+		check(w:worker().poll_continuation == true, "a published ACK owes one report read")
+		w.api.schedule(w.cx)
+		local owed = assert(w:worker().active_action_id)
+		check(w.f:action(owed).request.op == "mailbox_read" and w.f:action(owed).request.selector.stream == "report", "the owed poll reads the next report")
+		assert(w.f:finish(owed, "missing", {}).ok)
+		w:tick()
+		check(not w:worker().poll_continuation, "the owed read, once spent, is not a hot loop")
 	end
 	check(w:now() < discovery_at + 5000, "all six continuations complete inside the original discovery interval")
 	local before = #polls(w)

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.3
+
+- **A refused report says which field broke.** The report helper on Linux, macOS (`mailbox_worker.sh`, jq) and Windows (`mailbox_worker.ps1`) still answers `invalid_schema` on its first line, and now adds a second line naming the field and the rule, for example `payload.checks[0].argv: must hold 1 to 16 entries, has 49`. On Linux and macOS the same jq rules run in an explain mode only after a refusal, so the explanation cannot drift from the check; accepted and refused reports are unchanged (SKILLS-214: a coordinator spent about a minute guessing why its proposal was refused).
+
 ## 0.7.2
 
 - **One file is one install.** On a system where `/bin` and `/usr/bin` are the same folder (Ubuntu and most current Linux), Guided setup counted `/bin/claude` and `/usr/bin/claude` as two installs, so a second Claude account could be proposed the same install, and so the same login. A program reached twice on PATH, through a linked folder or a link to the same file, is now one install (SKILLS-213, found in the live run on the VM).
