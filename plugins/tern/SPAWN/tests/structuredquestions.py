@@ -387,7 +387,17 @@ class StructuredQuestions(unittest.TestCase):
         self.assertEqual(json.loads(ok.stdout.decode("utf-8"))["arguments"], ["--name=Ünï😀"])
         fx = self.fixture(seats=[], operator_clis=["claude"])
         done = fx.run("--accounts", "claude=Good,Bad\udcff")
-        self.assertEqual((done.returncode, json.loads(done.stdout)["why"]), (3, "A Claude label must be valid UTF-8 text."))
+        self.assertEqual((done.returncode, json.loads(done.stdout)["why"]), (3, "Every answer must be valid UTF-8 text."))
+        # Kimi review round 2: every other text that reaches the JSON goes through one gate.
+        done = fx.run("--phase", "2", "--map", "claude=/x\udcff", "--map", "claude=you#1")
+        self.assertEqual((done.returncode, json.loads(done.stdout)["why"]), (3, "Every answer must be valid UTF-8 text."), "an overridden answer is still in rerun.argv")
+        for phase in ((), ("--phase", "2")):
+            done = fx.run(*phase, cwd="/tmp/a\udcffb")
+            self.assertEqual((done.returncode, json.loads(done.stdout)["why"]), (3, "The launch folder must be valid UTF-8 text."), phase)
+        bad_root = fx.base / "g\udcff"
+        Fixture.make_glitch(bad_root)
+        data = self.output(fx, "--glitch-root", str(bad_root))
+        self.assertTrue(all("g\ufffd" not in line and "Glitch folder detected" not in line for line in data["intro"]), "a Glitch folder that is not UTF-8 is not offered")
 
     def test_a_seat_named_with_a_dash_maps_like_any_other(self):
         fx = self.fixture(seats=["claude-work", "claudehome"], operator_clis=[])

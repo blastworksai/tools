@@ -424,8 +424,8 @@ $1 == "CAND" {
 	found[$2] = 1
 }
 $1 == "UNAV" { nunav++; uacct[nunav] = $2; uprov[nunav] = $3; ureason[nunav] = $4 }
-$1 == "GLITCH" { glitch[++nglitch] = dec($2) }
-$1 == "PLACE" { place[++nplace] = dec($2) }
+$1 == "GLITCH" { g = dec($2); if (utf8ok(g)) glitch[++nglitch] = g }
+$1 == "PLACE" { g = dec($2); if (utf8ok(g)) place[++nplace] = g }
 $1 == "ANS" { ans[++nans] = dec($2) }
 $1 == "MAPO" { mapo[++nmapo] = dec($2) }
 $1 == "SKIP" { skip[dec($2)] = 1 }
@@ -466,7 +466,6 @@ function do_map(   a, v, cli, lab, n, parts, k, l, p, pi, m, i, j, c, r, suf, pa
 			l = trim(parts[k])
 			if (l == "") refuse("A " pname(cli) " label is empty.")
 			if (!printable(l)) refuse("A " pname(cli) " label has a control character, such as a tab or a line break.")
-			if (!utf8ok(l)) refuse("A " pname(cli) " label must be valid UTF-8 text.")
 			if (clen(l) > 32) refuse("The " pname(cli) " label \"" l "\" is longer than 32 characters.")
 			if ((cli SUBSEP tolower(l)) in seenlab) refuse("Two " pname(cli) " accounts have the label \"" l "\".")
 			seenlab[cli SUBSEP tolower(l)] = 1
@@ -567,6 +566,11 @@ function take(a, c) { ause[a] = c; taken[c] = 1; takenby[c] = a }
 $1 == "CK" { ckused[$2, $3] = $4 }
 END {
 	if (refused) exit 3
+	# One gate before any output: JSON travels as UTF-8, so every text that reaches it is valid UTF-8 or refused.
+	# Discovered paths and Glitch folders that are not are dropped where they are read (CAND, GLITCH, PLACE).
+	if (!utf8ok(cwd)) refuse("The launch folder must be valid UTF-8 text.")
+	if (!utf8ok(op) || !utf8ok(ophome)) refuse("Your account name and home folder must be valid UTF-8 text.")
+	for (i = 1; i <= nrarg; i++) if (!utf8ok(rarg[i])) refuse("Every answer must be valid UTF-8 text.")
 	if (mode == "map") { do_map(); exit 0 }
 	if (mode == "p1") p1(); else p2()
 	prompts = ""
