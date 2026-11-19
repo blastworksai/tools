@@ -34,7 +34,7 @@ AGY = "Agy keeps its login per OS user; a second install may share the first one
 
 class Fixture:
     def __init__(self, base, seats=SEATS, operator_clis=PROVIDERS, help_text=HELP_ALL, glitch=True, sudo=True, no_cli=(), help_by=None, hang=(), omp_family="openai", fork=(), leak=(), groups="setsid",
-                 extra_installs=(), others=()):
+                 extra_installs=(), others=(), link_bin=False):
         self.base = Path(base)
         self.bin = self.base / "bin"
         self.bin.mkdir()
@@ -66,6 +66,10 @@ class Fixture:
             if d not in self.extra_dirs:
                 self.extra_dirs.append(d)
             self.cli("you", provider, (help_by or {}).get(folder, help_text), where=d)
+        if link_bin:  # a second PATH folder that is the same folder (merged /usr: /bin -> /usr/bin)
+            link = self.home / "you/bin"
+            link.symlink_to(self.home / "you/.local/bin")
+            self.extra_dirs.append(link)
         omp = self.home / "ompone/.omp/agent"
         omp.mkdir(parents=True)
         (omp / "config.yml").write_text("modelRoles:\n  default: anthropic/claude-model\nsetupVersion: 3\n")
@@ -343,7 +347,8 @@ class StructuredQuestions(unittest.TestCase):
         self.assertEqual(agents(data)["claude-mine"]["account"], "you")
         self.assertNotIn("claude-theirs", agents(data))
         self.assertIn("Claude Theirs: no second install or OS user found. Each Claude account needs its own install with its own login. Type its path, or skip it.", lines(data, "mapping"))
-        self.assertIn(f"Not used for Claude: partner — {fx.home}/partner/.local/bin/claude.", lines(data, "mapping"))
+        self.assertIn("Not used for Claude: 1 other OS account can run it too (Change some to pick one).", lines(data, "mapping"))
+        self.assertEqual([c["account"] for c in data["derived"]["candidates"]], ["you", "partner"], "every candidate stays a choice")
         chosen = self.output(fx, "--accounts", "claude=Mine,Theirs", "--map", "claude-theirs=partner#1")
         self.assertEqual((agents(chosen)["claude-theirs"]["account"], agents(chosen)["claude-theirs"]["operator"]), ("partner", False))
         self.assertEqual(q_id(chosen, "mapping")["question"], "Use this mapping?")
@@ -356,6 +361,20 @@ class StructuredQuestions(unittest.TestCase):
         self.assertEqual([m["id"] for m in data["derived"]["missing"]], ["claude-bin", "claude-other"])
         chosen = agents(self.output(fx, "--accounts", "claude=Bin,Other", "--map", "claude-bin=partner#1"))
         self.assertEqual(chosen["claude-bin"]["account"], "partner", "it is used once chosen")
+
+    def test_one_file_reached_twice_is_one_install(self):
+        # Live VM run, 19 Nov: /bin and /usr/bin are one folder, so /bin/claude and /usr/bin/claude were two installs
+        # and a second account was proposed the same install, the same login.
+        fx = self.fixture(seats=[], operator_clis=["claude"], link_bin=True)
+        data = self.output(fx, "--accounts", "claude=A,B")
+        self.assertEqual([c["command"] for c in data["derived"]["candidates"]], [f"{fx.home}/you/.local/bin/claude"])
+        self.assertEqual(list(agents(data)), ["claude-a"])
+        self.assertEqual([m["id"] for m in data["derived"]["missing"]], ["claude-b"])
+
+    def test_the_operator_is_named_before_other_accounts_in_not_used(self):
+        fx = self.fixture(seats=["claudework", "codexone"], operator_clis=["claude"], others=("partner", "zed"))
+        rows = lines(self.output(fx, "--phase", "2"), "mapping")
+        self.assertIn(f"Not used for Claude: you (you) — {fx.home}/you/.local/bin/claude; 2 other OS accounts can run it too (Change some to pick one).", rows)
 
     def test_a_typed_folder_is_not_an_install(self):
         # Kimi review round 1, P2: `test -x` accepts a searchable folder for another account.

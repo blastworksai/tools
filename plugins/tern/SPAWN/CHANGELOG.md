@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.7.2
+
+- **One file is one install.** On a system where `/bin` and `/usr/bin` are the same folder (Ubuntu and most current Linux), Guided setup counted `/bin/claude` and `/usr/bin/claude` as two installs, so a second Claude account could be proposed the same install, and so the same login. A program reached twice on PATH, through a linked folder or a link to the same file, is now one install (SKILLS-213, found in the live run on the VM).
+- **"Not used" names you first.** The not-used line names the accounts named for the provider and your own installs, then counts the other OS accounts that can run the CLI ("43 other OS accounts can run it too (Change some to pick one)"); before, your own install could be hidden in "and 86 more". The Change some choices list installs in the same order.
+
 ## 0.7.1
 
 - **Guided setup fits the common case: one person, one login, one folder (SKILLS-213).** The questions used to be shaped by a machine with one OS account per seat: a person alone had to tick their own login, got a "Skip Claude" filler per provider and IDs such as `claude-ann` labelled `ANN`. Now the first questions ask only about accounts: "Are there any providers for which you have more than one account?" (No is the default). On Yes: which providers, how many accounts, then their labels, numbered (Claude 1, Claude 2) or typed. SPAWN never suggests a label. One account per provider needs no label: the agent is `claude`, labelled Claude.

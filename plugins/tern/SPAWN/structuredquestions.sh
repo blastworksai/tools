@@ -164,8 +164,10 @@ login_run() { # merge-stderr, account, then literal argv words
 # Every program of each CLI name on the running account's PATH, in PATH order: a constant script, the CLI names
 # are its arguments. macOS and Linux have no portable `which -a`, so PATH is walked here. A folder that is not
 # absolute, or holds a tab or a line break, is skipped, so a printed line is always "<cli><tab><absolute path>".
+# One file reached twice (/bin and /usr/bin on a merged-/usr system, or a symlinked folder) is one install: two
+# accounts on it would share one login.
 WALK='t=$(printf "\t"); nl="
-"; set -f; IFS=:; for c do for d in $PATH; do case $d in /*) ;; *) continue ;; esac; case $d in *"$t"*|*"$nl"*) continue ;; esac; d=${d%/}; f=$d/$c; if [ -f "$f" ] && [ -x "$f" ]; then printf "%s\t%s\n" "$c" "$f"; fi; done; done; :'
+"; set -f; IFS=:; for c do for d in $PATH; do case $d in /*) ;; *) continue ;; esac; case $d in *"$t"*|*"$nl"*) continue ;; esac; d=${d%/}; f=$d/$c; if [ -f "$f" ] && [ -x "$f" ]; then dup=0; for g in $seen; do [ -n "$g" ] && [ "$f" -ef "$g" ] && dup=1; done; [ "$dup" = 1 ] && continue; seen="$seen:$f"; printf "%s\t%s\n" "$c" "$f"; fi; done; seen=""; done; :'
 cands_from() { # account kind home: reads walker output on stdin, writes CAND facts, prints the CLIs found
 	while IFS="$TAB" read -r c p; do
 		case $c in claude|codex|kimi|grok|agy|muse|omp) ;; *) continue ;; esac
@@ -632,14 +634,19 @@ function p2(   g, i, k, m, p, pi, c, one, u, show, nl, nq, ol, no, fl, nf, idl, 
 		for (g = 1; g <= nag; g++) ln[++nl] = row_of(g)
 		for (pi = 1; pi <= np; pi++) {
 			p = plist[pi]; if (!(p in agcount)) continue
-			unused = ""; cnt = 0
-			for (c = 1; c <= ncand; c++) {
-				if (ccli[c] != p || ckused[p, ckey[c]] != "") continue
+			# Accounts named for the provider and the operator are named (at most 3); every other OS account that can
+			# run the CLI is a count: it is a choice under Change some, never a proposal.
+			unused = ""; cnt = 0; others = 0; m = sort_cands(p)
+			for (i = 1; i <= m; i++) {
+				c = so[i]
+				if (ckused[p, ckey[c]] != "") continue
+				if (crank[c] > 1) { others++; continue }
 				cnt++
 				if (cnt <= 3) unused = unused (unused == "" ? "" : ", ") cuser[c] (ckind[c] == "operator" ? " (you)" : "") " " EMD " " cpath[c]
 			}
 			if (cnt > 3) unused = unused ", and " (cnt - 3) " more"
-			if (cnt > 0) ln[++nl] = "Not used for " pname(p) ": " unused "."
+			if (others > 0) unused = unused (unused == "" ? "" : "; ") others " other OS account" (others == 1 ? "" : "s") " can run it too (Change some to pick one)"
+			if (cnt + others > 0) ln[++nl] = "Not used for " pname(p) ": " unused "."
 		}
 	}
 	for (i = 1; i <= nmiss; i++) {
@@ -715,14 +722,21 @@ function p2(   g, i, k, m, p, pi, c, one, u, show, nl, nq, ol, no, fl, nf, idl, 
 	finish_p2()
 }
 function more_glitch(   g, i) { g = ""; for (i = 4; i <= nglitch; i++) g = g (i > 4 ? ", " : "") glitch[i]; return g }
-function finish_p2(   g, accs, cands, c, perms, y, parts, miss, i, ra, f) {
+function finish_p2(   g, accs, cands, c, perms, y, parts, miss, i, ra, f, pi, m, k) {
 	accs = ""
 	for (g = 1; g <= nag; g++) {
 		f = gcli[g] == "omp" ? fam[gid[g]] : pfam(gcli[g])
 		accs = accs (g > 1 ? "," : "") "{\"id\":" js(gid[g]) ",\"provider\":" js(pname(gcli[g])) ",\"provider_family\":" js(f) ",\"account_label\":" js(glabel[g]) ",\"display\":" js(disp(gcli[g], glabel[g])) ",\"account\":" js(guser[g]) ",\"operator\":" jb(gkind[g] == "operator") ",\"command\":" js(gpath[g]) ",\"home\":" js(ghome[g]) ",\"install\":" js(gkey[g]) ",\"row\":" js(row_of(g)) "}"
 	}
+	# Candidates in proposal order per provider (named for it, then yours, then other accounts), for Change some.
 	cands = ""
-	for (c = 1; c <= ncand; c++) cands = cands (c > 1 ? "," : "") "{\"key\":" js(ckey[c]) ",\"provider\":" js(pname(ccli[c])) ",\"account\":" js(cuser[c]) ",\"operator\":" jb(ckind[c] == "operator") ",\"command\":" js(cpath[c]) ",\"option\":" js(cuser[c] (ckind[c] == "operator" ? " (you)" : "") " " EMD " " cpath[c]) ",\"used_by\":" js(ckused[ccli[c], ckey[c]]) "}"
+	for (pi = 1; pi <= np; pi++) {
+		m = sort_cands(plist[pi])
+		for (k = 1; k <= m; k++) {
+			c = so[k]
+			cands = cands (cands == "" ? "" : ",") "{\"key\":" js(ckey[c]) ",\"provider\":" js(pname(ccli[c])) ",\"account\":" js(cuser[c]) ",\"operator\":" jb(ckind[c] == "operator") ",\"command\":" js(cpath[c]) ",\"option\":" js(cuser[c] (ckind[c] == "operator" ? " (you)" : "") " " EMD " " cpath[c]) ",\"used_by\":" js(ckused[ccli[c], ckey[c]]) "}"
+		}
+	}
 	perms = ""
 	for (g = 1; g <= nag; g++) {
 		split(yolo[gcli[g]], parts, "|")
