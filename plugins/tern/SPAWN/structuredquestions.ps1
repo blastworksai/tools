@@ -319,11 +319,18 @@ foreach ($cli in $clis) {
 $byId = @{}; foreach ($a in $agentsAll) { $byId[$a.id] = $a }
 foreach ($s in $skips) { if (-not $byId.ContainsKey($s)) { Refuse "No agent has the ID `"$s`"." } }
 function Take($a, $c) { $a.cand = $c; $c.used_by = $a.id }
-# Overrides first: an install key, or a typed absolute path.
+# Overrides first: an install key, or a typed absolute path. The rerun argv keeps every earlier answer, so the
+# last --map for an agent is the one that counts.
+$lastMap = [ordered]@{}
 foreach ($v in $maps) {
   if (-not $v.Contains('=')) { Refuse 'A --map answer needs the form <id>=<install key or absolute path>.' }
-  $id = $v.Substring(0, $v.IndexOf('=')); $pth = $v.Substring($v.IndexOf('=') + 1)
+  $id = $v.Substring(0, $v.IndexOf('='))
   if (-not $byId.ContainsKey($id)) { Refuse "No agent has the ID `"$id`"." }
+  if ($lastMap.Contains($id)) { $lastMap.Remove($id) }
+  $lastMap[$id] = $v
+}
+foreach ($v in $lastMap.Values) {
+  $id = $v.Substring(0, $v.IndexOf('=')); $pth = $v.Substring($v.IndexOf('=') + 1)
   $a = $byId[$id]
   if ($skips -contains $id) { continue }
   if ($pth -match '^([A-Za-z]:[\\/]|\\\\)') {

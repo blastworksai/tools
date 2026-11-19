@@ -348,6 +348,47 @@ class StructuredQuestions(unittest.TestCase):
         self.assertEqual((agents(chosen)["claude-theirs"]["account"], agents(chosen)["claude-theirs"]["operator"]), ("partner", False))
         self.assertEqual(q_id(chosen, "mapping")["question"], "Use this mapping?")
 
+    def test_a_label_matching_another_accounts_folder_never_proposes_it(self):
+        # Kimi review round 1, P1: pass 1 matched every candidate's folder, so a label could pick another person's login.
+        fx = self.fixture(seats=[], operator_clis=[], others=("partner",))
+        data = self.output(fx, "--accounts", "claude=Bin,Other")
+        self.assertEqual(agents(data), {}, "another OS account is never proposed, even when a label names its folder")
+        self.assertEqual([m["id"] for m in data["derived"]["missing"]], ["claude-bin", "claude-other"])
+        chosen = agents(self.output(fx, "--accounts", "claude=Bin,Other", "--map", "claude-bin=partner#1"))
+        self.assertEqual(chosen["claude-bin"]["account"], "partner", "it is used once chosen")
+
+    def test_a_typed_folder_is_not_an_install(self):
+        # Kimi review round 1, P2: `test -x` accepts a searchable folder for another account.
+        fx = self.fixture()
+        for path in (fx.home / "claudework/.local", fx.home / "you/.local"):
+            why = self.refused(fx, *EINH, "--map", f"claude-work={path}")
+            self.assertIn("cannot run", why, path)
+
+    def test_the_last_map_for_an_agent_wins(self):
+        # Kimi review round 1, P2: the rerun argv repeats earlier answers; stale overrides kept installs reserved.
+        fx = self.fixture()
+        same = agents(self.output(fx, *EINH, "--map", "claude-work=you#1", "--map", "claude-work=you#1"))
+        self.assertEqual(same["claude-work"]["account"], "you")
+        data = self.output(fx, *EINH, "--map", "claude-work=you#1", "--map", "claude-work=claudework#1")
+        self.assertEqual(agents(data)["claude-work"]["account"], "claudework")
+        used = {c["key"]: c["used_by"] for c in data["derived"]["candidates"] if c["provider"] == "Claude"}
+        self.assertEqual(used["you#1"], "", "an earlier override reserves nothing")
+        typed = self.output(fx, *EINH, "--map", f"claude-work={fx.home}/you/.local/bin/claude", "--map", "claude-work=claudework#1")
+        self.assertEqual(agents(typed)["claude-work"]["command"], f"{fx.home}/claudework/.local/bin/claude", "a key after a typed path wins")
+
+    def test_text_that_is_not_utf8_is_refused_never_printed(self):
+        # Kimi review round 1, P2: a POSIX argv byte 0xFF passed --check-args and broke the JSON.
+        done = subprocess.run([b"/bin/sh", bytes(SCRIPT), b"--check-args", b"omp", b"--ok", b"a\xffb"], capture_output=True, stdin=subprocess.DEVNULL)
+        self.assertEqual((done.returncode, json.loads(done.stdout.decode("utf-8"))), (3, {"ok": False, "why": "Arguments must be valid UTF-8 text."}))
+        for bad in (b"\xc0\xaf", b"\xed\xa0\x80", b"\xe2\x82"):
+            done = subprocess.run([b"/bin/sh", bytes(SCRIPT), b"--check-args", b"omp", bad], capture_output=True, stdin=subprocess.DEVNULL)
+            self.assertEqual(done.returncode, 3, bad)
+        ok = subprocess.run([b"/bin/sh", bytes(SCRIPT), b"--check-args", b"omp", "--name=Ünï😀".encode()], capture_output=True, stdin=subprocess.DEVNULL)
+        self.assertEqual(json.loads(ok.stdout.decode("utf-8"))["arguments"], ["--name=Ünï😀"])
+        fx = self.fixture(seats=[], operator_clis=["claude"])
+        done = fx.run("--accounts", "claude=Good,Bad\udcff")
+        self.assertEqual((done.returncode, json.loads(done.stdout)["why"]), (3, "A Claude label must be valid UTF-8 text."))
+
     def test_a_seat_named_with_a_dash_maps_like_any_other(self):
         fx = self.fixture(seats=["claude-work", "claudehome"], operator_clis=[])
         a = agents(self.output(fx, "--accounts", "claude=Home,Work"))
@@ -658,6 +699,7 @@ class StructuredQuestions(unittest.TestCase):
         self.assertIn("--check-args", skill)
         self.assertIn("`when`", skill)
         self.assertIn("`for_each`", skill)
+        self.assertIn("`{N}` in its question is that count", skill, "the review's {N} and its table are defined")
         self.assertLessEqual(len(json.dumps(skill)), 8957, "stays within 0.6.9's JSON-encoded size; the whole helper prompt is bounded at 32000 bytes")
 
     def test_script_is_read_only_and_forbids_model_questions(self):

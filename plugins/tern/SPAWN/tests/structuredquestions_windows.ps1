@@ -35,6 +35,8 @@ function Run([string[]]$extra) {
 $sw = [Diagnostics.Stopwatch]::StartNew()
 $p1 = Run @()
 $p2 = Run @('--phase', '2', '--accounts', 'claude=Main,acct2')
+$me = [Environment]::UserName
+$remap = Run @('--phase', '2', '--accounts', 'claude=Main,acct2', '--map', ('claude-main=' + (Join-Path $second 'claude.ps1')), '--map', ('claude-main=' + $me + '#1'))
 $ok = Run @('--check-args', 'omp', '--profile', 'work')
 $no = Run @('--check-args', 'omp', '--ok', 'a;b')
 $sw.Stop()
@@ -61,6 +63,7 @@ $result = [ordered]@{
   hung_install_no_yolo = (-not (Yolo 'claude-main')); ps1_install_yolo = (Yolo 'claude-acct2'); survivors_after_timeout = $leftCount
   codex_yolo = (Yolo 'codex'); lookalike_not_offered = (-not (Yolo 'kimi')); sibling_entry_not_offered = (-not (Yolo 'grok')); omp_listed_value_offered = (Yolo 'omp'); muse_offered = (Yolo 'muse')
   per_agent_permission = [bool]($q2 | Where-Object { $_.id -eq 'perm-claude-acct2' -and $_.when.question -eq 'perm-gate' })
+  last_map_wins = (($remap.raw | ConvertFrom-Json).derived.accounts | Where-Object { $_.id -eq 'claude-main' }).command -eq (Join-Path $Dir 'claude.cmd')
   check_args = ($ok.code -eq 0) -and (($ok.raw | ConvertFrom-Json).arguments -join ' ') -eq '--profile work' -and ($no.code -eq 3) -and (($no.raw | ConvertFrom-Json).why -eq 'Arguments cannot contain a semicolon (;).')
 }
 $result | ConvertTo-Json -Compress

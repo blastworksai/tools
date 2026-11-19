@@ -29,7 +29,23 @@ if [ "${1:-}" = --check-args ]; then
 	exec env LC_ALL=C awk '
 	function esc(s,   r, i, c) { r = ""; for (i = 1; i <= length(s); i++) { c = substr(s, i, 1); if (c == "\\") r = r "\\\\"; else if (c == "\"") r = r "\\\""; else if (c < " " || c == "\177") r = r sprintf("\\u%04x", 0); else r = r c }; return r }
 	function fail(m) { printf "{\"ok\":false,\"why\":\"%s\"}\n", esc(m); exit 3 }
+	# JSON travels as UTF-8: a word that is not valid UTF-8 is refused, never printed as broken JSON.
+	function utf8ok(s,   i, n, c, k, j, d) {
+		n = length(s)
+		for (i = 1; i <= n; i++) {
+			c = ordv[substr(s, i, 1)]
+			if (c < 128) continue
+			if (c >= 194 && c <= 223) k = 1; else if (c >= 224 && c <= 239) k = 2; else if (c >= 240 && c <= 244) k = 3; else return 0
+			if (i + k > n) return 0
+			for (j = 1; j <= k; j++) { d = ordv[substr(s, i + j, 1)]; if (d < 128 || d > 191) return 0 }
+			d = ordv[substr(s, i + 1, 1)]
+			if ((c == 224 && d < 160) || (c == 237 && d > 159) || (c == 240 && d < 144) || (c == 244 && d > 143)) return 0
+			i += k
+		}
+		return 1
+	}
 	BEGIN {
+		for (i = 0; i < 256; i++) ordv[sprintf("%c", i)] = i
 		bad["\047"] = "a single quote (\047)"; bad["\""] = "a double quote (\")"; bad["\\"] = "a backslash (\\)"
 		bad["`"] = "a backtick (`)"; bad["$"] = "a dollar sign ($)"; bad[";"] = "a semicolon (;)"; bad["&"] = "an ampersand (&)"
 		bad["|"] = "a vertical bar (|)"; bad["<"] = "a less-than sign (<)"; bad[">"] = "a greater-than sign (>)"
@@ -45,6 +61,7 @@ if [ "${1:-}" = --check-args ]; then
 			if (w == "") fail("An argument is empty.")
 			if (length(w) > 4096) fail("An argument is longer than 4096 characters.")
 			if (substr(w, 1, 1) == "=") fail("An argument cannot start with =.")
+			if (!utf8ok(w)) fail("Arguments must be valid UTF-8 text.")
 			for (j = 1; j <= length(w); j++) {
 				c = substr(w, j, 1)
 				if (c < " " || c == "\177") fail("Arguments cannot contain control characters, such as a tab or a line break.")
@@ -314,6 +331,20 @@ function cut(s, m,   i, n, c, r) {
 	for (i = 1; i <= length(s); i++) { c = substr(s, i, 1); if (!(c >= "\200" && c < "\300")) { if (++n > m) break }; r = r c }
 	return r
 }
+function utf8ok(s,   i, n, c, k, j, d) {
+	n = length(s)
+	for (i = 1; i <= n; i++) {
+		c = ordv[substr(s, i, 1)]
+		if (c < 128) continue
+		if (c >= 194 && c <= 223) k = 1; else if (c >= 224 && c <= 239) k = 2; else if (c >= 240 && c <= 244) k = 3; else return 0
+		if (i + k > n) return 0
+		for (j = 1; j <= k; j++) { d = ordv[substr(s, i + j, 1)]; if (d < 128 || d > 191) return 0 }
+		d = ordv[substr(s, i + 1, 1)]
+		if ((c == 224 && d < 160) || (c == 237 && d > 159) || (c == 240 && d < 144) || (c == 244 && d > 143)) return 0
+		i += k
+	}
+	return 1
+}
 function printable(s,   i, c) { for (i = 1; i <= length(s); i++) { c = substr(s, i, 1); if (c in ctl) return 0 }; return 1 }
 function trim(s) { sub(/^ +/, "", s); sub(/ +$/, "", s); return s }
 function reduce(s) { s = tolower(s); gsub(/[^a-z0-9]/, "", s); return s }
@@ -376,6 +407,7 @@ BEGIN {
 	np = split("claude codex kimi grok agy muse omp", plist, " ")
 	ncand = 0; nunav = 0; nglitch = 0; nplace = 0; nosudo = 0; pcount = 0; nans = 0; nmapo = 0; nrarg = 0; nag = 0; nmiss = 0
 	EMD = "\342\200\224"; DOT = "\302\267"
+	for (i = 0; i < 256; i++) ordv[sprintf("%c", i)] = i
 }
 $1 == "OP" { op = dec($2); ophome = dec($3) }
 $1 == "CWD" { cwd = dec($2) }
@@ -383,6 +415,7 @@ $1 == "NOSUDO" { nosudo = 1 }
 $1 == "USER" { uhome[$2] = dec($3); users[++nusers] = $2 }
 $1 == "CAND" {
 	u = dec($3); pth = dec($5)
+	if (!utf8ok(pth) || !utf8ok(dec($6))) next
 	if ((u SUBSEP $2 SUBSEP pth) in seencand) next
 	seencand[u SUBSEP $2 SUBSEP pth] = 1
 	ncand++; ccli[ncand] = $2; cuser[ncand] = u; ckind[ncand] = $4; cpath[ncand] = pth; chome[ncand] = dec($6)
@@ -433,6 +466,7 @@ function do_map(   a, v, cli, lab, n, parts, k, l, p, pi, m, i, j, c, r, suf, pa
 			l = trim(parts[k])
 			if (l == "") refuse("A " pname(cli) " label is empty.")
 			if (!printable(l)) refuse("A " pname(cli) " label has a control character, such as a tab or a line break.")
+			if (!utf8ok(l)) refuse("A " pname(cli) " label must be valid UTF-8 text.")
 			if (clen(l) > 32) refuse("The " pname(cli) " label \"" l "\" is longer than 32 characters.")
 			if ((cli SUBSEP tolower(l)) in seenlab) refuse("Two " pname(cli) " accounts have the label \"" l "\".")
 			seenlab[cli SUBSEP tolower(l)] = 1
@@ -459,16 +493,23 @@ function do_map(   a, v, cli, lab, n, parts, k, l, p, pi, m, i, j, c, r, suf, pa
 	}
 	for (a = 1; a <= na; a++) byid[aid[a]] = a
 	for (k in skip) if (!(k in byid)) refuse("No agent has the ID \"" k "\".")
-	# Overrides first: a candidate key, or a typed absolute path run by the account whose home holds it.
+	# Overrides first: a candidate key, or a typed absolute path run by the account whose home holds it. The
+	# rerun argv keeps every earlier answer, so the last --map for an agent is the one that counts.
 	for (i = 1; i <= nmapo; i++) {
 		v = mapo[i]
 		if (index(v, "=") == 0) refuse("A --map answer needs the form <id>=<install key or absolute path>.")
-		id = substr(v, 1, index(v, "=") - 1); pth = substr(v, index(v, "=") + 1)
+		id = substr(v, 1, index(v, "=") - 1)
 		if (!(id in byid)) refuse("No agent has the ID \"" id "\".")
+		lastmap[id] = i
+	}
+	for (i = 1; i <= nmapo; i++) {
+		v = mapo[i]
+		id = substr(v, 1, index(v, "=") - 1); pth = substr(v, index(v, "=") + 1)
+		if (lastmap[id] != i) continue
 		a = byid[id]
 		if (id in skip) continue
 		if (substr(pth, 1, 1) == "/") {
-			if (!printable(pth)) refuse("A typed path has a control character.")
+			if (!printable(pth) || !utf8ok(pth)) refuse("A typed path must be valid UTF-8 text without control characters.")
 			u = owner_of(pth); hit = 0
 			for (c = 1; c <= ncand; c++) if (ccli[c] == acli[a] && cuser[c] == u && cpath[c] == pth) hit = c
 			if (hit && (hit in taken)) refuse("Two agents cannot use the same install: " ckey[hit] ".")
@@ -479,7 +520,8 @@ function do_map(   a, v, cli, lab, n, parts, k, l, p, pi, m, i, j, c, r, suf, pa
 			take(a, bykey[acli[a], pth])
 		}
 	}
-	# Pass 1: a label that names a seat account (its name after the CLI) or the folder that holds an install.
+	# Pass 1: a label that names a seat account (its name after the CLI) or the folder that holds an install, among
+		# accounts named for the provider and the operator only (another OS account is used only when chosen).
 	for (pi = 1; pi <= np; pi++) {
 		p = plist[pi]; if (!found[p]) continue
 		m = sort_cands(p)
@@ -489,7 +531,7 @@ function do_map(   a, v, cli, lab, n, parts, k, l, p, pi, m, i, j, c, r, suf, pa
 			if (acli[a] != p || asingle[a] || (a in ause) || (aid[a] in skip)) continue
 			r = reduce(alab[a]); if (r == "") continue
 			for (i = 1; i <= m; i++) {
-				c = srt[p, i]; if (c in taken) continue
+				c = srt[p, i]; if ((c in taken) || crank[c] > 1) continue
 				suf = crank[c] == 0 ? reduce(substr(cuser[c], length(p) + 1)) : ""
 				par = reduce(parentname(cpath[c]))
 				if (suf == r || par == r) { take(a, c); break }
@@ -722,7 +764,7 @@ cat "$T/map" >>"$FACTS"
 jsq() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
 while IFS="$TAB" read -r id cli user kind path typed; do
 	if [ "$typed" = 1 ]; then
-		if [ "$kind" = operator ]; then [ -f "$path" ] && [ -x "$path" ]; else login_run 0 "$user" test -x "$path" >/dev/null; fi || {
+		if [ "$kind" = operator ]; then [ -f "$path" ] && [ -x "$path" ]; else login_run 0 "$user" sh -c '[ -f "$1" ] && [ -x "$1" ]' spawn-check "$path" >/dev/null; fi || {
 			printf '{"ok":false,"why":"%s cannot run %s, so it cannot be %s."}\n' "$(jsq "$user")" "$(jsq "$path")" "$(jsq "$id")"
 			exit 3
 		}
