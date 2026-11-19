@@ -837,6 +837,15 @@
   "missing": [],
   "candidates": [
    {
+    "key": "claudehome#1",
+    "provider": "Claude",
+    "account": "claudehome",
+    "operator": false,
+    "command": "@FIX@/home/claudehome/.local/bin/claude",
+    "option": "claudehome — @FIX@/home/claudehome/.local/bin/claude",
+    "used_by": "claude-home"
+   },
+   {
     "key": "claudework#1",
     "provider": "Claude",
     "account": "claudework",
@@ -846,13 +855,13 @@
     "used_by": "claude-work"
    },
    {
-    "key": "claudehome#1",
+    "key": "you#1",
     "provider": "Claude",
-    "account": "claudehome",
-    "operator": false,
-    "command": "@FIX@/home/claudehome/.local/bin/claude",
-    "option": "claudehome — @FIX@/home/claudehome/.local/bin/claude",
-    "used_by": "claude-home"
+    "account": "you",
+    "operator": true,
+    "command": "@FIX@/home/you/.local/bin/claude",
+    "option": "you (you) — @FIX@/home/you/.local/bin/claude",
+    "used_by": ""
    },
    {
     "key": "codexone#1",
@@ -873,87 +882,6 @@
     "used_by": "codex-two"
    },
    {
-    "key": "kimione#1",
-    "provider": "Kimi",
-    "account": "kimione",
-    "operator": false,
-    "command": "@FIX@/home/kimione/.local/bin/kimi",
-    "option": "kimione — @FIX@/home/kimione/.local/bin/kimi",
-    "used_by": "kimi"
-   },
-   {
-    "key": "grokone#1",
-    "provider": "Grok",
-    "account": "grokone",
-    "operator": false,
-    "command": "@FIX@/home/grokone/.local/bin/grok",
-    "option": "grokone — @FIX@/home/grokone/.local/bin/grok",
-    "used_by": "grok"
-   },
-   {
-    "key": "agyone#1",
-    "provider": "Agy",
-    "account": "agyone",
-    "operator": false,
-    "command": "@FIX@/home/agyone/.local/bin/agy",
-    "option": "agyone — @FIX@/home/agyone/.local/bin/agy",
-    "used_by": "agy-one"
-   },
-   {
-    "key": "agytwo#1",
-    "provider": "Agy",
-    "account": "agytwo",
-    "operator": false,
-    "command": "@FIX@/home/agytwo/.local/bin/agy",
-    "option": "agytwo — @FIX@/home/agytwo/.local/bin/agy",
-    "used_by": "agy-two"
-   },
-   {
-    "key": "agythree#1",
-    "provider": "Agy",
-    "account": "agythree",
-    "operator": false,
-    "command": "@FIX@/home/agythree/.local/bin/agy",
-    "option": "agythree — @FIX@/home/agythree/.local/bin/agy",
-    "used_by": "agy-three"
-   },
-   {
-    "key": "agyfour#1",
-    "provider": "Agy",
-    "account": "agyfour",
-    "operator": false,
-    "command": "@FIX@/home/agyfour/.local/bin/agy",
-    "option": "agyfour — @FIX@/home/agyfour/.local/bin/agy",
-    "used_by": "agy-four"
-   },
-   {
-    "key": "museone#1",
-    "provider": "Muse",
-    "account": "museone",
-    "operator": false,
-    "command": "@FIX@/home/museone/.local/bin/muse",
-    "option": "museone — @FIX@/home/museone/.local/bin/muse",
-    "used_by": "muse"
-   },
-   {
-    "key": "ompone#1",
-    "provider": "OMP",
-    "account": "ompone",
-    "operator": false,
-    "command": "@FIX@/home/ompone/.local/bin/omp",
-    "option": "ompone — @FIX@/home/ompone/.local/bin/omp",
-    "used_by": "omp"
-   },
-   {
-    "key": "you#1",
-    "provider": "Claude",
-    "account": "you",
-    "operator": true,
-    "command": "@FIX@/home/you/.local/bin/claude",
-    "option": "you (you) — @FIX@/home/you/.local/bin/claude",
-    "used_by": ""
-   },
-   {
     "key": "you#1",
     "provider": "Codex",
     "account": "you",
@@ -961,6 +889,15 @@
     "command": "@FIX@/home/you/.local/bin/codex",
     "option": "you (you) — @FIX@/home/you/.local/bin/codex",
     "used_by": ""
+   },
+   {
+    "key": "kimione#1",
+    "provider": "Kimi",
+    "account": "kimione",
+    "operator": false,
+    "command": "@FIX@/home/kimione/.local/bin/kimi",
+    "option": "kimione — @FIX@/home/kimione/.local/bin/kimi",
+    "used_by": "kimi"
    },
    {
     "key": "you#1",
@@ -972,6 +909,15 @@
     "used_by": ""
    },
    {
+    "key": "grokone#1",
+    "provider": "Grok",
+    "account": "grokone",
+    "operator": false,
+    "command": "@FIX@/home/grokone/.local/bin/grok",
+    "option": "grokone — @FIX@/home/grokone/.local/bin/grok",
+    "used_by": "grok"
+   },
+   {
     "key": "you#1",
     "provider": "Grok",
     "account": "you",
@@ -979,6 +925,42 @@
     "command": "@FIX@/home/you/.local/bin/grok",
     "option": "you (you) — @FIX@/home/you/.local/bin/grok",
     "used_by": ""
+   },
+   {
+    "key": "agyfour#1",
+    "provider": "Agy",
+    "account": "agyfour",
+    "operator": false,
+    "command": "@FIX@/home/agyfour/.local/bin/agy",
+    "option": "agyfour — @FIX@/home/agyfour/.local/bin/agy",
+    "used_by": "agy-four"
+   },
+   {
+    "key": "agyone#1",
+    "provider": "Agy",
+    "account": "agyone",
+    "operator": false,
+    "command": "@FIX@/home/agyone/.local/bin/agy",
+    "option": "agyone — @FIX@/home/agyone/.local/bin/agy",
+    "used_by": "agy-one"
+   },
+   {
+    "key": "agythree#1",
+    "provider": "Agy",
+    "account": "agythree",
+    "operator": false,
+    "command": "@FIX@/home/agythree/.local/bin/agy",
+    "option": "agythree — @FIX@/home/agythree/.local/bin/agy",
+    "used_by": "agy-three"
+   },
+   {
+    "key": "agytwo#1",
+    "provider": "Agy",
+    "account": "agytwo",
+    "operator": false,
+    "command": "@FIX@/home/agytwo/.local/bin/agy",
+    "option": "agytwo — @FIX@/home/agytwo/.local/bin/agy",
+    "used_by": "agy-two"
    },
    {
     "key": "you#1",
@@ -990,6 +972,15 @@
     "used_by": ""
    },
    {
+    "key": "museone#1",
+    "provider": "Muse",
+    "account": "museone",
+    "operator": false,
+    "command": "@FIX@/home/museone/.local/bin/muse",
+    "option": "museone — @FIX@/home/museone/.local/bin/muse",
+    "used_by": "muse"
+   },
+   {
     "key": "you#1",
     "provider": "Muse",
     "account": "you",
@@ -997,6 +988,15 @@
     "command": "@FIX@/home/you/.local/bin/muse",
     "option": "you (you) — @FIX@/home/you/.local/bin/muse",
     "used_by": ""
+   },
+   {
+    "key": "ompone#1",
+    "provider": "OMP",
+    "account": "ompone",
+    "operator": false,
+    "command": "@FIX@/home/ompone/.local/bin/omp",
+    "option": "ompone — @FIX@/home/ompone/.local/bin/omp",
+    "used_by": "omp"
    },
    {
     "key": "you#1",
