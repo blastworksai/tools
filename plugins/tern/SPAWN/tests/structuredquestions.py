@@ -591,7 +591,7 @@ class StructuredQuestions(unittest.TestCase):
         sh, ps1 = SCRIPT.read_text(), (PACKAGE / "structuredquestions.ps1").read_text()
         for exact in ["Found on this machine: ", "Not found: ", "Glitch folder detected: ", "Are there any providers for which you have more than one account?",
                       "Which providers have more than one account?", "How many {provider} accounts?", "Labels for your {N} {provider} accounts?",
-                      "Number them ({provider} 1, {provider} 2)", "Type my own labels", "All agents run as ", "Use this mapping?", "Use it (Recommended)", "Change some",
+                      "Number them ({provider} 1, {provider} 2)", "Type my own labels", "All agents run as ", "Change some",
                       "no ", "install or OS user found. Each ", " account needs its own install with its own login. Type its path, or skip it.",
                       "Agy keeps its login per OS user; a second install may share the first one", "Do you want to set special permission modes to start some of these agents with?",
                       "No, all Default (Recommended)", "Default (no arguments)", "Custom (type the arguments)", "which permission mode?", "YOLO is not offered for ",
@@ -601,7 +601,10 @@ class StructuredQuestions(unittest.TestCase):
                       "--dangerously-skip-permissions", "--dangerously-bypass-approvals-and-sandbox", "--permission-mode bypassPermissions", "--approval-mode yolo",
                       "Arguments cannot contain ", "Not used for "]:
             self.assertIn(exact, sh, exact)
-            self.assertIn(exact.replace("one'", "one''"), ps1, exact)
+            self.assertIn(exact, ps1, exact)
+        # Windows has no OS-user launch, so its every agent is the operator's: the several-accounts question is POSIX only.
+        self.assertIn("Use this mapping?", sh)
+        self.assertNotIn("Use this mapping?", ps1)
 
     def test_windows_twin_reads_the_omp_config_and_bounds_every_call(self):
         ps1 = (PACKAGE / "structuredquestions.ps1").read_text()
@@ -631,7 +634,7 @@ class StructuredQuestions(unittest.TestCase):
             self.assertTrue(shim.search(path) and unsafe.search(path), "refused: " + path)
         self.assertTrue(script.search(r"C:\x\tool.ps1") and not shim.search(r"C:\x\tool.ps1") and not direct.search(r"C:\x\tool.ps1"))
         self.assertIn("'/d /c \"\"' + $Path + '\" --help\"'", ps1)
-        self.assertIn("'-NoProfile -File \"' + $Path + '\" --help'", ps1, "a .ps1 install runs the way SPAWN launches it")
+        self.assertIn("-NoLogo -NoProfile -File \"' + $Path + '\" --help'", ps1, "a .ps1 install runs the way SPAWN launches it")
         before, after = re.compile(literal("TokenBefore")), re.compile(literal("TokenAfter"))
 
         def token(text, tok):
