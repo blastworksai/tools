@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.5
+
+- **A coordinator's proposal shows up within seconds.** ORCH+ read a worker's next report only once per poll (every 5 minutes by default), and a poll that went to settlement (compacting read reports, publishing an ACK or a reply, acceptance, a wake) pushed that read a whole poll further. A poll spent on settlement now owes the report lane a read, which runs at once; stop and retirement never owe one, a held read lane never does, and the debt is void whenever the next poll could not read (stop or retirement due or in flight, reattachment needed, a stale coordinator generation). A continuation poll that comes back without an action waits one cadence before continuation may bypass the schedule again (SKILLS-214, found when a filmed orchestration waited on a coordinator's proposal).
+- **Fast after activity.** For 10 minutes after a coordinator's last report, its activation in this host session, or an answer of yours reaching it (its publication confirmed), ORCH+ looks for its next report every 10 seconds; after that it falls back to the policy cadence. A shorter policy value still wins. A coordinator whose state Tern cannot see (OMP) costs about four store writes per check, so the window keeps an idle coordinator at the ordinary cadence (measured: 49 writes an hour after the window) (SKILLS-214).
+
 ## 0.6.4
 
 - When there is nothing to choose between, ORCH+ no longer asks you to "Choose a project". The project menu gains a "Start in another project…" item for starting elsewhere (SKILLS-204).

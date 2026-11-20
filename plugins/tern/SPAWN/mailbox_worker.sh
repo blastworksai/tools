@@ -224,7 +224,12 @@ handover_check() {
 allocate() {
  input=$1 consumed=${2:-0} source_journal=${3:-$journal}
  strict "$input" 65536
- jq -e --arg schema report_input -f "$reply_validator" "$input" >/dev/null || fail invalid_schema
+ if ! jq -e --arg schema report_input -f "$reply_validator" "$input" >/dev/null; then
+  # The same rules in explain mode name the first field that broke and the rule it broke (SKILLS-214).
+  why=$(jq -e --arg schema report_input --arg explain 1 -f "$reply_validator" "$input" 2>&1 >/dev/null | head -n 1 |
+   sed 's/^jq: error (at [^)]*): //' | tr -cd '[:print:]' | cut -c1-300) || why=
+  printf 'invalid_schema\n%s\n' "${why:-the report does not match the documented schema}" >&2; exit 1
+ fi
  handover_check "$input"
  seq=$(jq -r '.next_seq' "$source_journal"); [ "$seq" -ge 1 ] && [ "$seq" -lt 9007199254740991 ] || fail journal_corrupt
  kind=$(jq -r '.kind' "$input")

@@ -268,7 +268,7 @@ local function pause_link(view: any, policy: any): any
 	return dispatch_link(view, if policy.paused then "resume" else "pause", if policy.paused then "Resume scheduling" else "Pause new work")
 end
 -- `orchplus.worker` node fields copied verbatim from the projected workflow worker.
-local WORKER_KEYS = "worker_id work_id worker_generation origin_binding pane_binding due_poll poll_continuation due_report report_request_pending active_action_id cleanup_ready"
+local WORKER_KEYS = "worker_id work_id worker_generation origin_binding pane_binding due_poll poll_ms poll_continuation due_report report_request_pending active_action_id cleanup_ready"
 	.. " activation_received"
 	.. " finish_requested coordinator_owner_id launch_origin_binding launch_pane_binding continuation_required continuation_proof"
 	.. " orchestration_excluded context_used_pct context_seq context_rollover phase due_rollover rollover restored adopt_pane_binding withdrawal role family review_id"
