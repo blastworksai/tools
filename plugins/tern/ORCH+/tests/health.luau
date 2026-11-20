@@ -1751,7 +1751,9 @@ if section == nil or section == "receipt_polling" then
 	-- spent and the host answers it mailbox_idle (no action): the turn was still the report lane's.
 	local last
 	for _, event in w.events do if event.command == "poll" then last = event end end
-	check(last ~= nil and last.bytes == nil and w:worker().active_action_id == nil,
+	local idle = w:diagnostic().poll_result
+	check(last ~= nil and last.bytes == nil and w:worker().active_action_id == nil
+		and idle ~= nil and idle.ok == true and idle.code == "mailbox_idle" and idle.request_id == last.request_id,
 		"an unavailable receipt watermark cannot starve report discovery")
 	w:tick(); w:elapse(5000); w.api.schedule(w.cx)
 	local third = assert(w:worker().active_action_id)

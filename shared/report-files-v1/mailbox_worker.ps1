@@ -617,6 +617,7 @@ function Receipts {
  try { CollectReceipts } finally { LeaveCapacity }
 }
 function Receive {
+ At '' # a refusal in this receive never inherits an earlier call's field path (SKILLS-214)
  # Receipt cursors may already have advanced and remote files may be compacted.
  # Only an explicitly unclaimed retained fact is deliverable; a claim is never
  # permission to execute again, even when its caller lost the claim response.

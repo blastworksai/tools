@@ -2550,6 +2550,10 @@ local function schedule(cx: WindowCx)
 			scan = { nonce = origin.alias_nonce, cursor = 0, observed = {}, watermarks = {}, next_poll = {}, startup_until = {}, paced = {}, focused_until = {} }; scans[source] = scan
 		end
 		-- One registered worker per turn: bounded callback work and fair rotation.
+		if #flow.worker_ids == 0 then
+			-- The last worker left: forget every per-worker timer and counter at once.
+			for _, per_worker in { scan.observed, scan.watermarks, scan.next_poll, scan.startup_until, scan.paced, scan.focused_until } do table.clear(per_worker) end
+		end
 		if #flow.worker_ids > 0 then
 			scan.cursor = scan.cursor % #flow.worker_ids + 1
 			if scan.cursor == 1 then
