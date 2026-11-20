@@ -718,8 +718,16 @@ local function probe_repository(view: any, input: any, complete: any?)
 		{ argv = { "git", "-C", input.cwd, "rev-parse", "--path-format=absolute", "--git-common-dir" }, field = "common_dir" },
 		{ argv = { "git", "-C", input.cwd, "rev-parse", "--verify", "--end-of-options", target .. "^{commit}" }, field = "head_revision" },
 	}
+	-- A newer probe replaced this one: a caller waiting on `complete` (readiness) gets a refusal, never silence.
+	local function superseded(): boolean
+		if view.setup_probe == input.request_id and contexts[view.pane] ~= nil then return false end
+		if complete and contexts[view.pane] ~= nil then
+			complete({ ok = false, code = "repository_probe_superseded", message = "A newer repository check replaced this one; it was not completed." })
+		end
+		return true
+	end
 	local function run(index: number)
-		if view.setup_probe ~= input.request_id or contexts[view.pane] == nil then return end
+		if superseded() then return end
 		local step = steps[index]
 		if step == nil then
 			view.setup_probe = nil
@@ -732,7 +740,7 @@ local function probe_repository(view: any, input: any, complete: any?)
 		end
 		local ok, failure = pcall(function()
 			tern.process.run(step.argv, { timeout_ms = 10000 }, function(result: any)
-				if view.setup_probe ~= input.request_id or contexts[view.pane] == nil then return end
+				if superseded() then return end
 				if result.status ~= 0 or result.timed_out or result.truncated or result.stdout_truncated then
 					view.setup_probe = nil
 					refuse("Git could not verify this repository/target: " .. tostring(result.stderr or ""):gsub("%c", " "):sub(1, 512))

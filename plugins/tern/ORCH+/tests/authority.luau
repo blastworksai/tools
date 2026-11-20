@@ -1715,6 +1715,35 @@ do
 		source_nonce = view1.alias_nonce, request_id = "verify-unowned-readiness", orch_project_id = "unknown-project" }) }, cx1)
 	check(view1.setup_result.code == "readiness_unowned" and #calls == before,
 		"readiness refuses arbitrary project readback before invoking Git")
+	-- A readiness probe that a newer repository probe replaced is refused, not left pending for the life of the pane.
+	local held, hold_next = {}, true
+	fake.process = { run = function(argv, options, callback)
+		local stdout = ""
+		if argv[2] == "init" then prepared = argv[4] end
+		if table.find(argv, "--show-toplevel") then stdout = prepared .. "\n"
+		elseif table.find(argv, "--git-common-dir") then stdout = prepared .. "/.git\n"
+		elseif table.find(argv, "--verify") then stdout = string.rep("a", 40) .. "\n" end
+		local result = { status = 0, stdout = stdout, stderr = "" }
+		if hold_next and table.find(argv, "--show-toplevel") then
+			hold_next = false
+			table.insert(held, function() callback(result) end)
+			return
+		end
+		callback(result)
+	end }
+	definition.event(view1, { ev = "action", act = "setup-readiness-prepare", value = runtime.json.encode({
+		source_nonce = view1.alias_nonce, request_id = "readiness-one" }) }, cx1)
+	check(#held == 1 and view1.readiness_pending == "readiness-one", "first readiness probe waits on its repository check")
+	definition.event(view1, { ev = "action", act = "setup-repository-probe", value = runtime.json.encode({
+		source_nonce = view1.alias_nonce, request_id = "newer-probe", cwd = prepared, target_ref = "main" }) }, cx1)
+	held[1]()
+	check(view1.readiness_pending == nil and view1.setup_result.request_id == "readiness-one"
+		and view1.setup_result.code == "repository_probe_superseded",
+		"a superseded readiness probe completes with a refusal and clears the pending flag")
+	definition.event(view1, { ev = "action", act = "setup-readiness-prepare", value = runtime.json.encode({
+		source_nonce = view1.alias_nonce, request_id = "readiness-two" }) }, cx1)
+	check(view1.setup_result.request_id == "readiness-two" and view1.setup_result.code ~= "readiness_pending",
+		"a second readiness request is not refused as still pending")
 	fake.process = original_process
 end
 do
