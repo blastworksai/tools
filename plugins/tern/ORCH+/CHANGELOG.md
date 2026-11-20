@@ -3,6 +3,7 @@
 ## 0.6.6
 
 - **Caps evict again.** Since 0.6.4 the limits on deploy and review records (64 each), intake records and template chains never made room: a second function with the same name, added for owner notices, replaced the one that evicts the oldest finished record. The record past a cap then made the orchestration fail its own state check, so it could not save anything more. The two functions now have their own names, and a test fails if a function on the shared config table is defined twice, in either definition form (SKILLS-219).
+- **The coordinator's fast window follows only your actions.** The 10 seconds check after activity now restarts on the coordinator's activation, a real report it sends, your answers to its questions and a report request you click yourself, and no longer on ORCH+'s own automatic report requests or the report that answers one (SKILLS-219).
 - **Two small stuck states.** An error inside the 100 ms relay to SPAWN no longer stops that relay: it re-arms before it works, as the host timer does. A rollover that is only waiting (session paused, capacity or quota held, catalog or slot not ready) no longer spends its retry budget; only a real preparation attempt counts, so a long pause no longer ends in "close this handover without a successor" (SKILLS-220).
 
 ## 0.6.5
