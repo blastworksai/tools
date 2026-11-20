@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.4
+
+- **SPAWN works on a Mac again.** On macOS `/bin/sh` is bash 3.2, and one case arm in `mailbox_target.sh` without its leading "(" stopped every mailbox operation before it started. The arm is balanced, and a test now parse-checks every SPAWN shell script with the system `/bin/sh` (SKILLS-215).
+
 ## 0.7.3
 
 - **A refused proposal says which field broke.** The report helper on Linux, macOS (`mailbox_worker.sh`, jq) and Windows (`mailbox_worker.ps1`) still answers `invalid_schema` on its first line, and now adds one second line naming the field and the rule, for example `payload.checks[0].argv: must hold 1 to 16 entries, has 49`. Every coordinator proposal kind (new_work, add_source, dispatch, report, review, rollover, landing) names its field, with the field and its rule on each system (the rule's wording can differ between jq and PowerShell); any report names a missing or unknown field and the envelope's action and handover pairing; other report kinds' value rules say `payload: invalid payload for this kind` (POSIX) or keep the bare code (Windows). On Linux and macOS the same jq rules run in an explain mode only after a refusal, so the explanation cannot drift from the check; accepted and refused reports are unchanged (SKILLS-214: a coordinator spent about a minute guessing why its proposal was refused).

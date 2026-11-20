@@ -190,7 +190,7 @@ if [ "$mode" = inventory ]; then
      if modified=$(stat -c %Y "$entry" 2>/dev/null); then :
      elif modified=$(stat -f %m "$entry" 2>/dev/null); then :
      else out storage_error; fi
-     case "$modified" in ''|*[!0-9]*) out storage_error;; esac
+     case "$modified" in (''|*[!0-9]*) out storage_error;; esac
      [ $((modified*1000)) -gt "$cutoff" ] || stale=$((stale+1))
     else out binding_mismatch; fi
    done
