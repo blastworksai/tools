@@ -7,6 +7,7 @@
 - **A readiness check no longer sticks.** If a newer repository check replaced a running readiness check, the readiness check stayed "still pending" until the pane was closed. It now ends with a refusal and the next request runs (SKILLS-221).
 - **No more useless polling of an old coordinator.** A coordinator generation that is no longer the current one is not shown as due for a poll, so the window no longer asks it every 10 seconds only to be refused (SKILLS-221).
 - **"Refreshed" is shown only when it is true.** "USAGE capacity evidence refreshed and validated." used to appear as soon as the evidence was sent, even when the host then refused it. It now appears after the host records the evidence. A refusal says "Capacity evidence was not recorded" with the reason, and no answer within 30 seconds says the host has not confirmed it (SKILLS-221).
+- **Internal.** The coordinator's 10 second and 10 minute cadence numbers now live in one place and the window reads them from there. The dispatch tests run on a fixed clock, and a new test fails when a vendored copy (channel, wire, status) drifts from its shared source (SKILLS-221).
 - **Install minimums are current.** ORCH+ now requires Tern 0.9.22 and SPAWN 0.7.5 (SKILLS-221).
 - **Docs match the code.** The reference, README and backlog now give the right version, the 10-second coordinator cadence and focus rule, the list of 18 test groups and which backlog item has shipped (SKILLS-221).
 
