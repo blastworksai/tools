@@ -72,6 +72,7 @@ local REASONS: { [string]: string } = {
 	source_remote = "runs on another machine over SSH; USAGE reads it only on that machine",
 	api_key_login = "signed in with an API key; no subscription quota",
 	web_login_forbidden = "provider refused usage access; sign in again with the provider's CLI",
+	access_token_stale = "login valid; usage updates when the provider's CLI saves a fresh token",
 }
 
 local function platform_hold_node(): Node?

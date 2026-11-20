@@ -415,10 +415,19 @@ def collect(provider, home, env, io, command=None):
         if not isinstance(token, str) or not token or not token.isprintable():
             raise Unavailable("local_login_unavailable")
         # An expired access token is never refreshed or sent; Claude renews it
-        # itself the next time the user opens it.
+        # itself. The access token lives hours, the login (its refresh token)
+        # weeks, and a running Claude can keep renewing in memory while the
+        # saved copy stays stale. So a stale access token is "login expired"
+        # only when the login has ended too: no refresh token, or its own
+        # refreshTokenExpiresAt has passed (SKILLS-217).
+        now = time.time() * 1000
         expires = oauth.get("expiresAt")
-        if type(expires) in (int, float) and expires <= time.time() * 1000:
-            raise Unavailable("web_login_expired")
+        if type(expires) in (int, float) and expires <= now:
+            refresh = oauth.get("refreshToken")
+            refresh_expires = oauth.get("refreshTokenExpiresAt")
+            login_live = isinstance(refresh, str) and bool(refresh) and not (
+                type(refresh_expires) in (int, float) and refresh_expires <= now)
+            raise Unavailable("access_token_stale" if login_live else "web_login_expired")
         if status_failure is not None:
             raise status_failure
         document = http_json("https://api.anthropic.com/api/oauth/usage",

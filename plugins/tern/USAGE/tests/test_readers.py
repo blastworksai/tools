@@ -558,12 +558,24 @@ for line in sys.stdin:
         self.assertEqual(result["usage"]["windows"][0]["used"], 25)
 
     def test_expired_claude_login_is_reported_without_refresh_or_request(self):
-        for expires, expired in ((int(time.time() * 1000) - 1, True), (0, True),
-                                 (int(time.time() * 1000) + 3600000, False), (None, False)):
-            with self.subTest(expires=expires), tempfile.TemporaryDirectory() as directory:
+        # SKILLS-217: a stale access token is "login expired" only when the login (its
+        # refresh token) has ended too; with a live login it is access_token_stale.
+        now = int(time.time() * 1000)
+        live, ended = now + 86400000, now - 1
+        for expires, refresh, refresh_expires, expected in (
+                (now - 1, "REFRESH", live, "access_token_stale"), (0, "REFRESH", None, "access_token_stale"),
+                (now - 1, "REFRESH", ended, "web_login_expired"), (now - 1, None, None, "web_login_expired"),
+                (now - 1, "", live, "web_login_expired"),
+                (now + 3600000, "REFRESH", live, None), (None, "REFRESH", None, None)):
+            expired = expected is not None
+            with self.subTest(expires=expires, refresh=refresh, refresh_expires=refresh_expires), tempfile.TemporaryDirectory() as directory:
                 home = Path(directory)
                 (home / ".claude").mkdir()
-                oauth = {"accessToken": "SECRET", "refreshToken": "REFRESH"}
+                oauth = {"accessToken": "SECRET"}
+                if refresh is not None:
+                    oauth["refreshToken"] = refresh
+                if refresh_expires is not None:
+                    oauth["refreshTokenExpiresAt"] = refresh_expires
                 if expires is not None:
                     oauth["expiresAt"] = expires
                 (home / ".claude" / ".credentials.json").write_text(json.dumps({"claudeAiOauth": oauth}))
@@ -576,13 +588,14 @@ for line in sys.stdin:
                     result = readers.handle({"request": {"version": 1, "provider": "claude", "kind": "claude"},
                                              "selectors": {}})
                 if expired:
-                    self.assertEqual(result["error"], "web_login_expired")
+                    self.assertEqual(result["error"], expected)
                     status.assert_called_once()
                     request.assert_not_called()
                 else:
                     self.assertNotIn("error", result)
                     self.assertEqual(request.call_args.args[1]["Authorization"], "Bearer SECRET")
                 self.assertNotIn("SECRET", json.dumps(result))
+                self.assertNotIn("REFRESH", json.dumps(result))
 
     def test_rpc_call_error_is_classified_by_caller_but_initialize_error_is_vendor(self):
         script = """
