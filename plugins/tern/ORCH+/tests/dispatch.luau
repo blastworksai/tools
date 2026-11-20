@@ -21,7 +21,7 @@ local sections = { fixture = true, core = true, control_rebind = true, receipts 
 	project_observation = true, project_repository_guards = true, migration_start_guards = true, enrol_route_cancel = true,
 	project_history_reuse = true, project_reserve = true, rollover_location = true, project_start_rollover = true,
 	legacy_observation = true, legacy_worker_roles = true, current_observation = true, compaction_retry = true, catalog_paging = true,
-	make_room = true, rollover_paused_budget = true }
+	make_room = true, rollover_paused_budget = true, coordinator_fast_window = true }
 assert(section == nil or sections[section], "unknown dispatch test section: " .. tostring(section))
 local runtime, environment = tern, getfenv()
 -- Absence stays absent; explicit JSON null remains available to negative wire tests.
@@ -4875,6 +4875,84 @@ if section == nil or section == "rollover_policy" then
 		"an in-progress rollover is never duplicated")
 	check(worker_of(f, id).finish == nil and #actions_of(f, id, "stop") == 0, "automatic request never stops anything by itself")
 	check(state.rehydrate(clone(f.authority.registry)) ~= nil, "policy-triggered rollover restores")
+end
+-- Owner ruling C5 (20 Nov 2026, "Only your actions"): a coordinator's 10 s window restarts on its activation,
+-- a real report it sends, an answer of the owner's, and a report request the owner clicked; never on ORCH+'s
+-- own automatic (policy) report request, nor on the report that answers one.
+if section == nil or section == "coordinator_fast_window" then
+	local clock = { now_ms = 1000, mono_ms = 1000, epoch = "fast-window-host" }
+	local f = fixture(function() return clone(clock) end); local id = f:accepted(true)
+	local function worker() return f.authority.registry.dispatch.workers[id] end
+	local function shown()
+		for _, w in dispatch.project(f.authority.registry, f.origin.logical_session_id, f.origin.alias_nonce).workflow.workers do
+			if w.worker_id == id then return w end
+		end
+		error("missing fast-window worker")
+	end
+	local function drain()
+		for _ = 1, 16 do
+			if not shown().due_poll and not shown().poll_continuation then return end
+			local queued = f:apply("poll", { worker_id = id }); assert(queued.ok, queued.message)
+			local request = f:action(queued.action_id).request
+			local status = if request.op == "mailbox_publish_ack" or request.op == "mailbox_publish_reply" then "published"
+				elseif request.op == "accept" then "accepted"
+				elseif request.op == "mailbox_retire" then "compacted" else "missing"
+			assert(f:finish(queued.action_id, status, {}).ok)
+		end
+		error("fast-window drain did not settle")
+	end
+	local function advance(ms) clock.mono_ms += ms; clock.now_ms += ms; assert(f:tick().ok) end
+	local function send(kind, payload, extra)
+		assert(f:apply("intake", { worker_id = id, bytes = f:report(id, worker().accepted_seq + 1, kind, payload, extra) }).ok)
+	end
+	local function quiet()
+		advance(700000); drain()
+		advance(10000)
+		check(not shown().due_poll, "after a quiet stretch the 10 s window is closed")
+	end
+	local function restarted() advance(0); drain(); advance(10000); return shown().due_poll end
+	local function issue(trigger)
+		assert(f:apply("observe", { worker_id = id, pane_binding = worker().pane_binding, native_state = "idle" }).ok)
+		local r = f:apply("reply", { worker_id = id, trigger = trigger }); assert(r.ok and r.code == "reply_committed", r.message)
+		return worker().workflow.report_request
+	end
+	local function settle_request(req)
+		send("reply_ack", { message_id = req.message_id, reply_seq = req.reply_seq, reply_sha256 = codec.sha256(req.bytes), status = "recorded" },
+			{ action_id = req.action_id, action_revision = req.action_revision })
+	end
+	drain(); quiet()
+	-- 1 An automatic (policy) report request does not restart the window.
+	local auto = issue("policy")
+	check(auto.automatic == true, "a policy report request is recorded as automatic")
+	drain(); advance(10000)
+	check(not shown().due_poll, "an automatic report request reaching the coordinator does not restart the 10 s window")
+	-- 2 The heartbeat answering it does not restart it either, yet still feeds health and freshness.
+	local before_report = clone(worker().workflow.report)
+	send("HEARTBEAT", { state = "idle", request_id = auto.request_id })
+	check(worker().workflow.report ~= nil and worker().workflow.report.at_ms >= (before_report and before_report.at_ms or 0), "the answering report is still recorded as the latest report")
+	drain(); advance(10000)
+	check(not shown().due_poll, "the report answering an automatic request does not restart the 10 s window")
+	settle_request(auto)
+	check(worker().workflow.report_request == nil, "the automatic request settles")
+	-- 3 A real report the coordinator sends restarts it.
+	quiet()
+	send("HEARTBEAT", { state = "working" })
+	check(restarted(), "a real report the coordinator sends restarts the 10 s window")
+	-- 4 A report request the owner clicks restarts it (the existing publication rule).
+	quiet()
+	local owner = issue(nil)
+	check(owner.automatic == nil, "an owner-clicked report request is not automatic")
+	check(restarted(), "a report request the owner clicks restarts the 10 s window")
+	send("HEARTBEAT", { state = "idle", request_id = owner.request_id }); settle_request(owner)
+	-- 5 A store without the new fields restores; malformed values are corrupt.
+	local stored = clone(f.authority.registry)
+	stored.dispatch.workers[id].workflow.reported_at = nil
+	check(state.rehydrate(clone(stored)) ~= nil, "a store without the report anchor restores")
+	stored.dispatch.workers[id].workflow.reported_at = { at_ms = 1, bogus = true }
+	check(state.rehydrate(clone(stored)) == nil, "a malformed report anchor is corrupt")
+	stored = clone(f.authority.registry)
+	for _, reply in stored.dispatch.workers[id].replies do reply.owner = false end
+	if next(stored.dispatch.workers[id].replies) ~= nil then check(state.rehydrate(clone(stored)) == nil, "owner is true or absent") end
 end
 -- SKILLS-220: waiting while paused is not a preparation attempt; the retry budget is spent only by a real attempt.
 if section == nil or section == "rollover_paused_budget" then

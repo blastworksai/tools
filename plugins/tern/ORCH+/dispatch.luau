@@ -1172,9 +1172,9 @@ function config.note_poll_grant(w: any, request: any)
 		if request.selector and request.selector.stream == "report" then f.read_owed = nil end
 	elseif READ_OWING[request.op] or (request.op == "mailbox_retire" and request.mode == "compact") then f.read_owed = true end
 end
--- Fast after activity (einh's pick, 19 Nov 2026): a coordinator converses with the owner, so for
--- 10 minutes after its last report, its activation in this host epoch or an answer reaching it,
--- its next report is looked for every 10 s; then it falls back to the policy cadence. A coordinator
+-- Fast after activity (einh's pick, 19 Nov 2026; narrowed to his own actions on 20 Nov 2026): a
+-- coordinator converses with the owner, so for 10 minutes after its activation in this host epoch, a
+-- real report it sends, or an answer or report request of the owner's reaching it, its next report is looked for every 10 s; then it falls back to the policy cadence. A coordinator
 -- whose state Tern cannot see (OMP) costs about four store writes per check, so an always-10 s
 -- cadence would rewrite the store ~1,440 times an hour while it sits idle. A shorter policy wins.
 local COORDINATOR_POLL_MS, COORDINATOR_FAST_MS = 10000, 600000
@@ -1184,7 +1184,8 @@ end
 function config.poll_interval(p: any, w: any, clock: any): number
 	if w.coordinator_owner_id == nil or not w.workflow then return p.poll_ms end
 	local f = w.workflow
-	for _, at in { f.report, f.active_at, f.started } do
+	-- reported_at and active_at are never set by ORCH+'s own automatic report requests or their answers.
+	for _, at in { f.reported_at, f.active_at, f.started } do
 		local age = elapsed(at, clock)
 		if age ~= nil and age < COORDINATOR_FAST_MS then return math.min(p.poll_ms, COORDINATOR_POLL_MS) end
 	end
@@ -1882,12 +1883,13 @@ end
 local function valid_flow(d: any, w: any, registry: any, legacy: boolean?): boolean
 	local f = w.workflow
 	if f == nil then return legacy == true end
-	if not closed(f, "thread evidence checkpoints native report last_poll health due_poll due_report report_request observation_cursor started exit context context_basis rollover_due_seq boundary_seq empty_read report_loop read_owed active_at")
+	if not closed(f, "thread evidence checkpoints native report last_poll health due_poll due_report report_request observation_cursor started exit context context_basis rollover_due_seq boundary_seq empty_read report_loop read_owed active_at reported_at")
 		or not dense(f.thread, 128) or type(f.evidence) ~= "table" or f.evidence == tern.json.null or count(f.evidence) > 16
 		or type(f.checkpoints) ~= "table" or f.checkpoints == tern.json.null or count(f.checkpoints) > 16 or type(f.due_poll) ~= "boolean" or type(f.due_report) ~= "boolean" then return false end
 	if f.report_loop ~= nil and not loops.valid(f.report_loop) then return false end
 	if f.read_owed ~= nil and f.read_owed ~= true then return false end
 	if f.active_at ~= nil and (not closed(f.active_at, "at_ms mono_ms epoch") or not valid_stamp(f.active_at)) then return false end
+	if f.reported_at ~= nil and (not closed(f.reported_at, "at_ms mono_ms epoch") or not valid_stamp(f.reported_at)) then return false end
 	if f.started ~= nil and (not closed(f.started, "at_ms mono_ms epoch") or not valid_stamp(f.started)) then return false end
 	if f.exit ~= nil and (not closed(f.exit, "at_ms mono_ms epoch state") or not valid_stamp(f.exit)
 		or f.exit.state ~= "exited" or (f.exit.epoch == nil and not w.stopped)) then return false end
@@ -1967,8 +1969,8 @@ local function valid_flow(d: any, w: any, registry: any, legacy: boolean?): bool
 	end
 	local r = f.report_request
 	if r then
-		if not closed(r, "request_id message_id reply_seq action_id action_revision acknowledged published response_received bytes ack_seq ack_sha256 response_bytes")
-			or not id(r.request_id) or type(r.acknowledged) ~= "boolean" or type(r.published) ~= "boolean" or type(r.response_received) ~= "boolean" then return false end
+		if not closed(r, "request_id message_id reply_seq action_id action_revision acknowledged published response_received bytes ack_seq ack_sha256 response_bytes automatic")
+			or (r.automatic ~= nil and r.automatic ~= true) or not id(r.request_id) or type(r.acknowledged) ~= "boolean" or type(r.published) ~= "boolean" or type(r.response_received) ~= "boolean" then return false end
 		local reply = codec.decode_reply(r.bytes, w)
 		if not valid_delivery(r, w, reply, "report_request") or reply.payload.request_id ~= r.request_id then return false end
 		if r.response_received then
@@ -2640,8 +2642,8 @@ function config.valid_worker(d: any, w: any, key: any, registry: any, legacy_cat
 			local ack = codec.decode_ack(receipt.bytes, expected); if ack == nil or ack.seq > w.accepted_seq or ack.seq <= w.compacted_floor or ack.receipt_chain_sha256 ~= receipt.chain or ack.committed_revision > registry.revision then return false end
 		end
 		for seq, reply in w.replies do
-			if not closed(reply, "bytes sha256 frames part message_id reply_seq action_id action_revision acknowledged legacy")
-				or type(reply.frames) ~= "table" or not pos(reply.part) or type(reply.acknowledged) ~= "boolean"
+			if not closed(reply, "bytes sha256 frames part message_id reply_seq action_id action_revision acknowledged legacy owner")
+				or (reply.owner ~= nil and reply.owner ~= true) or type(reply.frames) ~= "table" or not pos(reply.part) or type(reply.acknowledged) ~= "boolean"
 				or (reply.legacy ~= nil and (not legacy_catalog_cache or reply.legacy ~= true)) then return false end
 			-- A retained 0.3.0 landing_grant (Contract B upgrade) is immutable evidence under its legacy schema.
 			local decoded = if reply.legacy then nil else codec.decode_reply(reply.bytes, w)
@@ -3501,7 +3503,9 @@ function config.cleanup_request(n: any, w: any, request: any): boolean
 		and request.origin_binding.owner_generation == session.controller.generation
 		and (not w.coordinator_owner_id or not session.orchestrator or session.orchestrator.owner_id ~= w.coordinator_owner_id)
 end
-local function issue_reply(d: any, w: any, kind: string, payload: any, gate: any?): (any?, any?)
+-- `owner` marks a reply that is the owner's own act reaching the coordinator (his answer, his ruling, a report
+-- request he clicked); only such a reply restarts a coordinator's fast window when published.
+local function issue_reply(d: any, w: any, kind: string, payload: any, gate: any?, owner: boolean?): (any?, any?)
 	if count(w.replies) >= 8 or w.reply_seq == MAX then return fail("full", "Unacknowledged reply capacity is full.") end
 	local reply = { version = 1, message_id = next_id(d, "message-"), reply_seq = w.reply_seq + 1,
 		action_id = next_id(d, "reply-action-"), action_revision = 1, kind = kind, payload = payload }
@@ -3510,7 +3514,8 @@ local function issue_reply(d: any, w: any, kind: string, payload: any, gate: any
 	local bytes = tern.json.encode(reply); local frames, err = codec.frame(bytes, "reply", w); if err then return nil, err end
 	w.reply_seq = reply.reply_seq
 	w.replies[tostring(reply.reply_seq)] = { bytes = bytes, sha256 = frames.message_sha256, frames = frames, part = 1,
-		message_id = reply.message_id, reply_seq = reply.reply_seq, action_id = reply.action_id, action_revision = reply.action_revision, acknowledged = false }
+		message_id = reply.message_id, reply_seq = reply.reply_seq, action_id = reply.action_id, action_revision = reply.action_revision, acknowledged = false,
+		owner = if owner == true or kind == "owner_decision" or kind == "record_ruling" then true else nil }
 	return { bytes = bytes, message_id = if kind == "owner_decision" or kind == "report_request" or kind == "landing_grant" or kind == "landing_refresh" or kind == "deploy_grant" or kind == "project_start" then reply.message_id else nil, action_id = reply.action_id, action_revision = reply.action_revision, reply_seq = reply.reply_seq,
 		activation_token = payload.activation_token, acknowledged = false }, nil
 end
@@ -6650,7 +6655,7 @@ function config.execute_report(n: any, p: any, sid: string, clock: any): (string
 		return "pending", "worker_not_sendable", "Worker " .. t.worker_id .. " is not safely idle; the report_request is sent once it is. No agent is interrupted."
 	end
 	local request_id = next_id(d, "report-request-")
-	local delivery, err = issue_reply(d, t, "report_request", { request_id = request_id, requested_kind = "HEARTBEAT", reason = "An approved coordinator proposal requested a structured progress report; echo request_id in HEARTBEAT or CHECKPOINT." })
+	local delivery, err = issue_reply(d, t, "report_request", { request_id = request_id, requested_kind = "HEARTBEAT", reason = "An approved coordinator proposal requested a structured progress report; echo request_id in HEARTBEAT or CHECKPOINT." }, nil, true)
 	if err then return "pending", err.code, err.message end
 	delivery.request_id = request_id; delivery.published = false; delivery.response_received = false; f.report_request = delivery
 	append(d, t, "report_request", "Approved proposal requested structured progress; delivery ACK is not a progress response.", clock, { state = "pending", request_id = request_id, action_id = delivery.action_id })
@@ -8007,6 +8012,8 @@ local function semantic(n: any, w: any, report: any, bytes: string, clock: any):
 		observation.state = if kind == "READY" then "idle" elseif kind == "HEARTBEAT" then p.state elseif kind == "WAITING" or kind == "ASK" then "waiting"
 			elseif kind == "BLOCKED" then "blocked" elseif kind == "DONE" then "done" else (if f.report then f.report.state else "working")
 		f.report = observation
+		-- A report answering ORCH+'s own automatic request is not the coordinator's activity (see poll_interval).
+		if not (p.request_id and f.report_request and f.report_request.request_id == p.request_id and f.report_request.automatic == true) then f.reported_at = stamp(clock) end
 	end
 	if kind == "READY" or kind == "HEARTBEAT" or (kind == "CHECKPOINT" and (p.context_snapshot ~= nil or p.context_used_pct ~= nil)) then
 		f.context = nil
@@ -8470,8 +8477,11 @@ local function complete(n: any, a: any, body: any, clock: any, response_bytes: s
 		end
 	elseif request.op == "mailbox_publish_ack" or request.op == "mailbox_publish_reply" then
 		if body.status ~= "published" and body.status ~= "already_published" then return fail("transport_pending", "Mailbox publication has not been confirmed.") end
-		-- A reply whose manifest is confirmed published has reached the coordinator: its fast window starts (see poll_interval).
-		if request.op == "mailbox_publish_reply" and request.part == "manifest" and w.coordinator_owner_id ~= nil then flow(w).active_at = stamp(clock) end
+		-- An owner-sourced reply whose manifest is confirmed published has reached the coordinator: its fast window starts (see poll_interval).
+		if request.op == "mailbox_publish_reply" and request.part == "manifest" and w.coordinator_owner_id ~= nil then
+			local sent = w.replies[tostring(request.reply_seq)]
+			if sent and sent.owner == true then flow(w).active_at = stamp(clock) end
+		end
 		local start = config.start_for_action(d, a)
 		if start then
 			local reply = w.replies[tostring(request.reply_seq)]
@@ -10441,9 +10451,10 @@ function M.apply(registry: any, event: any, clock: any, reserve: any): (any?, an
 				return fail("worker_not_sendable", "Observe safely: working, waiting-input, exited or unconfirmed native workers are never interrupted.")
 			end
 			local request_id = next_id(d, "report-request-")
-			local delivery, err = issue_reply(d, w, "report_request", { request_id = request_id, requested_kind = "HEARTBEAT", reason = "Owner/session policy requested a structured progress report; echo request_id in HEARTBEAT or CHECKPOINT." })
+			local delivery, err = issue_reply(d, w, "report_request", { request_id = request_id, requested_kind = "HEARTBEAT", reason = "Owner/session policy requested a structured progress report; echo request_id in HEARTBEAT or CHECKPOINT." }, nil, event.trigger ~= "policy")
 			if err then return nil, err end
 			delivery.request_id = request_id; delivery.published = false; delivery.response_received = false; f.report_request = delivery
+			if event.trigger == "policy" then delivery.automatic = true end
 			local _, problem = append(d, w, "report_request", "Requested structured progress; delivery ACK is not a progress response.", clock, { state = "pending", request_id = request_id, action_id = delivery.action_id })
 			if problem then return nil, problem end
 			if event.trigger == "policy" then f.report_loop = loop or { count = 0 }; f.report_loop.count += 1 end
