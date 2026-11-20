@@ -7,7 +7,7 @@ $ErrorActionPreference='Stop'
 $utf8=New-Object Text.UTF8Encoding($false,$true)
 function Fail([string]$Code) { throw $Code }
 # A schema refusal names the field (At) and the rule it broke on a second line (SKILLS-214),
-# in the same words as the jq validator's explain mode.
+# with the same field and rule as the jq validator's explain mode (the wording may differ).
 $script:schemaAt=''
 function At([string]$Path) { $script:schemaAt=$Path }
 function Refuse([string]$Rule) {
