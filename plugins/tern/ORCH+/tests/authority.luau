@@ -420,6 +420,11 @@ safety_store.fail_write = true
 check(safety:apply(fact).code == "persistence_failed" and safety.uncommitted_observation, "uncommitted safety fact fences later settlement")
 safety_store.fail_write = false
 check(safety:apply(owned(safety, "release_controller", "safety", safety_owner)).code == "uncommitted_observation", "repaired storage alone does not revive stale permission")
+do
+	local refused = safety:apply(owned(safety, "release_controller", "safety", safety_owner))
+	check(string.find(refused.message, "restart Tern", 1, true) ~= nil and string.find(refused.message, "does not clear it", 1, true) ~= nil,
+		"the refusal after an unsaved observation names its one exit: restart Tern")
+end
 check(safety:load().ok and safety.uncommitted_observation, "store reread cannot silently clear runtime safety fence")
 -- Byte reserve is independent of removed historical entry counts.
 local capacity_store = store(); local capacity = host.new_authority(capacity_store)

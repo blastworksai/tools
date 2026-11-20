@@ -18,7 +18,7 @@ local OBSERVATION = { observe_owner = true, mark_uncertain = true }
 local function settlement(event: any): boolean
 	return SETTLEMENT[event.kind] == true or (event.kind == "dispatch" and event.command ~= "queue" and event.command ~= "catalog" and event.command ~= "reply" and event.command ~= "capacity")
 end
-local UNSAVED_OBSERVATION = "A fresh safety observation could not be persisted. Release and recovery are blocked in this runtime; repair storage/capacity and restart for fresh inspection."
+local UNSAVED_OBSERVATION = "A fresh safety observation could not be persisted. Release and recovery are blocked in this runtime; repair storage/capacity, then restart Tern for fresh inspection. Checking the store again does not clear it."
 local boot = string.format("host-%d-%08x-%08x", os.time(), math.random(1, 2147483647), math.random(1, 2147483647))
 local function host_clock(): any
 	return { now_ms = math.floor(os.time() * 1000), mono_ms = tern.now(), epoch = boot }
