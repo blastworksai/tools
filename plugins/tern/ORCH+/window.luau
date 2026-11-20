@@ -437,6 +437,9 @@ local setup_ui = require("./setup_window").new(setup_api)
 -- Request IDs this window incarnation sent: a refusal is this window's own evidence only when it
 -- answers one of them, so another window's (or older incarnation's) refusal never holds a driver.
 local issued = fifo(512)
+-- native_scope.owner_noticed: send_command already told the owner why it sent nothing.
+-- (The window sits at Luau's 200-local limit, so the owner-send helper hangs on this table.)
+native_scope.owner_noticed = false
 local function send_command(cx: WindowCx, source: number, origin: any, command: string, fields: any?, operator: boolean?): string?
 	local closing = (command == "bridge_control" or command == "bridge_result" or command == "bridge_observe")
 		and closing_context(cx, source, origin, command == "bridge_observe")
@@ -463,6 +466,7 @@ local function send_command(cx: WindowCx, source: number, origin: any, command: 
 		notice(cx, source, origin.alias_nonce, if command == "policy" then "These settings exceed the supported native settings envelope. Your draft is retained; shorten templates or guidance."
 			elseif command == "cancel_work" or command == "observe_allocation" then "The allocation evidence exceeds the supported native envelope. Work remains held; no proof was truncated or request sent."
 			else "Task request exceeds the 8192-byte native bridge limit; shorten the explicit assignment. Nothing was queued.")
+		native_scope.owner_noticed = true
 		return nil
 	end
 	cx.session:event(source, { ev = "action", id = node.id, act = if operator then "dispatch-operator-command" else "dispatch-command", value = bytes })
@@ -471,6 +475,15 @@ local function send_command(cx: WindowCx, source: number, origin: any, command: 
 	-- Use the same guard as admission; the old cursor must not hide a submitted continuation.
 	return if closing or (if command == "continue_controller" then current_context(cx, source, origin)
 		else native_scope.authorized_origin(cx, source, origin)) then event.request_id else nil
+end
+-- An owner's own command that could not be sent says so; a silent click reads as a broken button.
+function native_scope.owner_send(cx: WindowCx, source: number, origin: any, command: string, fields: any?): string?
+	native_scope.owner_noticed = false
+	local id = send_command(cx, source, origin, command, fields, true)
+	if not id and not native_scope.owner_noticed then
+		notice(cx, source, origin.alias_nonce, "Not sent: this window is no longer the current controller. Continue the controller in this window, then try again.")
+	end
+	return id
 end
 local function workflow_node(cx: WindowCx, source: number, key: string, role: string): any?
 	-- workflow-index carries the policy with three bounded routing allowlists; 64 KiB covers them.
@@ -4164,7 +4177,7 @@ local function dispatch_control(cx: WindowCx, source: number, request: any)
 		ask_decision(cx, source, origin, "Close retired handover without a successor?", {
 			{ label = "Keep handover pending" }, { label = "Leave no coordinator; require an explicit new start", confirm = true },
 		}, "confirm", function(fresh)
-			send_command(fresh, source, origin, "close_handover", { worker_id = request.worker_id }, true)
+			native_scope.owner_send(fresh, source, origin, "close_handover", { worker_id = request.worker_id })
 		end)
 		return
 	end
@@ -4220,7 +4233,7 @@ local function dispatch_control(cx: WindowCx, source: number, request: any)
 				return notice(fresh, source, origin.alias_nonce, "Controller changed during verification. Run ORCH+ Continue controller in this window again; nothing was rebound.")
 			end
 			-- Reconnect only after this exact continuation is durably acknowledged.
-			local continuation = send_command(fresh, source, origin, "continue_controller", { expected_revision = revision, operator_verified = true }, true)
+			local continuation = native_scope.owner_send(fresh, source, origin, "continue_controller", { expected_revision = revision, operator_verified = true })
 			if continuation then
 				start_guide(source, origin, false, continuation)
 				guides[source].automatic = true
@@ -4239,8 +4252,8 @@ local function dispatch_control(cx: WindowCx, source: number, request: any)
 		local delivery_id = start.delivery_action_id
 		local scoped = if type(delivery_id) == "string" then snapshot(cx, source, delivery_id) else nil
 		local action = if scoped then scoped.action else nil
-		local id = send_command(cx, source, origin, command, { orch_project_id = request.orch_project_id, start_id = request.start_id,
-			project_revision = request.project_revision, decision_context = request.decision_context }, true)
+		local id = native_scope.owner_send(cx, source, origin, command, { orch_project_id = request.orch_project_id, start_id = request.start_id,
+			project_revision = request.project_revision, decision_context = request.decision_context })
 		if not id or not action or action.action_id ~= delivery_id then return end
 		if start.delivery_state == "uncertain" and action.phase == "uncertain" and action.claim
 			and action.request and action.request.op == "mailbox_publish_reply" then
@@ -4316,7 +4329,7 @@ local function dispatch_control(cx: WindowCx, source: number, request: any)
 			end)
 		end)
 	elseif command == "pause" or command == "resume" then
-		send_command(cx, source, origin, command, nil, true)
+		native_scope.owner_send(cx, source, origin, command, nil)
 	elseif command == "policy" then
 		local flow = workflow_node(cx, source, "workflow-index", "orchplus.workflow")
 		if not flow or not flow.policy or type(flow.policy_sha256) ~= "string" then return end
@@ -4365,7 +4378,7 @@ local function dispatch_control(cx: WindowCx, source: number, request: any)
 			if not current or not current.restored or current.restored.reconciled or current.restored.at_ms ~= worker.restored.at_ms then
 				return notice(fresh, source, origin.alias_nonce, "Restoration evidence changed during confirmation; nothing was recorded.")
 			end
-			send_command(fresh, source, origin, "reconcile_restored", { worker_id = worker.worker_id, operator_verified = true }, true)
+			native_scope.owner_send(fresh, source, origin, "reconcile_restored", { worker_id = worker.worker_id, operator_verified = true })
 		end)
 	elseif command == "cancel_landing" or command == "move_landing" or command == "landing_lost" or command == "reconcile_landing" then
 		local item = landing_now(cx, source, request)
@@ -4391,7 +4404,7 @@ local function dispatch_control(cx: WindowCx, source: number, request: any)
 		if command == "move_landing" then
 			if (request.direction == "up" and item.move_up) or (request.direction == "down" and item.move_down) then
 				fields.direction = request.direction
-				send_command(cx, source, origin, "move_landing", fields, true)
+				native_scope.owner_send(cx, source, origin, "move_landing", fields)
 			end
 		elseif command == "cancel_landing" then
 			if not item.cancellable then return end
@@ -4401,14 +4414,14 @@ local function dispatch_control(cx: WindowCx, source: number, request: any)
 				else "Cancel ungranted landing " .. item.id .. "? Its approval gate is withdrawn; landing later needs a new worker request.", {
 				{ label = if stop_deployment then "Keep pending deployment" else "Keep this request", confirm = false },
 				{ label = if stop_deployment then "Stop pending deployment" else "Cancel this exact request", confirm = true },
-			}, "confirm", function(fresh) send_command(fresh, source, origin, "cancel_landing", fields, true) end, still)
+			}, "confirm", function(fresh) native_scope.owner_send(fresh, source, origin, "cancel_landing", fields) end, still)
 		elseif command == "landing_lost" then
 			if not (if deployed then deploy and deploy.markable_lost == true else item.markable_lost) then return end
 			ask_reason(cx, if deployed then "Deploy result lost — hold " .. tostring(deploy.deploy_id) .. " for reconciliation? Why is it lost? Nothing is re-granted or retried."
 				else "Why is the exact result of " .. item.id .. " lost? The slot stays held for reconciliation; nothing is retried.",
 				if deployed then "hold deploy" else "hold landing slot", function(fresh, reason)
 				fields.reason = reason
-				send_command(fresh, source, origin, "landing_lost", fields, true)
+				native_scope.owner_send(fresh, source, origin, "landing_lost", fields)
 			end)
 		else
 			if not (if deployed then deploy and deploy.reconcilable == true else item.reconcilable) then return end
@@ -4429,7 +4442,7 @@ local function dispatch_control(cx: WindowCx, source: number, request: any)
 						else "Evidence of your read-only inspection (for example the observed log entry)", if deployed then "reconcile deploy" else "reconcile landing", function(last_cx, reason)
 						fields.outcome = choice.outcome; fields.reason = reason; fields.operator_verified = true
 						if observed ~= "" then fields.target_revision = observed end
-						send_command(last_cx, source, origin, "reconcile_landing", fields, true)
+						native_scope.owner_send(last_cx, source, origin, "reconcile_landing", fields)
 					end)
 				end
 				if deployed then return settle(fresh, "") end
@@ -4470,14 +4483,14 @@ local function dispatch_control(cx: WindowCx, source: number, request: any)
 			end
 		end
 		if command == "recheck_gate" then
-			send_command(cx, source, origin, "recheck_gate", fields, true)
+			native_scope.owner_send(cx, source, origin, "recheck_gate", fields)
 			-- A quota fallback has no pane yet: recheck means a fresh, validated USAGE snapshot.
 			if gate.kind == "quota_fallback" then start_reader(source, origin, "snapshot", nil, function() end)
 			else inspect_worker(cx, source, origin, gate.worker_id, false) end
 		elseif command == "cancel_gate" then
 			ask_decision(cx, source, origin, "Cancel " .. gate.id .. "? Possible delivery cannot be retracted.", {
 				{ label = "Keep gate", cancel_gate = false }, { label = "Cancel this exact gate revision", cancel_gate = true },
-			}, "cancel_gate", function(fresh) send_command(fresh, source, origin, "cancel_gate", fields, true) end, gate_still("Gate changed during confirmation; nothing cancelled."))
+			}, "cancel_gate", function(fresh) native_scope.owner_send(fresh, source, origin, "cancel_gate", fields) end, gate_still("Gate changed during confirmation; nothing cancelled."))
 		elseif gate.kind == "native_input" then
 			refuse("Native input requires owner action in the exact pane. Open it, then recheck; ORCH+ cannot answer native permission or authentication prompts.")
 		elseif gate.phase ~= "pending" then
@@ -4498,20 +4511,20 @@ local function dispatch_control(cx: WindowCx, source: number, request: any)
 				if dispatch.HOST_GATES[gate.kind] then
 					-- Host-consumed decision: the chosen option is the whole answer (no free-text prompt). A
 					-- stale-claim answer never changes the claim; open_recovery also opens the recovery guide.
-					local id = send_command(fresh, source, origin, "answer", answer_fields, true)
+					local id = native_scope.owner_send(fresh, source, origin, "answer", answer_fields)
 					if id and gate.kind == "stale_claim" and choice.choice_id == "open_recovery" then start_guide(source, origin, true); arm() end
 					return
 				end
 				ask_text(fresh, source, origin, nil, "Explicit owner answer for " .. gate.id .. " / " .. choice.label, "send immutable answer", function(next_cx, answer)
 					if not gate_still("Question changed before submission; no answer sent.")(next_cx) then return end
 					answer_fields.answer = answer
-					send_command(next_cx, source, origin, "answer", answer_fields, true)
+					native_scope.owner_send(next_cx, source, origin, "answer", answer_fields)
 				end)
 			end, gate_still("Question changed during selection; no answer sent."))
 		end
 	elseif command == "dismiss_refusal" then
 		if not current_gate(cx, source, request) then return refuse("Gate revision or recipient changed. No answer or control was submitted.") end
-		send_command(cx, source, origin, "dismiss_refusal", { gate_id = request.gate_id, gate_revision = request.gate_revision }, true)
+		native_scope.owner_send(cx, source, origin, "dismiss_refusal", { gate_id = request.gate_id, gate_revision = request.gate_revision })
 	elseif command == "queue" then
 		conversation_ui.start(cx, source, origin, if request.coordinator then "start_orchestrator" else "new_conversation", request)
 	elseif command == "capacity_refresh" then
@@ -4555,7 +4568,7 @@ local function dispatch_control(cx: WindowCx, source: number, request: any)
 				arm()
 				return
 			end
-			local id = send_command(fresh, source, origin, "cancel_work", { worker_id = worker.worker_id }, true)
+			local id = native_scope.owner_send(fresh, source, origin, "cancel_work", { worker_id = worker.worker_id })
 			if id and retires then start_driver(source, origin, id, worker.worker_id) end
 		end)
 	elseif command == "start_work" then
@@ -4576,7 +4589,7 @@ local function dispatch_control(cx: WindowCx, source: number, request: any)
 	elseif command == "readback_publication" then
 		if type(request.action_id) ~= "string" then return end
 		held_actions[request.action_id] = nil
-		send_command(cx, source, origin, "readback_publication", { action_id = request.action_id }, true)
+		native_scope.owner_send(cx, source, origin, "readback_publication", { action_id = request.action_id })
 	elseif command == "reconcile" or command == "execute" then
 		if type(request.action_id) ~= "string" then return end
 		-- Reconciliation only reads status. Ready execution still requires a fresh durable claim.
@@ -5061,4 +5074,4 @@ local function bookkeeping(): any
 		sweep_attempts = size(sweep_attempts), scan_workers = per_worker, watched = #settle_order }
 end
 require("./updater/window").register({ name = "ORCH+", dir = "ORCH+", title_prefix = "ORCH+ " })
-return { native_observation = native_observation, schedule = schedule, intents = consume_intents, bookkeeping = bookkeeping, owned_origin = native_scope.owned_origin }
+return { native_observation = native_observation, schedule = schedule, intents = consume_intents, bookkeeping = bookkeeping, owned_origin = native_scope.owned_origin, owner_send = native_scope.owner_send }

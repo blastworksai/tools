@@ -1,6 +1,6 @@
 -- Deterministic real reducer/host/window coverage. Run bounded sections in native host callbacks.
 local root, section = ...
-assert(section == nil or table.find({ "clock", "focus_window", "form_hold_notice", "form_hold_capacity", "form_hold_rearm", "native", "controls", "status_launcher", "timer", "epoch_window", "epoch_host", "finish", "continuation", "alias_recovery", "held_report", "sweep_schedule", "readable_views", "cp2_controls", "guided_recovery", "guided_recovery_empty", "guided_recovery_host_restart", "stopped_worker_view", "expired_wake", "revoked_authorization", "observe_retention", "uncertain_read", "quota_reader", "bridge_lifecycle", "withdraw_fenced", "config_cards", "work_picker", "inbox_window", "usage_row",
+assert(section == nil or table.find({ "clock", "focus_window", "form_hold_notice", "form_hold_capacity", "form_hold_rearm", "native", "controls", "status_launcher", "timer", "epoch_window", "owner_send_notice", "epoch_host", "finish", "continuation", "alias_recovery", "held_report", "sweep_schedule", "readable_views", "cp2_controls", "guided_recovery", "guided_recovery_empty", "guided_recovery_host_restart", "stopped_worker_view", "expired_wake", "revoked_authorization", "observe_retention", "uncertain_read", "quota_reader", "bridge_lifecycle", "withdraw_fenced", "config_cards", "work_picker", "inbox_window", "usage_row",
 	"reconnect_stale", "reconnect_missing", "reconnect_unknown", "reconnect_unrelated", "worker_attachment", "worker_attachment_form",
 	"driver_admission_noop", "driver_admission_refused", "driver_retry_original", "driver_retry_unrelated", "driver_retry_absent",
 	"driver_deadline_absent", "driver_deadline_unrelated", "driver_missing", "driver_suspension", "driver_fence_origin", "driver_fence_claim",
@@ -1068,6 +1068,18 @@ if section == nil or section == "epoch_window" then
 	local current = w.events[#w.events].origin.window_epoch
 	check(current ~= original and w:outcome().ok, "explicit continuation uses a fresh VM identity even when both clocks repeat")
 	check(w.api.native_observation(w.cx, 9001, w:worker()) == "unknown", "controller continuation alone never adopts the worker's old pane alias")
+end
+if section == nil or section == "owner_send_notice" then
+	local w = window_fixture()
+	-- An owner command whose origin is no longer the controller's own is not sent, and the owner is told.
+	local stale = clone(w.f.origin); stale.window_epoch = "an-earlier-window"
+	local before, events = #w.toasts, #w.events
+	local sent = w.api.owner_send(w.cx, 9001, stale, "pause", nil)
+	local last = w.toasts[#w.toasts]
+	check(sent == nil and #w.events == events, "a stale origin sends nothing")
+	check(#w.toasts == before + 1 and string.sub(last.text, 1, 9) == "Not sent:", "an owner command that cannot be sent says so instead of failing silently")
+	w:click("pause")
+	check(flow(w.f).policy.paused and #w.toasts == before + 1, "a command that is sent shows no 'Not sent' notice")
 end
 if section == nil or section == "epoch_host" then
 	local f = shared.fixture(); local id = f:accepted(false)
