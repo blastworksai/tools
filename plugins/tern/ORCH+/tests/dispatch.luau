@@ -21,7 +21,7 @@ local sections = { fixture = true, core = true, control_rebind = true, receipts 
 	project_observation = true, project_repository_guards = true, migration_start_guards = true, enrol_route_cancel = true,
 	project_history_reuse = true, project_reserve = true, rollover_location = true, project_start_rollover = true,
 	legacy_observation = true, legacy_worker_roles = true, current_observation = true, compaction_retry = true, catalog_paging = true,
-	make_room = true }
+	make_room = true, rollover_paused_budget = true }
 assert(section == nil or sections[section], "unknown dispatch test section: " .. tostring(section))
 local runtime, environment = tern, getfenv()
 -- Absence stays absent; explicit JSON null remains available to negative wire tests.
@@ -4875,6 +4875,30 @@ if section == nil or section == "rollover_policy" then
 		"an in-progress rollover is never duplicated")
 	check(worker_of(f, id).finish == nil and #actions_of(f, id, "stop") == 0, "automatic request never stops anything by itself")
 	check(state.rehydrate(clone(f.authority.registry)) ~= nil, "policy-triggered rollover restores")
+end
+-- SKILLS-220: waiting while paused is not a preparation attempt; the retry budget is spent only by a real attempt.
+if section == nil or section == "rollover_paused_budget" then
+	local f, id = rollover_fixture()
+	local cap = 2
+	assert(f:apply("policy", { policy = { loop_cap = cap } }).ok)
+	local requested = f:apply("rollover", { worker_id = id, trigger = "owner" }); assert(requested.code == "rollover_requested")
+	local hid = requested.handover_id
+	assert(f:apply("pause").ok)
+	assert(answer_checkpoint(f, id, "paused-cp").ok)
+	check(rollover_of(f, hid).hold ~= nil and rollover_of(f, hid).hold.code == "session_paused" and rollover_of(f, hid).successor_worker_id == nil,
+		"a verified checkpoint answered while paused holds as session_paused with no successor")
+	local pane = clone(worker_of(f, id).pane_binding)
+	for i = 1, cap * 3 + 1 do
+		assert(f:apply("observe", { worker_id = id, pane_binding = clone(pane), native_state = if i % 2 == 0 then "idle" else "working" }).ok)
+	end
+	local r = rollover_of(f, hid)
+	check(r.hold and r.hold.code == "session_paused" and r.prepare_count == nil and r.successor_worker_id == nil,
+		"more than loop_cap evaluations while paused keep the hold, spend no retry budget and grant no successor")
+	assert(f:apply("resume").ok)
+	assert(f:apply("observe", { worker_id = id, pane_binding = clone(pane), native_state = "idle" }).ok)
+	r = rollover_of(f, hid)
+	check(r.successor_worker_id ~= nil and r.prepare_count == 1 and r.phase == "successor_granted",
+		"after resume exactly one successor is granted and exactly one attempt is counted")
 end
 if section == nil or section == "rollover_context" then
 	local f, id, clock = rollover_fixture()
