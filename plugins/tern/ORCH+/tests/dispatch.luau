@@ -349,6 +349,9 @@ local function fixture(clock, options)
 		for _, k in { "logical_session_id", "worker_id", "worker_generation", "launch_request_id", "work_id", "enrolment_token" } do mark[k] = w[k] end
 		while true do
 			local queued = self:apply("poll", { worker_id = worker_id, bytes = "watermark" }); must(queued.ok, queued)
+			-- SKILLS-214: an owed report read may run first; when it found nothing on an idle worker whose
+			-- receipts are all compacted, a watermark cannot advance anything and the poll is idle.
+			if queued.code == "mailbox_idle" and w.compacted_floor == w.accepted_seq then return queued end
 			local request = self:action(queued.action_id).request
 			if request.op == "mailbox_read" and request.selector.stream == "watermark" then
 				local page = must(codec.project_page(runtime.json.encode(mark), request.selector))
@@ -1023,12 +1026,40 @@ if section == nil or section == "read_owed" then
 	assert(f:finish(quiet.action_id, "missing", {}).ok)
 	assert(f:apply("observe", { worker_id = id, pane_binding = worker().pane_binding, native_state = "idle" }).ok)
 	assert(f:apply("reply", { worker_id = id }).ok)
+	local before_answer = clone(worker().workflow.active_at)
+	local first = f:apply("poll", { worker_id = id }); assert(first.ok, first.message)
+	check(f:action(first.action_id).request.op == "mailbox_publish_reply" and runtime.json.encode(worker().workflow.active_at or false) == runtime.json.encode(before_answer or false),
+		"granting a reply publication does not start the fast window: the answer has not reached the coordinator yet")
+	assert(f:finish(first.action_id, "published", {}).ok)
 	drain()
-	check(worker().workflow.active_at ~= nil, "an answer reaching the coordinator stamps its fast window")
+	check(worker().workflow.active_at ~= nil and worker().workflow.active_at.mono_ms == clock.mono_ms,
+		"the confirmed manifest publication of an answer stamps the fast window")
 	clock.mono_ms += 10000; clock.now_ms += 10000; assert(f:tick().ok)
 	check(projected(f, id).due_poll, "an answer reaching a quiet coordinator restarts the 10 s window")
 	stored = clone(f.authority.registry); stored.dispatch.workers[id].workflow.active_at = { at_ms = 1, bogus = true }
 	check(state.rehydrate(clone(stored)) == nil, "a malformed fast-window stamp is corrupt")
+	-- Kimi round 1: an owed read must never drive a refused poll in a loop. Wherever the next poll could
+	-- not reach the read, the debt is void and nothing projects continuation.
+	local function owing(mutate)
+		local r = clone(f.authority.registry); local w = r.dispatch.workers[id]
+		w.workflow.read_owed = true; mutate(w)
+		for _, shown in dispatch.project(r, f.origin.logical_session_id, f.origin.alias_nonce).workflow.workers do
+			if shown.worker_id == id then return shown.poll_continuation end
+		end
+	end
+	check(owing(function() end) == true, "control: an owed read alone projects continuation")
+	for label, mutate in {
+		stop_issued = function(w) w.stop_action_id = "action-stop" end,
+		stopped = function(w) w.stopped = { at_ms = 1 } end,
+		stop_refused = function(w) w.stop_refused = true end,
+		retirement_in_flight = function(w) w.mailbox_retire_action_id = "action-retire" end,
+		retirement_refused = function(w) w.retirement_refused = true end,
+		reattach_needed = function(w) w.continuation_required = true end,
+		rejected_report = function(w) w.rejected_report = { code = "x" } end,
+		stale_owner = function(w) w.coordinator_owner_id = "owner-stale" end,
+	} do
+		check(owing(mutate) ~= true, "an owed read never projects continuation when the poll cannot read: " .. label)
+	end
 	plain_clock.mono_ms += 10000; plain_clock.now_ms += 10000; assert(plain:tick().ok)
 	check(not projected(plain, pid).due_poll or projected(plain, pid).poll_continuation, "an ordinary worker is not paced at 10 s")
 	assert(plain:apply("policy", { policy = { poll_ms = 5000 } }).ok)
@@ -4450,6 +4481,10 @@ if section == nil or section == "wake_separation" then
 		check(f:finish(queued.action_id, "published", { wake_status = "awaiting_window", wake_effect_started = false,
 			wake_target_request_id = request.request_id, wake_target_action_id = request.action_id }).ok, "known publication commits independently of never-started notification")
 		check(f:action(queued.action_id) == nil and f.authority.registry.dispatch.workers[id].wakes[request.action_id] ~= nil, "publication releases slot but retains durable wake obligation")
+		-- SKILLS-214: the published ACK owes one report read; it runs at once and is not the wake.
+		check(projected(id).poll_continuation and f.authority.registry.dispatch.workers[id].workflow.read_owed == true, "a published ACK owes the report lane one read")
+		local owed = f:apply("poll", { worker_id = id }); assert(owed.ok, owed.message)
+		check(f:action(owed.action_id).request.op == "mailbox_read" and f:finish(owed.action_id, "missing", {}).ok, "the owed read runs before any busy wake")
 		check(not projected(id).poll_continuation and not projected(id).due_poll, "a busy native wake is not a runnable continuation")
 	end
 	check(f.authority.registry.sessions[f.origin.logical_session_id].controller.pending_executors == 0, "four busy workers do not occupy four execution slots merely waiting for idle")

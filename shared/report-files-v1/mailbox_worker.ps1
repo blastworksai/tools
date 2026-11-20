@@ -10,8 +10,10 @@ function Fail([string]$Code) { throw $Code }
 $script:schemaAt=''
 function At([string]$Path) { $script:schemaAt=$Path }
 function Refuse([string]$Rule) {
- if ($script:schemaAt.Length -gt 0) { Fail ("invalid_schema`n"+$script:schemaAt+': '+$Rule) }
- Fail ("invalid_schema`n"+$Rule)
+ # One line only: a key or value echoed into the rule may carry control characters.
+ $line=$Rule; if ($script:schemaAt.Length -gt 0) { $line=$script:schemaAt+': '+$Rule }
+ $line=$line -replace '[\x00-\x1f\x7f]',''; if ($line.Length -gt 300) { $line=$line.Substring(0,300) }
+ Fail ("invalid_schema`n"+$line)
 }
 function Full([string]$Resource,[long]$Current,[long]$Limit) { Fail ("full`n"+$Resource+"`n"+$Current+"`n"+$Limit) }
 function Hash([byte[]]$Bytes) { $sha=[Security.Cryptography.SHA256]::Create(); try { return ([BitConverter]::ToString($sha.ComputeHash($Bytes))).Replace('-','').ToLowerInvariant() } finally { $sha.Dispose() } }
@@ -251,7 +253,7 @@ function ValueType($Value,[string]$Type) {
  if (-not $valid) {
   $rules=@{ id='1-96 of A-Z a-z 0-9 _ -'; token='16-128 of A-Z a-z 0-9 _ -'; digest='64 lowercase hex characters'; revision='40 or 64 lowercase hex characters'
    positive='whole number from 1'; nonnegative='whole number from 0'; percent='whole number from 0 to 100'; short='text of 1 to 1024 bytes'; long='text of 1 to 32768 bytes'
-   absolute='an absolute path'; relative='a relative path'; path='a path of 1 to 4096 bytes' }
+   absolute='an absolute path of at most 4096 bytes'; relative='a relative path'; path='a path of 1 to 4096 bytes' }
   if ($rules.ContainsKey($Type)) { Refuse $rules[$Type] } else { Refuse 'invalid value' }
  }
 }
@@ -334,23 +336,25 @@ function ProposedWork($p) {
   At 'payload'; ObjectFields $p ($required+@('source')) $optional
   $source=$p.source; At 'payload.source'
   if ($source -isnot [hashtable]) { Refuse 'must be an object' }
-  Choice $source.kind @('plan_file','board','template')
+  At 'payload.source'
+  if ($source.kind -isnot [string] -or $source.kind -cnotin @('plan_file','board','template')) { Refuse 'kind must be plan_file, board or template' }
   if ($source.kind -ceq 'template') {
    ObjectFields $source @('kind','template_id','revision','input') @('custom_fields')
-   ValueType $source.template_id 'id'; BoundedText $source.input 32768 $true
+   At 'payload.source.template_id'; ValueType $source.template_id 'id'; At 'payload.source.input'; BoundedText $source.input 32768 $true
    if ($source.ContainsKey('custom_fields')) {
     $custom=$source.custom_fields
-    if ($custom -isnot [hashtable] -or $custom.Count -gt 16) { Fail 'invalid_schema' }
+    At 'payload.source.custom_fields'
+    if ($custom -isnot [hashtable] -or $custom.Count -gt 16) { Refuse 'up to 16 lowercase names other than input, values up to 2048 bytes' }
     foreach ($name in $custom.Keys) {
-     if ($name -isnot [string] -or $name.Length -gt 32 -or $name -ceq 'input' -or $name -cnotmatch '^[a-z][a-z0-9-]*$') { Fail 'invalid_schema' }
+     if ($name -isnot [string] -or $name.Length -gt 32 -or $name -ceq 'input' -or $name -cnotmatch '^[a-z][a-z0-9-]*$') { Refuse 'up to 16 lowercase names other than input, values up to 2048 bytes' }
      $value=$custom[$name]
-     if ($value -isnot [string] -or $utf8.GetByteCount($value) -gt 2048 -or $value.Contains([string][char]0)) { Fail 'invalid_schema' }
+     if ($value -isnot [string] -or $utf8.GetByteCount($value) -gt 2048 -or $value.Contains([string][char]0)) { Refuse 'up to 16 lowercase names other than input, values up to 2048 bytes' }
     }
    }
   } else {
-   ObjectFields $source @('kind','path','revision'); ValueType $source.path 'absolute'
+   ObjectFields $source @('kind','path','revision'); At 'payload.source.path'; ValueType $source.path 'absolute'
   }
-  BoundedText $source.revision 1024 $true
+  At 'payload.source.revision'; BoundedText $source.revision 1024 $true
  }
  At 'payload'
  if ($p.ContainsKey('orch_project_id') -eq $p.ContainsKey('new_project_name')) { Refuse 'give exactly one of orch_project_id or new_project_name' }
@@ -499,21 +503,22 @@ function ReportInput($Report) {
    if ($p -isnot [hashtable]) { Refuse 'must be an object' }
    foreach ($key in @('owner_id','proposal_id')) { At ('payload.'+$key); ValueType $p[$key] 'id' }
    At 'payload.owner_generation'; ValueType $p.owner_generation 'positive'; At 'payload.activation_token'; ValueType $p.activation_token 'digest'
-   At 'payload.kind'; Choice $p.kind @('dispatch','report','review','rollover','landing','new_work','add_source')
    At 'payload'
+   if ($p.kind -isnot [string] -or $p.kind -cnotin @('dispatch','report','review','rollover','landing','new_work','add_source')) { Refuse 'kind must be new_work, add_source, dispatch, report, review, rollover or landing' }
    if ($p.kind -cin @('new_work','add_source')) {
     ProposedWork $p
    } else {
     ObjectFields $p @('owner_id','owner_generation','activation_token','proposal_id','kind','work_id','project_id') @('checkpoint_id','record_id','record_revision','prompt')
-    foreach ($key in @('work_id','project_id')) { ValueType $p[$key] 'id' }
+    foreach ($key in @('work_id','project_id')) { At ('payload.'+$key); ValueType $p[$key] 'id' }
+    At 'payload'
    if ($p.kind -ceq 'dispatch') {
-    if ($p.ContainsKey('checkpoint_id')) { Fail 'invalid_schema' }
-    ValueType $p.record_id 'short'; ValueType $p.prompt 'long'
-    ValueType $p.record_revision 'nonnegative'
+    if ($p.ContainsKey('checkpoint_id')) { Refuse 'dispatch takes no checkpoint_id' }
+    At 'payload.record_id'; ValueType $p.record_id 'short'; At 'payload.prompt'; ValueType $p.prompt 'long'
+    At 'payload.record_revision'; ValueType $p.record_revision 'nonnegative'
    } else {
-    foreach ($key in @('record_id','record_revision','prompt')) { if ($p.ContainsKey($key)) { Fail 'invalid_schema' } }
-    if ($p.kind -ceq 'report') { if ($p.ContainsKey('checkpoint_id')) { Fail 'invalid_schema' } }
-    else { ValueType $p.checkpoint_id 'id' }
+    foreach ($key in @('record_id','record_revision','prompt')) { if ($p.ContainsKey($key)) { Refuse ($p.kind+' takes no '+$key) } }
+    if ($p.kind -ceq 'report') { if ($p.ContainsKey('checkpoint_id')) { Refuse 'report takes no checkpoint_id' } }
+    else { At 'payload.checkpoint_id'; ValueType $p.checkpoint_id 'id' }
    }
    }
   }
@@ -653,7 +658,7 @@ function Receive {
   $bytes=$memory.ToArray()
  } finally { $memory.Dispose() }
  if ($bytes.Length -ne $manifest.message_bytes -or (Hash $bytes) -cne $manifest.message_sha256) { Fail 'content_conflict' }
- $reply=Decode $bytes; MatchBinding $reply
+ At ''; $reply=Decode $bytes; MatchBinding $reply
  if ($reply.version -ne 1 -or $reply.reply_seq -ne $seq -or $reply.message_id -cne $manifest.message_id -or $reply.action_id -notmatch '^[A-Za-z0-9_-]{1,96}$' -or $reply.action_revision -lt 1 -or $reply.action_revision%1 -ne 0 -or $reply.action_revision -gt 9007199254740991 -or $reply.kind -cnotin @('assignment','report_request','owner_decision','landing_grant','landing_refresh','coordinator_activation','coordinator_retirement','project_start','review_request','rework','deploy_grant','label_request','record_ruling')) { Fail 'binding_mismatch' }
  $fields=@('version','logical_session_id','worker_id','worker_generation','launch_request_id','work_id','message_id','reply_seq','action_id','action_revision','kind','payload')
  if ($reply.kind -cin @('owner_decision','record_ruling')) { $fields+=@('gate_id','gate_revision') }

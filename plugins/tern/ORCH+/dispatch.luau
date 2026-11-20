@@ -1150,24 +1150,27 @@ end
 -- its read lane; outbound settlement and proven-idle native wakes retain their own gates.
 local function continuation_due(d: any, w: any, wake_ready: boolean): boolean
 	return outbound_due(d, w, wake_ready) or (w.rejected_report == nil and (w.assembly ~= nil or w.read_selector ~= nil))
-		or config.read_owed(w)
+		or config.read_owed(d, w)
 end
 -- A poll grants one effect, and outbound settlement outranks the report read. A poll spent on
 -- settlement therefore owes the report lane a read at once (SKILLS-214: a compaction poll pushed
 -- a coordinator's proposal a whole poll_ms further). Only the settlement kinds below set the debt,
 -- never stop or retirement, and a held read lane (rejected report, held acceptance) never owes.
+-- The debt is void whenever the next poll could not reach the read (stop or retirement due or in
+-- flight, a retired or reattaching generation), so it can never drive a refused poll in a loop.
 local READ_OWING = { mailbox_publish_ack = true, accept = true, mailbox_publish_reply = true, native_wake = true }
-function config.read_owed(w: any): boolean
+function config.read_owed(d: any, w: any): boolean
 	return w.workflow ~= nil and w.workflow.read_owed == true and w.rejected_report == nil
 		and not (w.accept_pending and w.phase == "held" and not revoked_authorization(w.reason))
+		and not w.mailbox_retired and not w.continuation_required and not w.stop_action_id and not w.stopped
+		and not w.mailbox_retire_action_id and not w.retirement_refused and not w.stop_refused
+		and not config.settled(w) and not config.start_retirement_settled(d, w)
 end
-function config.note_poll_grant(w: any, request: any, clock: any)
+function config.note_poll_grant(w: any, request: any)
 	local f = w.workflow
 	if request.op == "mailbox_read" then
 		if request.selector and request.selector.stream == "report" then f.read_owed = nil end
 	elseif READ_OWING[request.op] or (request.op == "mailbox_retire" and request.mode == "compact") then f.read_owed = true end
-	-- An owner answer reaching a coordinator starts its fast window (see poll_interval).
-	if request.op == "mailbox_publish_reply" and w.coordinator_owner_id ~= nil then f.active_at = stamp(clock) end
 end
 -- Fast after activity (einh's pick, 19 Nov 2026): a coordinator converses with the owner, so for
 -- 10 minutes after its last report, its activation in this host epoch or an answer reaching it,
@@ -3863,6 +3866,7 @@ local function settled(w: any): boolean
 	local finish = w.release or w.finish
 	return finish ~= nil and w.compacted_floor >= finish.seq and deliveries_settled(w)
 end
+config.settled = settled -- read earlier in the file by config.read_owed
 -- Explicitly withdrawn STARTs are not consumed replies. This separate retirement seam never
 -- weakens ordinary settlement or advances either producer/consumer floor.
 function config.valid_start_retirement(w: any): boolean
@@ -8464,6 +8468,8 @@ local function complete(n: any, a: any, body: any, clock: any, response_bytes: s
 		end
 	elseif request.op == "mailbox_publish_ack" or request.op == "mailbox_publish_reply" then
 		if body.status ~= "published" and body.status ~= "already_published" then return fail("transport_pending", "Mailbox publication has not been confirmed.") end
+		-- A reply whose manifest is confirmed published has reached the coordinator: its fast window starts (see poll_interval).
+		if request.op == "mailbox_publish_reply" and request.part == "manifest" and w.coordinator_owner_id ~= nil then flow(w).active_at = stamp(clock) end
 		local start = config.start_for_action(d, a)
 		if start then
 			local reply = w.replies[tostring(request.reply_seq)]
@@ -8971,7 +8977,7 @@ local function poll_idle(registry: any, d: any, w: any, event: any, clock: any):
 		or table.find(w.capabilities or {}, "worker-poll-v1") ~= nil
 		or w.continuation_required or w.mailbox_retired or w.rejected_report or w.assembly or w.read_selector or w.finish or w.release
 		or w.retirement or w.stop_action_id or w.mailbox_retire_action_id or w.restored or next(w.wakes or {}) ~= nil
-		or f.report_request ~= nil or active_rollover(d, w) or outbound_due(d, w, false) or config.read_owed(w) or pending(d, w)
+		or f.report_request ~= nil or active_rollover(d, w) or outbound_due(d, w, false) or config.read_owed(d, w) or pending(d, w)
 		or (w.coordinator_owner_id and not coordinator(registry, w)) then return false end
 	if event.bytes ~= nil and (event.bytes ~= "watermark" or w.compacted_floor ~= w.accepted_seq) then return false end
 	local native, read = f.native, f.empty_read
@@ -10352,7 +10358,7 @@ function M.apply(registry: any, event: any, clock: any, reserve: any): (any?, an
 		end
 		if not add(d, request, w.worker_id) then return fail("oversize", "Mailbox request exceeds the bridge bound; no effect was granted.") end
 		answer = result("mailbox_queued", { action_id = request.action_id })
-		config.note_poll_grant(w, request, clock)
+		config.note_poll_grant(w, request)
 		flow(w).last_poll = stamp(clock)
 	elseif event.command == "finish" then
 		local w = d.workers[event.worker_id]
@@ -10941,7 +10947,9 @@ function M.project(registry: any, session_id: string, origin_nonce: string, curr
 				launch_origin_binding = clone(w.origin_binding), launch_pane_binding = clone(w.pane_binding),
 				continuation_required = w.continuation_required == true, continuation_proof = continuation_proof(registry, w), health = clone(f.health), due_poll = f.due_poll,
 				poll_ms = config.check_interval(policy(d, w.logical_session_id), w),
+				-- A stale coordinator generation's polls are refused (owner_mismatch): never continuation.
 				poll_continuation = w.pane_binding ~= nil and not w.mailbox_retired and not pending(d, w)
+					and not (w.coordinator_owner_id and not coordinator(registry, w))
 					and continuation_due(d, w, f.health.native_state == "idle" and not (f.native and f.native.delivery_error)),
 				cleanup_ready = w.stopped ~= nil and not w.mailbox_retired and registry.sessions[session_id].generation_floor >= control_origin(w).owner_generation
 					and (settled(w) or config.start_retirement_settled(d, w)) and not pending(d, w),

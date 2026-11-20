@@ -357,6 +357,14 @@ class PosixMailboxTests(unittest.TestCase):
             (dict(work, extra=True), b"payload: unknown field extra"),
             (dict(work, target_ref="main"), b"payload: target_ref and target_revision go together"),
             (dict(work, repository_id="blastworksai/tools"), b"payload.repository_id: 1-96 of A-Z a-z 0-9 _ -"),
+            (dict(source, source=dict(kind="plan_file", path="relative.md", revision="r")), b"payload.source.path: an absolute path of at most 4096 bytes"),
+            (dict(source, source=dict(kind="shell", path="/plan", revision="r")), b"payload.source: kind must be plan_file, board or template"),
+            ({key: value for key, value in work.items() if key not in ("new_project_name", "record_id", "record_revision", "prompt", "scope", "checks")}
+             | dict(kind="dispatch", work_id="w", project_id="p", checkpoint_id="cp", record_id="r", record_revision=0, prompt="go"),
+             b"payload: dispatch takes no checkpoint_id"),
+            ({key: value for key, value in work.items() if key not in ("new_project_name", "record_id", "record_revision", "prompt", "scope", "checks")}
+             | dict(kind="review", work_id="w", project_id="p", checkpoint_id="cp", prompt="go"),
+             b"payload: review takes no prompt"),
         ]
         for payload, why in named:
             with self.subTest(why=why):

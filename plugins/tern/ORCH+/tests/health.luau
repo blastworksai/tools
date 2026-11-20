@@ -1,6 +1,6 @@
 -- Deterministic real reducer/host/window coverage. Run bounded sections in native host callbacks.
 local root, section = ...
-assert(section == nil or table.find({ "clock", "form_hold_notice", "form_hold_capacity", "form_hold_rearm", "native", "controls", "status_launcher", "timer", "epoch_window", "epoch_host", "finish", "continuation", "alias_recovery", "held_report", "sweep_schedule", "readable_views", "cp2_controls", "guided_recovery", "guided_recovery_empty", "guided_recovery_host_restart", "stopped_worker_view", "expired_wake", "revoked_authorization", "observe_retention", "uncertain_read", "quota_reader", "bridge_lifecycle", "withdraw_fenced", "config_cards", "work_picker", "inbox_window", "usage_row",
+assert(section == nil or table.find({ "clock", "focus_window", "form_hold_notice", "form_hold_capacity", "form_hold_rearm", "native", "controls", "status_launcher", "timer", "epoch_window", "epoch_host", "finish", "continuation", "alias_recovery", "held_report", "sweep_schedule", "readable_views", "cp2_controls", "guided_recovery", "guided_recovery_empty", "guided_recovery_host_restart", "stopped_worker_view", "expired_wake", "revoked_authorization", "observe_retention", "uncertain_read", "quota_reader", "bridge_lifecycle", "withdraw_fenced", "config_cards", "work_picker", "inbox_window", "usage_row",
 	"reconnect_stale", "reconnect_missing", "reconnect_unknown", "reconnect_unrelated", "worker_attachment", "worker_attachment_form",
 	"driver_admission_noop", "driver_admission_refused", "driver_retry_original", "driver_retry_unrelated", "driver_retry_absent",
 	"driver_deadline_absent", "driver_deadline_unrelated", "driver_missing", "driver_suspension", "driver_fence_origin", "driver_fence_claim",
@@ -976,7 +976,7 @@ local function window_fixture(options: any?)
 		binding = clone(f.origin) } }
 	w:click("resume")
 	table.clear(events)
-	if not (options and options.no_worker) then id = f:accepted(false); w.id = id end
+	if not (options and options.no_worker) then id = f:accepted(options and options.coordinator == true); w.id = id end
 	if options and options.idle_baseline then
 		-- Like the recovery cases, expose an actual current mock peer before
 		-- expecting a read: a bound lane without its current frame cannot send.
@@ -1736,16 +1736,23 @@ end
 -- Discovery serves real receipt debt without starving reports or reading debt-free watermarks.
 if section == nil or section == "receipt_polling" then
 	local w = window_fixture()
+	-- SKILLS-214: acceptance owes one report read, which runs as continuation before any discovery turn.
 	w:elapse(6000); w.api.schedule(w.cx)
+	local owed = assert(w:worker().active_action_id)
+	check(w.f:action(owed).request.selector.stream == "report", "the owed report read after acceptance runs first")
+	assert(w.f:finish(owed, "missing", {}).ok)
+	w:tick(); w:elapse(5000); w.api.schedule(w.cx)
 	local first = assert(w:worker().active_action_id)
 	check(w.f:action(first).request.selector.stream == "watermark",
 		"a published unconfirmed receipt gets the first discovery turn, not the fourth")
 	assert(w.f:finish(first, "missing", {}).ok)
 	w:tick(); w:elapse(5000); w.api.schedule(w.cx)
-	local second = assert(w:worker().active_action_id)
-	check(w.f:action(second).request.selector.stream == "report",
+	-- The owed read already found no next report and the worker stayed idle, so the report turn is
+	-- spent and the host answers it mailbox_idle (no action): the turn was still the report lane's.
+	local last
+	for _, event in w.events do if event.command == "poll" then last = event end end
+	check(last ~= nil and last.bytes == nil and w:worker().active_action_id == nil,
 		"an unavailable receipt watermark cannot starve report discovery")
-	assert(w.f:finish(second, "missing", {}).ok)
 	w:tick(); w:elapse(5000); w.api.schedule(w.cx)
 	local third = assert(w:worker().active_action_id)
 	check(w.f:action(third).request.selector.stream == "watermark",
@@ -1986,6 +1993,49 @@ local function press_finish(w)
 	for _ = 1, 3 do w:tick() end
 end
 local function noticed(w, text) for _, message in w.notices do if message:find(text, 1, true) then return true end end return false end
+-- SKILLS-214 "Focus restarts it" (einh, 20 Nov 2026): talking to a coordinator in its own pane is
+-- invisible to ORCH+ otherwise, so a focused coordinator pane is checked every 10 s, and for 10 minutes
+-- after the owner leaves it. Driven through the real window scheduler.
+if section == nil or section == "focus_window" then
+	local function polls(w) local n = 0; for _, event in w.events do if event.command == "poll" then n += 1 end end; return n end
+	local w = window_fixture({ coordinator = true })
+	-- The fixture's 5 s policy is faster than the coordinator cadence; the case needs a quiet 5 minutes.
+	assert(w.f:apply("policy", { policy = { poll_ms = 300000 } }).ok)
+	local function settle()
+		for _ = 1, 24 do
+			w.api.schedule(w.cx)
+			local active = w:worker().active_action_id
+			if active then
+				local request = w.f:action(active).request
+				local status = if request.op == "mailbox_publish_ack" or request.op == "mailbox_publish_reply" then "published"
+					elseif request.op == "accept" then "accepted" elseif request.op == "mailbox_retire" then "compacted" else "missing"
+				assert(w.f:finish(active, status, {}).ok)
+			end
+			w:tick()
+			if not w:worker().active_action_id and not w:worker().poll_continuation then return end
+		end
+		error("coordinator did not settle")
+	end
+	settle()
+	w:elapse(660000); settle() -- past the fast window; the due 5-minute poll runs and settles
+	local pane = assert(w.panes[tonumber(w:worker().pane_binding.pane_id)], "coordinator pane in the fixture")
+	local quiet = polls(w)
+	w:elapse(10000); w.api.schedule(w.cx)
+	check(polls(w) == quiet, "a quiet coordinator past its fast window is not polled at 10 s")
+	pane.focused = true
+	w:elapse(10000); w.api.schedule(w.cx)
+	check(polls(w) == quiet + 1, "a coordinator whose pane is focused is polled at its 10 s cadence")
+	settle()
+	pane.focused = false
+	local left = polls(w)
+	w:elapse(10000); w.api.schedule(w.cx)
+	check(polls(w) == left + 1, "for 10 minutes after the owner leaves the pane it is still polled at 10 s")
+	settle()
+	w:elapse(600000); settle()
+	local after = polls(w)
+	w:elapse(10000); w.api.schedule(w.cx)
+	check(polls(w) == after, "10 minutes after leaving the pane the 10 s checks stop")
+end
 if section == nil or section == "finish" then
 	local held = window_fixture()
 	assert(held.f:apply("intake", { worker_id = held.id, bytes = held.f:report(held.id, 2, "ASK", {
@@ -2004,6 +2054,10 @@ if section == nil or section == "finish" then
 		through_seq = worker.accepted_seq, receipt_chain_sha256 = worker.receipt_chain }
 	for _, key in { "logical_session_id", "worker_id", "worker_generation", "launch_request_id", "work_id", "enrolment_token" } do mark[key] = worker[key] end
 	local read = w.f:apply("poll", { worker_id = w.id, bytes = "watermark" }); assert(read.ok)
+	if (w.f:action(read.action_id).request.selector or {}).stream == "report" then -- SKILLS-214: acceptance owes one report read first
+		assert(w.f:finish(read.action_id, "missing", {}).ok)
+		read = w.f:apply("poll", { worker_id = w.id, bytes = "watermark" }); assert(read.ok)
+	end
 	local page = assert(shared.codec.project_page(runtime.json.encode(mark), w.f:action(read.action_id).request.selector))
 	assert(w.f:finish(read.action_id, "read", runtime.json.decode(page)).ok)
 	local stop = w.f:apply("poll", { worker_id = w.id })
@@ -2057,6 +2111,10 @@ if section == nil or section == "finish_refusal" then
 		through_seq = worker.accepted_seq, receipt_chain_sha256 = worker.receipt_chain }
 	for _, key in { "logical_session_id", "worker_id", "worker_generation", "launch_request_id", "work_id", "enrolment_token" } do mark[key] = worker[key] end
 	local read = w.f:apply("poll", { worker_id = w.id, bytes = "watermark" }); assert(read.ok)
+	if (w.f:action(read.action_id).request.selector or {}).stream == "report" then -- SKILLS-214: acceptance owes one report read first
+		assert(w.f:finish(read.action_id, "missing", {}).ok)
+		read = w.f:apply("poll", { worker_id = w.id, bytes = "watermark" }); assert(read.ok)
+	end
 	local page = assert(shared.codec.project_page(runtime.json.encode(mark), w.f:action(read.action_id).request.selector))
 	assert(w.f:finish(read.action_id, "read", runtime.json.decode(page)).ok)
 	local stop = w.f:apply("poll", { worker_id = w.id }); local request = w.f:action(stop.action_id).request
@@ -2552,6 +2610,10 @@ local function stop_worker(w, observation)
 		through_seq = worker.accepted_seq, receipt_chain_sha256 = worker.receipt_chain }
 	for _, key in { "logical_session_id", "worker_id", "worker_generation", "launch_request_id", "work_id", "enrolment_token" } do mark[key] = worker[key] end
 	local read = w.f:apply("poll", { worker_id = w.id, bytes = "watermark" }); assert(read.ok)
+	if (w.f:action(read.action_id).request.selector or {}).stream == "report" then -- SKILLS-214: acceptance owes one report read first
+		assert(w.f:finish(read.action_id, "missing", {}).ok)
+		read = w.f:apply("poll", { worker_id = w.id, bytes = "watermark" }); assert(read.ok)
+	end
 	local page = assert(shared.codec.project_page(runtime.json.encode(mark), w.f:action(read.action_id).request.selector))
 	assert(w.f:finish(read.action_id, "read", runtime.json.decode(page)).ok)
 	local stop = w.f:apply("poll", { worker_id = w.id })

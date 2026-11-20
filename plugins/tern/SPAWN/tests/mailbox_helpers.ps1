@@ -778,6 +778,12 @@ try {
  $bad=Decode (Encode $newWork); $bad.Remove('prompt'); $named+=,@($bad,'payload: missing field prompt')
  $bad=Decode (Encode $newWork); $bad['extra']=$true; $named+=,@($bad,'payload: unknown field extra')
  $bad=Decode (Encode $newWork); $bad['repository_id']='blastworksai/tools'; $named+=,@($bad,'payload.repository_id: 1-96 of A-Z a-z 0-9 _ -')
+ $bad=Decode (Encode $newSource); $bad.source=@{kind='plan_file';path='relative.md';revision='r'}; $named+=,@($bad,'payload.source.path: an absolute path of at most 4096 bytes')
+ $bad=Decode (Encode $newSource); $bad.source=@{kind='shell';path='/plan';revision='r'}; $named+=,@($bad,'payload.source: kind must be plan_file, board or template')
+ $base=@{owner_id=$newWork.owner_id;owner_generation=$newWork.owner_generation;activation_token=$newWork.activation_token;proposal_id='p';work_id='w';project_id='p'}
+ $bad=Decode (Encode $base); $bad.kind='dispatch'; $bad.checkpoint_id='cp'; $bad.record_id='r'; $bad.record_revision=0; $bad.prompt='go'; $named+=,@($bad,'payload: dispatch takes no checkpoint_id')
+ $bad=Decode (Encode $base); $bad.kind='review'; $bad.checkpoint_id='cp'; $bad.prompt='go'; $named+=,@($bad,'payload: review takes no prompt')
+ $bad=Decode (Encode $newWork); $bad[('x'+[char]10+'y')]=1; $named+=,@($bad,'payload: unknown field xy')
  foreach ($pair in $named) {
   $rejected=Worker 'report' ($utf8.GetString((Encode @{kind='COORDINATOR_PROPOSAL';payload=$pair[0]})))
   Assert ($rejected.code -ne 0 -and $rejected.err.TrimEnd() -ceq ("invalid_schema`n"+$pair[1])) ('Named refusal differs: expected '+$pair[1]+', got '+$rejected.err)

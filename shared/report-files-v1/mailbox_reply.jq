@@ -62,8 +62,12 @@ def template_fields:
   (.key|class and .!="input") and (.value|type=="string" and utf8bytelength<=2048 and (contains("\u0000")|not)));
 def proposed_source:
  if .kind|IN("plan_file","board") then
-  fields(["kind","path","revision"]) and (.path|absolute and bounded(4096)) and (.revision|nonblank(1024))
- else shape(["kind","template_id","revision","input"];["custom_fields"]) and .kind=="template" and (.template_id|id) and (.revision|nonblank(1024)) and (.input|nonblank(32768)) and optional("custom_fields";template_fields) end;
+  fields(["kind","path","revision"]) and at("path";absolute and bounded(4096);"an absolute path of at most 4096 bytes") and
+  at("revision";nonblank(1024);"non-blank text up to 1024 bytes")
+ else rule(.kind=="template";"kind must be plan_file, board or template") and shape(["kind","template_id","revision","input"];["custom_fields"]) and
+  at("template_id";id;"1-96 of A-Z a-z 0-9 _ -") and at("revision";nonblank(1024);"non-blank text up to 1024 bytes") and
+  at("input";nonblank(32768);"non-blank text up to 32768 bytes") and
+  optional("custom_fields";template_fields;"up to 16 lowercase names other than input, values up to 2048 bytes") end;
 def project_start:
  fields(["owner_id","owner_generation","activation_token","orch_project_id","project_revision","decision_context"]) and
  (.owner_id|id) and (.owner_generation|positive) and (.activation_token|sha) and
@@ -141,9 +145,12 @@ def report_payload:
   else
    rule(.kind|IN("dispatch","report","review","rollover","landing");"kind must be new_work, add_source, dispatch, report, review, rollover or landing") and
    shape(["owner_id","owner_generation","activation_token","proposal_id","kind","work_id","project_id"];["checkpoint_id","record_id","record_revision","prompt"]) and at("work_id";id;"1-96 of A-Z a-z 0-9 _ -") and at("project_id";id;"1-96 of A-Z a-z 0-9 _ -") and
-   (if .kind=="dispatch" then (has("checkpoint_id")|not) and (.record_id|text(1024)) and (.record_revision|nonnegative) and (.prompt|text(32768))
-    else (.kind|IN("report","review","rollover","landing")) and (has("record_id")|not) and (has("record_revision")|not) and (has("prompt")|not) and
-     (if .kind=="report" then has("checkpoint_id")|not else .checkpoint_id|id end) end)
+   (if .kind=="dispatch" then rule(has("checkpoint_id")|not;"dispatch takes no checkpoint_id") and
+     at("record_id";text(1024);"1-1024 bytes, from the eligible records list") and at("record_revision";nonnegative;"whole number from 0") and
+     at("prompt";text(32768);"text of 1 to 32768 bytes")
+    else rule(has("record_id")|not;"\(.kind) takes no record_id") and rule(has("record_revision")|not;"\(.kind) takes no record_revision") and
+     rule(has("prompt")|not;"\(.kind) takes no prompt") and
+     (if .kind=="report" then rule(has("checkpoint_id")|not;"report takes no checkpoint_id") else at("checkpoint_id";id;"1-96 of A-Z a-z 0-9 _ -") end) end)
   end)
  elif $kind=="PROJECT_START_CLAIM" then project_start
  elif $kind=="COORDINATOR_RELEASE" then

@@ -523,6 +523,7 @@ local function native_observation(cx: WindowCx, source: number, worker: any): (s
 	return "unknown", "Unrecognized terminal: lifecycle only; no native input or readiness inferred. A verified worker-poll capability is required for replies.", pane
 end
 local drivers: any = {}
+local scans: any = {} -- per-source worker scan state (see the worker scan below)
 local executed: any = {} -- grant_id -> true: set-before-send markers (pruned only once settled).
 local held_actions: any = {}
 -- Per-action bookkeeping (`executed`, `auto_reconcile`, `held_actions`) is pruned only on positive
@@ -1389,7 +1390,11 @@ local function advance(cx: WindowCx, driver: any)
 				.. tostring(command_result.message or command_result.code) .. " Nothing changed.")
 		end
 		driver.owner_command = nil
-		if matched and not command_result.action_id and not driver.scope and not driver.delivery then drop(driver); return end
+		if matched and not command_result.action_id and not driver.scope and not driver.delivery then
+			local scan = if driver.continuation then scans[driver.source] else nil
+			if scan and scan.paced then scan.paced[driver.worker_id] = tern.now() + (driver.pace_ms or 10000) end
+			drop(driver); return
+		end
 		driver.command_request_id = nil
 		-- Unrelated workflow controls cannot strand an already captured grant/delivery.
 		if matched and command_result.ok == false and not a and not driver.delivery then drop(driver); return end
@@ -1861,7 +1866,7 @@ local function push_config_panes(cx: WindowCx, source: number, host: any, sessio
 	pane_pushes[source] = bytes
 	cx.session:event(source, { ev = "action", id = "main", act = "config-panes", value = bytes })
 end
-local scans: any = {}
+-- scans is declared beside drivers: the driver drop path paces continuation with it.
 -- Start one bounded automatic read-only attempt for an uncertain retained effect once its backoff
 -- is due, only on the owner control's exact route; everything else waits for the owner.
 local function auto_reconcile_due(cx: WindowCx, source: number, origin: any, scoped: any, key: any, worker_id: string?)
@@ -2542,7 +2547,7 @@ local function schedule(cx: WindowCx)
 		if routing and routing.refresh_due == true and readers[source] == nil then start_reader(source, fresh_intent(cx, source, origin), "snapshot") end
 		local scan = scans[source]
 		if not scan or scan.nonce ~= origin.alias_nonce then
-			scan = { nonce = origin.alias_nonce, cursor = 0, observed = {}, watermarks = {}, next_poll = {}, startup_until = {} }; scans[source] = scan
+			scan = { nonce = origin.alias_nonce, cursor = 0, observed = {}, watermarks = {}, next_poll = {}, startup_until = {}, paced = {}, focused_until = {} }; scans[source] = scan
 		end
 		-- One registered worker per turn: bounded callback work and fair rotation.
 		if #flow.worker_ids > 0 then
@@ -2551,7 +2556,7 @@ local function schedule(cx: WindowCx)
 				-- Once per rotation: forget per-worker timers/counters of workers no longer registered.
 				local registered = {}
 				for _, worker_id in flow.worker_ids do registered[worker_id] = true end
-				for _, per_worker in { scan.observed, scan.watermarks, scan.next_poll, scan.startup_until } do
+				for _, per_worker in { scan.observed, scan.watermarks, scan.next_poll, scan.startup_until, scan.paced, scan.focused_until } do
 					for worker_id in per_worker do if not registered[worker_id] then per_worker[worker_id] = nil end end
 				end
 			end
@@ -2568,6 +2573,15 @@ local function schedule(cx: WindowCx)
 				-- The host decides each worker's cadence (coordinators look every 10 s, SKILLS-214).
 				local cadence = if type(worker.poll_ms) == "number" and worker.poll_ms > 0 then worker.poll_ms else flow.policy.poll_ms
 				local poll_ms = if startup then math.min(cadence, 2000) else cadence
+				-- Talking to a coordinator in its own pane is activity ORCH+ cannot see otherwise: OMP's
+				-- state stays unknown and typing is not observable. While its pane is focused in this
+				-- window, and for 10 minutes after, it is checked at its 10 s cadence (einh's pick
+				-- "Focus restarts it", SKILLS-214). Window memory only; nothing is persisted.
+				if worker.coordinator_owner_id ~= nil and worker.pane_binding then
+					local pane = scoped_pane(cx, tonumber(worker.pane_binding.pane_id), worker.pane_binding)
+					if pane and pane.focused == true then scan.focused_until[worker.worker_id] = now + 600000 end
+				end
+				local talking = now < (scan.focused_until[worker.worker_id] or 0)
 				if now >= (scan.observed[worker.worker_id] or 0) then
 					scan.observed[worker.worker_id] = now + poll_ms
 					local native, _reason, _pane, problem = native_observation(cx, source, worker)
@@ -2586,7 +2600,9 @@ local function schedule(cx: WindowCx)
 								and data.driver_result.action_id == worker.active_action_id) then driver = candidate end
 					end
 				end
-				local continuation = worker.poll_continuation == true
+				-- A continuation poll that came back without an action (refused or nothing granted) is
+				-- paced for one cadence before continuation may bypass the schedule again (SKILLS-214).
+				local continuation = worker.poll_continuation == true and now >= (scan.paced[worker.worker_id] or 0)
 				if not worker.active_action_id and not driver and not command_pending
 					and (continuation or now >= (scan.next_poll[worker.worker_id] or 0)) then
 					local scheduled = false
@@ -2597,14 +2613,15 @@ local function schedule(cx: WindowCx)
 						local request_id = send_command(cx, source, command_origin, "poll", { worker_id = worker.worker_id })
 						if request_id then
 							local key = tostring(source) .. ":" .. worker.worker_id
-							driver = { key = key, source = source, origin = command_origin, worker_id = worker.worker_id, command_request_id = request_id }
+							driver = { key = key, source = source, origin = command_origin, worker_id = worker.worker_id, command_request_id = request_id,
+								continuation = true, pace_ms = poll_ms }
 							drivers[key] = driver
 						end
 					elseif worker.due_rollover and not flow.policy.paused then
 						scheduled = send_command(cx, source, command_origin, "rollover", { worker_id = worker.worker_id, trigger = "policy" }) ~= nil
 					elseif worker.due_report and not worker.report_request_pending and not flow.policy.paused then
 						scheduled = send_command(cx, source, command_origin, "reply", { worker_id = worker.worker_id, trigger = "policy" }) ~= nil
-					elseif startup or worker.due_poll or (worker.report_request_pending and not worker.report_held) then
+					elseif startup or worker.due_poll or talking or (worker.report_request_pending and not worker.report_held) then
 						-- A held report blocks this generation's report lane (no automatic report or watermark
 						-- re-read until the owner acts); due_poll covers outbound settlement.
 						-- Alternate receipt confirmation with report discovery while receipts
@@ -5035,7 +5052,7 @@ arm() -- Also rearms when reloaded without window_start; one timer owns observat
 local function bookkeeping(): any
 	local function size(t: any): number local n = 0; for _ in t do n += 1 end; return n end
 	local per_worker = 0
-	for _, scan in scans do per_worker += size(scan.observed) + size(scan.watermarks) + size(scan.next_poll) + size(scan.startup_until) end
+	for _, scan in scans do per_worker += size(scan.observed) + size(scan.watermarks) + size(scan.next_poll) + size(scan.startup_until) + size(scan.paced or {}) + size(scan.focused_until or {}) end
 	return { executed = size(executed), auto_reconcile = size(auto_reconcile), auto_readback = size(auto_readback.values), held_actions = size(held_actions),
 		sweep_attempts = size(sweep_attempts), scan_workers = per_worker, watched = #settle_order }
 end
