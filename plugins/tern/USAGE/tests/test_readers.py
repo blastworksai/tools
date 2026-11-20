@@ -605,6 +605,36 @@ for line in sys.stdin:
                 self.assertNotIn("SECRET", json.dumps(result))
                 self.assertNotIn("REFRESH", json.dumps(result))
 
+    def test_claude_login_stamp_edges(self):
+        # SKILLS-217, Kimi round 2: an explicit null expiry fails closed (only a missing key
+        # is unknown), a huge integer never raises, and equality with the clock means ended.
+        fixed_s = 1795000000.0
+        now = int(fixed_s * 1000)
+        for oauth_extra, expected in (
+                ({"refreshTokenExpiresAt": None}, "web_login_expired"),
+                ({}, "access_token_stale"),
+                ({"refreshTokenExpiresAt": 10 ** 400}, "access_token_stale"),
+                ({"refreshTokenExpiresAt": now}, "web_login_expired"),
+                ({"refreshTokenExpiresAt": now + 1}, "access_token_stale")):
+            with self.subTest(extra=repr(oauth_extra)[:40]), tempfile.TemporaryDirectory() as directory:
+                home = Path(directory)
+                (home / ".claude").mkdir()
+                oauth = {"accessToken": "SECRET", "refreshToken": "REFRESH", "expiresAt": now}
+                oauth.update(oauth_extra)
+                (home / ".claude" / ".credentials.json").write_text(json.dumps({"claudeAiOauth": oauth}))
+                with patch.object(readers.time, "time", return_value=fixed_s), \
+                     patch.object(helper, "source_identity", return_value={"source_uid": "1000"}), \
+                     patch.object(helper, "current_home", return_value=home), \
+                     patch.object(helper, "profile_environment", return_value={"HOME": directory}), \
+                     patch("metadata_providers.collect", return_value={"principal": "a@example.test",
+                           "principal_kind": "email", "label": "a@example.test"}), \
+                     patch.object(readers, "http_json", return_value={"five_hour": {"utilization": 3}}) as request:
+                    result = readers.handle({"request": {"version": 1, "provider": "claude", "kind": "claude"},
+                                             "selectors": {}})
+                self.assertEqual(result.get("error"), expected)
+                request.assert_not_called()
+                self.assertNotIn("SECRET", json.dumps(result))
+
     def test_rpc_call_error_is_classified_by_caller_but_initialize_error_is_vendor(self):
         script = """
 import json, sys

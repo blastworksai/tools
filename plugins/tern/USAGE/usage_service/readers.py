@@ -40,7 +40,9 @@ def _epoch_ms(value):
     """A credential timestamp in milliseconds, or None when it is not a finite number.
 
     A positive value below 1e11 is taken as seconds and scaled (SKILLS-217)."""
-    if type(value) not in (int, float) or not math.isfinite(value):
+    # A Python int is always finite; only a float can be NaN or infinite (and
+    # math.isfinite on a huge int would raise OverflowError).
+    if type(value) not in (int, float) or (type(value) is float and not math.isfinite(value)):
         return None
     return value * 1000 if 0 < value < 1e11 else value
 
@@ -437,10 +439,11 @@ def collect(provider, home, env, io, command=None):
         expires = _epoch_ms(oauth.get("expiresAt"))
         if expires is not None and expires <= now:
             refresh = oauth.get("refreshToken")
-            raw_refresh_expires = oauth.get("refreshTokenExpiresAt")
-            refresh_expires = _epoch_ms(raw_refresh_expires)
+            # Only a missing key means "expiry unknown"; an explicit null is a
+            # present but invalid value and fails closed.
+            refresh_expires = _epoch_ms(oauth.get("refreshTokenExpiresAt"))
             login_live = isinstance(refresh, str) and refresh.strip() != "" and (
-                raw_refresh_expires is None or (refresh_expires is not None and refresh_expires > now))
+                "refreshTokenExpiresAt" not in oauth or (refresh_expires is not None and refresh_expires > now))
             raise Unavailable("access_token_stale" if login_live else "web_login_expired")
         if status_failure is not None:
             raise status_failure
