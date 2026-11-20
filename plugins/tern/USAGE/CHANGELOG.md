@@ -3,6 +3,8 @@
 ## 2.5.5
 
 - A Claude account no longer shows "provider login expired" while its login is valid. Claude's saved access token lives hours and a running Claude can keep renewing it in memory while the saved copy stays stale; USAGE read that stale copy as an ended login. Now "login expired" means the login itself has ended (no refresh token, or `refreshTokenExpiresAt` has passed). A stale access token with a live login shows "login valid; usage updates when the provider's CLI saves a fresh token" (`access_token_stale`) and keeps the last known usage; USAGE still never refreshes or sends a stale token (SKILLS-217, found on Claude · BWAI, whose login runs to 9 December).
+- A blank refresh token, or a refresh expiry that is present but not a number, counts as an ended login ("login expired"), never as valid. Both expiry stamps are read in milliseconds or seconds.
+- **Update the host and every window together.** `access_token_stale` is a new reason in the same snapshot version: a 2.5.4 window attached to a 2.5.5 host rejects a snapshot that carries it, until that window is updated too.
 
 ## 2.5.4
 

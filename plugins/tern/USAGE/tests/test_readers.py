@@ -562,11 +562,19 @@ for line in sys.stdin:
         # refresh token) has ended too; with a live login it is access_token_stale.
         now = int(time.time() * 1000)
         live, ended = now + 86400000, now - 1
+        live_s, ended_s = (now + 86400000) // 1000, now // 1000 - 60
         for expires, refresh, refresh_expires, expected in (
                 (now - 1, "REFRESH", live, "access_token_stale"), (0, "REFRESH", None, "access_token_stale"),
                 (now - 1, "REFRESH", ended, "web_login_expired"), (now - 1, None, None, "web_login_expired"),
                 (now - 1, "", live, "web_login_expired"),
-                (now + 3600000, "REFRESH", live, None), (None, "REFRESH", None, None)):
+                (now + 3600000, "REFRESH", live, None), (None, "REFRESH", None, None),
+                # Kimi round 1: blank refresh tokens and malformed refresh expiries fail closed.
+                (now - 1, "   ", live, "web_login_expired"), (now - 1, "REFRESH", "0", "web_login_expired"),
+                (now - 1, "REFRESH", True, "web_login_expired"), (now - 1, "REFRESH", {"at": live}, "web_login_expired"),
+                (now - 1, "REFRESH", float("nan"), "web_login_expired"), (now - 1, "REFRESH", float("inf"), "web_login_expired"),
+                # Seconds and milliseconds both read right, for either stamp.
+                (now - 1, "REFRESH", live_s, "access_token_stale"), (now - 1, "REFRESH", ended_s, "web_login_expired"),
+                (now // 1000 - 60, "REFRESH", live, "access_token_stale"), ((now + 3600000) // 1000, "REFRESH", live, None)):
             expired = expected is not None
             with self.subTest(expires=expires, refresh=refresh, refresh_expires=refresh_expires), tempfile.TemporaryDirectory() as directory:
                 home = Path(directory)

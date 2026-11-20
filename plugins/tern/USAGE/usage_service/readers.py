@@ -36,6 +36,15 @@ def obj(value):
     return value
 
 
+def _epoch_ms(value):
+    """A credential timestamp in milliseconds, or None when it is not a finite number.
+
+    A positive value below 1e11 is taken as seconds and scaled (SKILLS-217)."""
+    if type(value) not in (int, float) or not math.isfinite(value):
+        return None
+    return value * 1000 if 0 < value < 1e11 else value
+
+
 def name(value):
     if not isinstance(value, str) or not value.strip() or len(value) > 128 or not value.isprintable():
         raise Unavailable("unparsed")
@@ -420,13 +429,18 @@ def collect(provider, home, env, io, command=None):
         # saved copy stays stale. So a stale access token is "login expired"
         # only when the login has ended too: no refresh token, or its own
         # refreshTokenExpiresAt has passed (SKILLS-217).
+        # Both stamps are read in milliseconds; a positive value below 1e11 is
+        # taken as seconds (1e11 ms is 1973, 1e11 s is year 5138). A refresh
+        # expiry that is present but not a finite number, or a blank refresh
+        # token, fails closed: the login counts as ended, never as valid.
         now = time.time() * 1000
-        expires = oauth.get("expiresAt")
-        if type(expires) in (int, float) and expires <= now:
+        expires = _epoch_ms(oauth.get("expiresAt"))
+        if expires is not None and expires <= now:
             refresh = oauth.get("refreshToken")
-            refresh_expires = oauth.get("refreshTokenExpiresAt")
-            login_live = isinstance(refresh, str) and bool(refresh) and not (
-                type(refresh_expires) in (int, float) and refresh_expires <= now)
+            raw_refresh_expires = oauth.get("refreshTokenExpiresAt")
+            refresh_expires = _epoch_ms(raw_refresh_expires)
+            login_live = isinstance(refresh, str) and refresh.strip() != "" and (
+                raw_refresh_expires is None or (refresh_expires is not None and refresh_expires > now))
             raise Unavailable("access_token_stale" if login_live else "web_login_expired")
         if status_failure is not None:
             raise status_failure
