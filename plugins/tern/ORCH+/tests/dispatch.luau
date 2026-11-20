@@ -21,7 +21,7 @@ local sections = { fixture = true, core = true, control_rebind = true, receipts 
 	project_observation = true, project_repository_guards = true, migration_start_guards = true, enrol_route_cancel = true,
 	project_history_reuse = true, project_reserve = true, rollover_location = true, project_start_rollover = true,
 	legacy_observation = true, legacy_worker_roles = true, current_observation = true, compaction_retry = true, catalog_paging = true,
-	make_room = true, rollover_paused_budget = true, coordinator_fast_window = true }
+	make_room = true, rollover_paused_budget = true, coordinator_fast_window = true, coordinator_fast_window_start = true }
 assert(section == nil or sections[section], "unknown dispatch test section: " .. tostring(section))
 local runtime, environment = tern, getfenv()
 -- Absence stays absent; explicit JSON null remains available to negative wire tests.
@@ -5225,6 +5225,41 @@ local function ack_activation(f, worker_id)
 	local w = worker_of(f, worker_id); local grant = w.activation; local reply = w.replies[tostring(grant.reply_seq)]
 	return send_report(f, worker_id, "reply_ack", { message_id = reply.message_id, reply_seq = reply.reply_seq, reply_sha256 = reply.sha256, status = "recorded" },
 		{ action_id = grant.action_id, action_revision = grant.action_revision })
+end
+-- Owner ruling C5 follow-up: the owner's own START click restarts a coordinator's 10 s window; a policy
+-- auto-start (workflow section project_start_policy) does not. Landing and deploy grants go to a release
+-- manager or a builder, never to a coordinator, so they cannot restart this window at all.
+if section == nil or section == "coordinator_fast_window_start" then
+	local clock = { now_ms = 1000, mono_ms = 1000, epoch = "fast-start-host" }
+	local f, id = coordinator_ready(function() return clone(clock) end)
+	local function shown()
+		for _, w in dispatch.project(f.authority.registry, f.origin.logical_session_id, f.origin.alias_nonce).workflow.workers do
+			if w.worker_id == id then return w end
+		end
+		error("missing fast-start worker")
+	end
+	local function drain()
+		for _ = 1, 16 do
+			if not shown().due_poll and not shown().poll_continuation then return end
+			local queued = f:apply("poll", { worker_id = id }); assert(queued.ok, queued.message)
+			local request = f:action(queued.action_id).request
+			local status = if request.op == "mailbox_publish_ack" or request.op == "mailbox_publish_reply" then "published"
+				elseif request.op == "accept" then "accepted"
+				elseif request.op == "mailbox_retire" then "compacted" else "missing"
+			assert(f:finish(queued.action_id, status, {}).ok)
+		end
+		error("fast-start drain did not settle")
+	end
+	local function advance(ms) clock.mono_ms += ms; clock.now_ms += ms; assert(f:tick().ok) end
+	local project = f:project("Owner START restarts the window", false)
+	advance(700000); drain(); advance(10000)
+	check(not shown().due_poll, "after a quiet stretch the 10 s window is closed")
+	local p = f.authority.registry.dispatch.projects[project]
+	assert(f:apply("project_start", { orch_project_id = project, project_revision = p.revision }).ok)
+	local stored = f.authority.registry.dispatch.projects[project].start
+	check(f.authority.registry.dispatch.workers[id].replies[tostring(stored.reply_seq)].owner == true, "the owner's START reply is marked owner-sourced")
+	advance(0); drain(); advance(10000)
+	check(shown().due_poll, "the owner's START reaching a quiet coordinator restarts the 10 s window")
 end
 if section == nil or section == "project_start_rollover" then
 	local f, predecessor = coordinator_ready()

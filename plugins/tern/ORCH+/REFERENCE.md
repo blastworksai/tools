@@ -246,7 +246,7 @@ The window retains an observed SPAWN outcome until `main.dispatch-state.receipt`
 
 While the window drives an *active* controller that has timed work, it keeps exactly one short wait child in flight. Timed work means any of:
 
-- a registered worker, whose observation and poll run every `poll_ms` (a coordinator is checked every 10 s and is due every 10 s for 10 minutes after its activation, a real report it sends, or an answer or report request of yours reaching it, then every `poll_ms`; ORCH+'s own automatic report requests, and the report answering one, do not restart the 10 minutes; a shorter `poll_ms` wins);
+- a registered worker, whose observation and poll run every `poll_ms` (a coordinator is checked every 10 s and is due every 10 s for 10 minutes after its activation, a real report it sends, or an answer, report request or START of yours reaching it, then every `poll_ms`; ORCH+'s own automatic report requests, and the report answering one, do not restart the 10 minutes; a shorter `poll_ms` wins);
 - an effect driver;
 - a capacity or backpressure backoff;
 - a USAGE read;
