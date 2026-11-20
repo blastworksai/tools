@@ -153,7 +153,7 @@ def _yaml_comments(source):
 
 
 # A store read parses every detail file again after any write: 272 files took six to eight seconds, past
-# binding-open's five-second budget (SKILLS-168). Parsing is a pure function of the bytes and the limits below,
+# binding-open's five-second budget. Parsing is a pure function of the bytes and the limits below,
 # so a successful parse is kept by its SHA-256 and replayed; refusals are never kept and always recomputed.
 # Each caller gets its own copy of the metadata tree (callers edit it). Bounded by entries and by bytes.
 PARSE_CACHE_ENTRIES = 4096
