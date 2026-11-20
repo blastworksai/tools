@@ -421,6 +421,9 @@ if section == nil or section == "selectors" then
 	submit(chosen, { model = "  claude-sonnet-5-5 ", effort = "high" })
 	check(chosen.sent[1].fields.launch_model == "claude-sonnet-5-5" and chosen.sent[1].fields.launch_effort == "high" and chosen.sent[1].command == "queue",
 		"a changed model and an effort travel with that one queue request")
+	-- A legacy record holds a display-only label; an explicit entry equal to it is still the owner's choice and is sent.
+	local same_label = picked("claude", "claude-sonnet-5-5"); submit(same_label, { model = "claude-sonnet-5-5", effort = "" })
+	check(same_label.sent[1].fields.launch_model == "claude-sonnet-5-5", "a typed model equal to the saved display-only label is still sent as launch_model")
 	local effort_only = picked("claude"); submit(effort_only, { model = "", effort = "max" })
 	check(effort_only.sent[1].fields.launch_model == nil and effort_only.sent[1].fields.launch_effort == "max", "an effort alone is sent without a model")
 	-- Codex and Kimi: a model flag but no verified effort flag, so no Effort field.

@@ -1752,6 +1752,8 @@ sections.selectors=function()
   {name='provider outside the seven CLIs',provider='Claude Work',exe='claude',model='m',text='known CLI'},
   {name='typed flag behind a sudo wrapper',provider='claude',exe='sudo',args={'-u','x','claude','--model','typed'},command='sudo -u x claude',model='other',text='already contain'},
   {name='typed effort flag',provider='claude',exe='claude',args={'--effort=low'},effort='high',text='already contain'},
+  {name='login sudo -i',provider='claude',exe='sudo',args={'-i','-u','x','--','claude'},command='sudo -i -u x claude',model='m',text='sudo -i or -s'},
+  {name='login sudo -s',provider='claude',exe='sudo',args={'-s','-u','x','--','claude'},command='sudo -s -u x claude',effort='high',text='sudo -i or -s'},
  }) do
   local f=fixture();local rec=terminal(f,case.provider,case.exe,case.args);if case.command then rec.command=case.command end
   local original=copy(f.snapshot.records[1])
@@ -1765,6 +1767,19 @@ sections.selectors=function()
   local f=fixture();terminal(f,'claude','claude',{'--fresh','--','--model'})
   local result,request=started(f,'after-dashdash','chosen')
   check(result.status=='resolved' and f.d.execution(request,77).launch.command:find("'--model' 'chosen'",1,true),'a flag-looking word after the program\'s -- does not block the override')
+ end
+ -- A Windows executable path never decides the CLI (the provider does), so an override applies to a .exe launch.
+ do
+  local f=fixture();terminal(f,'claude','C:/Tools/claude.exe')
+  local result,request=started(f,'windows-path','chosen-model')
+  check(result.status=='resolved','a Windows executable path takes an override: '..tostring(result.error and result.error.message))
+  check(f.d.execution(request,77).launch.command:find('chosen-model',1,true)~=nil,'the override reaches a Windows-path launch')
+ end
+ -- A command readable both as a Windows path and as shell words is refused outright, as for saved selectors.
+ do
+  local f=fixture();terminal(f,'claude','C:\\Tools\\claude.exe')
+  local result=started(f,'windows-ambiguous','chosen-model')
+  check(result.status=='rejected' and result.error.code=='unsupported_capability' and f.effects.reserves==0 and tostring(result.error.message):find('two ways',1,true),'an ambiguous Windows-path command is refused and reserves nothing: '..tostring(result.error and result.error.message))
  end
  -- The CLI is the provider, never the program's file name (SKILLS-213): a renamed install takes the provider's flags.
  do

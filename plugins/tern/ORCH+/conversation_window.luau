@@ -118,7 +118,7 @@ function M.new(api: any): any
 					function(form_cx: any, values: any, action: string)
 						if action ~= "start" or type(values) ~= "table" then return end
 						local model = if type(values.model) == "string" then values.model:match("^%s*(.-)%s*$") else ""
-						if model == "" or model == record.model_variant then model = nil end
+						if model == "" then model = nil end
 						local effort = if values.effort ~= nil and values.effort ~= "" then values.effort else nil
 						local errors = {}
 						if model ~= nil then
