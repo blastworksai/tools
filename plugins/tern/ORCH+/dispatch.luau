@@ -2994,7 +2994,7 @@ function config.mark_legacy_refusals(d: any)
 		local code = if refused then g.answer.source.code else g.execution.effect_ref
 		local reason = if refused then (config.REFUSALS[g.answer.source.code] or "") else "The approved proposal was refused at execution. Its detailed reason was not retained; tell your orchestrator."
 		if not code:match("^[%w_%-]+$") then code = "refused" end
-		config.notify(d, g, code, if reason == "" then "Refused." else reason, config.make_room(d, g.logical_session_id))
+		config.notify(d, g, code, if reason == "" then "Refused." else reason, config.make_notice_room(d, g.logical_session_id))
 	end
 end
 function M.restore(d: any)
@@ -6519,7 +6519,7 @@ function config.pending_notice(g: any): any?
 	return if notice and not notice.malformed and notice.status == "pending" then notice else nil
 end
 -- Clears the oldest pending notifications until a new one fits; returns the count the incoming card carries.
-function config.make_room(d: any, sid: string): number
+function config.make_notice_room(d: any, sid: string): number
 	local carried = 0
 	while true do
 		local mine, all = {}, {}
@@ -6554,7 +6554,7 @@ function config.refuse_proposal(d: any, w: any, p: any, bytes: string, code: str
 	if code == "unknown_record" or code == "catalog_changed" then text ..= "\n" .. config.roster_text(d, w.logical_session_id) end
 	local saved = {}
 	for key, g in d.gates or {} do saved[key] = clone(g.evidence) end
-	local carried = config.make_room(d, w.logical_session_id)
+	local carried = config.make_notice_room(d, w.logical_session_id)
 	local g, err = new_gate(d, w, "coordinator_proposal", bounded(text, 32768), { { id = "approve", label = "Approve proposal" }, { id = "reject", label = "Reject" } },
 		{ "refused:" .. code }, clock, bytes)
 	if not err then
@@ -6739,7 +6739,7 @@ function config.execute_proposal(registry: any, n: any, gate_id: string, event: 
 	append(d, w, "execution", bounded("Proposal " .. proposal.payload.proposal_id .. " (" .. proposal.payload.kind .. ", gate " .. g.id .. ") " .. state .. ": " .. message, 32768), clock)
 	-- A terminal refusal is shown to the owner on its own card, with the original reason, committed here with the
 	-- execution record. It opens no decision for the coordinator and nothing is retried.
-	if state == "refused" and ref ~= "gate_cancelled" then config.notify(d, g, ref, message, config.make_room(d, g.logical_session_id)) end
+	if state == "refused" and ref ~= "gate_cancelled" then config.notify(d, g, ref, message, config.make_notice_room(d, g.logical_session_id)) end
 	return message
 end
 -- Runs at the end of every dispatch commit for the event's session. Pause answers nothing by policy:
@@ -6761,7 +6761,7 @@ function config.advance_proposals(registry: any, n: any, event: any, clock: any,
 					if not problem then
 						g.answer = { choice_id = "reject", answer = message, source = { kind = "refusal", code = "review_disabled" }, at_ms = stamp(clock).at_ms }
 						g.phase = "answered"
-						config.notify(d, g, "review_disabled", config.REFUSALS.review_disabled, config.make_room(d, g.logical_session_id))
+						config.notify(d, g, "review_disabled", config.REFUSALS.review_disabled, config.make_notice_room(d, g.logical_session_id))
 					end
 				end
 			end
