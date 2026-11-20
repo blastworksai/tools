@@ -3791,7 +3791,7 @@ function config.issue_project_start(n: any, p: any, w: any, snapshot: any, conte
 	if p.start and p.start.closed and #(p.start_history or {}) >= 32 then return fail("full", "Retained START history is full; finish this project before adding more START decisions.") end
 	local start, problem = issue_reply(n.dispatch, w, "project_start", { owner_id = owner.owner_id, owner_generation = owner.generation,
 		activation_token = w.activation.activation_token, orch_project_id = p.orch_project_id,
-		project_revision = p.revision, decision_context = context })
+		project_revision = p.revision, decision_context = context }, nil, source.kind == "owner")
 	if not start then return nil, problem end
 	start.start_id = next_id(n.dispatch, "project-start-"); start.project_revision = p.revision; start.decision_context = context
 	start.coordinator = { owner_id = owner.owner_id, owner_generation = owner.generation, worker_id = w.worker_id }
