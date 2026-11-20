@@ -4,7 +4,7 @@
     python3 shared/report-files-v1/sync.py [--check]
 
 --check writes nothing and exits 1 for missing, differing or extra wire files.
-Only the two wire codecs and explicitly named SPAWN helpers are generated.
+Only the two wire codecs, ORCH+'s vendored selectors.luau and explicitly named SPAWN helpers are generated.
 """
 import argparse
 from pathlib import Path
