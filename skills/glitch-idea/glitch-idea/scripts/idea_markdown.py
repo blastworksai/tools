@@ -56,18 +56,14 @@ INDEX_AUTHORITY = ('Frontmatter owns accepted order and backlog revision.\n'
                    'Scores and ranks below are derived from detail files; edit details, not this table.\n')
 
 
-class BoundedLoader(yaml.SafeLoader):
+class _Bounds:
+    """The bounds every frontmatter reader enforces, whichever parser feeds it events."""
     # Copy rather than mutate SafeLoader's process-global resolver table.
     yaml_implicit_resolvers = {
         key: [(tag, regexp) for tag, regexp in rules
               if tag != 'tag:yaml.org,2002:timestamp']
         for key, rules in yaml.SafeLoader.yaml_implicit_resolvers.items()
     }
-
-    def __init__(self, stream):
-        super().__init__(stream)
-        self.node_count = 0
-        self.node_depth = 0
 
     def compose_node(self, parent, index):
         require(not self.check_event(yaml.AliasEvent), 'YAML aliases are not supported')
@@ -92,6 +88,33 @@ class BoundedLoader(yaml.SafeLoader):
             require(key not in result, 'Duplicate YAML key: ' + key)
             result[key] = self.construct_object(value_node, deep=deep)
         return result
+
+
+class PureBoundedLoader(_Bounds, yaml.SafeLoader):
+    def __init__(self, stream):
+        super().__init__(stream)
+        self.node_count = 0
+        self.node_depth = 0
+
+
+if yaml.__with_libyaml__:
+    class _FastBoundedLoader(_Bounds, yaml.composer.Composer, yaml.cyaml.CParser,
+                             yaml.constructor.SafeConstructor, yaml.resolver.Resolver):
+        # libyaml scans and parses; Python's Composer (before CParser, so its compose_node runs and sees the
+        # bounds above), SafeConstructor and Resolver build the value exactly as PureBoundedLoader does.
+        # The pure-Python scanner took most of a store read: six to eight seconds on 272 files, past
+        # binding-open's five-second budget.
+        def __init__(self, stream):
+            yaml.cyaml.CParser.__init__(self, stream)
+            yaml.constructor.SafeConstructor.__init__(self)
+            yaml.resolver.Resolver.__init__(self)
+            yaml.composer.Composer.__init__(self)
+            self.node_count = 0
+            self.node_depth = 0
+
+    BoundedLoader = _FastBoundedLoader
+else:
+    BoundedLoader = PureBoundedLoader
 
 
 def _tree(value):

@@ -316,6 +316,11 @@ class AgentProtocolTextTests(unittest.TestCase):
             self.assertRegex(body, r"(?i)the loop writes its file in a folder under this account's home that only this account can read.{0,20}mode 0700.{0,20}never a shared temp folder.{0,40}never the runtime folder")
             self.assertNotIn('/tmp', text)
 
+    def test_capture_words_file_stays_private(self):
+        """SKILLS-168: a retry wrote the operator's words into a shared project folder before capture."""
+        for text in (SKILL, COMMANDS):
+            self.assertRegex(flat(text), r"(?i)put that file in a folder under this account's home that only this account can read.{0,20}mode 0700.{0,20}never a shared temp folder or a shared project folder.{0,40}delete it once `capture` has saved the idea")
+
     def test_the_helper_runs_the_events_loop(self):
         """SKILLS-168: a slow agent let the lease lapse between the open and its own loop; the helper now runs it."""
         skill, commands = flat(SKILL), flat(COMMANDS)
