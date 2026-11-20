@@ -661,10 +661,12 @@ function Receive {
  } finally { $memory.Dispose() }
  if ($bytes.Length -ne $manifest.message_bytes -or (Hash $bytes) -cne $manifest.message_sha256) { Fail 'content_conflict' }
  At ''; $reply=Decode $bytes; MatchBinding $reply
- if ($reply.version -ne 1 -or $reply.reply_seq -ne $seq -or $reply.message_id -cne $manifest.message_id -or $reply.action_id -notmatch '^[A-Za-z0-9_-]{1,96}$' -or $reply.action_revision -lt 1 -or $reply.action_revision%1 -ne 0 -or $reply.action_revision -gt 9007199254740991 -or $reply.kind -cnotin @('assignment','report_request','owner_decision','landing_grant','landing_refresh','coordinator_activation','coordinator_retirement','project_start','review_request','rework','deploy_grant','label_request','record_ruling')) { Fail 'binding_mismatch' }
+ # A missing or extra header field is a schema fault on every helper (SKILLS-216); only present
+ # values that disagree with this generation's correlation are a binding mismatch.
  $fields=@('version','logical_session_id','worker_id','worker_generation','launch_request_id','work_id','message_id','reply_seq','action_id','action_revision','kind','payload')
  if ($reply.kind -cin @('owner_decision','record_ruling')) { $fields+=@('gate_id','gate_revision') }
  Fields $reply $fields
+ if ($reply.version -ne 1 -or $reply.reply_seq -ne $seq -or $reply.message_id -cne $manifest.message_id -or $reply.action_id -notmatch '^[A-Za-z0-9_-]{1,96}$' -or $reply.action_revision -lt 1 -or $reply.action_revision%1 -ne 0 -or $reply.action_revision -gt 9007199254740991 -or $reply.kind -cnotin @('assignment','report_request','owner_decision','landing_grant','landing_refresh','coordinator_activation','coordinator_retirement','project_start','review_request','rework','deploy_grant','label_request','record_ruling')) { Fail 'binding_mismatch' }
  if ($reply.message_id -notmatch '^[A-Za-z0-9_-]{1,96}$') { Fail 'invalid_schema' }
  $p=$reply.payload
  switch ($reply.kind) {
