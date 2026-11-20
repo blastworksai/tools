@@ -58,6 +58,11 @@ class ParseCacheTests(unittest.TestCase):
         again = md.parse_document(DOC)
         self.assertEqual(again.metadata, {'a': 1, 'nested': {'list': [1, {'b': 'c'}]}})
         self.assertIsNot(again.metadata, md.parse_document(DOC).metadata)
+        # A replayed Document is private all the way down too.
+        again.metadata['nested']['list'][1]['b'] = 'replay changed'
+        again.metadata['nested']['list'].append('replay extra')
+        self.assertEqual(md.parse_document(DOC).metadata, {'a': 1, 'nested': {'list': [1, {'b': 'c'}]}})
+        self.assertEqual(self.count.calls, 1)
 
     def test_refusals_are_never_kept(self):
         bad = b'---\na: &x [1]\nb: *x\n---\n'
@@ -75,6 +80,24 @@ class ParseCacheTests(unittest.TestCase):
                 with self.assertRaises(IdeaError) as caught:
                     md.parse_document(raw)
                 self.assertEqual(caught.exception.code, 'too_large')
+        deep = b'---\na: [[[[1]]]]\n---\n'
+        md.parse_document(deep)
+        with patch.object(md, 'MAX_DEPTH', 3):
+            with self.assertRaises(IdeaError) as caught:
+                md.parse_document(deep)
+            self.assertEqual(caught.exception.code, 'too_large')
+
+    def test_another_loader_is_never_answered_from_the_cache(self):
+        raw = b'---\na: 1\n---\n'
+        md.parse_document(raw)
+
+        class Refusing(md.BoundedLoader):
+            def construct_mapping(self, node, deep=False):
+                md.require(False, 'refused by this loader')
+        with patch.object(md, 'BoundedLoader', Refusing):
+            with self.assertRaises(IdeaError):
+                md.parse_document(raw)
+        self.assertEqual(self.count.calls, 2)
 
     def test_the_cache_stays_bounded(self):
         with patch.object(md, 'PARSE_CACHE_ENTRIES', 2):
