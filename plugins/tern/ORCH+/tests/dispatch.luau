@@ -137,7 +137,8 @@ local function role_node(node, role, key)
 end
 local function fixture(clock, options)
 	local memory = keyed_memory()
-	local authority = host.new_authority(memory, clock or function() return { now_ms = math.floor(os.time() * 1000) } end)
+	-- A fixed default clock (2023-11-14 22:13:20 UTC): tests that need time to pass pass their own clock.
+	local authority = host.new_authority(memory, clock or function() return { now_ms = 1700000000000 } end)
 	authority:load(); assert(authority:initialize(true).ok)
 	local peer, selection = empty_peer()
 	local qualified = authority:qualify({ kind = "qualify_current", request_id = next_id(),
