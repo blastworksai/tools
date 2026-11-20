@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.6.7
+
+- **A command that cannot be sent now says so.** When one of your own controls (Pause, Resume, Close handover, Answer, Recheck, Cancel, Dismiss and the landing and gate controls) could not be sent because this window is no longer the current controller, nothing happened and nothing was shown. It now shows "Not sent: <reason>" (SKILLS-221).
+- **The saved-observation notice names its exit.** After a safety observation could not be saved, release and recovery stay blocked, as before. The notice now says the exit is to restart Tern and that checking the store again does not clear it (SKILLS-221).
+- **A readiness check no longer sticks.** If a newer repository check replaced a running readiness check, the readiness check stayed "still pending" until the pane was closed. It now ends with a refusal and the next request runs (SKILLS-221).
+- **No more useless polling of an old coordinator.** A coordinator generation that is no longer the current one is not shown as due for a poll, so the window no longer asks it every 10 seconds only to be refused (SKILLS-221).
+- **Install minimums are current.** ORCH+ now requires Tern 0.9.22 and SPAWN 0.7.5 (SKILLS-221).
+- **Docs match the code.** The reference, README and backlog now give the right version, the 10-second coordinator cadence and focus rule, the list of 18 test groups and which backlog item has shipped (SKILLS-221).
+
 ## 0.6.6
 
 - **Caps evict again.** Since 0.6.4 the limits on deploy and review records (64 each), intake records and template chains never made room: a second function with the same name, added for owner notices, replaced the one that evicts the oldest finished record. The record past a cap then made the orchestration fail its own state check, so it could not save anything more. The two functions now have their own names, and a test fails if a function on the shared config table is defined twice, in either definition form (SKILLS-219).

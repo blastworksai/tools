@@ -1,6 +1,6 @@
 # ORCH+ protocol reference
 
-This is the detailed contract behind [ORCH+](README.md) 0.6.2: conversation/project association, storage, dispatch, mailbox, roles, proof, landing, rollover and recovery. [plugin.toml](plugin.toml) declares the package version; [requires.json](requires.json) declares Tern 0.9.10 and SPAWN 0.4.0 requirements. Those requirements are not qualification results. The README covers everyday use. The agent-facing contracts are [worker-brief.md](worker-brief.md) and [coordinator-brief.md](coordinator-brief.md).
+This is the detailed contract behind [ORCH+](README.md) 0.6.7: conversation/project association, storage, dispatch, mailbox, roles, proof, landing, rollover and recovery. [plugin.toml](plugin.toml) declares the package version; [requires.json](requires.json) declares Tern 0.9.22 and SPAWN 0.7.5 requirements. Those requirements are not qualification results. The README covers everyday use. The agent-facing contracts are [worker-brief.md](worker-brief.md) and [coordinator-brief.md](coordinator-brief.md).
 
 Normal use is **New orchestration…**, the compact agent picker, an orchestrator pane and **ORCHESTRATED WORK**. Settings and project START decisions are normal controls; compatible reconnection is automatic. Internal owner cards, raw commands and manual settlement/recovery belong under **Advanced**. There are no `orchplus://` links. Dispatch and assistance publish bounded one-shot operator intents (`main.operator-intent`, role `orchplus.intent`). Only the controller-origin window runs a dispatch intent after rechecking the pane, logical session, host and window incarnation; the host independently validates it. Expiration does not prove nonexecution, and a stale rendered action never authorizes replay. Host-block clicks do not authenticate a human.
 
@@ -380,7 +380,7 @@ Activation, retirement, quiescence, reply floors, native stop and mailbox retire
 
 ## Test sections
 
-`tests/run.luau` takes the plugin directory and `group[/section]` selections; see the README's Verification section. Groups are `state`, `transport`, `authority`, `dispatch`, `reports`, `gates`, `health` and `workflow`; each test file's closing section list is authoritative. Run groups and long sections as separate host callbacks: long traces yield cooperatively at JSON boundaries without raising callback budgets or shrinking the >32-worker, >64-gate and command-eviction traces. `gates` exceeds one callback and runs per section. Collect the returned assertion summary; a submitted test event is not a result.
+`tests/run.luau` takes the plugin directory and `group[/section]` selections; see the README's Verification section. Groups are `state`, `transport`, `authority`, `dispatch`, `reports`, `gates`, `health`, `workflow`, `source_adapter`, `source_ui`, `picker_ui`, `conversation_ui`, `channel`, `setup_ui`, `form_ui`, `readiness_ui`, `rulings` and `reclamation` (18); each test file's closing section list is authoritative. Run groups and long sections as separate host callbacks: long traces yield cooperatively at JSON boundaries without raising callback budgets or shrinking the >32-worker, >64-gate and command-eviction traces. `gates` exceeds one callback and runs per section. Collect the returned assertion summary; a submitted test event is not a result.
 
 | Group | Sections by area |
 | --- | --- |
