@@ -208,7 +208,8 @@ The `prototype` skill that builds the prototype is Matt Pocock's (MIT, https://g
 
 ## Capture, resume and the next slice
 
-Save the user's words to a UTF-8 file without paraphrasing, trimming or adding a newline. Avoid shell interpolation of their text: write with the file tool or pass bytes as data.
+Save the user's words to a UTF-8 file without paraphrasing, trimming or adding a newline.
+Put that file in a folder under this account's home that only this account can read (mode 0700), never a shared temp folder or a shared project folder, and delete it once `capture` has saved the idea. Avoid shell interpolation of their text: write with the file tool or pass bytes as data.
 
 ```bash
 python3 "$idea_tool" capture --text-file /absolute/raw-idea.txt --actor operator

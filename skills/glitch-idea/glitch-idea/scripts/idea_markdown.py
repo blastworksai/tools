@@ -3,11 +3,14 @@
 Pure bytes in/bytes out: filesystem locking, CAS, import and publication belong
 in Store. Parsing never writes. A Document carries comment/body conflict guards.
 """
+from collections import OrderedDict
 from dataclasses import dataclass
 import copy
+import hashlib
 import json
 import math
 import re
+import threading
 from urllib.parse import quote
 from pathlib import PurePosixPath, PureWindowsPath
 
@@ -149,7 +152,61 @@ def _yaml_comments(source):
     return comments or '#' in source[end:]
 
 
+# A store read parses every detail file again after any write: 272 files took six to eight seconds, past
+# binding-open's five-second budget. Parsing is a pure function of the bytes and the limits below,
+# so a successful parse is kept by its SHA-256 and replayed; refusals are never kept and always recomputed.
+# Each caller gets its own copy of the metadata tree (callers edit it). Bounded by entries and by bytes.
+PARSE_CACHE_ENTRIES = 4096
+PARSE_CACHE_BYTES = 64 * 1024 * 1024
+_parse_cache = OrderedDict()
+_parse_cache_bytes = 0
+_parse_cache_lock = threading.Lock()
+
+
+def _copy_tree(value):
+    """A private copy of a JSON-shaped tree (dicts and lists are new; strings and numbers are immutable)."""
+    if type(value) is dict:
+        return {key: _copy_tree(child) for key, child in value.items()}
+    if type(value) is list:
+        return [_copy_tree(child) for child in value]
+    return value
+
+
+def _cache_key(raw):
+    return (hashlib.sha256(raw).digest(), len(raw), MAX_DOCUMENT, MAX_FRONTMATTER, MAX_NODES, MAX_DEPTH, BoundedLoader)
+
+
+def clear_parse_cache():
+    global _parse_cache_bytes
+    with _parse_cache_lock:
+        _parse_cache.clear()
+        _parse_cache_bytes = 0
+
+
 def parse_document(raw):
+    global _parse_cache_bytes
+    require(type(raw) is bytes, 'Markdown input must be bytes')
+    key = _cache_key(raw)
+    with _parse_cache_lock:
+        hit = _parse_cache.get(key)
+        if hit is not None:
+            _parse_cache.move_to_end(key)
+    if hit is not None:
+        metadata, body, comments = hit
+        return Document(_copy_tree(metadata), body, comments)
+    document = _parse_document_uncached(raw)
+    if len(raw) <= PARSE_CACHE_BYTES:
+        with _parse_cache_lock:
+            if key not in _parse_cache:
+                _parse_cache[key] = (_copy_tree(document.metadata), document.body, document.has_comments)
+                _parse_cache_bytes += len(raw)
+            while _parse_cache and (len(_parse_cache) > PARSE_CACHE_ENTRIES or _parse_cache_bytes > PARSE_CACHE_BYTES):
+                (_, size, *_rest), _ = _parse_cache.popitem(last=False)
+                _parse_cache_bytes -= size
+    return document
+
+
+def _parse_document_uncached(raw):
     require(type(raw) is bytes, 'Markdown input must be bytes')
     require(len(raw) <= MAX_DOCUMENT, 'Markdown document exceeds size limit', 'too_large')
     try:
