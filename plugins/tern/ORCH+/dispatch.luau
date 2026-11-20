@@ -4495,7 +4495,6 @@ local function grant_successor(n: any, r: any, pred: any, event: any, clock: any
 	local d = n.dispatch
 	if r.prepared then return if prepare_only then true else config.activate_successor(n, r, clock, reserve) end
 	if (r.prepare_count or 0) >= math.min(100, policy(d, r.logical_session_id).loop_cap) then return rollover_hold(r, "loop_capped", "Successor preparation reached its bounded live retry count; close this handover without a successor.") end
-	r.prepare_count = (r.prepare_count or 0) + 1
 	if policy(d, r.logical_session_id).paused then return rollover_hold(r, "session_paused", "Session is paused; no successor launch is granted until resume. The predecessor keeps running.") end
 	if type(clock) == "table" and clock.reserved_capacity then
 		return rollover_hold(r, "capacity_reached", "Authority capacity is at its settlement reserve; no successor launch is granted. The predecessor keeps running.")
@@ -4559,6 +4558,9 @@ local function grant_successor(n: any, r: any, pred: any, event: any, clock: any
 			return rollover_hold(r, "orchestrator_slot_occupied", "The orchestrator slot is occupied; a successor coordinator is never started beside another owner.")
 		end
 	end
+	-- Only a real preparation attempt spends the bounded retry count; the pause, capacity, quota, catalog
+	-- and slot holds above are waits, not attempts (SKILLS-220).
+	r.prepare_count = (r.prepare_count or 0) + 1
 	-- The successor's assignment is the verified checkpoint itself: no transcript, no predecessor command.
 	local payload = clone(codec.decode_report(r.checkpoint, pred).payload); payload.request_id = nil
 	payload.context_used_pct = nil; payload.context_snapshot = nil

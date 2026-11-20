@@ -1893,8 +1893,9 @@ local function arm_relay()
 	if relay_timer then return end
 	relay_timer = tern.timer(if next(relay.views) then 100 else 1000, function()
 		relay_timer = nil
-		relay.pump()
+		-- Re-arm first, as the 1 s host timer does: an error inside pump must not stop all SPAWN traffic (SKILLS-220).
 		arm_relay()
+		relay.pump()
 	end)
 end
 local function relay_decode(value: any): any?
