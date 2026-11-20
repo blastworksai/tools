@@ -1,6 +1,6 @@
 -- Deterministic real reducer/host/window coverage. Run bounded sections in native host callbacks.
 local root, section = ...
-assert(section == nil or table.find({ "clock", "focus_window", "form_hold_notice", "form_hold_capacity", "form_hold_rearm", "native", "controls", "status_launcher", "timer", "epoch_window", "owner_send_notice", "epoch_host", "finish", "continuation", "alias_recovery", "held_report", "sweep_schedule", "readable_views", "cp2_controls", "guided_recovery", "guided_recovery_empty", "guided_recovery_host_restart", "stopped_worker_view", "expired_wake", "revoked_authorization", "observe_retention", "uncertain_read", "quota_reader", "bridge_lifecycle", "withdraw_fenced", "config_cards", "work_picker", "inbox_window", "usage_row",
+assert(section == nil or table.find({ "clock", "focus_window", "form_hold_notice", "form_hold_capacity", "form_hold_rearm", "native", "controls", "status_launcher", "timer", "epoch_window", "owner_send_notice", "epoch_host", "finish", "continuation", "alias_recovery", "held_report", "sweep_schedule", "readable_views", "cp2_controls", "guided_recovery", "guided_recovery_empty", "guided_recovery_host_restart", "stopped_worker_view", "expired_wake", "revoked_authorization", "observe_retention", "uncertain_read", "quota_reader", "capacity_refresh_confirm", "bridge_lifecycle", "withdraw_fenced", "config_cards", "work_picker", "inbox_window", "usage_row",
 	"reconnect_stale", "reconnect_missing", "reconnect_unknown", "reconnect_unrelated", "worker_attachment", "worker_attachment_form",
 	"driver_admission_noop", "driver_admission_refused", "driver_retry_original", "driver_retry_unrelated", "driver_retry_absent",
 	"driver_deadline_absent", "driver_deadline_unrelated", "driver_missing", "driver_suspension", "driver_fence_origin", "driver_fence_claim",
@@ -3129,6 +3129,48 @@ if section == nil or section == "quota_reader" then
 	check(#w:usage_placements() == 0 and #w:bridge_placements() == 0 and #w:bridges_closed() == 0,
 		"request correlation and peer restart never create or destroy a native transport view")
 	codec.sha256_step, codec.sha256 = original_step, original_sha256
+end
+-- SKILLS-221 U3: "USAGE capacity evidence refreshed and validated." is shown only after the host
+-- answers the exact capacity command ok; a host refusal says so and never shows the success text.
+if section == nil or section == "capacity_refresh_confirm" then
+	local w = window_fixture()
+	local codec = shared.codec
+	local NOW = 1700000000000
+	local raw = runtime.json.encode({ version = 1, complete = true, incomplete = false, auth_revision = "auth-1", records = runtime.json.array(),
+		sources = runtime.json.array(), quota_unit = "percent" })
+	local revision = codec.sha256(raw)
+	local server = { text = "", requests = {}, validated_at_ms = NOW }
+	function server.handle(req)
+		table.insert(server.requests, req.op)
+		local r
+		if req.op == "validate" then
+			r = { version = 1, request_id = req.request_id, op = "validate", ok = true, status = "current", revision = revision, auth_revision = "auth-1",
+				validated_at_ms = server.validated_at_ms, expires_at_ms = NOW + 600000 }
+		else
+			r = { version = 1, request_id = req.request_id, op = req.op, ok = true, status = "ok", revision = revision, auth_revision = "auth-1",
+				issued_at_ms = NOW, expires_at_ms = NOW + 600000, index = 0, count = 1, size = #raw, data = raw,
+				next_cursor = runtime.json.null, complete = true, incomplete = false }
+		end
+		server.text = runtime.json.encode(r)
+	end
+	w:usage(server)
+	local SUCCESS = "USAGE capacity evidence refreshed and validated."
+	local function count_text(fragment) local n = 0; for _, m in w.notices do if m:find(fragment, 1, true) then n += 1 end end; return n end
+	local function capacity_commands() local n = 0; for _, e in w.events do if e.command == "capacity" then n += 1 end end; return n end
+	local function refresh(done)
+		w:click("capacity_refresh")
+		for _ = 1, 80 do w:tick(); if done() then break end end
+	end
+	-- A validation older than the host's 120 s window: the window sends the evidence, the host refuses it.
+	server.validated_at_ms = NOW - 200000
+	refresh(function() return capacity_commands() == 1 and count_text("not recorded") == 1 end)
+	check(capacity_commands() == 1 and count_text("Capacity evidence was not recorded") == 1 and count_text(SUCCESS) == 0,
+		"a capacity command the host refuses says so and never shows the refreshed text")
+	-- A current validation: the host records it and only then does the refreshed text appear.
+	server.validated_at_ms = NOW
+	refresh(function() return count_text(SUCCESS) == 1 end)
+	check(capacity_commands() == 2 and count_text(SUCCESS) == 1,
+		"a capacity command the host records shows the refreshed text exactly once")
 end
 -- Native authorization runs after another window turn, not synchronously with request submission.
 if section == nil or section == "control_scheduling" then

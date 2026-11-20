@@ -3390,6 +3390,31 @@ local function ruling_tick(cx: WindowCx)
 		end
 	end
 end
+-- An owner's "refresh capacity" is only reported as done once the host has answered the exact
+-- capacity command it sent: the toast follows the host's receipt, never the send.
+native_scope.capacity_confirms = {}
+function native_scope.capacity_confirm_step(cx: WindowCx)
+	for source, wait in native_scope.capacity_confirms do
+		if not native_scope.authorized_origin(cx, source, wait.origin) then
+			native_scope.capacity_confirms[source] = nil
+			continue
+		end
+		local data = snapshot(cx, source)
+		local result
+		for _, key in { "command_result", "driver_result", "result" } do
+			local candidate = if data then data[key] else nil
+			if candidate and candidate.request_id == wait.request_id then result = candidate; break end
+		end
+		if result then
+			native_scope.capacity_confirms[source] = nil
+			if result.ok then cx:toast("info", "ORCH+ quota evidence", "USAGE capacity evidence refreshed and validated.")
+			else cx:toast("error", "ORCH+ quota evidence", "Capacity evidence was not recorded: " .. tostring(result.message or result.code) .. " Nothing changed.") end
+		elseif awake_now() - wait.sent_at > 30000 then
+			native_scope.capacity_confirms[source] = nil
+			cx:toast("error", "ORCH+ quota evidence", "The host has not confirmed the capacity evidence. Refresh again.")
+		end
+	end
+end
 local function arm()
 	if timer ~= nil then return end
 	timer = tern.timer(TICK_MS, function(fresh: WindowCx?)
@@ -3476,6 +3501,7 @@ local function arm()
 			if next(guides) ~= nil and not pcall(probe_step, fresh) then table.clear(guides) end
 			-- Fenced-work withdrawal: at most one read-only status step per controller.
 			if next(withdrawals) ~= nil and not pcall(withdraw_step, fresh) then table.clear(withdrawals) end
+			if next(native_scope.capacity_confirms) ~= nil and not pcall(native_scope.capacity_confirm_step, fresh) then table.clear(native_scope.capacity_confirms) end
 			relay_maintenance(fresh)
 			pcall(idle_wake.keep, fresh) -- Last: this turn's schedule decides whether timed work remains.
 		end
@@ -3509,7 +3535,7 @@ local function reader_done(cx: WindowCx, reader: any, ok: boolean, message: stri
 	end
 	local after = reader.after
 	reader.after = nil
-	for _, fn in after or {} do pcall(fn, cx, ok) end
+	for _, fn in after or {} do pcall(fn, cx, ok, reader.capacity_request) end
 end
 local HINTS = {
 	export_disabled = " Enable the read-only capacity export in USAGE Setup.",
@@ -3636,7 +3662,8 @@ reader_step = function(cx: WindowCx, reader: any)
 		expires_at_ms = a.expires_at_ms, validation = validation }, index, math.floor(os.time() * 1000))
 	-- The command must fit the 8192-byte bridge; lowest-priority records drop to "not in evidence".
 	while #tern.json.encode(evidence) > 6500 and #evidence.records > 0 do table.remove(evidence.records) end
-	send_command(cx, source, fresh_intent(cx, source, origin), "capacity", { capacity = evidence })
+	-- An owner-requested refresh sends as an owner command so the host's answer is readable here.
+	reader.capacity_request = send_command(cx, source, fresh_intent(cx, source, origin), "capacity", { capacity = evidence }, reader.owner == true)
 	reader_done(cx, reader, true)
 end
 local function current_gate(cx: WindowCx, source: number, request: any): any?
@@ -4528,9 +4555,10 @@ local function dispatch_control(cx: WindowCx, source: number, request: any)
 	elseif command == "queue" then
 		conversation_ui.start(cx, source, origin, if request.coordinator then "start_orchestrator" else "new_conversation", request)
 	elseif command == "capacity_refresh" then
-		start_reader(source, origin, "snapshot", nil, function(next_cx: WindowCx, ok: boolean)
-			if ok then next_cx:toast("info", "ORCH+ quota evidence", "USAGE capacity evidence refreshed and validated.") end
+		start_reader(source, origin, "snapshot", nil, function(_: WindowCx, ok: boolean, request_id: string?)
+			if ok and request_id then native_scope.capacity_confirms[source] = { request_id = request_id, origin = origin, sent_at = awake_now() }; arm() end
 		end)
+		if readers[source] then readers[source].owner = true end
 	elseif command == "cancel_work" then
 		if not worker then return refuse("Queued work changed; nothing was cancelled.") end
 		-- Cancellation eligibility is not continuation or nonexecution evidence.
