@@ -117,6 +117,14 @@ function Selectors.parse_models(key: string?, output: any, decode: ((string) -> 
 	end
 	return ids
 end
+-- What an agent picker may offer for a catalog row named only by its provider: nil when that provider is not
+-- one of the seven CLIs (no Model or Effort field); otherwise the CLI key and the effort values it really
+-- accepts (nil when it has no verified effort flag). SPAWN still validates every override itself.
+function Selectors.picker_choices(provider: any): { key: string, efforts: { string }? }?
+	local key = Selectors.provider_key(provider)
+	if key == nil then return nil end
+	return { key = key, efforts = Selectors.efforts(key) }
+end
 function Selectors.model_error(model: any): string?
 	if type(model) ~= "string" or model:find("%S") == nil then return "Model must be an exact model id, not empty" end
 	if #model > MAX_MODEL then return "Model id is longer than " .. tostring(MAX_MODEL) .. " bytes" end

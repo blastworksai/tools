@@ -4,7 +4,7 @@
     python3 shared/report-files-v1/sync.py [--check]
 
 --check writes nothing and exits 1 for missing, differing or extra wire files.
-Only the two wire codecs and explicitly named SPAWN helpers are generated.
+Only the two wire codecs, ORCH+'s vendored selectors.luau and explicitly named SPAWN helpers are generated.
 """
 import argparse
 from pathlib import Path
@@ -15,6 +15,10 @@ ROOT = CANON.parents[1]
 TARGETS = (ROOT / 'plugins/tern/ORCH+/wire', ROOT / 'plugins/tern/SPAWN/wire')
 HEADER = b'-- Vendored from shared/report-files-v1 by sync.py; edit there, then run sync.py.\n'
 HELPERS = ('mailbox_reply.jq', 'mailbox_worker.ps1')
+# SPAWN owns the model/effort capability table; ORCH+'s agent picker reads the same file (pure, no requires).
+SELECTORS_SOURCE = ROOT / 'plugins/tern/SPAWN/selectors.luau'
+SELECTORS_TARGET = ROOT / 'plugins/tern/ORCH+/selectors.luau'
+SELECTORS_HEADER = b'-- Vendored from plugins/tern/SPAWN/selectors.luau by shared/report-files-v1/sync.py; edit it there, then run sync.py.\n'
 
 
 def main(argv=None):
@@ -25,6 +29,7 @@ def main(argv=None):
     outputs.extend((ROOT / 'plugins/tern/SPAWN' / name,
                     b'# Generated from shared/report-files-v1 by sync.py; edit the canonical source.\n' + (CANON / name).read_bytes())
                    for name in HELPERS)
+    outputs.append((SELECTORS_TARGET, SELECTORS_HEADER + SELECTORS_SOURCE.read_bytes()))
     problems = []
     for path, data in outputs:
         if not path.is_file():

@@ -1,7 +1,8 @@
 # ORCH+ backlog
 
 This is a list of future work.
-None of these items is implemented.
+Item 1 has shipped (see below).
+None of the other items is implemented.
 None of them is authorised for build.
 They are requests recorded for later, not promises.
 
@@ -9,6 +10,10 @@ They are requests recorded for later, not promises.
 
 Let the person choose the model and the effort level, not only the provider and account.
 The provider's real capabilities and the saved launch configuration stay authoritative.
+Shipped in ORCH+ 0.7.0 with SPAWN 0.8.0 (SKILLS-211; SPAWN's per-agent defaults shipped earlier).
+After the person picks an agent, an optional form takes a model id and an effort for that one start.
+The choice rides on that launch request, SPAWN applies it with the same rules as the saved fields and never edits the saved agent, and the agent row shows it as requested, not as confirmed.
+Remaining: an agent saved as the preferred orchestrator or worker, a rollover successor and a quota-routed substitute still start on their saved settings, without the form.
 
 ## 2. Structured questions in the central orchestrator
 

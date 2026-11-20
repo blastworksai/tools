@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.8.0
+
+- **A launch can carry its own model and effort.** The managed `launch` request now accepts optional `model` and `effort` (ORCH+ 0.7.0 sends them when the owner chooses them for one start). They follow the 0.7.0 rules exactly: the model is an exact id and becomes a flag as an explicit selector, an effort comes only from the CLI's verified list, and the CLI is the record's provider, as in 0.7.1 (a provider outside the seven CLIs is refused; a sudo -i or -s launch is refused). The launch's arguments are built from a copy of the record; the saved record is never edited, and a request without either field launches byte for byte as before.
+- An override whose flag already sits in the program's option region (before its own `--`) is refused, never silently dropped: the typed flag would win. A refusal names the reason and nothing is reserved or started.
+- Wire: only `launch` gains the two optional fields. An older SPAWN refuses such a request as an invalid schema instead of ignoring the fields.
+
 ## 0.7.5
 
 - **A reply missing a header field is refused the same way on Windows.** The Windows helper answered `binding_mismatch` for a reply with a missing or extra header field, where Linux and macOS answer `invalid_schema`. It now checks the fields first, and only present values that disagree with this generation are a binding mismatch (SKILLS-216).

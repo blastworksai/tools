@@ -1286,7 +1286,11 @@ local function project_panel(view: any, projection: any, selected: any): any
 				elseif worker.phase == "accepted" then "Agent session unavailable"
 				elseif flow.policy.paused or worker.project_held then "Queued — not started"
 				elseif worker.phase == "awaiting_acceptance" then "Waiting to join" else "Agent session queued"
-			local label = provider_display.name(provider) .. " · " .. account .. " — " .. (title or pending_title)
+			-- The owner's per-launch choice, shown as requested: the CLI's own confirmation is never claimed.
+			local requested = {}
+			if worker.requested_model then table.insert(requested, "model " .. worker.requested_model) end
+			if worker.requested_effort then table.insert(requested, "effort " .. worker.requested_effort) end
+			local label = provider_display.name(provider) .. " · " .. account .. (if #requested > 0 then " · requested " .. table.concat(requested, ", ") else "") .. " — " .. (title or pending_title)
 			table.insert(conversations, conversation_row(provider,
 				if worker.pane_binding or worker.launch_pane_binding then dispatch_link(view, "open_worker", label, { worker_id = worker_id })
 				else ui.text(label)))

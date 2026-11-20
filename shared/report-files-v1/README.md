@@ -31,6 +31,8 @@ READY, HEARTBEAT and CHECKPOINT optionally carry **one** context representation:
 
 Both mailbox observers use only the admitted OBSERVE envelope and their operation-specific fields. The mailbox ACTION binding, enrolment token, handle, expected generation and serial ledger are not observer request fields.
 
+A `launch` request may carry optional `model` (nonblank, at most 200 bytes, no control characters, no leading `-`) and `effort` (lowercase letters, at most 32 bytes): the owner's choice for that one launch. No other operation accepts them, so an older peer refuses such a request as an invalid closed schema instead of ignoring the fields, and a request without them is byte for byte what it was. SPAWN applies its capability table (`plugins/tern/SPAWN/selectors.luau`, vendored read-only into ORCH+ by `sync.py`) and never edits the saved record.
+
 ## Report assembly
 
 ORCH+ owns persisted report assembly. `assembly_start(manifest_bytes, manifest_sha256, binding)` creates a bounded JSON-serializable prefix. `assembly_push(state, chunk_bytes, chunk_sha256, binding)` validates the arriving object and appends its Base64 slice without replaying prior chunks. Slices may split a UTF-8 character; only complete logical bytes are decoded as the report.
