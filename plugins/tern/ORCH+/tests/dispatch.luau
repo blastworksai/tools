@@ -21,7 +21,7 @@ local sections = { fixture = true, core = true, control_rebind = true, receipts 
 	project_observation = true, project_repository_guards = true, migration_start_guards = true, enrol_route_cancel = true,
 	project_history_reuse = true, project_reserve = true, rollover_location = true, project_start_rollover = true,
 	legacy_observation = true, legacy_worker_roles = true, current_observation = true, compaction_retry = true, catalog_paging = true,
-	make_room = true, rollover_paused_budget = true, coordinator_fast_window = true, coordinator_fast_window_start = true }
+	make_room = true, rollover_paused_budget = true, coordinator_fast_window = true, coordinator_fast_window_start = true, coordinator_fast_window_rollover = true }
 assert(section == nil or sections[section], "unknown dispatch test section: " .. tostring(section))
 local runtime, environment = tern, getfenv()
 -- Absence stays absent; explicit JSON null remains available to negative wire tests.
@@ -5254,12 +5254,56 @@ if section == nil or section == "coordinator_fast_window_start" then
 	local project = f:project("Owner START restarts the window", false)
 	advance(700000); drain(); advance(10000)
 	check(not shown().due_poll, "after a quiet stretch the 10 s window is closed")
+	-- An ORCH+ refusal of a proposal is delivered as an owner_decision but is not the owner's act: no restart.
+	do
+		local w = f:worker()
+		local payload = { owner_id = w.coordinator_owner_id, owner_generation = w.coordinator_generation, activation_token = w.activation.activation_token,
+			proposal_id = "p-refuse", kind = "new_work", orch_project_id = "project-x", record_id = "nope", record_revision = 0, prompt = "x",
+			scope = { paths = runtime.json.array({}), systems = runtime.json.array({}) }, checks = runtime.json.array({ { check_id = "unit", argv = runtime.json.array({ "x" }) } }) }
+		assert(f:apply("intake", { worker_id = id, bytes = f:report(id, w.accepted_seq + 1, "COORDINATOR_PROPOSAL", payload) }).ok)
+		local gate
+		for _, g in f.authority.registry.dispatch.gates do if g.kind == "coordinator_proposal" then gate = g end end
+		assert(gate and gate.answer and gate.answer.source.kind == "refusal", "the proposal is refused by ORCH+")
+		advance(700000)
+		for _ = 1, 16 do
+			if f.authority.registry.dispatch.gates[gate.id].delivery and not shown().due_poll and not shown().poll_continuation then break end
+			local q = f:apply("poll", { worker_id = id }); assert(q.ok, q.message)
+			local op = f:action(q.action_id).request.op
+			assert(f:finish(q.action_id, if op == "mailbox_retire" then "compacted" elseif op == "mailbox_read" then "missing" elseif op == "accept" then "accepted" else "published", {}).ok)
+		end
+		drain()
+		local delivery = f.authority.registry.dispatch.gates[gate.id].delivery
+		check(delivery ~= nil and f:worker().replies[tostring(delivery.reply_seq)].owner == nil, "a refusal's owner_decision reply is not owner-sourced")
+		advance(10000)
+		check(not shown().due_poll, "a refusal reaching a quiet coordinator does not restart the 10 s window")
+	end
 	local p = f.authority.registry.dispatch.projects[project]
 	assert(f:apply("project_start", { orch_project_id = project, project_revision = p.revision }).ok)
 	local stored = f.authority.registry.dispatch.projects[project].start
 	check(f.authority.registry.dispatch.workers[id].replies[tostring(stored.reply_seq)].owner == true, "the owner's START reply is marked owner-sourced")
 	advance(0); drain(); advance(10000)
 	check(shown().due_poll, "the owner's START reaching a quiet coordinator restarts the 10 s window")
+end
+-- C5 review: a policy-triggered coordinator rollover's checkpoint request is automatic; its answer is not activity.
+if section == nil or section == "coordinator_fast_window_rollover" then
+	for _, trigger in { "policy", "owner" } do
+		local clock = { now_ms = 1000, mono_ms = 1000, epoch = "fast-rollover-" .. trigger }
+		local f, id = coordinator_ready(function() return clone(clock) end)
+		assert(f:apply("policy", { policy = { auto_rollover = true, rollover_include_coordinator = true, rollover_threshold_pct = 50 } }).ok)
+		assert(f:apply("observe", { worker_id = id, pane_binding = clone(worker_of(f, id).pane_binding), native_state = "idle" }).ok)
+		assert(send_report(f, id, "READY", { state = "idle", context_used_pct = 60 }).ok)
+		assert(send_report(f, id, "CHECKPOINT", handover_checkpoint("fw-boundary")).ok)
+		local first = clone(worker_of(f, id).workflow.reported_at)
+		check(first ~= nil and first.mono_ms == clock.mono_ms, trigger .. ": an unprompted report stamps the report anchor")
+		clock.mono_ms += 700000; clock.now_ms += 700000
+		local requested = f:apply("rollover", { worker_id = id, trigger = trigger }); assert(requested.code == "rollover_requested", tostring(requested.code))
+		local req = worker_of(f, id).workflow.report_request
+		check((req.automatic == true) == (trigger == "policy"), trigger .. ": only a policy rollover's checkpoint request is automatic")
+		assert(answer_checkpoint(f, id, "fw-answer").ok)
+		local after = worker_of(f, id).workflow.reported_at
+		check((runtime.json.encode(after) == runtime.json.encode(first)) == (trigger == "policy"),
+			trigger .. ": the checkpoint answering " .. (if trigger == "policy" then "an automatic request leaves" else "an owner request moves") .. " the report anchor")
+	end
 end
 if section == nil or section == "project_start_rollover" then
 	local f, predecessor = coordinator_ready()
