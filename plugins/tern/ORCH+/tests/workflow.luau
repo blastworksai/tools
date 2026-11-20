@@ -1609,6 +1609,21 @@ function W.idempotent(f, label, gid, answer)
 	assert(f:tick())
 	check(W.effects(f) == effects and runtime.json.encode(f.authority.registry.dispatch.gates[gid].execution) == execution, label .. ": a cold start revisits the answered gate without executing again")
 end
+-- C5 review: an answer reaches the coordinator as an owner_decision; only the owner's own answer is owner-sourced.
+function W.decision_reply_flag(f, cid, gid, owner, label)
+	for _ = 1, 12 do
+		local g = f.authority.registry.dispatch.gates[gid]
+		if g.delivery then
+			local reply = W.worker(f, cid).replies[tostring(g.delivery.reply_seq)]
+			check(reply ~= nil and (reply.owner == true) == owner, label .. ": the owner_decision reply is " .. (if owner then "" else "not ") .. "owner-sourced")
+			return
+		end
+		local q = f:apply("poll", { worker_id = cid }); if not q.ok or not q.action_id then break end
+		local op = f:action(q.action_id).request.op
+		assert(f:finish(q.action_id, if op == "mailbox_retire" then "compacted" elseif op == "mailbox_read" then "missing" else "published", {}).ok)
+	end
+	check(false, label .. ": the owner_decision was never delivered to the coordinator")
+end
 -- One cell. Returns nothing; every expectation is a check.
 function W.autonomy_cell(kind, scoped, auto)
 	local label = kind .. " × " .. (if scoped then "in scope" else "out of scope") .. " × " .. (if auto then "auto-approved" else "not auto-approved")
@@ -1647,6 +1662,7 @@ function W.autonomy_cell(kind, scoped, auto)
 	if auto and scoped then
 		check(g.answer ~= nil and g.answer.choice_id == "approve" and g.answer.source.kind == "policy" and g.answer.source.rule == "auto_approve:" .. kind
 			and #g.answer.source.policy_revision == 64, label .. ": answered by session policy with the tagged policy source")
+		if kind == "report" then W.decision_reply_flag(f, cid, g.id, false, label) end
 	else
 		check(g.phase == "pending" and g.answer == nil and g.execution == nil and W.effects(f) == before, label .. ": the proposal gates for the owner and executes nothing")
 		answer = f:event("answer", { gate_id = g.id, gate_revision = g.revision, choice_id = "approve", answer = "Owner approves this proposal." })
@@ -1654,6 +1670,7 @@ function W.autonomy_cell(kind, scoped, auto)
 		check(answered.ok and answered.execution ~= nil, label .. ": the owner answer executes in its own commit (" .. tostring(answered.code) .. ")")
 		g = f.authority.registry.dispatch.gates[g.id]
 		check(g.answer.source.kind == "owner" and g.answer.source.owner_id == f.origin.owner_id, label .. ": the owner answer carries the tagged owner source")
+		if kind == "report" then W.decision_reply_flag(f, cid, g.id, true, label) end
 	end
 	g = f.authority.registry.dispatch.gates[g.id]
 	local e, bw = g.execution, W.worker(f, b)
@@ -1673,6 +1690,8 @@ function W.autonomy_cell(kind, scoped, auto)
 		e, bw = g.execution, W.worker(f, b)
 		local rr = bw.workflow.report_request
 		check(e.state == "done" and rr ~= nil and e.effect_ref == "report_request:" .. rr.request_id, label .. ": report sends one report_request to the work")
+		check((rr.automatic == true) == (auto and scoped) and (bw.replies[tostring(rr.reply_seq)].owner == true) == not (auto and scoped),
+			label .. ": the approved report request is automatic exactly when session policy approved it, owner-sourced otherwise")
 	elseif kind == "review" then
 		local r = W.review(f, b)
 		check(e.state == "done" and r ~= nil and e.effect_ref == "review:" .. r.review_id and r.checkpoint_id == "cp-1", label .. ": review opens a review of that checkpoint")
