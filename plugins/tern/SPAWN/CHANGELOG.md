@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.5
+
+- **A reply missing a header field is refused the same way on Windows.** The Windows helper answered `binding_mismatch` for a reply with a missing or extra header field, where Linux and macOS answer `invalid_schema`. It now checks the fields first, and only present values that disagree with this generation are a binding mismatch (SKILLS-216).
+
 ## 0.7.4
 
 - **SPAWN works on a Mac again.** On macOS `/bin/sh` is bash 3.2, and one case arm in `mailbox_target.sh` without its leading "(" stopped every mailbox operation before it started. The arm is balanced, and a test now parse-checks every SPAWN shell script with the system `/bin/sh` (SKILLS-215).
