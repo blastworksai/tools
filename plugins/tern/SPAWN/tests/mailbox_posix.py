@@ -2190,5 +2190,16 @@ class PosixHelperModeTests(unittest.TestCase):
         with self.assertRaises(AssertionError):
             self.mailbox(padded + b" ")
 
+
+class SystemShellParseTests(unittest.TestCase):
+    """SKILLS-215: every helper must parse under the system /bin/sh. On macOS that is bash 3.2,
+    which mis-parses a case arm without its leading "(" inside $( ... ); dash and bash 5 accept it,
+    so only a run on a Mac catches the regression this guards."""
+    def test_helpers_parse_under_system_sh(self):
+        for script in sorted(SOURCE.glob("*.sh")):
+            with self.subTest(script=script.name):
+                result = subprocess.run(["/bin/sh", "-n", str(script)], capture_output=True, timeout=30)
+                self.assertEqual((result.returncode, result.stderr), (0, b""))
+
 if __name__ == "__main__":
     unittest.main()
