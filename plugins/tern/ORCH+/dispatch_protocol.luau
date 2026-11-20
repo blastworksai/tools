@@ -8,6 +8,9 @@ M.SOURCE_INPUT_BYTES = 2048
 M.MANAGED_GENERATION_BUDGET = 16 -- Shared SPAWN mailbox allocation domain, not a logical-task or per-account limit.
 M.DESKTOP_BOARD_PATH_BYTES = 4096
 M.BOARD_SETTING_PATH_BYTES = 512 -- The configured Board location; board opening and sync reject longer paths, so settings must too.
+-- A coordinator's fast cadence: its next report is looked for this often for this long after activity.
+M.COORDINATOR_POLL_MS = 10000
+M.COORDINATOR_FAST_MS = 600000
 M.NATIVE_BOARD_ID_BYTES = 6 * M.DESKTOP_BOARD_PATH_BYTES + 128 -- Opaque native JSON identity, including escaped full path and bounded model/row framing.
 
 -- No native or mailbox-file effect; SPAWN only records these operations' own outcome.

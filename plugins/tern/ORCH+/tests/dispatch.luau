@@ -919,6 +919,13 @@ end
 -- only when the host says it is due. Measured 19 Nov 2026: 4 writes per 10 s inside the window,
 -- 49 writes an hour after it (the ordinary 5-minute cadence).
 if section == nil or section == "coordinator_cost" then
+	-- The fast-cadence numbers have one home, the protocol module; the window uses it rather than literals.
+	check(protocol.COORDINATOR_POLL_MS == 10000 and protocol.COORDINATOR_FAST_MS == 600000, "the protocol module exports the coordinator's 10 s and 10 min cadence")
+	do
+		local window_source = runtime.fs.read(root .. "/window.luau")
+		check(window_source:find("now + dispatch.COORDINATOR_FAST_MS", 1, true) ~= nil and window_source:find("now + 600000", 1, true) == nil
+			and window_source:find("dispatch.COORDINATOR_POLL_MS", 1, true) ~= nil, "the window takes the fast-cadence numbers from the protocol module, not literals")
+	end
 	local clock = { now_ms = 1000, mono_ms = 1000, epoch = "cost-host" }
 	local f = fixture(function() return clone(clock) end); local id = f:accepted(true)
 	local function shown() for _, w in dispatch.project(f.authority.registry, f.origin.logical_session_id, f.origin.alias_nonce).workflow.workers do if w.worker_id == id then return w end end end

@@ -1177,7 +1177,7 @@ end
 -- real report it sends, or an answer or report request of the owner's reaching it, its next report is looked for every 10 s; then it falls back to the policy cadence. A coordinator
 -- whose state Tern cannot see (OMP) costs about four store writes per check, so an always-10 s
 -- cadence would rewrite the store ~1,440 times an hour while it sits idle. A shorter policy wins.
-local COORDINATOR_POLL_MS, COORDINATOR_FAST_MS = 10000, 600000
+local COORDINATOR_POLL_MS, COORDINATOR_FAST_MS = protocol.COORDINATOR_POLL_MS, protocol.COORDINATOR_FAST_MS
 function config.check_interval(p: any, w: any): number
 	return if w.coordinator_owner_id ~= nil then math.min(p.poll_ms, COORDINATOR_POLL_MS) else p.poll_ms
 end

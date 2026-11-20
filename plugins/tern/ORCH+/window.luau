@@ -1405,7 +1405,7 @@ local function advance(cx: WindowCx, driver: any)
 		driver.owner_command = nil
 		if matched and not command_result.action_id and not driver.scope and not driver.delivery then
 			local scan = if driver.continuation then scans[driver.source] else nil
-			if scan and scan.paced then scan.paced[driver.worker_id] = tern.now() + (driver.pace_ms or 10000) end
+			if scan and scan.paced then scan.paced[driver.worker_id] = tern.now() + (driver.pace_ms or dispatch.COORDINATOR_POLL_MS) end
 			drop(driver); return
 		end
 		driver.command_request_id = nil
@@ -2596,7 +2596,7 @@ local function schedule(cx: WindowCx)
 				-- "Focus restarts it", SKILLS-214). Window memory only; nothing is persisted.
 				if worker.coordinator_owner_id ~= nil and worker.pane_binding then
 					local pane = scoped_pane(cx, tonumber(worker.pane_binding.pane_id), worker.pane_binding)
-					if pane and pane.focused == true then scan.focused_until[worker.worker_id] = now + 600000 end
+					if pane and pane.focused == true then scan.focused_until[worker.worker_id] = now + dispatch.COORDINATOR_FAST_MS end
 				end
 				local talking = now < (scan.focused_until[worker.worker_id] or 0)
 				if now >= (scan.observed[worker.worker_id] or 0) then
