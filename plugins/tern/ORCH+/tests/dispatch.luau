@@ -1068,6 +1068,19 @@ if section == nil or section == "read_owed" then
 	} do
 		check(owing(mutate) ~= true, "an owed read never projects continuation when the poll cannot read: " .. label)
 	end
+	do
+		-- A stale coordinator generation is never projected as due: the window would poll it every 10 s only to be refused.
+		local r = clone(f.authority.registry); local w = r.dispatch.workers[id]
+		w.workflow.due_poll = true
+		local function shown_due(registry)
+			for _, shown in dispatch.project(registry, f.origin.logical_session_id, f.origin.alias_nonce).workflow.workers do
+				if shown.worker_id == id then return shown.due_poll end
+			end
+		end
+		check(shown_due(r) == true, "control: a current coordinator's due poll is projected")
+		w.coordinator_owner_id = "owner-stale"
+		check(shown_due(r) == false, "a stale coordinator generation is not projected as due for a poll")
+	end
 	plain_clock.mono_ms += 10000; plain_clock.now_ms += 10000; assert(plain:tick().ok)
 	check(not projected(plain, pid).due_poll or projected(plain, pid).poll_continuation, "an ordinary worker is not paced at 10 s")
 	assert(plain:apply("policy", { policy = { poll_ms = 5000 } }).ok)

@@ -3494,6 +3494,11 @@ local function coordinator(n: any, w: any): any?
 		and owner.managed_worker_id == w.worker_id and (owner.phase == "running" or owner.phase == "retiring") then return owner end
 	return nil
 end
+-- A coordinator generation the registry no longer names as current: its polls are refused
+-- (owner_mismatch), so nothing may project a poll or continuation for it.
+function config.stale_coordinator(n: any, w: any): boolean
+	return w.coordinator_owner_id ~= nil and coordinator(n, w) == nil
+end
 function config.cleanup_request(n: any, w: any, request: any): boolean
 	if not w or not (w.stopped or (w.startup_cancelling and config.failed_startup(n, w))) or not w.mailbox_handle or w.mailbox_retired
 		or request.op ~= "mailbox_retire" or request.mode ~= "retire" then return false end
@@ -10252,7 +10257,7 @@ function M.apply(registry: any, event: any, clock: any, reserve: any): (any?, an
 			return finish_command(n, event, result("mailbox_retirement_queued", { action_id = request.action_id, worker_id = w.worker_id }))
 		end
 		if w == nil or not equal(control_origin(w), event.origin) or not w.mailbox_handle or not w.pane_binding or w.continuation_required then return fail("worker_unbound", "Worker requires its explicitly continued current mailbox/native route.") end
-		if w.coordinator_owner_id and not coordinator(n, w) then return fail("owner_mismatch", "Only the current coordinator generation may settle; restored owners require inspected recovery.") end
+		if config.stale_coordinator(n, w) then return fail("owner_mismatch", "Only the current coordinator generation may settle; restored owners require inspected recovery.") end
 		resume_revoked(d, w)
 		local activation_err = config.issue_activation(n, d, w, clock)
 		if activation_err then return nil, activation_err end
@@ -10962,11 +10967,11 @@ function M.project(registry: any, session_id: string, origin_nonce: string, curr
 				cwd = w.cwd, placement = w.placement, execution_cwd = w.execution_cwd, presentation = w.presentation,
 				origin_binding = clone(control_origin(w)), pane_binding = clone(control_binding(w)),
 				launch_origin_binding = clone(w.origin_binding), launch_pane_binding = clone(w.pane_binding),
-				continuation_required = w.continuation_required == true, continuation_proof = continuation_proof(registry, w), health = clone(f.health), due_poll = f.due_poll,
+				continuation_required = w.continuation_required == true, continuation_proof = continuation_proof(registry, w), health = clone(f.health), due_poll = f.due_poll and not config.stale_coordinator(registry, w),
 				poll_ms = config.check_interval(policy(d, w.logical_session_id), w),
 				-- A stale coordinator generation's polls are refused (owner_mismatch): never continuation.
 				poll_continuation = w.pane_binding ~= nil and not w.mailbox_retired and not pending(d, w)
-					and not (w.coordinator_owner_id and not coordinator(registry, w))
+					and not config.stale_coordinator(registry, w)
 					and continuation_due(d, w, f.health.native_state == "idle" and not (f.native and f.native.delivery_error)),
 				cleanup_ready = w.stopped ~= nil and not w.mailbox_retired and registry.sessions[session_id].generation_floor >= control_origin(w).owner_generation
 					and (settled(w) or config.start_retirement_settled(d, w)) and not pending(d, w),
