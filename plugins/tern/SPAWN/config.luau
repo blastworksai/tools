@@ -465,6 +465,36 @@ function Config.selector_error(record: any, previous: any?): string?
 	end
 	return nil
 end
+-- A per-launch override of the record's model and effort (ORCH+ owner choice for one fresh launch).
+-- It goes through the same rules as the saved fields: an exact model id, an effort from the CLI's
+-- verified list, the CLI taken from the record's provider (SKILLS-213; a provider outside the seven is
+-- refused), and no flag the program's option region already carries (a typed flag would win and
+-- drop the choice silently, so it is refused instead). Returns a COPY of the record with the choice
+-- applied, or nil and the refusal text. The saved record is never changed.
+function Config.override_record(record: any, model: any, effort: any): (any?, string?)
+	if model == nil and effort == nil then return record, nil end
+	local copy = table.clone(record)
+	if model ~= nil then
+		local why = Selectors.model_error(model)
+		if why ~= nil then return nil, why end
+		copy.model = model
+		copy.model_selector = true
+	end
+	if effort ~= nil then copy.effort = effort end
+	local fresh
+	for _, mode in ipairs(launch_modes(copy)) do
+		if mode.name == "fresh" then fresh = mode end
+	end
+	if fresh == nil then return nil, "This agent has no fresh launch to apply a model or effort to; nothing was started." end
+	local why = Config.selector_identity_error(copy)
+	if why ~= nil then return nil, why .. " Nothing was started." end
+	local _, first = Config.program_of(fresh.executable, fresh.argv)
+	local hit = Selectors.duplicate(Selectors.provider_key(copy.provider), Selectors.region(fresh.argv, first), model, effort)
+	if hit ~= nil then
+		return nil, "This agent's saved arguments already contain " .. hit .. ", so the chosen model or effort cannot apply to this launch. Remove that flag in Agent settings or leave the choice empty; nothing was started."
+	end
+	return copy, nil
+end
 local function normalize(source: any, legacy: boolean): (any?, string?)
 	if type(source) ~= "table" then return nil, "Record must be an object" end
 	for field in pairs(source) do

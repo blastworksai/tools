@@ -161,6 +161,8 @@ The flags are derived from `model` and `effort` through one table (`selectors.lu
 
 **Model choices (Agent settings).** Where a CLI's own `--help` documents a headless, read-only model listing, the agent's Model row offers **List models**: `grok models`, `agy models` (needs a signed-in account) and `omp models --json --no-extensions`, run as that agent's OS account, only when you click, never for an SSH agent, saving nothing. The listed ids become a drop-down (CLI default first). Claude, Codex, Kimi and Muse have no such command, and a listing that fails or prints nothing usable keeps the free-text field; either way the field carries helper text naming that CLI's model and effort flags. Empty means the CLI's own default.
 
+A managed launch from ORCH+ may carry its own `model` and/or `effort` for that one start. They are checked by the same table and rules, replace the saved value for that launch only, and never change the saved record. A typed flag in the saved arguments makes the override impossible, so it is refused.
+
 A native OMP fresh default may carry `model` and `effort`; `profile` is still refused there. The CLI is the record's provider (Claude, Codex, Kimi, Grok, Agy, Muse or OMP), never the program's file name, so a second install or a wrapper may be named anything: provider Claude with program `ClaudeSUPERAWESOMEACCOUNT` takes Claude's flags, and List models runs that agent's own program. Any other provider refuses model and effort. The flags still go in the program's own option region (a literal `sudo` form is unwrapped).
 
 Advanced manual import example (**Agent settings → Advanced → Setup → Paste setup JSON**):

@@ -1,6 +1,7 @@
 --!strict
 local codec = require("./wire/codec")
 local provider_display = require("./provider_display")
+local selectors = require("./selectors")
 local M = {}
 -- Native conversations stay native. This module owns only explicit choices and their one-shot
 -- host submissions; a lost response is never converted into another launch/enrollment.
@@ -81,7 +82,10 @@ function M.new(api: any): any
 			options.pane_title = provider_display.pane_title(pane)
 			options.pane_binding = binding
 		end
-		local function chosen(fresh: any, record: any, catalog: any)
+		-- `picked` is true only for an agent the owner just chose in the picker: that is when the optional
+		-- Model and Effort fields appear. A saved preferred agent keeps its zero-prompt start and its saved settings.
+		local chosen_with: any
+		local function chosen(fresh: any, record: any, catalog: any, picked: boolean?)
 			if not record then return end
 			local project = projects(fresh, source)[project_id]
 			if not project or project.finished then return problem(fresh, source, origin, "The project changed. Select a current project; nothing was launched.") end
@@ -97,7 +101,46 @@ function M.new(api: any): any
 					catalog_revision = catalog.revision, orch_project_id = project_id, pane_binding = binding, delivery = delivery })
 				return
 			end
-			local fields = { record_id = record.id, record_revision = record.revision, catalog_revision = catalog.revision,
+			local choices = if picked then selectors.picker_choices(record.provider) else nil
+			if choices ~= nil and not binding then
+				-- Optional per-start model and effort. Empty keeps the agent's saved settings; nothing here edits them.
+				local tag = "launch-selectors:" .. api.id()
+				local rows = { { id = "model", label = "Model (exact id, optional)", kind = "text", value = "",
+					description = (if record.model_variant then "Saved for this agent: " .. record.model_variant .. ". " else "") .. "Leave empty to use the saved setting, or the CLI's own default." } }
+				if choices.efforts ~= nil then
+					local options = { { value = "", label = "Agent default" } }
+					for _, effort in choices.efforts do table.insert(options, { value = effort, label = effort }) end
+					table.insert(rows, { id = "effort", label = "Effort", kind = "select", value = "", options = options })
+				end
+				api.forms.open(fresh, source, origin, { tag = tag, title = (if coordinator then "Orchestrator" else "Agent") .. " model and effort",
+					description = "Optional. Applies to this start only; the agent's saved settings do not change.",
+					fields = rows, actions = { { id = "start", label = "Start", submit = true }, { id = "cancel", label = "Back" } } },
+					function(form_cx: any, values: any, action: string)
+						if action ~= "start" or type(values) ~= "table" then return end
+						local model = if type(values.model) == "string" then values.model:match("^%s*(.-)%s*$") else ""
+						if model == "" or model == record.model_variant then model = nil end
+						local effort = if values.effort ~= nil and values.effort ~= "" then values.effort else nil
+						local errors = {}
+						if model ~= nil then
+							local why = selectors.model_error(model)
+							if why then errors.model = why end
+						end
+						if effort ~= nil and (choices.efforts == nil or not table.find(choices.efforts, effort)) then errors.effort = "Choose one of the listed efforts." end
+						if next(errors) ~= nil then api.forms.update(form_cx, source, { busy = false, errors = errors }); return end
+						api.forms.update(form_cx, source, { busy = true, notice = "Starting…" })
+						chosen_with(form_cx, record, catalog, model, effort)
+						if api.forms.active(source, tag) then api.forms.cancel(form_cx, source) end
+					end)
+				return
+			end
+			chosen_with(fresh, record, catalog, nil, nil)
+		end
+		chosen_with = function(fresh: any, record: any, catalog: any, model: string?, effort: string?)
+			local project = projects(fresh, source)[project_id]
+			if not project or project.finished then return problem(fresh, source, origin, "The project changed. Select a current project; nothing was launched.") end
+			local current = api.fresh(fresh, source, origin)
+			local fields ={ record_id = record.id, record_revision = record.revision, catalog_revision = catalog.revision,
+				launch_model = model, launch_effort = effort,
 				orch_project_id = project_id, cwd = record.cwd, placement = record.placement,
 				presentation = if coordinator then "coordinator_adjacent" else "user_new_tab",
 				open_conversation = if coordinator then nil else true, coordinator = coordinator == true,
@@ -124,11 +167,11 @@ function M.new(api: any): any
 						api.notice(last, source, origin.alias_nonce, if coordinator then "Your saved orchestrator needs an update before it can start project work. Your saved choice has not changed. Choose another ready agent."
 							else tostring(reason or "Your saved agent is not ready. Choose another agent."), if reason then "error" else "info", nil,
 							if coordinator then { context = "project_start", code = "orchestrator_update_required", detail = reason } else nil)
-						api.picker.pick(last, source, api.fresh(last, source, origin), options, chosen)
+						api.picker.pick(last, source, api.fresh(last, source, origin), options, function(c: any, r: any, k: any) chosen(c, r, k, true) end)
 					end
 				end)
 			end)
-		else api.picker.pick(cx, source, origin, options, chosen) end
+		else api.picker.pick(cx, source, origin, options, function(c: any, r: any, k: any) chosen(c, r, k, true) end) end
 	end
 	local repository_form: any
 	local function repository_back(cx: any, source: number, origin: any, draft: any)

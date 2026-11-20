@@ -21,7 +21,7 @@ local sections = { fixture = true, core = true, control_rebind = true, receipts 
 	project_observation = true, project_repository_guards = true, migration_start_guards = true, enrol_route_cancel = true,
 	project_history_reuse = true, project_reserve = true, rollover_location = true, project_start_rollover = true,
 	legacy_observation = true, legacy_worker_roles = true, current_observation = true, compaction_retry = true, catalog_paging = true,
-	make_room = true, rollover_paused_budget = true, coordinator_fast_window = true, coordinator_fast_window_start = true, coordinator_fast_window_rollover = true }
+	make_room = true, rollover_paused_budget = true, coordinator_fast_window = true, coordinator_fast_window_start = true, coordinator_fast_window_rollover = true, launch_selectors = true }
 assert(section == nil or sections[section], "unknown dispatch test section: " .. tostring(section))
 local runtime, environment = tern, getfenv()
 -- Absence stays absent; explicit JSON null remains available to negative wire tests.
@@ -8899,7 +8899,7 @@ if section == nil or section == "rollover_location" then
 		local provision = actions_of(f, successor, "mailbox_provision"); assert(#provision == 1)
 		local provisioned = f:finish(provision[1], "provisioned", { handle = "mailbox-location-successor", binding_digest = string.rep("b", 64),
 			capabilities = runtime.json.array(clone(worker_of(f, id).capabilities)), limits = {} })
-		assert(provisioned.ok, runtime.json.encode(provisioned))
+		assert(provisioned.ok, debug.traceback(runtime.json.encode(provisioned)))
 		local request = f:action(worker_of(f, successor).launch_action_id).request
 		check(request.cwd == "/fixture/original-worktree" and request.presentation == "background"
 			and request.placement == (if terminal then "tab" else "split")
@@ -8947,5 +8947,74 @@ if section == nil or section == "make_room" then
 	check(config.deploy_room(d) == false, "64 deploys still running refuse a 65th")
 	d.deploys["dep-7"].status = "deployed"
 	check(config.deploy_room(d) == true and d.deploys["dep-7"] == nil, "a settled deploy is evicted to make room")
+end
+if section == nil or section == "launch_selectors" then
+	-- The owner's model/effort choice for ONE launch: validated like SPAWN's saved fields, retained on the
+	-- worker, carried only on the launch request of the record it was chosen for, and absent when not chosen.
+	local function queue_with(f, extra)
+		local fields = { record_id = "native", record_revision = 0, catalog_revision = 0, prompt = "Selector fixture task",
+			cwd = "/fixture", placement = "split", coordinator = false }
+		for key, value in extra or {} do fields[key] = value end
+		return f:allow_shared_fixture(f:apply("queue", fields))
+	end
+	local function launch_of(f, queued)
+		assert(queued.ok, queued.message)
+		local provisioned = f:finish(queued.action_id, "provisioned", { handle = "mailbox-fixture", binding_digest = string.rep("a", 64),
+			capabilities = runtime.json.array({ "report-files-v1", "native-ask-v1", "coordinator-control-v1", "project-start-v1" }), limits = {} })
+		assert(provisioned.ok, debug.traceback(runtime.json.encode(provisioned)))
+		local worker = f.authority.registry.dispatch.workers[queued.worker_id]
+		return worker, f:action(worker.launch_action_id).request
+	end
+	local plain = fixture(); plain:catalog(0)
+	local worker, request = launch_of(plain, queue_with(plain))
+	check(request.op == "launch" and request.model == nil and request.effort == nil and worker.launch_selectors == nil,
+		"no choice: the launch request carries neither field and the worker records none")
+	local chosen = fixture(); chosen:catalog(0)
+	worker, request = launch_of(chosen, queue_with(chosen, { launch_model = "anthropic/claude-sonnet-5-5", launch_effort = "medium" }))
+	check(request.model == "anthropic/claude-sonnet-5-5" and request.effort == "medium" and worker.launch_selectors.record_id == "native",
+		"a chosen model and effort ride this one launch request")
+	local claimed = chosen:apply("claim", { action_id = worker.launch_action_id, executor = chosen.origin.window_epoch })
+	local sent = chosen:action(worker.launch_action_id)
+	check(claimed.ok and codec.decode_dispatch_request(sent.request_bytes) ~= nil and codec.decode_dispatch_request(sent.request_bytes).model == "anthropic/claude-sonnet-5-5",
+		"the claimed launch's exact bytes survive the closed wire schema and keep the choice")
+	local model_only = fixture(); model_only:catalog(0)
+	worker, request = launch_of(model_only, queue_with(model_only, { launch_model = "m-1" }))
+	check(request.model == "m-1" and request.effort == nil, "a model alone carries no effort")
+	-- Routing to another record never carries the choice to it.
+	local routed = clone(worker); routed.record_id = "other-record"
+	check(dispatch.launch_request(routed, "mailbox-selectors").model == nil and dispatch.launch_request(routed, "mailbox-selectors").effort == nil
+		and dispatch.launch_request(worker, "mailbox-selectors").model == "m-1",
+		"a record switched by routing starts on that record's saved settings, never on the choice made for another record")
+	-- Refusals are early, explicit and leave no worker behind.
+	for _, case in { { "effort not in the CLI list", { launch_effort = "turbo" } }, { "empty model", { launch_model = "" } },
+		{ "leading dash", { launch_model = "-x" } }, { "control byte", { launch_model = "a\nb" } }, { "model of the wrong type", { launch_model = 7 } },
+		{ "long model", { launch_model = string.rep("m", 201) } } } do
+		local f = fixture(); f:catalog(0)
+		local before = runtime.json.encode(f.authority.registry.dispatch.workers)
+		local refused = f:apply("queue", { record_id = "native", record_revision = 0, catalog_revision = 0, prompt = "task", cwd = "/fixture",
+			placement = "split", coordinator = false, launch_model = case[2].launch_model, launch_effort = case[2].launch_effort })
+		check(refused.code == "invalid_task" and runtime.json.encode(f.authority.registry.dispatch.workers) == before,
+			case[1] .. " is refused with its reason and nothing is queued: " .. tostring(refused.message))
+	end
+	local unknown = fixture(); unknown:catalog(0)
+	local row = unknown.authority.registry.dispatch.catalogs[unknown.origin.logical_session_id].records[1]
+	row.provider = "mystery"; unknown.memory.value = clone(unknown.authority.registry)
+	local mystery = unknown:apply("queue", { record_id = "native", record_revision = 0, catalog_revision = 0, prompt = "task", cwd = "/fixture",
+		placement = "split", coordinator = false, launch_model = "m" })
+	check(mystery.code == "invalid_task" and tostring(mystery.message):find("no model or effort setting", 1, true), "an agent whose CLI the table does not know accepts no choice: " .. tostring(mystery.message))
+	-- Persisted state: a worker keeps the choice across restore, and a malformed one is refused.
+	local saved = clone(chosen.authority.registry)
+	check(dispatch.valid(saved.dispatch, saved) and state.rehydrate(clone(saved)) ~= nil, "a retained launch choice restores")
+	for name, mutate in { extra = function(c) c.extra = true end, empty = function(c) c.model = nil; c.effort = nil end,
+		bad_model = function(c) c.model = "-x" end, bad_effort = function(c) c.effort = "High" end, no_record = function(c) c.record_id = nil end } do
+		local corrupt = clone(saved)
+		for _, w in corrupt.dispatch.workers do if w.launch_selectors then mutate(w.launch_selectors) end end
+		check(not dispatch.valid(corrupt.dispatch, corrupt) and state.rehydrate(corrupt) == nil, "a malformed retained launch choice (" .. name .. ") is refused at restore")
+	end
+	-- Projection used for the agent row says "requested".
+	local projection = dispatch.project(chosen.authority.registry, chosen.origin.logical_session_id, chosen.origin.alias_nonce)
+	local shown
+	for _, w in projection.workflow.workers do if w.worker_id == worker.worker_id or w.requested_model then shown = w end end
+	check(shown ~= nil and shown.requested_model ~= nil, "the projection carries the requested model for the view")
 end
 return "dispatch" .. (if section then "/" .. section else "") .. ": " .. tostring(checks) .. " checks passed"

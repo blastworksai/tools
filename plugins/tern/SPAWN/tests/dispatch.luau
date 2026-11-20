@@ -1694,6 +1694,112 @@ sections.presentation=function()
  local revision=fixture();local stale=revision.launch('stale-record');stale.presentation='user_new_tab';revision.snapshot.config_revision=1
  check(revision.d.request(stale,revision.binding,1,function()end).status=='rejected' and revision.effects.reserves==0,'presentation never relaxes exact record revision')
 end
+-- Per-launch model/effort override (ORCH+ owner choice for one start). The saved record is never edited.
+sections.selectors=function()
+ local function terminal(f,provider,executable,arguments)
+  local record=f.snapshot.records[1]
+  record.provider=provider;record.backend='local-terminal';record.fresh_native_default=nil;record.fresh_executable=executable;record.fresh_arguments=arguments or {'--fresh'};record.task_argument_index=#(arguments or {'--fresh'})+1
+  record.command=executable;record.mailbox.wake='worker-poll-v1';record.mailbox.producer.poll=true;record.mailbox.capabilities={'report-files-v1','worker-poll-v1','argv-v1'}
+  return record
+ end
+ local function started(f,id,model,effort)
+  local r=f.launch(id);r.model=model;r.effort=effort
+  local result=f.d.request(r,f.binding,1,function()end)
+  return result,r
+ end
+ -- Native OMP: derived joined flags, that launch only.
+ do
+  local f=fixture();local record=f.snapshot.records[1];local original=copy(record)
+  local plain=started(f,'plain-launch')
+  check(plain.status=='resolved','a launch without an override still resolves')
+  local plain_command=f.d.execution(f.launch('plain-launch'),77).launch.command
+  check(not plain_command:find('--model',1,true) and not plain_command:find('--thinking',1,true),'no override adds no model or effort flag: '..plain_command)
+  local g=fixture();local gr=g.snapshot.records[1]
+  local result,request=started(g,'chosen-launch','anthropic/claude-sonnet-5-5','medium')
+  check(result.status=='resolved','a valid override resolves: '..tostring(result.error and result.error.message))
+  local command=g.d.execution(request,77).launch.command
+  check(command:find('--model=anthropic/claude-sonnet-5-5',1,true) and command:find('--thinking=medium',1,true),'the override reaches this launch\'s arguments: '..command)
+  check(g.p.equal(gr,original) and g.p.equal(g.saved['dispatch-v1'].requests['session/chosen-launch'].request.model,'anthropic/claude-sonnet-5-5'),'the saved record is unchanged and only the retained request carries the choice')
+  local after=started(g,'later-launch')
+  check(after.status=='resolved' and not g.d.execution(g.launch('later-launch'),77).launch.command:find('--model',1,true),'the next launch without an override is back on the saved settings')
+ end
+ -- Saved model and effort: override replaces only what it names.
+ do
+  local f=fixture();local record=terminal(f,'claude','claude');record.model='saved-model';record.model_selector=true;record.effort='low'
+  local original=copy(record)
+  local both,r1=started(f,'terminal-both','chosen-model','high')
+  check(both.status=='resolved','claude terminal accepts both: '..tostring(both.error and both.error.message))
+  local args=f.d.execution(r1,77).launch.command
+  check(args:find("'--model' 'chosen-model'",1,true) and args:find("'--effort' 'high'",1,true) and not args:find('saved-model',1,true) and not args:find("'low'",1,true),'override replaces the saved model and effort for this launch: '..args)
+  local only,r2=started(f,'terminal-effort',nil,'max')
+  local keep=f.d.execution(r2,77).launch.command
+  check(only.status=='resolved' and keep:find("'--model' 'saved-model'",1,true) and keep:find("'--effort' 'max'",1,true),'an effort-only override keeps the saved model: '..keep)
+  check(f.p.equal(f.snapshot.records[1],original),'saved model and effort are never edited')
+ end
+ -- A legacy display label (no model_selector) stays display-only: an effort-only override adds only the effort.
+ do
+  local f=fixture();local record=terminal(f,'claude','claude');record.model='Opus display label'
+  local result,request=started(f,'legacy-label',nil,'high')
+  local args=f.d.execution(request,77).launch.command
+  check(result.status=='resolved' and args:find("'--effort' 'high'",1,true) and not args:find('--model',1,true),'a legacy model label never becomes a flag: '..args)
+ end
+ -- Refusals: never substituted, nothing reserved.
+ for _,case in ipairs({
+  {name='unlisted effort',provider='claude',exe='claude',effort='turbo',text='must be one of'},
+  {name='effort on a CLI without a verified effort flag',provider='codex',exe='codex',effort='high',text='no verified effort'},
+  {name='unknown CLI',provider='mystery',exe='mystery-agent',model='m',text='known CLI'},
+  {name='typed flag already in the saved arguments',provider='claude',exe='claude',args={'--model','typed'},model='other',text='already contain'},
+  {name='provider outside the seven CLIs',provider='Claude Work',exe='claude',model='m',text='known CLI'},
+  {name='typed flag behind a sudo wrapper',provider='claude',exe='sudo',args={'-u','x','claude','--model','typed'},command='sudo -u x claude',model='other',text='already contain'},
+  {name='typed effort flag',provider='claude',exe='claude',args={'--effort=low'},effort='high',text='already contain'},
+ }) do
+  local f=fixture();local rec=terminal(f,case.provider,case.exe,case.args);if case.command then rec.command=case.command end
+  local original=copy(f.snapshot.records[1])
+  local result=started(f,'refused-launch',case.model,case.effort)
+  check(result.status=='rejected' and result.error.code=='unsupported_capability' and f.effects.reserves==0 and tostring(result.error.message):find(case.text,1,true),
+   case.name..' is refused with its reason and reserves nothing: '..tostring(result.error and result.error.message))
+  check(f.p.equal(f.snapshot.records[1],original),case.name..' leaves the saved record untouched')
+ end
+ -- Option region: text after the program's own `--` is positional, so it never blocks an override.
+ do
+  local f=fixture();terminal(f,'claude','claude',{'--fresh','--','--model'})
+  local result,request=started(f,'after-dashdash','chosen')
+  check(result.status=='resolved' and f.d.execution(request,77).launch.command:find("'--model' 'chosen'",1,true),'a flag-looking word after the program\'s -- does not block the override')
+ end
+ -- The CLI is the provider, never the program's file name (SKILLS-213): a renamed install takes the provider's flags.
+ do
+  local f=fixture();terminal(f,'claude','ClaudeSUPERAWESOMEACCOUNT')
+  local result,request=started(f,'renamed-install','chosen-model','high')
+  local args=f.d.execution(request,77).launch.command
+  check(result.status=='resolved' and args:find("'--model' 'chosen-model'",1,true) and args:find("'--effort' 'high'",1,true),'a provider Claude agent whose program has another name takes the override: '..tostring(result.error and result.error.message))
+ end
+ -- A CLI with a model flag but no effort flag accepts a model override.
+ do
+  local f=fixture();terminal(f,'codex','codex')
+  local result,request=started(f,'codex-model','gpt-5.6-sol')
+  check(result.status=='resolved' and f.d.execution(request,77).launch.command:find("'-m' 'gpt-5.6-sol'",1,true),'codex takes a model override through its own flag')
+ end
+ -- Same typed-flag record launches unchanged when nothing is overridden (a saved record that already types the flag keeps working).
+ do
+  local f=fixture();terminal(f,'claude','claude',{'--model','typed'})
+  local result,request=started(f,'typed-no-override')
+  check(result.status=='resolved' and f.d.execution(request,77).launch.command:find("'--model' 'typed'",1,true),'a saved typed flag still launches when no override is chosen')
+ end
+ -- Wire: only launch carries the fields, with the same bounds everywhere.
+ do
+  local f=fixture();local base=f.launch('wire-launch')
+  local function decoded(mutate)local r=copy(base);mutate(r);return f.p.decode(runtime.json.encode(r))end
+  check(decoded(function(r)r.model='exact/model-1';r.effort='high' end)~=nil,'launch accepts exact model and effort')
+  check(decoded(function() end)~=nil,'launch without either field is the same request as before')
+  for name,mutate in pairs({
+   empty_model=function(r)r.model='' end,leading_dash=function(r)r.model='-x' end,control=function(r)r.model='a\nb' end,
+   long_model=function(r)r.model=string.rep('m',201) end,uppercase_effort=function(r)r.effort='High' end,effort_digit=function(r)r.effort='h1' end,
+   long_effort=function(r)r.effort=string.rep('e',33) end,numeric_model=function(r)r.model=7 end,
+  }) do check(decoded(mutate)==nil,'invalid '..name..' is refused by the codec') end
+  local catalog=f.req('catalog','wire-catalog');catalog.model='m'
+  check(f.p.decode(runtime.json.encode(catalog))==nil,'the fields exist on launch only: catalog with model is refused')
+ end
+end
 -- Live macOS defect: owner recovery revoked a staged, never-authorized accept of a launch still
 -- awaiting acceptance. The revocation is a distinct pre-effect outcome, the launch is unchanged,
 -- the old controller stays fenced, and after explicit attachment the same immutable acceptance
@@ -2696,6 +2802,6 @@ if section then
  assert(sections[section],'unknown dispatch section '..section)
  sections[section]()
 else
- for _,name in ipairs({'terminal_ledger','forget_review','launch','allocation','migration','publication','ack_lifecycle','wake_binding','authorization','expired_authorization','recovery','duplex','retirement_binding','retirement_settlement','retirement_producer','unused_retirement','failed_startup','coordinator_launch','wake_capacity','wake_retention','attachment','attachment_recovery','authority_rotation','host_local','rollover_accept','adopt','enrol','presentation','accept_recovery','native_rollback','owner_retention','bootstrap','administration','consumed_status','scope_progress','relay_fence','native_delivery'})do sections[name]()end
+ for _,name in ipairs({'terminal_ledger','forget_review','launch','allocation','migration','publication','ack_lifecycle','wake_binding','authorization','expired_authorization','recovery','duplex','retirement_binding','retirement_settlement','retirement_producer','unused_retirement','failed_startup','coordinator_launch','wake_capacity','wake_retention','attachment','attachment_recovery','authority_rotation','host_local','rollover_accept','adopt','enrol','presentation','accept_recovery','native_rollback','owner_retention','bootstrap','administration','consumed_status','scope_progress','relay_fence','native_delivery','selectors'})do sections[name]()end
 end
 return 'PASS dispatch'..(if section then '/'..section else '')..' '..tostring(checks)
