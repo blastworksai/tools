@@ -3515,7 +3515,7 @@ local function issue_reply(d: any, w: any, kind: string, payload: any, gate: any
 	w.reply_seq = reply.reply_seq
 	w.replies[tostring(reply.reply_seq)] = { bytes = bytes, sha256 = frames.message_sha256, frames = frames, part = 1,
 		message_id = reply.message_id, reply_seq = reply.reply_seq, action_id = reply.action_id, action_revision = reply.action_revision, acknowledged = false,
-		owner = if owner == true or kind == "owner_decision" or kind == "record_ruling" then true else nil }
+		owner = if owner == true then true else nil }
 	return { bytes = bytes, message_id = if kind == "owner_decision" or kind == "report_request" or kind == "landing_grant" or kind == "landing_refresh" or kind == "deploy_grant" or kind == "project_start" then reply.message_id else nil, action_id = reply.action_id, action_revision = reply.action_revision, reply_seq = reply.reply_seq,
 		activation_token = payload.activation_token, acknowledged = false }, nil
 end
@@ -3830,7 +3830,7 @@ function config.ruling_command(n: any, event: any): (any?, any?)
 		if not w or w.phase ~= "accepted" or w.continuation_required or w.mailbox_retired then return fail("writer_unproved", "An existing currently authorized writer is required.") end
 		local payload, problem = rulings.remote_payload(g.ruling, w)
 		if problem then return nil, problem end
-		local delivery, err = issue_reply(d, w, "record_ruling", payload, g)
+		local delivery, err = issue_reply(d, w, "record_ruling", payload, g, true)
 		if err then return nil, err end
 		g.ruling_delivery = { worker_id = w.worker_id, reply_seq = delivery.reply_seq, action_id = delivery.action_id }
 		return result("ruling_queued"), nil
@@ -4442,6 +4442,7 @@ local function request_checkpoint(n: any, r: any, w: any, clock: any): boolean
 		reason = "Rollover " .. r.id .. ": claim this request, publish one CHECKPOINT echoing request_id with fresh passed checks for the current artifact revision (a failed check blocks the rollover), then resolve this claim in the helper journal and drain receipts. Start no new work, send no further progress and stay idle. ORCH+ stops this pane only after a fresh successor accepts; an unresolved claim keeps your stopped mailbox unretired." })
 	if err then return rollover_hold(r, err.code, err.message) end
 	delivery.request_id = request_id; delivery.published = false; delivery.response_received = false; f.report_request = delivery
+	if r.trigger == "policy" then delivery.automatic = true end
 	append(d, w, "report_request", "Rollover " .. r.id .. " requested a verified checkpoint; delivery ACK is not a checkpoint.", clock,
 		{ state = "pending", request_id = request_id, action_id = delivery.action_id })
 	r.request_id = request_id; rollover_edge(r, "checkpoint_pending", n.revision, clock)
@@ -6629,7 +6630,7 @@ function config.execute_dispatch(registry: any, n: any, w: any, g: any, p: any, 
 	return "done", "worker:" .. nw.worker_id, "Approved dispatch queued work " .. nw.work_id .. " (" .. nw.worker_id .. ") on " .. row.id .. ", inheriting " .. p.work_id .. "'s scope and source."
 end
 -- One report_request to the work's current generation, counted against its report loop (Contract L).
-function config.execute_report(n: any, p: any, sid: string, clock: any): (string, string, string)
+function config.execute_report(n: any, p: any, sid: string, clock: any, source: any): (string, string, string)
 	local d = n.dispatch
 	local t = config.work_head(d, sid, p.work_id)
 	if not t or t.finish or t.release or t.stopped or t.mailbox_retired or (t.workflow and t.workflow.exit) then
@@ -6655,8 +6656,10 @@ function config.execute_report(n: any, p: any, sid: string, clock: any): (string
 		return "pending", "worker_not_sendable", "Worker " .. t.worker_id .. " is not safely idle; the report_request is sent once it is. No agent is interrupted."
 	end
 	local request_id = next_id(d, "report-request-")
-	local delivery, err = issue_reply(d, t, "report_request", { request_id = request_id, requested_kind = "HEARTBEAT", reason = "An approved coordinator proposal requested a structured progress report; echo request_id in HEARTBEAT or CHECKPOINT." }, nil, true)
+	local delivery, err = issue_reply(d, t, "report_request", { request_id = request_id, requested_kind = "HEARTBEAT", reason = "An approved coordinator proposal requested a structured progress report; echo request_id in HEARTBEAT or CHECKPOINT." }, nil,
+		type(source) == "table" and source.kind == "owner")
 	if err then return "pending", err.code, err.message end
+	if type(source) == "table" and source.kind == "policy" then delivery.automatic = true end
 	delivery.request_id = request_id; delivery.published = false; delivery.response_received = false; f.report_request = delivery
 	append(d, t, "report_request", "Approved proposal requested structured progress; delivery ACK is not a progress response.", clock, { state = "pending", request_id = request_id, action_id = delivery.action_id })
 	f.report_loop = loop or { count = 0 }; f.report_loop.count += 1
@@ -6707,7 +6710,7 @@ function config.proposal_effect(registry: any, n: any, w: any, g: any, p: any, e
 		return "pending", "capacity_reached", "Authority capacity is at its settlement reserve; the approved " .. p.kind .. " runs on a later commit."
 	end
 	if p.kind == "dispatch" then return config.execute_dispatch(registry, n, w, g, p, event, clock, reserve) end
-	if p.kind == "report" then return config.execute_report(n, p, sid, clock) end
+	if p.kind == "report" then return config.execute_report(n, p, sid, clock, g.answer and g.answer.source) end
 	if p.kind == "landing" then return config.execute_landing(n, g, p, sid, clock) end
 	-- An approved coordinator `review` proposal opens a review of the proposed checkpoint.
 	local target
@@ -10317,7 +10320,8 @@ function M.apply(registry: any, event: any, clock: any, reserve: any): (any?, an
 		if not request then
 			for _, g in d.gates or {} do
 				if g.worker_id == w.worker_id and g.phase == "answered" then
-					local delivery, err = issue_reply(d, w, "owner_decision", { choice_id = g.answer.choice_id, answer = g.answer.answer }, g)
+					local delivery, err = issue_reply(d, w, "owner_decision", { choice_id = g.answer.choice_id, answer = g.answer.answer }, g,
+						type(g.answer.source) == "table" and g.answer.source.kind == "owner")
 					-- A full reply outbox leaves the gate answered: the existing publication paths below still drain it.
 					if err and err.code == "full" then break end
 					if err then return nil, err end
