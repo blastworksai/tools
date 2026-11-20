@@ -29,7 +29,8 @@ KINDS = {"claude": "claude", "openai": "codex", "kimi": "kimi", "muse": "muse",
 # Helper error codes that pass through; anything else is reported generically.
 ERRORS = frozenset({"local_login_unavailable", "web_login_expired", "unparsed", "vendor_usage_unavailable",
                     "source_timeout", "source_usage_unavailable", "source_profile_invalid",
-                    "source_context_ambiguous", "api_key_login", "web_login_forbidden"})
+                    "source_context_ambiguous", "api_key_login", "web_login_forbidden",
+                    "access_token_stale"})
 
 
 def _text(value, maximum=256):

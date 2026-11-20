@@ -36,6 +36,17 @@ def obj(value):
     return value
 
 
+def _epoch_ms(value):
+    """A credential timestamp in milliseconds, or None when it is not a finite number.
+
+    A positive value below 1e11 is taken as seconds and scaled (SKILLS-217)."""
+    # A Python int is always finite; only a float can be NaN or infinite (and
+    # math.isfinite on a huge int would raise OverflowError).
+    if type(value) not in (int, float) or (type(value) is float and not math.isfinite(value)):
+        return None
+    return value * 1000 if 0 < value < 1e11 else value
+
+
 def name(value):
     if not isinstance(value, str) or not value.strip() or len(value) > 128 or not value.isprintable():
         raise Unavailable("unparsed")
@@ -415,10 +426,25 @@ def collect(provider, home, env, io, command=None):
         if not isinstance(token, str) or not token or not token.isprintable():
             raise Unavailable("local_login_unavailable")
         # An expired access token is never refreshed or sent; Claude renews it
-        # itself the next time the user opens it.
-        expires = oauth.get("expiresAt")
-        if type(expires) in (int, float) and expires <= time.time() * 1000:
-            raise Unavailable("web_login_expired")
+        # itself. The access token lives hours, the login (its refresh token)
+        # weeks, and a running Claude can keep renewing in memory while the
+        # saved copy stays stale. So a stale access token is "login expired"
+        # only when the login has ended too: no refresh token, or its own
+        # refreshTokenExpiresAt has passed (SKILLS-217).
+        # Both stamps are read in milliseconds; a positive value below 1e11 is
+        # taken as seconds (1e11 ms is 1973, 1e11 s is year 5138). A refresh
+        # expiry that is present but not a finite number, or a blank refresh
+        # token, fails closed: the login counts as ended, never as valid.
+        now = time.time() * 1000
+        expires = _epoch_ms(oauth.get("expiresAt"))
+        if expires is not None and expires <= now:
+            refresh = oauth.get("refreshToken")
+            # Only a missing key means "expiry unknown"; an explicit null is a
+            # present but invalid value and fails closed.
+            refresh_expires = _epoch_ms(oauth.get("refreshTokenExpiresAt"))
+            login_live = isinstance(refresh, str) and refresh.strip() != "" and (
+                "refreshTokenExpiresAt" not in oauth or (refresh_expires is not None and refresh_expires > now))
+            raise Unavailable("access_token_stale" if login_live else "web_login_expired")
         if status_failure is not None:
             raise status_failure
         document = http_json("https://api.anthropic.com/api/oauth/usage",

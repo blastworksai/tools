@@ -17,7 +17,7 @@ snapshot.REASONS = {
 	local_login_unavailable = true, source_metadata_disabled = true, vendor_usage_unavailable = true,
 	source_timeout = true, source_context_ambiguous = true, source_profile_invalid = true,
 	source_profile_unavailable = true, source_usage_unavailable = true, source_remote = true, api_key_login = true,
-	web_login_forbidden = true,
+	web_login_forbidden = true, access_token_stale = true,
 }
 local REASONS = snapshot.REASONS
 

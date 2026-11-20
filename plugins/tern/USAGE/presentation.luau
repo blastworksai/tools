@@ -84,6 +84,7 @@ presentation.LOGIN_REASONS = {
 	web_login_expired = "login expired",
 	local_login_unavailable = "signed out",
 	web_login_forbidden = "login refused",
+	access_token_stale = "waiting for a fresh token",
 } :: { [string]: string }
 
 function presentation.login_problem(window: any?): string?

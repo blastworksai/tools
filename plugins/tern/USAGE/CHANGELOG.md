@@ -1,5 +1,11 @@
 # USAGE changelog
 
+## 2.5.5
+
+- A Claude account no longer shows "provider login expired" while its login is valid. Claude's saved access token lives hours and a running Claude can keep renewing it in memory while the saved copy stays stale; USAGE read that stale copy as an ended login. Now "login expired" means the login itself has ended (no refresh token, or `refreshTokenExpiresAt` has passed). A stale access token with a live login shows "login valid; usage updates when the provider's CLI saves a fresh token" (`access_token_stale`) and keeps the last known usage; USAGE still never refreshes or sends a stale token (SKILLS-217, found on Claude · BWAI, whose login runs to 9 December).
+- A blank refresh token, or a refresh expiry that is present but not a number, counts as an ended login ("login expired"), never as valid. Both expiry stamps are read in milliseconds or seconds.
+- **Update the host and every window together.** `access_token_stale` is a new reason in the same snapshot version: a 2.5.4 window attached to a 2.5.5 host rejects a snapshot that carries it, until that window is updated too.
+
 ## 2.5.4
 
 - The companion now starts when the plugin starts after an install (Linux, Windows and macOS). The host half creates the private runtime once, without waiting for USAGE Setup. Before, a fresh install stayed on "The local USAGE companion is unavailable." until the owner ran Setup, because the host asked for the runtime without consent to install dependencies and was refused with `dependency_consent_required`. Setup remains the retry road; there is one automatic attempt per plugin load, never a retry loop. Proof status: Linux is proven on a real host. Windows is proven only when a native Windows installation shows the companion starting (not yet observed). macOS is unproven until a Mac run. Windows and macOS stay platform-held (readings withheld) whatever the companion does; this change only starts the companion.

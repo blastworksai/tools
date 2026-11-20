@@ -558,12 +558,32 @@ for line in sys.stdin:
         self.assertEqual(result["usage"]["windows"][0]["used"], 25)
 
     def test_expired_claude_login_is_reported_without_refresh_or_request(self):
-        for expires, expired in ((int(time.time() * 1000) - 1, True), (0, True),
-                                 (int(time.time() * 1000) + 3600000, False), (None, False)):
-            with self.subTest(expires=expires), tempfile.TemporaryDirectory() as directory:
+        # SKILLS-217: a stale access token is "login expired" only when the login (its
+        # refresh token) has ended too; with a live login it is access_token_stale.
+        now = int(time.time() * 1000)
+        live, ended = now + 86400000, now - 1
+        live_s, ended_s = (now + 86400000) // 1000, now // 1000 - 60
+        for expires, refresh, refresh_expires, expected in (
+                (now - 1, "REFRESH", live, "access_token_stale"), (0, "REFRESH", None, "access_token_stale"),
+                (now - 1, "REFRESH", ended, "web_login_expired"), (now - 1, None, None, "web_login_expired"),
+                (now - 1, "", live, "web_login_expired"),
+                (now + 3600000, "REFRESH", live, None), (None, "REFRESH", None, None),
+                # Kimi round 1: blank refresh tokens and malformed refresh expiries fail closed.
+                (now - 1, "   ", live, "web_login_expired"), (now - 1, "REFRESH", "0", "web_login_expired"),
+                (now - 1, "REFRESH", True, "web_login_expired"), (now - 1, "REFRESH", {"at": live}, "web_login_expired"),
+                (now - 1, "REFRESH", float("nan"), "web_login_expired"), (now - 1, "REFRESH", float("inf"), "web_login_expired"),
+                # Seconds and milliseconds both read right, for either stamp.
+                (now - 1, "REFRESH", live_s, "access_token_stale"), (now - 1, "REFRESH", ended_s, "web_login_expired"),
+                (now // 1000 - 60, "REFRESH", live, "access_token_stale"), ((now + 3600000) // 1000, "REFRESH", live, None)):
+            expired = expected is not None
+            with self.subTest(expires=expires, refresh=refresh, refresh_expires=refresh_expires), tempfile.TemporaryDirectory() as directory:
                 home = Path(directory)
                 (home / ".claude").mkdir()
-                oauth = {"accessToken": "SECRET", "refreshToken": "REFRESH"}
+                oauth = {"accessToken": "SECRET"}
+                if refresh is not None:
+                    oauth["refreshToken"] = refresh
+                if refresh_expires is not None:
+                    oauth["refreshTokenExpiresAt"] = refresh_expires
                 if expires is not None:
                     oauth["expiresAt"] = expires
                 (home / ".claude" / ".credentials.json").write_text(json.dumps({"claudeAiOauth": oauth}))
@@ -576,12 +596,43 @@ for line in sys.stdin:
                     result = readers.handle({"request": {"version": 1, "provider": "claude", "kind": "claude"},
                                              "selectors": {}})
                 if expired:
-                    self.assertEqual(result["error"], "web_login_expired")
+                    self.assertEqual(result["error"], expected)
                     status.assert_called_once()
                     request.assert_not_called()
                 else:
                     self.assertNotIn("error", result)
                     self.assertEqual(request.call_args.args[1]["Authorization"], "Bearer SECRET")
+                self.assertNotIn("SECRET", json.dumps(result))
+                self.assertNotIn("REFRESH", json.dumps(result))
+
+    def test_claude_login_stamp_edges(self):
+        # SKILLS-217, Kimi round 2: an explicit null expiry fails closed (only a missing key
+        # is unknown), a huge integer never raises, and equality with the clock means ended.
+        fixed_s = 1795000000.0
+        now = int(fixed_s * 1000)
+        for oauth_extra, expected in (
+                ({"refreshTokenExpiresAt": None}, "web_login_expired"),
+                ({}, "access_token_stale"),
+                ({"refreshTokenExpiresAt": 10 ** 400}, "access_token_stale"),
+                ({"refreshTokenExpiresAt": now}, "web_login_expired"),
+                ({"refreshTokenExpiresAt": now + 1}, "access_token_stale")):
+            with self.subTest(extra=repr(oauth_extra)[:40]), tempfile.TemporaryDirectory() as directory:
+                home = Path(directory)
+                (home / ".claude").mkdir()
+                oauth = {"accessToken": "SECRET", "refreshToken": "REFRESH", "expiresAt": now}
+                oauth.update(oauth_extra)
+                (home / ".claude" / ".credentials.json").write_text(json.dumps({"claudeAiOauth": oauth}))
+                with patch.object(readers.time, "time", return_value=fixed_s), \
+                     patch.object(helper, "source_identity", return_value={"source_uid": "1000"}), \
+                     patch.object(helper, "current_home", return_value=home), \
+                     patch.object(helper, "profile_environment", return_value={"HOME": directory}), \
+                     patch("metadata_providers.collect", return_value={"principal": "a@example.test",
+                           "principal_kind": "email", "label": "a@example.test"}), \
+                     patch.object(readers, "http_json", return_value={"five_hour": {"utilization": 3}}) as request:
+                    result = readers.handle({"request": {"version": 1, "provider": "claude", "kind": "claude"},
+                                             "selectors": {}})
+                self.assertEqual(result.get("error"), expected)
+                request.assert_not_called()
                 self.assertNotIn("SECRET", json.dumps(result))
 
     def test_rpc_call_error_is_classified_by_caller_but_initialize_error_is_vendor(self):

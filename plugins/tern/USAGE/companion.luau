@@ -36,6 +36,7 @@ local MESSAGES: { [string]: string } = {
 	source_remote = "Runs on another machine over SSH; USAGE reads it only on that machine.",
 	api_key_login = "Signed in with an API key, which has no subscription quota.",
 	web_login_forbidden = "The provider refused this login's usage request. Sign in again with the provider's own CLI to grant usage access.",
+	access_token_stale = "The login is valid, but its saved access token is out of date; usage updates when the provider's CLI saves a fresh one.",
 	source_unreachable = "The sharing source is unreachable.",
 	pin_mismatch = "The sharing certificate does not match the paired identity.",
 	address_in_use = "The sharing port is already in use on this machine.",

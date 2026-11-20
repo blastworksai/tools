@@ -24,7 +24,7 @@ CLIENT_LEASE_SECONDS = 90
 REASONS = frozenset({"not_reported", "unparsed", "source_unreachable", "not_yet_measured", "reset_passed", "stale", "web_login_expired", "unavailable", "server_sent_no_usage",
     "local_login_unavailable", "source_metadata_disabled", "vendor_usage_unavailable", "source_timeout",
     "source_context_ambiguous", "source_profile_invalid", "source_profile_unavailable", "source_usage_unavailable",
-    "source_remote", "api_key_login", "web_login_forbidden"})
+    "source_remote", "api_key_login", "web_login_forbidden", "access_token_stale"})
 # Readings written by pre-2.0 builds carry these usage_source values.
 LEGACY_USAGE_SOURCES = {"native-headless": "headless", "native-passive:last-good": "last-good"}
 MESSAGES = {
@@ -39,6 +39,7 @@ MESSAGES = {
     "not_found": "The requested record is unavailable.",
     "expired": "The request has expired.",
     "web_login_expired": "The provider login has expired. Sign in again with the provider's own CLI.",
+    "access_token_stale": "The login is valid, but its saved access token is out of date; usage updates when the provider's CLI saves a fresh one.",
     "source_remote": "Runs on another machine over SSH; USAGE reads it only on that machine.",
     "api_key_login": "Signed in with an API key, which has no subscription quota.",
     "web_login_forbidden": "The provider refused this login's usage request. Sign in again with the provider's own CLI to grant usage access.",
