@@ -8732,9 +8732,14 @@ end
 -- notice pruner that way (SKILLS-201), and the deploy, review, intake and chain caps stopped evicting.
 if section == nil or section == "make_room" then
 	local seen, twice = {}, {}
-	for _, file in { "dispatch", "policy_validation" } do
+	-- policy_validation.luau's own name for the shared table is M; both definition forms are caught.
+	for file, names in { dispatch = { "config" }, policy_validation = { "M", "config" } } do
 		for line in runtime.fs.read(root .. "/" .. file .. ".luau"):gmatch("[^\n]+") do
-			local fn = line:match("^function config%.([%w_]+)%s*%(")
+			local fn
+			for _, name in names do
+				fn = fn or line:match("^%s*function " .. name .. "%.([%w_]+)%s*%(")
+					or line:match("^%s*" .. name .. "%.([%w_]+)%s*=%s*function%s*%(")
+			end
 			if fn then
 				if seen[fn] then table.insert(twice, fn .. " (" .. seen[fn] .. ", " .. file .. ")") else seen[fn] = file end
 			end
