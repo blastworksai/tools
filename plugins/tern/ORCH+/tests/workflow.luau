@@ -2968,11 +2968,13 @@ if section == nil or section == "project_start_policy" then
 	check(grant and grant.source.kind == "policy" and grant.source.rule == "auto_start_projects"
 		and #grant.source.policy_revision == 64 and not p.started and f.authority.registry.dispatch.intakes[added.intake_id].held,
 		"saved explicit auto-start policy creates an honestly policy-sourced typed intent, never direct managed release")
+	check(W.worker(f, cid).replies[tostring(grant.reply_seq)].owner == nil, "a policy auto-start's START reply is not owner-sourced")
 	local seq = W.worker(f, cid).reply_seq
 	assert(f:apply("pause").ok)
 	check(W.worker(f, cid).reply_seq == seq and f.authority.registry.dispatch.projects[project].start.bytes == grant.bytes,
 		"later bookkeeping and pause cannot allocate another automatic START grant")
-	W.publish_start(f, cid, project); assert(W.ack(f, cid, f.authority.registry.dispatch.projects[project].start).ok)
+	W.publish_start(f, cid, project)
+	assert(W.ack(f, cid, f.authority.registry.dispatch.projects[project].start).ok)
 	assert(W.start_claim(f, cid, project).ok)
 	check(not f.authority.registry.dispatch.intakes[added.intake_id].held and W.worker(f, manual).project_held
 		and W.worker(f, manual).checks_pending and W.provision_of(f, manual) == nil,
