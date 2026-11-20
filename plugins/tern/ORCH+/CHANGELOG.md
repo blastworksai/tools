@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.6
+
+- **Caps evict again.** Since 0.6.4 the limits on deploy and review records (64 each), intake records and template chains never made room: a second function with the same name, added for owner notices, replaced the one that evicts the oldest finished record. The record past a cap then made the orchestration fail its own state check, so it could not save anything more. The two functions now have their own names, and a test fails if any function is defined twice (SKILLS-219).
+
 ## 0.6.5
 
 - **A coordinator's proposal shows up within seconds.** ORCH+ read a worker's next report only once per poll (every 5 minutes by default), and a poll that went to settlement (compacting read reports, publishing an ACK or a reply, acceptance, a wake) pushed that read a whole poll further. A poll spent on settlement now owes the report lane a read, which runs at once; stop and retirement never owe one, a held read lane never does, and the debt is void whenever the next poll could not read (stop or retirement due or in flight, reattachment needed, a stale coordinator generation). A continuation poll that comes back without an action waits one cadence before continuation may bypass the schedule again (SKILLS-214, found when a filmed orchestration waited on a coordinator's proposal).

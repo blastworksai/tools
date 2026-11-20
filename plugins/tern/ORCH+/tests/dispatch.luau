@@ -20,7 +20,8 @@ local sections = { fixture = true, core = true, control_rebind = true, receipts 
 	stale_result_grant_change = true, held_withdrawal = true, capacity_withdrawal = true,
 	project_observation = true, project_repository_guards = true, migration_start_guards = true, enrol_route_cancel = true,
 	project_history_reuse = true, project_reserve = true, rollover_location = true, project_start_rollover = true,
-	legacy_observation = true, legacy_worker_roles = true, current_observation = true, compaction_retry = true, catalog_paging = true }
+	legacy_observation = true, legacy_worker_roles = true, current_observation = true, compaction_retry = true, catalog_paging = true,
+	make_room = true }
 assert(section == nil or sections[section], "unknown dispatch test section: " .. tostring(section))
 local runtime, environment = tern, getfenv()
 -- Absence stays absent; explicit JSON null remains available to negative wire tests.
@@ -8725,5 +8726,40 @@ if section == nil or section == "rollover_location" then
 			"background terminal rollover freezes an unfocused tab without rewriting its saved record")
 		check(state.rehydrate(clone(f.authority.registry)) ~= nil, "the exact inherited launch and saved record restore together")
 	end
+end
+-- SKILLS-219: config is one shared table across dispatch.luau and policy_validation.luau, so a second
+-- `function config.x` silently replaces the first. The bounded-map evictor was replaced by the owner-
+-- notice pruner that way (SKILLS-201), and the deploy, review, intake and chain caps stopped evicting.
+if section == nil or section == "make_room" then
+	local seen, twice = {}, {}
+	for _, file in { "dispatch", "policy_validation" } do
+		for line in runtime.fs.read(root .. "/" .. file .. ".luau"):gmatch("[^\n]+") do
+			local fn = line:match("^function config%.([%w_]+)%s*%(")
+			if fn then
+				if seen[fn] then table.insert(twice, fn .. " (" .. seen[fn] .. ", " .. file .. ")") else seen[fn] = file end
+			end
+		end
+	end
+	check(#twice == 0, "every config function is defined once: " .. table.concat(twice, "; "))
+	local config = load("policy_validation")
+	local function filled(n, done)
+		local map = {}
+		for i = 1, n do map["d" .. i] = { serial = i, done = done(i) } end
+		return map
+	end
+	local settled, rank = function(v) return v.done end, function(v) return v.serial end
+	local map = filled(64, function() return true end)
+	check(config.make_room(map, 64, settled, rank) == true and map.d1 == nil and map.d2 ~= nil,
+		"a full map evicts its oldest settled entry and makes room")
+	local busy = filled(64, function() return false end)
+	check(config.make_room(busy, 64, settled, rank) == false and busy.d1 ~= nil,
+		"a full map with nothing settled refuses and keeps every entry")
+	local room = filled(10, function() return false end)
+	check(config.make_room(room, 64, settled, rank) == true, "a map below its cap has room without evicting")
+	local d = { deploys = {} }
+	for i = 1, 64 do d.deploys["dep-" .. i] = { deploy_id = "dep-" .. i, status = "running" } end
+	check(config.deploy_room(d) == false, "64 deploys still running refuse a 65th")
+	d.deploys["dep-7"].status = "deployed"
+	check(config.deploy_room(d) == true and d.deploys["dep-7"] == nil, "a settled deploy is evicted to make room")
 end
 return "dispatch" .. (if section then "/" .. section else "") .. ": " .. tostring(checks) .. " checks passed"
