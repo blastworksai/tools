@@ -1,6 +1,6 @@
 -- Deterministic real reducer/host/window coverage. Run bounded sections in native host callbacks.
 local root, section = ...
-assert(section == nil or table.find({ "clock", "focus_window", "form_hold_notice", "form_hold_capacity", "form_hold_rearm", "native", "controls", "status_launcher", "timer", "epoch_window", "owner_send_notice", "epoch_host", "finish", "continuation", "alias_recovery", "held_report", "sweep_schedule", "readable_views", "cp2_controls", "guided_recovery", "guided_recovery_empty", "guided_recovery_host_restart", "stopped_worker_view", "expired_wake", "revoked_authorization", "observe_retention", "uncertain_read", "quota_reader", "capacity_refresh_confirm", "bridge_lifecycle", "withdraw_fenced", "config_cards", "work_picker", "inbox_window", "usage_row",
+assert(section == nil or table.find({ "clock", "focus_window", "form_hold_notice", "form_hold_capacity", "form_hold_rearm", "native", "controls", "status_launcher", "timer", "epoch_window", "owner_send_notice", "owner_send_reasons", "epoch_host", "finish", "continuation", "alias_recovery", "held_report", "sweep_schedule", "readable_views", "cp2_controls", "guided_recovery", "guided_recovery_empty", "guided_recovery_host_restart", "stopped_worker_view", "expired_wake", "revoked_authorization", "observe_retention", "uncertain_read", "quota_reader", "capacity_refresh_confirm", "capacity_refresh_outcomes", "bridge_lifecycle", "withdraw_fenced", "config_cards", "work_picker", "inbox_window", "usage_row",
 	"reconnect_stale", "reconnect_missing", "reconnect_unknown", "reconnect_unrelated", "worker_attachment", "worker_attachment_form",
 	"driver_admission_noop", "driver_admission_refused", "driver_retry_original", "driver_retry_unrelated", "driver_retry_absent",
 	"driver_deadline_absent", "driver_deadline_unrelated", "driver_missing", "driver_suspension", "driver_fence_origin", "driver_fence_claim",
@@ -1080,6 +1080,35 @@ if section == nil or section == "owner_send_notice" then
 	check(#w.toasts == before + 1 and string.sub(last.text, 1, 9) == "Not sent:", "an owner command that cannot be sent says so instead of failing silently")
 	w:click("pause")
 	check(flow(w.f).policy.paused and #w.toasts == before + 1, "a command that is sent shows no 'Not sent' notice")
+end
+-- SKILLS-221 R1: a refusal names its real reason, and a command already emitted is never "Not sent".
+-- Fails on the old code: every nil was reported as "no longer the current controller", and a command
+-- emitted before the window lost its authority was reported "Not sent".
+if section == nil or section == "owner_send_reasons" then
+	local w = window_fixture()
+	-- The origin is current, but it carries no intent fence: the refusal is not an authority loss.
+	local unfenced = clone(w.f.origin)
+	local before, events = #w.toasts, #w.events
+	local sent = w.api.owner_send(w.cx, 9001, unfenced, "pause", nil)
+	local last = w.toasts[#w.toasts]
+	check(sent == nil and #w.events == events and #w.toasts == before + 1, "a command without its fence sends nothing and says so once")
+	check(string.sub(last.text, 1, 9) == "Not sent:" and not last.text:find("no longer the current controller", 1, true),
+		"a missing fence is not reported as a lost controller")
+	-- The host sees the command, then the window stops being the current controller.
+	local host = w.cx.hosts:list()[1]
+	local original = w.cx.session.event
+	w.cx.session.event = function(self, pane, event)
+		original(self, pane, event)
+		if event.act == "dispatch-operator-command" then host.state = "disconnected" end
+	end
+	before = #w.toasts
+	w:click("pause")
+	w.cx.session.event = original; host.state = "connected"
+	local emitted = false
+	for _, e in w.events do if e.command == "pause" then emitted = true end end
+	last = w.toasts[#w.toasts]
+	check(emitted and #w.toasts == before + 1 and string.sub(last.text, 1, 5) == "Sent," and not last.text:find("Not sent", 1, true),
+		"a command that reached the host is never reported as not sent")
 end
 if section == nil or section == "epoch_host" then
 	local f = shared.fixture(); local id = f:accepted(false)
@@ -3171,6 +3200,50 @@ if section == nil or section == "capacity_refresh_confirm" then
 	refresh(function() return count_text(SUCCESS) == 1 end)
 	check(capacity_commands() == 2 and count_text(SUCCESS) == 1,
 		"a capacity command the host records shows the refreshed text exactly once")
+end
+-- SKILLS-221 R1: every owner capacity refresh click ends in one visible outcome.
+-- Fails on the old code: a repeated identical failure was deduplicated away, and a reader that
+-- ended without a message (the window lost its authority) showed nothing.
+if section == nil or section == "capacity_refresh_outcomes" then
+	local w = window_fixture()
+	local codec = shared.codec
+	local NOW = 1700000000000
+	local raw = runtime.json.encode({ version = 1, complete = true, incomplete = false, auth_revision = "auth-1", records = runtime.json.array(),
+		sources = runtime.json.array(), quota_unit = "percent" })
+	local revision = codec.sha256(raw)
+	local host = w.cx.hosts:list()[1]
+	local server = { text = "", requests = {}, drop_host = false }
+	function server.handle(req)
+		table.insert(server.requests, req.op)
+		local r
+		if req.op == "validate" then
+			r = { version = 1, request_id = req.request_id, op = "validate", ok = true, status = "current", revision = revision, auth_revision = "auth-1",
+				validated_at_ms = NOW, expires_at_ms = NOW + 600000 }
+		else
+			r = { version = 1, request_id = req.request_id, op = req.op, ok = true, status = "ok", revision = revision, auth_revision = "auth-1",
+				issued_at_ms = NOW, expires_at_ms = NOW + 600000, index = 0, count = 1, size = #raw, data = raw,
+				next_cursor = runtime.json.null, complete = true, incomplete = false }
+		end
+		server.text = runtime.json.encode(r)
+		if server.drop_host and req.op == "validate" then host.state = "disconnected" end
+	end
+	w:usage(server)
+	local function count_text(fragment) local n = 0; for _, m in w.notices do if m:find(fragment, 1, true) then n += 1 end end; return n end
+	-- The same failure twice: each click still says so.
+	local original_step = codec.sha256_step
+	codec.sha256_step = function(state) state.busy = true; return false end
+	for click = 1, 2 do
+		w:click("capacity_refresh")
+		for _ = 1, 80 do w:tick(); if count_text("hash_interrupted") == click then break end end
+	end
+	codec.sha256_step = original_step
+	check(count_text("hash_interrupted") == 2, "a second identical capacity failure is shown again, never swallowed")
+	-- The window loses its authority while the owner's refresh is in flight: the click says it was not sent.
+	server.drop_host = true
+	w:click("capacity_refresh")
+	for _ = 1, 80 do w:tick(); if count_text("Capacity refresh was not sent") == 1 then break end end
+	server.drop_host = false; host.state = "connected"
+	check(count_text("Capacity refresh was not sent") == 1, "a refresh that ends without a message still tells the owner it was not sent")
 end
 -- Native authorization runs after another window turn, not synchronously with request submission.
 if section == nil or section == "control_scheduling" then

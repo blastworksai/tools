@@ -438,16 +438,23 @@ local setup_ui = require("./setup_window").new(setup_api)
 -- answers one of them, so another window's (or older incarnation's) refusal never holds a driver.
 local issued = fifo(512)
 -- native_scope.owner_noticed: send_command already told the owner why it sent nothing.
+-- send_command returns the request id, or nil with the plain reason it refused; a third value true
+-- means the command was already emitted to the host before the window lost its authority.
 -- (The window sits at Luau's 200-local limit, so the owner-send helper hangs on this table.)
 native_scope.owner_noticed = false
-local function send_command(cx: WindowCx, source: number, origin: any, command: string, fields: any?, operator: boolean?): string?
+local function send_command(cx: WindowCx, source: number, origin: any, command: string, fields: any?, operator: boolean?): (string?, string?, boolean?)
 	local closing = (command == "bridge_control" or command == "bridge_result" or command == "bridge_observe")
 		and closing_context(cx, source, origin, command == "bridge_observe")
 	if not closing and not (if command == "continue_controller" then current_context(cx, source, origin)
-		else native_scope.authorized_origin(cx, source, origin)) then return nil end
-	local data, node = snapshot(cx, source); if not node then return nil end
+		else native_scope.authorized_origin(cx, source, origin)) then
+		return nil, "this window is no longer the current controller. Continue the controller in this window, then try again."
+	end
+	local data, node = snapshot(cx, source)
+	if not node then return nil, "the controller's state cannot be read in this window right now. Try again in a moment." end
 	local fence = intent_fences[origin]
-	if not fence or type(fence.authority_namespace) ~= "string" or type(fence.expected_revision) ~= "number" then return nil end
+	if not fence or type(fence.authority_namespace) ~= "string" or type(fence.expected_revision) ~= "number" then
+		return nil, "the controller has not published the state this command needs. Try again in a moment."
+	end
 	local event = { kind = "dispatch", request_id = dispatch_id(), orch_session_id = origin.logical_session_id, origin = origin,
 		controller_pane = tostring(source), command = command,
 		authority_namespace = fence.authority_namespace, expected_revision = fence.expected_revision }
@@ -473,15 +480,16 @@ local function send_command(cx: WindowCx, source: number, origin: any, command: 
 	issued.put(event.request_id, true)
 	-- Native delivery returns before HOST commits the continued window origin.
 	-- Use the same guard as admission; the old cursor must not hide a submitted continuation.
-	return if closing or (if command == "continue_controller" then current_context(cx, source, origin)
-		else native_scope.authorized_origin(cx, source, origin)) then event.request_id else nil
+	if closing or (if command == "continue_controller" then current_context(cx, source, origin)
+		else native_scope.authorized_origin(cx, source, origin)) then return event.request_id end
+	return nil, "Sent, but this window stopped being the current controller right after. The result may not show here; check before sending again.", true
 end
 -- An owner's own command that could not be sent says so; a silent click reads as a broken button.
 function native_scope.owner_send(cx: WindowCx, source: number, origin: any, command: string, fields: any?): string?
 	native_scope.owner_noticed = false
-	local id = send_command(cx, source, origin, command, fields, true)
-	if not id and not native_scope.owner_noticed then
-		notice(cx, source, origin.alias_nonce, "Not sent: this window is no longer the current controller. Continue the controller in this window, then try again.")
+	local id, why, emitted = send_command(cx, source, origin, command, fields, true)
+	if not id and not native_scope.owner_noticed and why then
+		notice(cx, source, origin.alias_nonce, if emitted then why else "Not sent: " .. why)
 	end
 	return id
 end
@@ -3397,6 +3405,7 @@ function native_scope.capacity_confirm_step(cx: WindowCx)
 	for source, wait in native_scope.capacity_confirms do
 		if not native_scope.authorized_origin(cx, source, wait.origin) then
 			native_scope.capacity_confirms[source] = nil
+			cx:toast("error", "ORCH+ quota evidence", "Capacity evidence was sent, but this window stopped being the current controller before the host answered. Check the result before refreshing again.")
 			continue
 		end
 		local data = snapshot(cx, source)
@@ -3526,12 +3535,19 @@ local function reader_done(cx: WindowCx, reader: any, ok: boolean, message: stri
 	if readers[reader.source] == reader then readers[reader.source] = nil end
 	if not ok then
 		next_refresh[reader.source] = tern.now() + 30000
-		if message and reader_notices[reader.source] ~= message then
+		-- An owner's click always ends in a visible outcome, even when the same failure was already shown.
+		if reader.owner and not message then
+			notice(cx, reader.source, reader.origin.alias_nonce, "Capacity refresh was not sent: this window is no longer the current controller. Continue the controller in this window, then try again.")
+		elseif message and (reader.owner or reader_notices[reader.source] ~= message) then
 			reader_notices[reader.source] = message
 			notice(cx, reader.source, reader.origin.alias_nonce, message)
 		end
 	else
 		reader_notices[reader.source] = nil
+		if reader.owner and not reader.capacity_request then
+			notice(cx, reader.source, reader.origin.alias_nonce, reader.capacity_refusal
+				or "A capacity check that was already running finished without recording evidence. Refresh again to record it.")
+		end
 	end
 	local after = reader.after
 	reader.after = nil
@@ -3663,7 +3679,9 @@ reader_step = function(cx: WindowCx, reader: any)
 	-- The command must fit the 8192-byte bridge; lowest-priority records drop to "not in evidence".
 	while #tern.json.encode(evidence) > 6500 and #evidence.records > 0 do table.remove(evidence.records) end
 	-- An owner-requested refresh sends as an owner command so the host's answer is readable here.
-	reader.capacity_request = send_command(cx, source, fresh_intent(cx, source, origin), "capacity", { capacity = evidence }, reader.owner == true)
+	local request_id, why, emitted = send_command(cx, source, fresh_intent(cx, source, origin), "capacity", { capacity = evidence }, reader.owner == true)
+	reader.capacity_request = request_id
+	if not request_id and why then reader.capacity_refusal = if emitted then why else "Capacity evidence was not sent: " .. why end
 	reader_done(cx, reader, true)
 end
 local function current_gate(cx: WindowCx, source: number, request: any): any?
