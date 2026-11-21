@@ -2,7 +2,7 @@
 
 ## 0.6.7
 
-- **A command that cannot be sent now says so.** When one of your own controls (Pause, Resume, Close handover, Answer, Recheck, Cancel, Dismiss and the landing and gate controls) could not be sent, nothing happened and nothing was shown. It now shows "Not sent: <reason>" with the real reason, and a command that was handed to the native transport is never reported as not sent: its notice says the host has not confirmed it (SKILLS-221).
+- **A command that cannot be sent now says so.** When one of your own controls (Pause, Resume, Close handover, Answer, Recheck, Cancel, Dismiss and the landing and gate controls) could not be sent, nothing happened and nothing was shown. It now shows "Not sent: <reason>" with the real reason, and a command that was handed to the native transport is never reported as not sent: its notice says this window could not verify the host's response (SKILLS-221).
 - **The saved-observation notice names its exit.** After a safety observation could not be saved, release and recovery stay blocked, as before. The notice now says the exit is to restart Tern and that checking the store again does not clear it (SKILLS-221).
 - **A readiness check no longer sticks.** If a newer repository check replaced a running readiness check, the readiness check stayed "still pending" until the pane was closed. It now ends with a refusal and the next request runs (SKILLS-221).
 - **No more useless polling of an old coordinator.** A coordinator generation that is no longer the current one is not shown as due for a poll, so the window no longer asks it every 10 seconds only to be refused (SKILLS-221).

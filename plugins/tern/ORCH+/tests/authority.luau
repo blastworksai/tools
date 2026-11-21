@@ -1747,9 +1747,26 @@ do
 	check(view1.readiness_pending == nil, "a superseded readiness probe clears the pending flag")
 	check(view1.setup_result.request_id == "newer-probe" and view1.setup_result.code ~= "repository_probe_superseded",
 		"the newer repository probe keeps its own result when the superseded readiness refusal arrives late")
-	local refusal = if view1.setup_refusals then view1.setup_refusals["readiness-one"] else nil
+	local refusal = if view1.readiness_receipts then view1.readiness_receipts["readiness-one"] else nil
 	check(refusal ~= nil and refusal.ok == false and refusal.code == "repository_probe_superseded" and refusal.request_id == "readiness-one",
-		"the superseded readiness caller receives its own refusal, kept beside the newer result")
+		"the superseded readiness caller receives its own refusal receipt, kept beside the newer result")
+	-- SKILLS-221 R4: the refusal arrives first and the newer repository result then replaces the shared result slot.
+	-- Fails on the old code: no receipt existed, so the readiness caller never saw its refusal.
+	hold_next = true
+	definition.event(view1, { ev = "action", act = "setup-readiness-prepare", value = runtime.json.encode({
+		source_nonce = view1.alias_nonce, request_id = "readiness-early" }) }, cx1)
+	hold_next = true
+	definition.event(view1, { ev = "action", act = "setup-repository-probe", value = runtime.json.encode({
+		source_nonce = view1.alias_nonce, request_id = "newer-late", cwd = prepared, target_ref = "main" }) }, cx1)
+	check(#held == 3, "the readiness probe and the newer repository probe are both held")
+	held[2]()
+	check(view1.readiness_receipts["readiness-early"] ~= nil and view1.setup_result.request_id == "readiness-early",
+		"the refusal arrives while the newer probe still runs")
+	held[3]()
+	check(view1.setup_result.request_id == "newer-late", "the newer repository result then replaces the shared result slot")
+	local early = view1.readiness_receipts["readiness-early"]
+	check(early ~= nil and early.code == "repository_probe_superseded" and early.request_id == "readiness-early",
+		"the readiness refusal survives as its own receipt after the shared result slot is replaced")
 	definition.event(view1, { ev = "action", act = "setup-readiness-prepare", value = runtime.json.encode({
 		source_nonce = view1.alias_nonce, request_id = "readiness-two" }) }, cx1)
 	check(view1.setup_result.request_id == "readiness-two" and view1.setup_result.code ~= "readiness_pending",

@@ -397,8 +397,9 @@ local handling_event = false
 -- A forgotten orchestration leaves no selection, scoped result or saved id behind. Only a successfully LOADED authority
 -- (ready, with the installation-level notice naming this exact session and the session truly gone) may authorize this:
 -- missing, corrupt or unreadable storage never clears anything.
-local FORGOTTEN_VIEW_FIELDS = { "scoped_results", "dispatch_command_result", "dispatch_action", "recovery",
-	"attestation", "close_armed", "relay_notice", "creation_ready", "setup_result", "migration_result", "orchestration_result", "forget" }
+local FORGOTTEN_VIEW_FIELDS = { "scoped_results", "dispatch_command_result", "dispatch_capacity_result", "dispatch_action", "recovery",
+	"attestation", "close_armed", "relay_notice", "creation_ready", "setup_result", "readiness_receipts", "readiness_receipt_ids",
+	"migration_result", "orchestration_result", "forget" }
 -- Any session id the loaded authority no longer holds is cleared with its scoped results. A forgotten orchestration clears at
 -- once and shows the completion notice; any other absent id (an ordinary close) is kept for a short grace so the closed bridge
 -- view can still release through its session_closed alias, and is never written to saved data.
@@ -773,14 +774,17 @@ local function readiness_host(view: any, input: any, prepare: boolean)
 	local function done(response: any)
 		if not live() then return end
 		view.readiness_pending = nil
-		if response.code == "repository_probe_superseded" then
-			-- The refusal is this caller's own result. When the newer check already published its result (no probe is
-			-- still running), the refusal is kept beside it and never replaces it.
-			local own = table.clone(response)
-			own.request_id = input.request_id
-			view.setup_refusals = { [input.request_id] = own }
-			if view.setup_probe == nil then return end
-		end
+		-- Every readiness outcome is this caller's own receipt, keyed by its request id. A newer repository result or a
+		-- late refusal can replace `setup_result`, never the receipt; the window reads the receipt.
+		local own = table.clone(response)
+		own.request_id = input.request_id
+		local receipts, ids = view.readiness_receipts or {}, view.readiness_receipt_ids or {}
+		receipts[input.request_id] = own
+		table.insert(ids, input.request_id)
+		while #ids > 4 do receipts[table.remove(ids, 1)] = nil end
+		view.readiness_receipts, view.readiness_receipt_ids = receipts, ids
+		-- When the newer check already published its result (no probe is still running), that result stays.
+		if response.code == "repository_probe_superseded" and view.setup_probe == nil then render_all(); return end
 		setup_result(view, input, response)
 	end
 	if not prepare then
@@ -2348,6 +2352,10 @@ local function handle(view: any, ev: any, cx: any)
 		end
 		if operator and not control_command then
 			view.dispatch_command_result = response
+			-- A refresh's own receipt: another owner command, a cleanup summary or a selection replaces or clears
+			-- dispatch_command_result before the window's confirmation tick reads it. This slot is only replaced by the
+			-- next capacity answer.
+			if input.command == "capacity" then view.dispatch_capacity_result = response end
 			if not workflow_only then view.dispatch_driver_result = response end
 		end
 		-- The conversation composer serializes these commands per source. Keep its exact

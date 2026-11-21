@@ -617,6 +617,7 @@ local function dispatch_view(view: any, projection: any, selected: any): (any, a
 		session_control = if d.session_control then pick(d.session_control, "phase admission_seq admitted generation_floor request_floor next_request_serial last_authority_revision close") else nil,
 		reconcile_progress = d.reconcile_progress,
 		control_result = if view.dispatch_control_result then pick(view.dispatch_control_result, "request_id command ok code message") else nil,
+		capacity_result = if view.dispatch_capacity_result then pick(view.dispatch_capacity_result, "request_id command ok code message") else nil,
 		controller_phase = if bound then owner.phase else nil, revision = projection.revision, command_cursor = d.command_cursor,
 		action = if active then pick(active, ACTION_KEYS, { action_id = active.request.action_id }) else nil,
 		result = if outcome then pick(outcome, RESULT_KEYS, { action_id = outcome.action_id }) else nil,
@@ -1446,7 +1447,8 @@ function M.render(view: any, projection: any, status: string, diagnostic: string
 		end
 		table.insert(rows, keyed(tern.json.encode({ version = 1, source_nonce = view.alias_nonce, host_pane_id = tostring(view.pane),
 			authority_namespace = projection.authority_namespace, authority_revision = projection.revision,
-			setup = setup, installation_defaults = defaults, setup_result = view.setup_result, setup_repository = view.setup_repository }), "setup-index", "orchplus.setup"))
+			setup = setup, installation_defaults = defaults, setup_result = view.setup_result, setup_repository = view.setup_repository,
+			readiness_receipts = view.readiness_receipts }), "setup-index", "orchplus.setup"))
 	end
 	if view.setup_catalog_request then table.insert(rows, keyed(tern.json.encode(view.setup_catalog_request), "setup-catalog-request", "orchplus.setup.request")) end
 	if diagnostic ~= nil and view.advanced_open then table.insert(rows, ui.text(ui.span(diagnostic, "error"))) end

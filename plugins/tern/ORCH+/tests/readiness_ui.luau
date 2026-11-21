@@ -286,4 +286,29 @@ do
 	check(pcall(changed.tick, changed) and changed.notices[#changed.notices]:find("not attached to newer defaults", 1, true) ~= nil,
 		"a configuration change during failed preparation is reported without throwing")
 end
+-- SKILLS-221 R4: the host publishes the readiness outcome as its own receipt, so the shared result slot being replaced
+-- (by a newer repository result, in either arrival order) cannot hide the refusal from the readiness caller.
+-- Fails on the old code: the window read only the shared result slot, saw another request id and waited until timeout.
+for _, replaced in { "newer_result", "other_refusal" } do
+	local f = exercise(); f:consent()
+	local operation = assert(f.processes[1])
+	f.data.readiness_receipts = { [operation.request.request_id] = { request_id = operation.request.request_id, ok = false,
+		code = "repository_probe_superseded", message = "A newer repository check replaced this one; it was not completed." } }
+	f.data.setup_result = if replaced == "newer_result" then { request_id = "newer-probe", ok = true, code = "repository_verified" }
+		else { request_id = "another-probe", ok = false, code = "repository_unavailable" }
+	f:tick()
+	check(#f.commands == 0 and #f.queued == 0 and f.events[#f.events].readiness.state == "unavailable"
+		and f.events[#f.events].readiness.summary:find("newer repository check", 1, true) ~= nil,
+		"a superseded readiness refusal is read from its own receipt when the shared result belongs to " .. replaced)
+end
+do
+	local f = exercise(); f:consent()
+	local operation = assert(f.processes[1])
+	f.path = "/fixture/execution-host/readiness-owned"
+	f.data.readiness_receipts = { [operation.request.request_id] = { request_id = operation.request.request_id, ok = true, repository = {
+		cwd = f.path, repo_root = f.path, common_dir = f.path .. "/.git", head_revision = string.rep("a", 40), target_ref = "refs/heads/main" } } }
+	f.data.setup_result = { request_id = "newer-probe", ok = true, code = "repository_verified" }
+	f:tick()
+	check(f.decision ~= nil and f.decision.command == "new_project", "a verified readiness receipt proceeds although the shared result was replaced")
+end
 return "readiness_ui: " .. tostring(checks) .. " checks"

@@ -506,7 +506,7 @@ local function send_command(cx: WindowCx, source: number, origin: any, command: 
 	if closing or (if command == "continue_controller" then current_context(cx, source, origin)
 		else native_scope.authorized_origin(cx, source, origin)) then return event.request_id end
 	return nil, "Handed to the native transport, but this window could not confirm the controller afterwards ("
-		.. native_scope.authority_gap(cx, source, origin) .. "). The host has not confirmed it; the result may not show here. Check before sending again.", true
+		.. native_scope.authority_gap(cx, source, origin) .. "). This window could not verify the host's response; the result may not show here. Check before sending again.", true
 end
 -- send_command for an owner's own command: its refusal, including an oversized envelope, comes back
 -- as the reason and nothing is noticed inside, so the caller shows exactly one outcome.
@@ -3445,7 +3445,8 @@ function native_scope.capacity_confirm_one(cx: WindowCx, source: number, wait: a
 	end
 	local data = snapshot(cx, source)
 	local result
-	for _, key in { "command_result", "driver_result", "result" } do
+	-- capacity_result is the refresh's own receipt; the others stay as fallbacks for an older host.
+	for _, key in { "capacity_result", "command_result", "driver_result", "result" } do
 		local candidate = if data then data[key] else nil
 		if candidate and candidate.request_id == wait.request_id then result = candidate; break end
 	end
@@ -3463,9 +3464,12 @@ function native_scope.capacity_confirm_step(cx: WindowCx)
 	for source, wait in native_scope.capacity_confirms do
 		local ok, failure = pcall(native_scope.capacity_confirm_one, cx, source, wait)
 		if not ok then
-			cx:toast("error", "ORCH+ quota evidence", "Capacity evidence was sent, but this window could not confirm the host's answer ("
-				.. tostring(failure):sub(1, 200) .. "). Check the result before refreshing again.")
+			-- Remove the entry before reporting it: a report that raises must neither keep the entry nor skip the others.
 			native_scope.capacity_confirms[source] = nil
+			pcall(function()
+				cx:toast("error", "ORCH+ quota evidence", "Capacity evidence was sent, but this window could not confirm the host's answer ("
+					.. tostring(failure):sub(1, 200) .. "). Check the result before refreshing again.")
+			end)
 		end
 	end
 end

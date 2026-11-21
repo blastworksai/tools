@@ -1,6 +1,6 @@
 -- Deterministic real reducer/host/window coverage. Run bounded sections in native host callbacks.
 local root, section = ...
-assert(section == nil or table.find({ "clock", "focus_window", "focus_stale_coordinator", "form_hold_notice", "form_hold_capacity", "form_hold_rearm", "native", "controls", "status_launcher", "timer", "epoch_window", "owner_send_notice", "owner_send_reasons", "owner_send_post_submit", "owner_send_oversize", "epoch_host", "finish", "continuation", "alias_recovery", "held_report", "sweep_schedule", "readable_views", "cp2_controls", "guided_recovery", "guided_recovery_empty", "guided_recovery_host_restart", "stopped_worker_view", "expired_wake", "revoked_authorization", "observe_retention", "uncertain_read", "quota_reader", "capacity_refresh_confirm", "capacity_refresh_outcomes", "capacity_refresh_collision", "capacity_refresh_send_refused", "capacity_refresh_lost_confirmation", "capacity_confirm_error", "bridge_lifecycle", "withdraw_fenced", "config_cards", "work_picker", "inbox_window", "usage_row",
+assert(section == nil or table.find({ "clock", "focus_window", "focus_stale_coordinator", "form_hold_notice", "form_hold_capacity", "form_hold_rearm", "native", "controls", "status_launcher", "timer", "epoch_window", "owner_send_notice", "owner_send_reasons", "owner_send_post_submit", "owner_send_oversize", "epoch_host", "finish", "continuation", "alias_recovery", "held_report", "sweep_schedule", "readable_views", "cp2_controls", "guided_recovery", "guided_recovery_empty", "guided_recovery_host_restart", "stopped_worker_view", "expired_wake", "revoked_authorization", "observe_retention", "uncertain_read", "quota_reader", "capacity_refresh_confirm", "capacity_refresh_outcomes", "capacity_refresh_collision", "capacity_refresh_send_refused", "capacity_refresh_lost_confirmation", "capacity_confirm_error", "capacity_confirm_report_error", "capacity_receipt_owner_command", "capacity_refresh_second_click_pending", "capacity_refresh_disconnected_before_submit", "bridge_lifecycle", "withdraw_fenced", "config_cards", "work_picker", "inbox_window", "usage_row",
 	"reconnect_stale", "reconnect_missing", "reconnect_unknown", "reconnect_unrelated", "worker_attachment", "worker_attachment_form",
 	"driver_admission_noop", "driver_admission_refused", "driver_retry_original", "driver_retry_unrelated", "driver_retry_absent",
 	"driver_deadline_absent", "driver_deadline_unrelated", "driver_missing", "driver_suspension", "driver_fence_origin", "driver_fence_claim",
@@ -200,7 +200,7 @@ local function window_fixture(options: any?)
 	local pick_callback, prompt_callback, picked, picker_spec, prompt_spec
 	-- The controller block's published one-shot operator intent (host.luau publishes it on click).
 	local intent, intent_serial = nil, 0
-	local selected, selected_worker, result, command_result, driver_result, poll_result, control_result, receipt
+	local selected, selected_worker, result, command_result, driver_result, poll_result, control_result, receipt, capacity_result
 	-- Completed results remain readable by exact action until their driver releases
 	-- the host receipt; the current dispatch result is not that scoped surface.
 	local scoped_results = {}
@@ -273,6 +273,7 @@ local function window_fixture(options: any?)
 				relay_endpoint = relay_endpoint, relay_boot = relay_boot, capacity = usage_meta }, usage_relay_frames = usage_frames,
 			action_serial = 0, dispatch_action = selected, dispatch_result = result, dispatch_command_result = command_result,
 			dispatch_driver_result = driver_result, dispatch_poll_result = poll_result, dispatch_control_result = control_result,
+			dispatch_capacity_result = capacity_result,
 			dispatch_receipt = receipt, scoped_results = scoped_results, workflow_worker = selected_worker,
 			operator_intent = intent, idle_wake = idle_wake }, projection, "ready")
 	end
@@ -380,6 +381,7 @@ local function window_fixture(options: any?)
 		if table.find({ "bridge_control", "bridge_result", "bridge_observe" }, input.command) then control_result = response end
 		if act == "dispatch-operator-command" then
 			command_result = response
+			if input.command == "capacity" then capacity_result = response end
 			if not workflow_only then driver_result = response end
 		end
 		if (act ~= "dispatch-operator-command" or response.ok) and not workflow_only then result = response end
@@ -1096,7 +1098,7 @@ if section == nil or section == "owner_send_reasons" then
 		"a missing fence says exactly that, never that the controller has not published")
 end
 -- Fails on the old code: a command emitted before the window lost its authority was reported "Sent, but ...
--- no longer the current controller", which neither says what failed nor that the host has not confirmed it.
+-- no longer the current controller", which neither says what failed nor that this window could not verify the host's response.
 if section == nil or section == "owner_send_post_submit" then
 	local w = window_fixture()
 	-- The host sees the command, then the window stops being the current controller.
@@ -1113,8 +1115,8 @@ if section == nil or section == "owner_send_post_submit" then
 	for _, e in w.events do if e.command == "pause" then emitted += 1 end end
 	local last = w.toasts[#w.toasts]
 	check(emitted == 1 and #w.events == events + 1, "the command reached the transport exactly once")
-	check(#w.toasts == before + 1 and last.text == "Handed to the native transport, but this window could not confirm the controller afterwards (the execution host is not connected). The host has not confirmed it; the result may not show here. Check before sending again.",
-		"a command that reached the transport is never reported as not sent, and says the host has not confirmed it")
+	check(#w.toasts == before + 1 and last.text == "Handed to the native transport, but this window could not confirm the controller afterwards (the execution host is not connected). This window could not verify the host's response; the result may not show here. Check before sending again.",
+		"a command that reached the transport is never reported as not sent, and says this window could not verify the host's response")
 end
 -- Fails on the old code: an oversized owner command showed its notice inside send_command and returned
 -- no reason, so the caller had no structured refusal to display (and no "Not sent:" prefix).
@@ -3392,6 +3394,104 @@ if section == nil or section == "capacity_confirm_error" then
 	check(kit.count_text("The host has not confirmed the capacity evidence") == 1 and kit.count_text("could not confirm the host's answer") == 1
 		and next(w.api.capacity_confirms) == nil,
 		"the surviving refresh still ends with its own outcome")
+	-- No other capacity outcome appeared: neither a success nor a host refusal.
+	check(kit.count_text(kit.success) == 0 and kit.count_text("not recorded") == 0,
+		"the error and the missing answer never produce a capacity success or a 'not recorded' notice")
+end
+-- SKILLS-221 R4: the report of a broken confirmation raises. The entry is removed first, the failure of the report is
+-- contained, and the other entries are still checked in the same pass.
+-- Fails on the old code: the raising notice left the failed entry in the table and skipped the rest of the loop.
+if section == nil or section == "capacity_confirm_report_error" then
+	local kit = capacity_fixture()
+	local w = kit.w
+	local original_event = w.cx.session.event
+	local swallowed = 0
+	w.cx.session.event = function(self, pane, event)
+		if event.act == "dispatch-operator-command" and runtime.json.decode(event.value).command == "capacity" then swallowed += 1; return end
+		original_event(self, pane, event)
+	end
+	w:click("capacity_refresh")
+	kit.run(function() return swallowed == 1 end)
+	check(swallowed == 1 and w.api.capacity_confirms[9001] ~= nil, "a real refresh waits for the host's answer")
+	w.api.capacity_confirms[9002] = { request_id = "broken-a", origin = nil, sent_at = 0 }
+	w.api.capacity_confirms[9003] = { request_id = "broken-b", origin = nil, sent_at = 0 }
+	local original_toast, raised = w.cx.toast, 0
+	w.cx.toast = function(self, level, title, message)
+		if raised == 0 and message:find("could not confirm the host's answer", 1, true) then raised += 1; error("toast failed once") end
+		return original_toast(self, level, title, message)
+	end
+	check(pcall(w.tick, w), "a raising notice does not escape the confirmation step")
+	w.cx.toast = original_toast; w.cx.session.event = original_event
+	check(raised == 1, "the first report of a broken confirmation raised")
+	check(w.api.capacity_confirms[9002] == nil and w.api.capacity_confirms[9003] == nil,
+		"every broken confirmation is removed even when its report raised")
+	check(w.api.capacity_confirms[9001] ~= nil and kit.count_text("could not confirm the host's answer") == 1,
+		"the other broken entry was still reported and the real refresh keeps waiting")
+end
+-- SKILLS-221 R4: the host recorded the refresh, then an unrelated owner command replaced the shared command result
+-- before the window's confirmation tick. The refresh still ends with its own success outcome.
+-- Fails on the old code: only the shared command result carried the receipt, so the refresh timed out as unconfirmed.
+if section == nil or section == "capacity_receipt_owner_command" then
+	local kit = capacity_fixture()
+	local w = kit.w
+	local original = w.cx.session.event
+	local injected = false
+	w.cx.session.event = function(self, pane, event)
+		original(self, pane, event)
+		if not injected and event.act == "dispatch-operator-command" and runtime.json.decode(event.value).command == "capacity" then
+			injected = true
+			w:click("pause") -- Another owner command, applied by the host straight after the capacity command.
+		end
+	end
+	w:click("capacity_refresh")
+	kit.run(function() return injected end)
+	w.cx.session.event = original
+	check(injected and kit.capacity_commands() == 1, "the host received the capacity command and then the unrelated owner command")
+	check(w:outcome() ~= nil and w:outcome().command == "pause", "the unrelated owner command replaced the shared command result")
+	kit.run(function() return kit.count_text(kit.success) == 1 end)
+	check(kit.count_text(kit.success) == 1 and kit.count_text("has not confirmed") == 0 and kit.count_text("not recorded") == 0
+		and next(w.api.capacity_confirms) == nil, "the recorded refresh still ends with its success outcome")
+end
+-- SKILLS-221 R4: a second click while the first refresh waits for the host's answer (not only while the reader runs).
+-- Added coverage for a phase no test reached; it passes on the old code too (the guard already existed).
+if section == nil or section == "capacity_refresh_second_click_pending" then
+	local kit = capacity_fixture()
+	local w = kit.w
+	local original = w.cx.session.event
+	local swallowed = 0
+	w.cx.session.event = function(self, pane, event)
+		if event.act == "dispatch-operator-command" and runtime.json.decode(event.value).command == "capacity" then swallowed += 1; return end
+		original(self, pane, event)
+	end
+	w:click("capacity_refresh")
+	kit.run(function() return swallowed == 1 end)
+	check(swallowed == 1 and w.api.capacity_confirms[9001] ~= nil, "the first refresh is waiting for the host's answer")
+	local notices = #w.notices
+	w:click("capacity_refresh")
+	check(#w.notices == notices + 1 and kit.count_text("A capacity refresh is already in progress") == 1,
+		"a second click while a confirmation is pending shows one 'already in progress' notice")
+	check(swallowed == 1 and kit.capacity_commands() == 0 and w.api.capacity_confirms[9001] ~= nil,
+		"the second click sends no command and leaves the pending confirmation in place")
+	w.cx.session.event = original
+end
+-- SKILLS-221 R4: the window loses the controller after the reader finished and before the evidence is submitted.
+-- Added coverage: only a disconnection after submission was covered before; this one must send zero commands.
+if section == nil or section == "capacity_refresh_disconnected_before_submit" then
+	local kit = capacity_fixture()
+	local w, host = kit.w, kit.host
+	local handle = kit.server.handle
+	kit.server.handle = function(req)
+		handle(req)
+		if req.op ~= "validate" then host.state = "disconnected" end
+	end
+	local notices = #w.notices
+	w:click("capacity_refresh")
+	kit.run(function() return kit.count_text("Capacity refresh was not sent: this window cannot act as the controller (the execution host is not connected)") == 1 end)
+	host.state = "connected"
+	check(kit.capacity_commands() == 0, "a disconnection before submission sends zero capacity commands")
+	check(#w.notices == notices + 1 and kit.count_text("Capacity refresh was not sent: this window cannot act as the controller (the execution host is not connected)") == 1 and kit.count_text(kit.success) == 0,
+		"the refresh ends with one 'not sent' notice and no success")
+	check(next(w.api.capacity_confirms) == nil, "nothing waits for a host answer that was never requested")
 end
 -- Native authorization runs after another window turn, not synchronously with request submission.
 if section == nil or section == "control_scheduling" then
