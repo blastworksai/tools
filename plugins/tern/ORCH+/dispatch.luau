@@ -10968,6 +10968,8 @@ function M.project(registry: any, session_id: string, origin_nonce: string, curr
 				origin_binding = clone(control_origin(w)), pane_binding = clone(control_binding(w)),
 				launch_origin_binding = clone(w.origin_binding), launch_pane_binding = clone(w.pane_binding),
 				continuation_required = w.continuation_required == true, continuation_proof = continuation_proof(registry, w), health = clone(f.health), due_poll = f.due_poll and not config.stale_coordinator(registry, w),
+				-- Lets the window refuse the poll paths that do not read due_poll (startup, focus, a pending report request).
+				stale_coordinator = config.stale_coordinator(registry, w),
 				poll_ms = config.check_interval(policy(d, w.logical_session_id), w),
 				-- A stale coordinator generation's polls are refused (owner_mismatch): never continuation.
 				poll_continuation = w.pane_binding ~= nil and not w.mailbox_retired and not pending(d, w)

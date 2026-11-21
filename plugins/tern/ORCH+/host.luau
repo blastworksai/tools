@@ -773,6 +773,14 @@ local function readiness_host(view: any, input: any, prepare: boolean)
 	local function done(response: any)
 		if not live() then return end
 		view.readiness_pending = nil
+		if response.code == "repository_probe_superseded" then
+			-- The refusal is this caller's own result. When the newer check already published its result (no probe is
+			-- still running), the refusal is kept beside it and never replaces it.
+			local own = table.clone(response)
+			own.request_id = input.request_id
+			view.setup_refusals = { [input.request_id] = own }
+			if view.setup_probe == nil then return end
+		end
 		setup_result(view, input, response)
 	end
 	if not prepare then

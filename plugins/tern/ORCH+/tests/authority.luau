@@ -1742,9 +1742,14 @@ do
 	definition.event(view1, { ev = "action", act = "setup-repository-probe", value = runtime.json.encode({
 		source_nonce = view1.alias_nonce, request_id = "newer-probe", cwd = prepared, target_ref = "main" }) }, cx1)
 	held[1]()
-	check(view1.readiness_pending == nil and view1.setup_result.request_id == "readiness-one"
-		and view1.setup_result.code == "repository_probe_superseded",
-		"a superseded readiness probe completes with a refusal and clears the pending flag")
+	-- SKILLS-221 R2: the newer probe finished first, so its result stays; the readiness caller gets its own refusal.
+	-- Fails on the old code: the late refusal replaced the newer probe's result (request_id "readiness-one").
+	check(view1.readiness_pending == nil, "a superseded readiness probe clears the pending flag")
+	check(view1.setup_result.request_id == "newer-probe" and view1.setup_result.code ~= "repository_probe_superseded",
+		"the newer repository probe keeps its own result when the superseded readiness refusal arrives late")
+	local refusal = if view1.setup_refusals then view1.setup_refusals["readiness-one"] else nil
+	check(refusal ~= nil and refusal.ok == false and refusal.code == "repository_probe_superseded" and refusal.request_id == "readiness-one",
+		"the superseded readiness caller receives its own refusal, kept beside the newer result")
 	definition.event(view1, { ev = "action", act = "setup-readiness-prepare", value = runtime.json.encode({
 		source_nonce = view1.alias_nonce, request_id = "readiness-two" }) }, cx1)
 	check(view1.setup_result.request_id == "readiness-two" and view1.setup_result.code ~= "readiness_pending",
