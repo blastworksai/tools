@@ -149,10 +149,14 @@ function M.new(api: any): any
 					else runs[run.source] = nil; toast(cx, "Readiness consent could not be persisted; nothing launched.") end
 				end
 			elseif run.phase == "repository_probe" then
-				local result = readiness_outcome(api.setup(cx, run.source), run.request)
+				local data = api.setup(cx, run.source)
+				local result = readiness_outcome(data, run.request)
 				if result then
 					if not result.ok or type(result.repository) ~= "table" then
 						finish(cx, run, "unavailable", "Disposable repository verification failed: " .. tostring(result.message or result.code))
+					elseif not data or not api.same(data.setup_repository, result.repository) then
+						-- A success receipt is only usable while the host still holds that exact repository proof.
+						finish(cx, run, "unavailable", "Another checkout was verified before this readiness check could continue. Run the readiness check again.")
 					else
 						run.repository = table.clone(result.repository); run.repository.queue_route = "orch_queue"
 						run.path = run.repository.cwd

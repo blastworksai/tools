@@ -114,6 +114,7 @@ local function exercise(project_snapshot)
 			self.path = "/fixture/execution-host/readiness-owned"
 			self.data.setup_result = { request_id = operation.request.request_id, ok = true, repository = {
 				cwd = self.path, repo_root = self.path, common_dir = self.path .. "/.git", head_revision = string.rep("a", 40), target_ref = "refs/heads/main" } }
+			self.data.setup_repository = self.data.setup_result.repository -- The host still holds this repository proof.
 		else self.data.setup_result = { request_id = operation.request.request_id, ok = true, readiness_passed = true } end
 		self:tick()
 	end
@@ -307,8 +308,24 @@ do
 	f.path = "/fixture/execution-host/readiness-owned"
 	f.data.readiness_receipts = { [operation.request.request_id] = { request_id = operation.request.request_id, ok = true, repository = {
 		cwd = f.path, repo_root = f.path, common_dir = f.path .. "/.git", head_revision = string.rep("a", 40), target_ref = "refs/heads/main" } } }
+	f.data.setup_repository = f.data.readiness_receipts[operation.request.request_id].repository
 	f.data.setup_result = { request_id = "newer-probe", ok = true, code = "repository_verified" }
 	f:tick()
 	check(f.decision ~= nil and f.decision.command == "new_project", "a verified readiness receipt proceeds although the shared result was replaced")
+end
+-- SKILLS-221 R5: a success receipt outlived its repository proof (another checkout was verified before the window read it).
+-- Fails on the old code: the window created the exercise project and the host then refused the association.
+do
+	local f = exercise(); f:consent()
+	local operation = assert(f.processes[1])
+	f.path = "/fixture/execution-host/readiness-owned"
+	f.data.readiness_receipts = { [operation.request.request_id] = { request_id = operation.request.request_id, ok = true, repository = {
+		cwd = f.path, repo_root = f.path, common_dir = f.path .. "/.git", head_revision = string.rep("a", 40), target_ref = "refs/heads/main" } } }
+	f.data.setup_repository = { cwd = "/fixture/other-checkout", repo_root = "/fixture/other-checkout", common_dir = "/fixture/other-checkout/.git",
+		head_revision = string.rep("b", 40), target_ref = "refs/heads/main" }
+	f:tick()
+	check(f.decision == nil and #f.commands == 0 and #f.queued == 0 and f.events[#f.events].readiness.state == "unavailable"
+		and f.events[#f.events].readiness.summary:find("Another checkout was verified before this readiness check could continue. Run the readiness check again.", 1, true) ~= nil,
+		"a success receipt for a repository the host no longer holds ends the run with one notice and creates no project")
 end
 return "readiness_ui: " .. tostring(checks) .. " checks"

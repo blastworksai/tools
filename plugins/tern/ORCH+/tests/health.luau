@@ -1,6 +1,6 @@
 -- Deterministic real reducer/host/window coverage. Run bounded sections in native host callbacks.
 local root, section = ...
-assert(section == nil or table.find({ "clock", "focus_window", "focus_stale_coordinator", "form_hold_notice", "form_hold_capacity", "form_hold_rearm", "native", "controls", "status_launcher", "timer", "epoch_window", "owner_send_notice", "owner_send_reasons", "owner_send_post_submit", "owner_send_oversize", "epoch_host", "finish", "continuation", "alias_recovery", "held_report", "sweep_schedule", "readable_views", "cp2_controls", "guided_recovery", "guided_recovery_empty", "guided_recovery_host_restart", "stopped_worker_view", "expired_wake", "revoked_authorization", "observe_retention", "uncertain_read", "quota_reader", "capacity_refresh_confirm", "capacity_refresh_outcomes", "capacity_refresh_collision", "capacity_refresh_send_refused", "capacity_refresh_lost_confirmation", "capacity_confirm_error", "capacity_confirm_report_error", "capacity_receipt_owner_command", "capacity_refresh_second_click_pending", "capacity_refresh_disconnected_before_submit", "bridge_lifecycle", "withdraw_fenced", "config_cards", "work_picker", "inbox_window", "usage_row",
+assert(section == nil or table.find({ "clock", "focus_window", "focus_stale_coordinator", "form_hold_notice", "form_hold_capacity", "form_hold_rearm", "native", "controls", "status_launcher", "timer", "epoch_window", "owner_send_notice", "owner_send_reasons", "owner_send_post_submit", "owner_send_oversize", "epoch_host", "finish", "continuation", "alias_recovery", "held_report", "sweep_schedule", "readable_views", "cp2_controls", "guided_recovery", "guided_recovery_empty", "guided_recovery_host_restart", "stopped_worker_view", "expired_wake", "revoked_authorization", "observe_retention", "uncertain_read", "quota_reader", "capacity_refresh_confirm", "capacity_refresh_outcomes", "capacity_refresh_collision", "capacity_refresh_send_refused", "capacity_refresh_lost_confirmation", "capacity_confirm_error", "capacity_confirm_report_error", "capacity_confirm_report_retry", "capacity_receipt_own_node", "capacity_receipt_owner_command", "capacity_refresh_second_click_pending", "capacity_refresh_disconnected_before_submit", "bridge_lifecycle", "withdraw_fenced", "config_cards", "work_picker", "inbox_window", "usage_row",
 	"reconnect_stale", "reconnect_missing", "reconnect_unknown", "reconnect_unrelated", "worker_attachment", "worker_attachment_form",
 	"driver_admission_noop", "driver_admission_refused", "driver_retry_original", "driver_retry_unrelated", "driver_retry_absent",
 	"driver_deadline_absent", "driver_deadline_unrelated", "driver_missing", "driver_suspension", "driver_fence_origin", "driver_fence_claim",
@@ -3428,6 +3428,58 @@ if section == nil or section == "capacity_confirm_report_error" then
 	check(w.api.capacity_confirms[9001] ~= nil and kit.count_text("could not confirm the host's answer") == 1,
 		"the other broken entry was still reported and the real refresh keeps waiting")
 end
+-- SKILLS-221 R5: the notice of a failed confirmation raises once. The failed outcome is kept and shown on the next
+-- window turn (one retry), so two failed confirmations still end with two notices.
+-- Fails on 673c563: the raising notice discarded its outcome, so only one notice ever appeared.
+if section == nil or section == "capacity_confirm_report_retry" then
+	local kit = capacity_fixture()
+	local w = kit.w
+	w.api.capacity_confirms[9002] = { request_id = "broken-a", origin = nil, sent_at = 0 }
+	w.api.capacity_confirms[9003] = { request_id = "broken-b", origin = nil, sent_at = 0 }
+	local original_toast, raised = w.cx.toast, 0
+	w.cx.toast = function(self, level, title, message)
+		if raised == 0 and message:find("could not confirm the host's answer", 1, true) then raised += 1; error("toast failed once") end
+		return original_toast(self, level, title, message)
+	end
+	check(pcall(w.tick, w), "a raising notice does not escape the confirmation step")
+	check(raised == 1 and kit.count_text("could not confirm the host's answer") == 1, "one outcome was shown and one notice raised on the first turn")
+	w:tick()
+	w.cx.toast = original_toast
+	check(kit.count_text("could not confirm the host's answer") == 2 and next(w.api.capacity_confirms) == nil,
+		"the outcome whose notice raised is shown on the next window turn: two failed confirmations end with two notices")
+end
+-- SKILLS-221 R5: the capacity receipt is published once in its own small node, never copied into each action's projection.
+-- Fails on 673c563: the receipt rode in every per-action projection, so a refresh grew each action toward its 8192-byte bound.
+if section == nil or section == "capacity_receipt_own_node" then
+	local kit = capacity_fixture()
+	local w = kit.w
+	w.f.target_pane = "9004"
+	local other = w.f:accepted(false)
+	assert(w.f:apply("intake", { worker_id = w.id, bytes = w.f:report(w.id, 2, "HEARTBEAT", { state = "working" }) }).ok)
+	local wake = w.f:apply("poll", { worker_id = w.id })
+	local wake_request = w.f:action(wake.action_id).request
+	assert(w.f:finish(wake.action_id, "published", { wake_status = "awaiting_window", wake_effect_started = false,
+		wake_target_request_id = wake_request.request_id, wake_target_action_id = wake_request.action_id }).ok)
+	w.agents[1].state = "working"
+	w:elapse(6000)
+	w.api.schedule(w.cx); w.api.schedule(w.cx)
+	local other_action
+	for _, worker in flow(w.f).workers do if worker.worker_id == other then other_action = worker.active_action_id end end
+	check(other_action ~= nil, "a retained action exists")
+	local function node_text(root)
+		local tree = assert(w.cx.session:surface(9001, { root = root }))
+		local span = tree.main.p.spans[1]
+		return if type(span) == "string" then span else span.t
+	end
+	w:click("capacity_refresh")
+	kit.run(function() return kit.count_text(kit.success) == 1 end)
+	check(kit.count_text(kit.success) == 1, "the refresh ended with its success outcome")
+	local after = node_text("main.dispatch-action-" .. other_action)
+	check(not after:find("capacity_result", 1, true) and #after <= 8192 and runtime.json.decode(after).action.action_id == other_action,
+		"the action projection carries no capacity receipt and stays readable")
+	local receipt = node_text("main.dispatch-capacity")
+	check(#receipt <= 1024 and runtime.json.decode(receipt).ok == true, "the receipt has its own small node")
+end
 -- SKILLS-221 R4: the host recorded the refresh, then an unrelated owner command replaced the shared command result
 -- before the window's confirmation tick. The refresh still ends with its own success outcome.
 -- Fails on the old code: only the shared command result carried the receipt, so the refresh timed out as unconfirmed.
@@ -3474,8 +3526,8 @@ if section == nil or section == "capacity_refresh_second_click_pending" then
 		"the second click sends no command and leaves the pending confirmation in place")
 	w.cx.session.event = original
 end
--- SKILLS-221 R4: the window loses the controller after the reader finished and before the evidence is submitted.
--- Added coverage: only a disconnection after submission was covered before; this one must send zero commands.
+-- SKILLS-221 R4: the window loses the controller after the reader answered the snapshot request and before it verifies
+-- the evidence (the reader stops before validation and any send). Added coverage: this one must send zero commands.
 if section == nil or section == "capacity_refresh_disconnected_before_submit" then
 	local kit = capacity_fixture()
 	local w, host = kit.w, kit.host

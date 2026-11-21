@@ -780,7 +780,7 @@ local function readiness_host(view: any, input: any, prepare: boolean)
 		own.request_id = input.request_id
 		local receipts, ids = view.readiness_receipts or {}, view.readiness_receipt_ids or {}
 		receipts[input.request_id] = own
-		table.insert(ids, input.request_id)
+		if not table.find(ids, input.request_id) then table.insert(ids, input.request_id) end
 		while #ids > 4 do receipts[table.remove(ids, 1)] = nil end
 		view.readiness_receipts, view.readiness_receipt_ids = receipts, ids
 		-- When the newer check already published its result (no probe is still running), that result stays.

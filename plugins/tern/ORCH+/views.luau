@@ -617,7 +617,6 @@ local function dispatch_view(view: any, projection: any, selected: any): (any, a
 		session_control = if d.session_control then pick(d.session_control, "phase admission_seq admitted generation_floor request_floor next_request_serial last_authority_revision close") else nil,
 		reconcile_progress = d.reconcile_progress,
 		control_result = if view.dispatch_control_result then pick(view.dispatch_control_result, "request_id command ok code message") else nil,
-		capacity_result = if view.dispatch_capacity_result then pick(view.dispatch_capacity_result, "request_id command ok code message") else nil,
 		controller_phase = if bound then owner.phase else nil, revision = projection.revision, command_cursor = d.command_cursor,
 		action = if active then pick(active, ACTION_KEYS, { action_id = active.request.action_id }) else nil,
 		result = if outcome then pick(outcome, RESULT_KEYS, { action_id = outcome.action_id }) else nil,
@@ -634,6 +633,12 @@ local function dispatch_view(view: any, projection: any, selected: any): (any, a
 	end
 	local bridge = keyed(bytes, "dispatch-state", "orchplus.dispatch")
 	local scoped_nodes = {}
+	-- The capacity refresh receipt has its own small node, never a copy in the main or per-action projections.
+	if view.dispatch_capacity_result then
+		local receipt = pick(view.dispatch_capacity_result, "request_id command ok code")
+		receipt.message = if view.dispatch_capacity_result.message ~= nil then tostring(view.dispatch_capacity_result.message):sub(1, 200) else nil
+		table.insert(scoped_nodes, keyed(tern.json.encode(receipt), "dispatch-capacity", "orchplus.dispatch"))
+	end
 	for id, a in d.actions do
 		local scoped = table.clone(machine)
 		scoped.sessions = nil; scoped.control = nil; scoped.session_control = nil; scoped.compatibility = nil

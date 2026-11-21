@@ -3445,8 +3445,12 @@ function native_scope.capacity_confirm_one(cx: WindowCx, source: number, wait: a
 	end
 	local data = snapshot(cx, source)
 	local result
-	-- capacity_result is the refresh's own receipt; the others stay as fallbacks for an older host.
-	for _, key in { "capacity_result", "command_result", "driver_result", "result" } do
+	-- The refresh's own receipt has its own small node; the others stay as fallbacks for an older host.
+	local _, receipt_bytes = surface_node(cx, source, BLOCK, "orchplus.dispatch", "dispatch-capacity", 1024)
+	local receipt = if receipt_bytes then decoded(receipt_bytes, 1024) else nil
+	if receipt and receipt.request_id == wait.request_id then result = receipt end
+	for _, key in { "command_result", "driver_result", "result" } do
+		if result then break end
 		local candidate = if data then data[key] else nil
 		if candidate and candidate.request_id == wait.request_id then result = candidate; break end
 	end
@@ -3460,16 +3464,21 @@ function native_scope.capacity_confirm_one(cx: WindowCx, source: number, wait: a
 	end
 end
 -- An error while checking one waiting refresh ends that refresh with a notice; every other one keeps waiting.
+-- A failed confirmation whose own notice raised keeps its text here and is shown on the next window turn.
+-- One retry is enough: a notice that raises a second time is dropped, never kept forever.
+native_scope.capacity_unsent = {}
 function native_scope.capacity_confirm_step(cx: WindowCx)
+	local retry = native_scope.capacity_unsent
+	native_scope.capacity_unsent = {}
+	for _, text in retry do pcall(function() cx:toast("error", "ORCH+ quota evidence", text) end) end
 	for source, wait in native_scope.capacity_confirms do
 		local ok, failure = pcall(native_scope.capacity_confirm_one, cx, source, wait)
 		if not ok then
 			-- Remove the entry before reporting it: a report that raises must neither keep the entry nor skip the others.
 			native_scope.capacity_confirms[source] = nil
-			pcall(function()
-				cx:toast("error", "ORCH+ quota evidence", "Capacity evidence was sent, but this window could not confirm the host's answer ("
-					.. tostring(failure):sub(1, 200) .. "). Check the result before refreshing again.")
-			end)
+			local text = "Capacity evidence was sent, but this window could not confirm the host's answer ("
+				.. tostring(failure):sub(1, 200) .. "). Check the result before refreshing again."
+			if not pcall(function() cx:toast("error", "ORCH+ quota evidence", text) end) then table.insert(native_scope.capacity_unsent, text) end
 		end
 	end
 end
@@ -3559,7 +3568,7 @@ local function arm()
 			if next(guides) ~= nil and not pcall(probe_step, fresh) then table.clear(guides) end
 			-- Fenced-work withdrawal: at most one read-only status step per controller.
 			if next(withdrawals) ~= nil and not pcall(withdraw_step, fresh) then table.clear(withdrawals) end
-			if next(native_scope.capacity_confirms) ~= nil then pcall(native_scope.capacity_confirm_step, fresh) end
+			if next(native_scope.capacity_confirms) ~= nil or next(native_scope.capacity_unsent) ~= nil then pcall(native_scope.capacity_confirm_step, fresh) end
 			relay_maintenance(fresh)
 			pcall(idle_wake.keep, fresh) -- Last: this turn's schedule decides whether timed work remains.
 		end
