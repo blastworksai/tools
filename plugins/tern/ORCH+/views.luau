@@ -268,7 +268,7 @@ local function pause_link(view: any, policy: any): any
 	return dispatch_link(view, if policy.paused then "resume" else "pause", if policy.paused then "Resume scheduling" else "Pause new work")
 end
 -- `orchplus.worker` node fields copied verbatim from the projected workflow worker.
-local WORKER_KEYS = "worker_id work_id worker_generation origin_binding pane_binding due_poll poll_ms poll_continuation due_report report_request_pending active_action_id cleanup_ready"
+local WORKER_KEYS = "worker_id work_id worker_generation origin_binding pane_binding due_poll poll_ms poll_continuation stale_coordinator due_report report_request_pending active_action_id cleanup_ready"
 	.. " activation_received"
 	.. " finish_requested coordinator_owner_id launch_origin_binding launch_pane_binding continuation_required continuation_proof"
 	.. " orchestration_excluded context_used_pct context_seq context_rollover phase due_rollover rollover restored adopt_pane_binding withdrawal role family review_id"
@@ -633,6 +633,12 @@ local function dispatch_view(view: any, projection: any, selected: any): (any, a
 	end
 	local bridge = keyed(bytes, "dispatch-state", "orchplus.dispatch")
 	local scoped_nodes = {}
+	-- The capacity refresh receipt has its own small node, never a copy in the main or per-action projections.
+	if view.dispatch_capacity_result then
+		local receipt = pick(view.dispatch_capacity_result, "request_id command ok code")
+		receipt.message = if view.dispatch_capacity_result.message ~= nil then tostring(view.dispatch_capacity_result.message):sub(1, 200) else nil
+		table.insert(scoped_nodes, keyed(tern.json.encode(receipt), "dispatch-capacity", "orchplus.dispatch"))
+	end
 	for id, a in d.actions do
 		local scoped = table.clone(machine)
 		scoped.sessions = nil; scoped.control = nil; scoped.session_control = nil; scoped.compatibility = nil
@@ -1446,7 +1452,8 @@ function M.render(view: any, projection: any, status: string, diagnostic: string
 		end
 		table.insert(rows, keyed(tern.json.encode({ version = 1, source_nonce = view.alias_nonce, host_pane_id = tostring(view.pane),
 			authority_namespace = projection.authority_namespace, authority_revision = projection.revision,
-			setup = setup, installation_defaults = defaults, setup_result = view.setup_result, setup_repository = view.setup_repository }), "setup-index", "orchplus.setup"))
+			setup = setup, installation_defaults = defaults, setup_result = view.setup_result, setup_repository = view.setup_repository,
+			readiness_receipts = view.readiness_receipts }), "setup-index", "orchplus.setup"))
 	end
 	if view.setup_catalog_request then table.insert(rows, keyed(tern.json.encode(view.setup_catalog_request), "setup-catalog-request", "orchplus.setup.request")) end
 	if diagnostic ~= nil and view.advanced_open then table.insert(rows, ui.text(ui.span(diagnostic, "error"))) end

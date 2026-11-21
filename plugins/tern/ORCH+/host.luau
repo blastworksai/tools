@@ -18,7 +18,7 @@ local OBSERVATION = { observe_owner = true, mark_uncertain = true }
 local function settlement(event: any): boolean
 	return SETTLEMENT[event.kind] == true or (event.kind == "dispatch" and event.command ~= "queue" and event.command ~= "catalog" and event.command ~= "reply" and event.command ~= "capacity")
 end
-local UNSAVED_OBSERVATION = "A fresh safety observation could not be persisted. Release and recovery are blocked in this runtime; repair storage/capacity and restart for fresh inspection."
+local UNSAVED_OBSERVATION = "A fresh safety observation could not be persisted. Release and recovery are blocked in this runtime; repair storage/capacity, then restart Tern for fresh inspection. Checking the store again does not clear it."
 local boot = string.format("host-%d-%08x-%08x", os.time(), math.random(1, 2147483647), math.random(1, 2147483647))
 local function host_clock(): any
 	return { now_ms = math.floor(os.time() * 1000), mono_ms = tern.now(), epoch = boot }
@@ -397,8 +397,9 @@ local handling_event = false
 -- A forgotten orchestration leaves no selection, scoped result or saved id behind. Only a successfully LOADED authority
 -- (ready, with the installation-level notice naming this exact session and the session truly gone) may authorize this:
 -- missing, corrupt or unreadable storage never clears anything.
-local FORGOTTEN_VIEW_FIELDS = { "scoped_results", "dispatch_command_result", "dispatch_action", "recovery",
-	"attestation", "close_armed", "relay_notice", "creation_ready", "setup_result", "migration_result", "orchestration_result", "forget" }
+local FORGOTTEN_VIEW_FIELDS = { "scoped_results", "dispatch_command_result", "dispatch_capacity_result", "dispatch_action", "recovery",
+	"attestation", "close_armed", "relay_notice", "creation_ready", "setup_result", "readiness_receipts", "readiness_receipt_ids",
+	"migration_result", "orchestration_result", "forget" }
 -- Any session id the loaded authority no longer holds is cleared with its scoped results. A forgotten orchestration clears at
 -- once and shows the completion notice; any other absent id (an ordinary close) is kept for a short grace so the closed bridge
 -- view can still release through its session_closed alias, and is never written to saved data.
@@ -718,8 +719,16 @@ local function probe_repository(view: any, input: any, complete: any?)
 		{ argv = { "git", "-C", input.cwd, "rev-parse", "--path-format=absolute", "--git-common-dir" }, field = "common_dir" },
 		{ argv = { "git", "-C", input.cwd, "rev-parse", "--verify", "--end-of-options", target .. "^{commit}" }, field = "head_revision" },
 	}
+	-- A newer probe replaced this one: a caller waiting on `complete` (readiness) gets a refusal, never silence.
+	local function superseded(): boolean
+		if view.setup_probe == input.request_id and contexts[view.pane] ~= nil then return false end
+		if complete and contexts[view.pane] ~= nil then
+			complete({ ok = false, code = "repository_probe_superseded", message = "A newer repository check replaced this one; it was not completed." })
+		end
+		return true
+	end
 	local function run(index: number)
-		if view.setup_probe ~= input.request_id or contexts[view.pane] == nil then return end
+		if superseded() then return end
 		local step = steps[index]
 		if step == nil then
 			view.setup_probe = nil
@@ -732,7 +741,7 @@ local function probe_repository(view: any, input: any, complete: any?)
 		end
 		local ok, failure = pcall(function()
 			tern.process.run(step.argv, { timeout_ms = 10000 }, function(result: any)
-				if view.setup_probe ~= input.request_id or contexts[view.pane] == nil then return end
+				if superseded() then return end
 				if result.status ~= 0 or result.timed_out or result.truncated or result.stdout_truncated then
 					view.setup_probe = nil
 					refuse("Git could not verify this repository/target: " .. tostring(result.stderr or ""):gsub("%c", " "):sub(1, 512))
@@ -765,6 +774,17 @@ local function readiness_host(view: any, input: any, prepare: boolean)
 	local function done(response: any)
 		if not live() then return end
 		view.readiness_pending = nil
+		-- Every readiness outcome is this caller's own receipt, keyed by its request id. A newer repository result or a
+		-- late refusal can replace `setup_result`, never the receipt; the window reads the receipt.
+		local own = table.clone(response)
+		own.request_id = input.request_id
+		local receipts, ids = view.readiness_receipts or {}, view.readiness_receipt_ids or {}
+		receipts[input.request_id] = own
+		if not table.find(ids, input.request_id) then table.insert(ids, input.request_id) end
+		while #ids > 4 do receipts[table.remove(ids, 1)] = nil end
+		view.readiness_receipts, view.readiness_receipt_ids = receipts, ids
+		-- When the newer check already published its result (no probe is still running), that result stays.
+		if response.code == "repository_probe_superseded" and view.setup_probe == nil then render_all(); return end
 		setup_result(view, input, response)
 	end
 	if not prepare then
@@ -2332,6 +2352,10 @@ local function handle(view: any, ev: any, cx: any)
 		end
 		if operator and not control_command then
 			view.dispatch_command_result = response
+			-- A refresh's own receipt: another owner command, a cleanup summary or a selection replaces or clears
+			-- dispatch_command_result before the window's confirmation tick reads it. This slot is only replaced by the
+			-- next capacity answer.
+			if input.command == "capacity" then view.dispatch_capacity_result = response end
 			if not workflow_only then view.dispatch_driver_result = response end
 		end
 		-- The conversation composer serializes these commands per source. Keep its exact

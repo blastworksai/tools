@@ -1,8 +1,8 @@
 # ORCH+ backlog
 
 This is a list of future work.
-None of these items is implemented.
-None of them is authorised for build.
+Item 8 is implemented (shipped in 0.6.3); none of the others is implemented.
+None of the open items is authorised for build.
 They are requests recorded for later, not promises.
 
 ## 1. Choose model and effort

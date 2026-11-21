@@ -420,6 +420,11 @@ safety_store.fail_write = true
 check(safety:apply(fact).code == "persistence_failed" and safety.uncommitted_observation, "uncommitted safety fact fences later settlement")
 safety_store.fail_write = false
 check(safety:apply(owned(safety, "release_controller", "safety", safety_owner)).code == "uncommitted_observation", "repaired storage alone does not revive stale permission")
+do
+	local refused = safety:apply(owned(safety, "release_controller", "safety", safety_owner))
+	check(string.find(refused.message, "restart Tern", 1, true) ~= nil and string.find(refused.message, "does not clear it", 1, true) ~= nil,
+		"the refusal after an unsaved observation names its one exit: restart Tern")
+end
 check(safety:load().ok and safety.uncommitted_observation, "store reread cannot silently clear runtime safety fence")
 -- Byte reserve is independent of removed historical entry counts.
 local capacity_store = store(); local capacity = host.new_authority(capacity_store)
@@ -1715,6 +1720,57 @@ do
 		source_nonce = view1.alias_nonce, request_id = "verify-unowned-readiness", orch_project_id = "unknown-project" }) }, cx1)
 	check(view1.setup_result.code == "readiness_unowned" and #calls == before,
 		"readiness refuses arbitrary project readback before invoking Git")
+	-- A readiness probe that a newer repository probe replaced is refused, not left pending for the life of the pane.
+	local held, hold_next = {}, true
+	fake.process = { run = function(argv, options, callback)
+		local stdout = ""
+		if argv[2] == "init" then prepared = argv[4] end
+		if table.find(argv, "--show-toplevel") then stdout = prepared .. "\n"
+		elseif table.find(argv, "--git-common-dir") then stdout = prepared .. "/.git\n"
+		elseif table.find(argv, "--verify") then stdout = string.rep("a", 40) .. "\n" end
+		local result = { status = 0, stdout = stdout, stderr = "" }
+		if hold_next and table.find(argv, "--show-toplevel") then
+			hold_next = false
+			table.insert(held, function() callback(result) end)
+			return
+		end
+		callback(result)
+	end }
+	definition.event(view1, { ev = "action", act = "setup-readiness-prepare", value = runtime.json.encode({
+		source_nonce = view1.alias_nonce, request_id = "readiness-one" }) }, cx1)
+	check(#held == 1 and view1.readiness_pending == "readiness-one", "first readiness probe waits on its repository check")
+	definition.event(view1, { ev = "action", act = "setup-repository-probe", value = runtime.json.encode({
+		source_nonce = view1.alias_nonce, request_id = "newer-probe", cwd = prepared, target_ref = "main" }) }, cx1)
+	held[1]()
+	-- SKILLS-221 R2: the newer probe finished first, so its result stays; the readiness caller gets its own refusal.
+	-- Fails on the old code: the late refusal replaced the newer probe's result (request_id "readiness-one").
+	check(view1.readiness_pending == nil, "a superseded readiness probe clears the pending flag")
+	check(view1.setup_result.request_id == "newer-probe" and view1.setup_result.code ~= "repository_probe_superseded",
+		"the newer repository probe keeps its own result when the superseded readiness refusal arrives late")
+	local refusal = if view1.readiness_receipts then view1.readiness_receipts["readiness-one"] else nil
+	check(refusal ~= nil and refusal.ok == false and refusal.code == "repository_probe_superseded" and refusal.request_id == "readiness-one",
+		"the superseded readiness caller receives its own refusal receipt, kept beside the newer result")
+	-- SKILLS-221 R4: the refusal arrives first and the newer repository result then replaces the shared result slot.
+	-- Fails on the old code: no receipt existed, so the readiness caller never saw its refusal.
+	hold_next = true
+	definition.event(view1, { ev = "action", act = "setup-readiness-prepare", value = runtime.json.encode({
+		source_nonce = view1.alias_nonce, request_id = "readiness-early" }) }, cx1)
+	hold_next = true
+	definition.event(view1, { ev = "action", act = "setup-repository-probe", value = runtime.json.encode({
+		source_nonce = view1.alias_nonce, request_id = "newer-late", cwd = prepared, target_ref = "main" }) }, cx1)
+	check(#held == 3, "the readiness probe and the newer repository probe are both held")
+	held[2]()
+	check(view1.readiness_receipts["readiness-early"] ~= nil and view1.setup_result.request_id == "readiness-early",
+		"the refusal arrives while the newer probe still runs")
+	held[3]()
+	check(view1.setup_result.request_id == "newer-late", "the newer repository result then replaces the shared result slot")
+	local early = view1.readiness_receipts["readiness-early"]
+	check(early ~= nil and early.code == "repository_probe_superseded" and early.request_id == "readiness-early",
+		"the readiness refusal survives as its own receipt after the shared result slot is replaced")
+	definition.event(view1, { ev = "action", act = "setup-readiness-prepare", value = runtime.json.encode({
+		source_nonce = view1.alias_nonce, request_id = "readiness-two" }) }, cx1)
+	check(view1.setup_result.request_id == "readiness-two" and view1.setup_result.code ~= "readiness_pending",
+		"a second readiness request is not refused as still pending")
 	fake.process = original_process
 end
 do

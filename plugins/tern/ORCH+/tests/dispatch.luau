@@ -137,7 +137,8 @@ local function role_node(node, role, key)
 end
 local function fixture(clock, options)
 	local memory = keyed_memory()
-	local authority = host.new_authority(memory, clock or function() return { now_ms = math.floor(os.time() * 1000) } end)
+	-- A fixed default clock (2023-11-14 22:13:20 UTC): tests that need time to pass pass their own clock.
+	local authority = host.new_authority(memory, clock or function() return { now_ms = 1700000000000 } end)
 	authority:load(); assert(authority:initialize(true).ok)
 	local peer, selection = empty_peer()
 	local qualified = authority:qualify({ kind = "qualify_current", request_id = next_id(),
@@ -919,6 +920,13 @@ end
 -- only when the host says it is due. Measured 19 Nov 2026: 4 writes per 10 s inside the window,
 -- 49 writes an hour after it (the ordinary 5-minute cadence).
 if section == nil or section == "coordinator_cost" then
+	-- The fast-cadence numbers have one home, the protocol module; the window uses it rather than literals.
+	check(protocol.COORDINATOR_POLL_MS == 10000 and protocol.COORDINATOR_FAST_MS == 600000, "the protocol module exports the coordinator's 10 s and 10 min cadence")
+	do
+		local window_source = runtime.fs.read(root .. "/window.luau")
+		check(window_source:find("now + dispatch.COORDINATOR_FAST_MS", 1, true) ~= nil and window_source:find("now + 600000", 1, true) == nil
+			and window_source:find("dispatch.COORDINATOR_POLL_MS", 1, true) ~= nil, "the window takes the fast-cadence numbers from the protocol module, not literals")
+	end
 	local clock = { now_ms = 1000, mono_ms = 1000, epoch = "cost-host" }
 	local f = fixture(function() return clone(clock) end); local id = f:accepted(true)
 	local function shown() for _, w in dispatch.project(f.authority.registry, f.origin.logical_session_id, f.origin.alias_nonce).workflow.workers do if w.worker_id == id then return w end end end
@@ -1060,6 +1068,19 @@ if section == nil or section == "read_owed" then
 		stale_owner = function(w) w.coordinator_owner_id = "owner-stale" end,
 	} do
 		check(owing(mutate) ~= true, "an owed read never projects continuation when the poll cannot read: " .. label)
+	end
+	do
+		-- A stale coordinator generation is never projected as due: the window would poll it every 10 s only to be refused.
+		local r = clone(f.authority.registry); local w = r.dispatch.workers[id]
+		w.workflow.due_poll = true
+		local function shown_due(registry)
+			for _, shown in dispatch.project(registry, f.origin.logical_session_id, f.origin.alias_nonce).workflow.workers do
+				if shown.worker_id == id then return shown.due_poll end
+			end
+		end
+		check(shown_due(r) == true, "control: a current coordinator's due poll is projected")
+		w.coordinator_owner_id = "owner-stale"
+		check(shown_due(r) == false, "a stale coordinator generation is not projected as due for a poll")
 	end
 	plain_clock.mono_ms += 10000; plain_clock.now_ms += 10000; assert(plain:tick().ok)
 	check(not projected(plain, pid).due_poll or projected(plain, pid).poll_continuation, "an ordinary worker is not paced at 10 s")

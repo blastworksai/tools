@@ -4,6 +4,16 @@ local M = {}
 function M.new(api: any): any
 	local runs: any = {}
 	local function toast(cx: WindowCx, message: string) cx:toast("info", "ORCH+ optional readiness", message) end
+	-- The host publishes every readiness outcome as its own receipt keyed by request id, so a newer repository result
+	-- or a late refusal cannot replace it before this window reads it. The shared result slot stays a fallback.
+	local function readiness_outcome(data: any?, request: string?): any?
+		if not data or request == nil then return nil end
+		local receipts = data.readiness_receipts
+		local own = if type(receipts) == "table" then receipts[request] else nil
+		if own then return own end
+		local result = data.setup_result
+		return if result and result.request_id == request then result else nil
+	end
 	local function persist(cx: WindowCx, source: number, data: any, state: string, summary: string, run: any?)
 		local request_id = api.id()
 		cx.session:event(source, { ev = "action", id = "main.setup-index", act = "setup-command", value = tern.json.encode({
@@ -140,10 +150,13 @@ function M.new(api: any): any
 				end
 			elseif run.phase == "repository_probe" then
 				local data = api.setup(cx, run.source)
-				local result = if data then data.setup_result else nil
-				if result and result.request_id == run.request then
+				local result = readiness_outcome(data, run.request)
+				if result then
 					if not result.ok or type(result.repository) ~= "table" then
 						finish(cx, run, "unavailable", "Disposable repository verification failed: " .. tostring(result.message or result.code))
+					elseif not data or not api.same(data.setup_repository, result.repository) then
+						-- A success receipt is only usable while the host still holds that exact repository proof.
+						finish(cx, run, "unavailable", "Another checkout was verified before this readiness check could continue. Run the readiness check again.")
 					else
 						run.repository = table.clone(result.repository); run.repository.queue_route = "orch_queue"
 						run.path = run.repository.cwd
@@ -217,9 +230,8 @@ function M.new(api: any): any
 					end
 				end
 			elseif run.phase == "readback" then
-				local data = api.setup(cx, run.source)
-				local result = if data then data.setup_result else nil
-				if result and result.request_id == run.request then
+				local result = readiness_outcome(api.setup(cx, run.source), run.request)
+				if result then
 					finish(cx, run, if result.ok and result.readiness_passed then "passed" else "failed",
 						if result.ok and result.readiness_passed then "Actual managed task, helper checks and policy-gated release-manager landing confirmed by execution-host Git readback."
 						else tostring(result.message or "The disposable target did not contain the readiness artifact."))
