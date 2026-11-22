@@ -79,3 +79,5 @@ def main():
 
 
 main()
+
+# Landing policy acceptance proof, 22 Nov 2026: this comment-only line landed by Founder Overrule.
