@@ -81,3 +81,4 @@ def main():
 main()
 
 # Landing policy acceptance proof, 22 Nov 2026: this comment-only line landed by Founder Overrule.
+# Second line: must be refused, the overrule record is spent.
