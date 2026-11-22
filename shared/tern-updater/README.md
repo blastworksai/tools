@@ -52,7 +52,7 @@ Optional, next to the plugin's `plugin.toml`:
    hidden = true
    ```
 
-3. Run `python3 shared/tern-updater/sync.py <DIR>` to vendor the fourteen modules into `plugins/tern/<DIR>/updater/`. Never edit vendored copies; edit here and re-run `sync.py` (no DIR = every integrated plugin). The pure `discovery.luau` module is also used by SPAWN and TODO; their runners retain their own deadlines and environment routing. `shell.luau` is generated from SPAWN's reviewed shell serializers.
+3. Run `python3 shared/tern-updater/sync.py <DIR>` to vendor the fourteen modules into `plugins/tern/<DIR>/updater/`. Never edit vendored copies; edit here and re-run `sync.py` (no DIR = every integrated plugin). `sync.py --check` writes nothing: it lists each differing, missing or extra copy and exits 1 when it finds one. The pure `discovery.luau` module is also used by SPAWN and TODO; their runners retain their own deadlines and environment routing. `shell.luau` is generated from SPAWN's reviewed shell serializers.
 
    The extraction runs from `local Backend = {}` to the mailbox-adapter boundary in `SPAWN/backend.luau`. Keep SPAWN-only setup helpers and their constants below that boundary: the generated updater module has no SPAWN `Config` dependency. Run `sync.py --check` after editing this region; unchanged serializers should leave the canonical module and all five vendored copies byte-identical.
 4. Add the snippet below to the plugin's README with `<PREFIX>`/`<DIR>` filled in.
