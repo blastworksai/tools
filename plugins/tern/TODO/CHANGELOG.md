@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.10.0
+
+- Offer a native choice of canonical plans from the execution host when automatic attachment finds no verified publication. Open the explicit selection in the live, read-only checklist.
+
 ## 0.7.3
 
 - Fix: a plan view's wait is held per requesting window (one window's revoke no longer cancels another's), and a wait that lapses leaves the view open and dormant instead of closing it. A dormant view looks again every 30 seconds: it finds a plan published later, drops itself when its pane is closed and ends when its session ends. A window asking again, or selecting the same session again, resumes it at once; the owner never has to close the view.
