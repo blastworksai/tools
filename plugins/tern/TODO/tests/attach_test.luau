@@ -3,17 +3,20 @@ local attach=require("../lib/attach")
 local function fixture()
     local f={picks={},blocks={},toasts={},timers={},events={},closed={},panes={{pane=10,tab=20,kind="terminal",program="bash",title="agent",cwd="/work"}}}
     f.host={id=1,name="host",address="user@host",state="connected",kind="remote",panes={10}}
-    f.root={split="right",{pane=10},{pane=11}}
+    f.root={pane=10}
+    f.floats={}
     local cx={session={},hosts={},layout={}}
     f.focus=10
     function cx.session:focused() return f.focus end
     function cx.session:pane(id) for _,p in f.panes do if p.pane==id then return p end end end
     function cx.session:panes() return f.panes end
     function cx.session:sessions() return {{name="Interactive",tabs={20,21}}} end
-    function cx.session:layout() return {root=f.root} end
+    function cx.session:layout(tab)
+        return {tab=tab,root=f.root,floats=f.floats,zoomed=false,focus=f.focus}
+    end
     function cx.session:event(pane,event)table.insert(f.events,{pane=pane,event=event})end
     function cx.hosts:current() return f.host end
-    function cx.hosts:list() return {f.host} end
+    function cx.hosts:list() return f.hosts or {f.host} end
     function cx.hosts:switch(id) assert(id==f.host.id) end
     function cx.layout:focus(id) f.focused=id; f.focus=id end
     function cx.layout:close(id) table.insert(f.closed,id) end
@@ -24,6 +27,7 @@ local function fixture()
     function cx:new_block(kind,args,how,opts)
         table.insert(f.blocks,{kind=kind,args=args,opts=opts})
         table.insert(f.panes,{pane=11,tab=20,block=kind})
+        f.root={split="right",{pane=opts.target},{pane=11},ratio=0.3}
         return 11
     end
     function cx:toast(level,text)table.insert(f.toasts,{level=level,text=text})end
@@ -32,6 +36,86 @@ local function fixture()
     return f
 end
 return {
+    {"one-pane tab attaches directly even when another tab has a live pane",function()
+        for _,hostKind in {"local","remote"} do
+            local f=fixture()
+            f.host.kind=hostKind
+            table.insert(f.host.panes,12)
+            table.insert(f.panes,{pane=12,tab=21,kind="terminal"})
+            local origin=f.controller.singlePane(f.cx)
+            assert(origin and origin.target==10 and origin.tab==20 and origin.hostKind==hostKind)
+            f.controller.start(f.cx,false,origin.target,origin)
+            f.timers[1](f.cx)
+            local source=tern.json.decode(f.blocks[1].args[1])
+            local label=if hostKind=="remote" then "SSH · " else "Local · "
+            assert(source.label==label .. f.host.address and f.blocks[1].opts.target==10)
+            assert(#f.events==1 and f.events[1].event.act=="confirm-selection")
+        end
+    end},
+    {"two tiled panes or a floating block keep the pane selector",function()
+        local f=fixture()
+        table.insert(f.panes,{pane=12,tab=20,kind="file"})
+        f.root={split="down",{pane=10},{pane=12},ratio=0.5}
+        assert(f.controller.singlePane(f.cx)==nil,"an ineligible second pane still occupies a tile")
+        f.root={pane=10}
+        f.floats={{pane=12,over=10,corner="tr"}}
+        assert(f.controller.singlePane(f.cx)==nil,"a floating second pane must preserve selection")
+        assert(#f.blocks==0)
+    end},
+    {"ineligible focused panes cannot open TODO automatically",function()
+        local cases={
+            parked=function(f) f.panes[1].parked=true end,
+            floating=function(f) f.panes[1].floating=true end,
+            exited=function(f) f.panes[1].exited=0 end,
+            closed=function(f) f.panes={} end,
+            hidden=function(f) f.root={pane=12} end,
+            nonterminal=function(f) f.panes[1].kind="file" end,
+            disconnected=function(f) f.host.state="disconnected" end,
+            ambiguous=function(f)
+                f.hosts={f.host,{id=2,state="connected",kind="local",panes={10}}}
+            end,
+        }
+        for name,change in cases do
+            local f=fixture()
+            change(f)
+            assert(f.controller.singlePane(f.cx)==nil and #f.blocks==0,name)
+        end
+    end},
+    {"an automatic origin with stale focus, layout, or host fails before opening",function()
+        local changes={
+            focus=function(f) f.focus=12 end,
+            layout=function(f) f.root={split="right",{pane=10},{pane=12},ratio=0.5} end,
+            host=function(f) f.host.id=2 end,
+        }
+        for name,change in changes do
+            local f=fixture()
+            local origin=f.controller.singlePane(f.cx)
+            assert(origin)
+            change(f)
+            f.controller.start(f.cx,false,origin.target,origin)
+            assert(#f.blocks==0 and #f.events==0,name)
+            assert(f.toasts[1] and f.toasts[1].level=="error",name)
+        end
+    end},
+    {"a new pane, moved focus, or changed connection cannot confirm an automatic split",function()
+        local changes={
+            focus=function(f) f.focus=12 end,
+            layout=function(f)
+                f.root={split="down",f.root,{pane=12},ratio=0.5}
+            end,
+            host=function(f) f.host.id=2 end,
+        }
+        for name,change in changes do
+            local f=fixture()
+            local origin=f.controller.singlePane(f.cx)
+            assert(origin)
+            f.controller.start(f.cx,false,origin.target,origin)
+            assert(#f.blocks==1,name)
+            change(f)
+            f.timers[1](f.cx)
+            assert(#f.events==0 and f.closed[1]==11,name)
+        end
+    end},
     {"selected native split delegates process resolution to host, with no client process call",function()
         local f=fixture();f.controller.start(f.cx,false)
         local source=tern.json.decode(f.blocks[1].args[1])
@@ -81,6 +165,7 @@ return {
         assert(#woke==0,"a fresh attach is not a wake")
         controller.start(f.cx,false,10)
         assert(#woke==1 and woke[1]=="11:10",table.concat(woke,","))
+        assert(#f.blocks==1,"the existing view must not open a second split")
         assert(f.toasts[#f.toasts].text:find("already has a plan view",1,true))
     end},
 }

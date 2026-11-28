@@ -89,7 +89,7 @@ function claim.acquire(env: Env, cx: any, board: string, granted: (any, string, 
 	end
 	local function poll(cx: any?)
 		if cx == nil then give_up("The window closed before the board was free."); return end
-		local ok, err = pcall(function()
+		local ok, err = pcall(function(): string?
 			if claim.holds(env, board, token) then
 				granted(cx, token, release)
 				return "granted"

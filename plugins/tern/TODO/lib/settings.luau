@@ -4,7 +4,7 @@ local settings = {}
 
 settings.KEY = "settings"
 settings.EMPTY = "No TODO source is enabled. Turn on the Tern Board option or enable Glitch integration in TODO Settings."
-settings.GLITCH_NOTE = "/glitch-plan progress will be shown in the TODO pane."
+settings.GLITCH_NOTE = "Start the plan with /glitch-execute in Claude Code or $glitch-execute in Codex."
 -- A fresh installation: Glitch off, native board on, no sync, nothing attached.
 settings.DEFAULTS = { schema = 1, glitch = false, board = true, sync = false }
 
@@ -105,7 +105,7 @@ function settings.syncBlocker(s: any, target: any, view: string, planSeen: boole
     if not planSeen then
         if why == "too_large" then return if target.remote then settings.REMOTE_TOO_LARGE else settings.TOO_LARGE end
         if why == "unreadable" and target.remote then return settings.REMOTE_ONLY end
-        return "Waiting for this session to publish a plan (/glitch-plan)."
+        return "Waiting for this session to publish a plan. Run /glitch-execute in Claude Code or $glitch-execute in Codex."
     end
     return nil
 end

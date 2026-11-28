@@ -1194,12 +1194,13 @@ class WindowContract(unittest.TestCase):
     def source(self, name):
         return (ROOT/name).read_text()
 
-    def test_files_button_is_gone_and_status_segment_opens_settings(self):
+    def test_status_segment_opens_todo_and_settings_remains_a_separate_command(self):
         window = self.source('window.luau')
+        status = window.split('tern.chrome.status(', 1)[1].split('end)', 1)[0]
         self.assertNotIn('files.button', window)
-        self.assertIn('icon = "list-checks", text = "TODO"', window)
-        self.assertIn('"settings"', window)
-        self.assertIn('TODO: Open Settings', window)
+        self.assertIn('icon = "list-checks", text = "TODO"', status)
+        self.assertIn('command = "plugin." .. tern.plugin.id .. ".open"', status)
+        self.assertIn('id = "settings", title = "TODO: Open Settings"', window)
         self.assertIn('status_prompt.ensure(cx, tern.plugin.id)', window)
         self.assertEqual(window.count('status_prompt.ensure('), 1)
 
@@ -1247,7 +1248,7 @@ class WindowContract(unittest.TestCase):
 
     def test_manifest_keeps_version_and_icon(self):
         manifest = self.source('plugin.toml')
-        self.assertIn('version = "0.7.3"', manifest)
+        self.assertIn('version = "0.8.0"', manifest)
         self.assertIn('icon = "list-checks"', manifest)
 
 

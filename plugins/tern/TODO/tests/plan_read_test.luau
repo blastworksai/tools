@@ -80,16 +80,16 @@ return {
         local gone = { kind = "unreadable" }
         for tick = 1, 2 do
             local verdict, text = memo.decide(s, remote, "match", 11, gone, tick * 1000, false)
-            assert(verdict == "blocked" and text:find("/glitch-plan", 1, true), "a view just opened has no node for a moment: " .. tostring(text))
+            assert(verdict == "blocked" and text:find("/glitch-execute", 1, true), "a view just opened has no node for a moment: " .. tostring(text))
         end
         local verdict, text = memo.decide(s, remote, "match", 11, gone, 9000, false) -- the third unreadable tick in a row
         assert(verdict == "blocked" and text == "Board sync for this session works only when the session runs on this window's machine.", text)
         -- a readable answer ends the streak at once
-        assert(select(2, memo.decide(s, remote, "match", 11, { kind = "waiting" }, 9100, false)):find("/glitch-plan", 1, true))
+        assert(select(2, memo.decide(s, remote, "match", 11, { kind = "waiting" }, 9100, false)):find("/glitch-execute", 1, true))
         local local1 = sync_pane.new({ gate = sync_gate.new(), repaint = function() end, clear = function() end })
         for tick = 1, 6 do
             local _, t = local1.decide(s, localCand, "match", 11, gone, tick * 1000, false)
-            assert(t:find("/glitch-plan", 1, true), "a local session never gets the remote limit: " .. tostring(t))
+            assert(t:find("/glitch-execute", 1, true), "a local session never gets the remote limit: " .. tostring(t))
         end
         local _, big = memo.decide(s, remote, "match", 11, { kind = "too_large" }, 9200, false)
         assert(big == settings.REMOTE_TOO_LARGE and big:find("works only when the session runs on this window's machine", 1, true), big)

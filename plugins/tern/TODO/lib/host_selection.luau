@@ -403,6 +403,7 @@ end
 function selection.waitLease(event: any): { on: boolean, rid: string }?
     if type(event) ~= "table" or event.ev ~= "action" or event.id ~= "main" or event.act ~= "sync-wait" or type(event.value) ~= "string" then return nil end
     local verb, rid = event.value:match("^(%a+):?(.*)$")
+    if rid == nil then return nil end
     if rid == "" then rid = LEGACY elseif not selection.validRequester(rid) then return nil end
     if verb == "on" then return { on = true, rid = rid } end
     if verb == "off" then return { on = false, rid = rid } end

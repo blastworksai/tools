@@ -16,7 +16,7 @@ gate.VERIFY_MS = 125000
 function gate.new()
 	local revs: { [string]: number } = {}
 	local generation = 0
-	local verifyAt: { [string]: number } = {} -- key -> time from which the provisional pass is re-verified
+	local verifyAt: { [string]: number? } = {} -- key -> time from which the provisional pass is re-verified
 	local self = {}
 	-- nowMs is the clock in milliseconds; without it a provisional entry counts as matching.
 	function self.matches(key: string, rev: number, nowMs: number?): boolean

@@ -1,17 +1,23 @@
 # TODO for Tern
 
-Plan visibility for the interactive `/glitch-plan` → `/glitch-execute` workflow. The canonical plan contains explicit agreed checkpoints, and optionally the tasks, file changes, implementation steps and validation checks under them, each with a current state and, when blocked, a reason. The panel is a read-only native Tern checklist. TODO also works as a native Tern board when Glitch is off.
+TODO shows the active Glitch plan in a read-only Tern checklist. It displays the agreed checkpoints, tasks, file changes, steps and validation checks from the canonical plan. With Glitch off, TODO opens the session's native Tern board.
+
+## Open the active plan
+
+1. Enable **Do you use Glitch?** on the execution host. The installed package sets up eligible local Claude and Codex hooks. In a fresh Codex session, review and trust the TODO hooks through `/hooks`.
+2. In a fresh native Tern agent pane, enter `/glitch-execute "plans/Example plan.md"` in Claude Code or `$glitch-execute "plans/Example plan.md"` in Codex. Use one explicit canonical plan path. A quoted path can contain spaces.
+3. Click **TODO** in the status bar. If the current tab has exactly one real pane and it is eligible, TODO opens its plan view or native board directly. With multiple panes, no eligible pane or an ambiguous selection, TODO opens settings. Choose a session under **Attach to** when available.
 
 ## Status bar, settings and boards
 
-TODO lives in Tern's status bar: the **TODO** segment (icon `list-checks`) opens a **TODO Settings** pane, a new pane and never a popout. The same pane opens from the Command Palette (`Ctrl+Shift+P`) with **TODO: Open Settings**. If the **Plugin segments** widget is not in the widget bar, the first window start asks once, per plugin installation, whether to add it (the shared status-bar prompt); the palette command always works. TODO adds nothing to the Files pane.
+The **TODO** status segment runs **TODO: Open** (`plugin.todo.open`). Only the current tab counts toward direct opening. Closed, parked, disconnected and ineligible panes cannot be chosen automatically. The Command Palette (`Ctrl+Shift+P`) also offers **TODO: Open Settings** (`plugin.todo.settings`) and **TODO: attach to this panel** (`plugin.todo.show`). When the **Plugin segments** widget is absent, the first window start asks once per installation whether to add it.
 
 The settings pane has these fields:
 
 1. **Attach to**: the live agent or terminal sessions that suit the current mode. Closed, parked or ineligible sessions never appear, and the choice is checked again right before TODO attaches, opens a board or syncs.
 2. **Do you use Glitch?** Off by default.
 3. Glitch **Off**: **Show the session's folder as a Tern Board?** (On by default) opens Tern's ordinary board (`TODO.md`) in the attached session's folder. This needs no plan, but the session must run on this computer, because a board is a file in that folder. When only sessions on other hosts are open, the list says so plainly and counts them. Off shows `No TODO source is enabled. Turn on the Tern Board option or enable Glitch integration in TODO Settings.`
-4. Glitch **On**: the TODO pane shows `/glitch-plan progress will be shown in the TODO pane.` and **Sync Glitch Plan to Tern Board?** (Off by default). Turning sync on never changes the **Attach to** list. While sync is on the pane always says what it is doing: the board's name and an **Open board** control once synced, or the one thing that is missing (no session picked, no plan view yet, no plan published, or a plan that could not be read). With sync on, a plan view that finds no published plan stays open and looks again every few seconds, so sync starts when the plan appears.
+4. Glitch **On**: **Sync Glitch Plan to Tern Board?** controls one-way sync and defaults to Off. The saved **Attach to** choice takes precedence over direct opens. If sync is on and no session is saved, the first confirmed direct plan view sets the choice. Settings show the board name and an **Open board** control after sync, or the condition preventing sync. If that plan view is waiting for a publication with sync on, it checks again every few seconds.
 
 Settings are stored in the plugin's own key/value store with closed validation and safe defaults.
 
@@ -53,7 +59,7 @@ Use the installed package’s absolute `bin/todo` path (`bin/todo.cmd` on Window
 
 Canonical plan files use UTF-8 with LF or CRLF line endings. The reader never rewrites their bytes. The command prints a fenced JSON block between `<!-- TERN-SESSION:START -->` and `<!-- TERN-SESSION:END -->`; the agent places it in the canonical plan through its normal write path. States are `pending`, `active`, `blocked`, `done`. Several can be active at once (parallel builders). `current` is null or names one active or blocked checkpoint; blocked checkpoints require a reason. Stable ids survive description/reordering changes. The view never edits these fields.
 
-The companion is installed separately under `_local/tern-todo`, through Glitch’s supported local customization path. It does not override managed skills or hooks. Its publication instruction must be observed in the planning session; descriptor presence alone does not prove adoption. Claude's optional additive entry hook is specific to its configured Glitch root. Codex, Kimi, Muse and every other harness require explicit companion publication by the owning agent; automatic entry delivery or adoption is not claimed for them.
+The installed TODO host sets up the companion under `_local/tern-todo` on the execution account when Glitch is enabled. Plan creation maintains the block. Execute publishes the plan identity for the current pane. The hook leaves the plan bytes untouched. A deliberately resumed legacy plan without a checkpoint block gets one scoped `adopt` command. Its executor adds the agreed block through the normal plan workflow, then runs the exact command once. Other interactive agents can use the generic publisher. [Planning companion](integrations/glitch-plan-session-view/README.md)
 
 ## Platform and account boundaries
 
@@ -73,16 +79,9 @@ The outside/non-cooperating **same-record** cleanup limitation remains: comparin
 
 ## Session discovery and source location
 
-Pick the live agent session under **Attach to** in TODO Settings (or run **TODO: attach to this panel**), and TODO resolves its explicitly published plan. It never asks the operator for the plan path or types into the agent. The planning companion publishes after an agreed plan is created or deliberately resumed/revised:
+TODO resolves the pane's published canonical path and plan ID using its verified live process chain and ownership. Normal edits refresh without republishing. A changed plan requires deliberate reattachment. An ended process invalidates its old binding. Claude `/clear` clears the binding of the old conversation. Codex `/new` can leave it visible until the next input starts the new session. The generic interface for other interactive agents uses explicit clear before reset or exit.
 
-```sh
-todo publish --agent-pid 12345 --plan /absolute/canonical/PLAN.md
-todo clear --agent-pid 12345
-```
-
-Identify the agent’s actual durable process with its runtime or `todo ancestry` and pass its verified numeric pid on every invocation (12345 in the example is a placeholder); never use a shell/launcher/helper pid. See [the companion](integrations/glitch-plan-session-view/README.md). Publications contain only the existing canonical path/plan id and a verified live process birth/owner chain. The binding validates the explicitly declared publisher process, including its birth and owner; pane/PID reuse is refused. The planning agent must identify its own durable CLI process; no shell-name inference is used. The canonical record remains authoritative; normal edits refresh without republishing. Clear or process exit invalidates old success and stops polling the ended binding. A conversation reset in the same process is not detectable: the agent must explicitly clear before reset/end and on fresh-conversation startup; skipping that instruction can leave the previous plan visible until clear or process exit. A changed plan requires deliberate reattachment.
-
-No active publication shows **No active plan is published for this session** and exits the TODO flow, leaving the agent running. Invalid metadata/access produces a detection error instead. This works with ordinary CLI agents: no native agent composer, draft inspection, prompt submission, hook, socket access or copied credential is needed.
+Without an active publication, TODO shows **No active plan is published for this session** and leaves the agent running. Invalid metadata or inaccessible process inspection produces a diagnostic.
 
 Local and native SSH Tern sessions use the same host-side resolver. The viewing client confirms the native split beside the selected session; the execution host resolves that split to its own process metadata, using only window keys its own daemon lists (the client window's key is never sent across), then reads its own published canonical file. Client-side pane handles are never interpreted as host CLI ids. The label shows Local or SSH and the native host. Raw SSH into a machine without native Tern ancestry is unsupported; there is no guessed local path or automatic secondary SSH login. If multiple native windows can claim the new TODO panel, membership is ambiguous and attachment fails closed rather than selecting a window or source arbitrarily. Attach again from one unambiguous window/layout.
 
@@ -93,16 +92,16 @@ todo source --plan /absolute/PLAN.md
 todo source --plan /absolute/PLAN.md --ssh reviewed-host
 ```
 
-The reader returns only the validated checkpoint object, not whole plan prose, instructions or credentials. Requests have a finite deadline; each panel refreshes independently. Local sources refresh every 1.5 seconds and healthy SSH sources every 15 seconds. An SSH read failure clears previous success immediately, waits at least 60 seconds, then backs off to a maximum of five minutes; a successful read resets the delay. SSH always requires an already trusted host key and never updates known_hosts. There is no seat-wide lock or FORGE lookup. Usage/read errors return 1, never the Stop-hook continuation code 2. The viewer/reader needs no agent hook. Automatic Claude planning/execution entry uses the separately installed companion entry hook; that instruction delivery does not itself publish a plan.
+The reader returns the validated checkpoint object. Each panel refreshes independently, every 1.5 seconds for local sources and 15 seconds for healthy SSH sources. An SSH read failure clears the previous success, then backs off from 60 seconds to five minutes. A successful read resets the delay. SSH uses an existing trusted host key. Usage and read errors return exit code 1.
 
 ## Runtime and rollout
 
-**Tern 0.9.8 or later is the minimum supported runtime for both the session daemon and viewing client.** Connected runs on 0.9.8 (`f21d9a3`) and 0.9.10 (`2ad447b`) are historical pre-0.6.0 evidence, not current-head acceptance. Those runs observed initial local rendering and tested later SSH/restore behavior through native host callbacks; authenticated remote/restored client visuals remained open. Confirm the actual running binary/client versions; changing a symlink does not update a running daemon. This plugin does not update or restart Tern. It can update itself; see Update.
+The viewer requires **Tern 0.9.8 or later** on the server and client. Automatic execute hooks have been exercised in disposable interactive Linux panes with Tern 0.9.22, Claude Code 2.1.332 and Codex 0.172.0. Setup requires Python 3.11 or later, an owned Glitch root and the execution account's consent. Each native remote host configures its own hooks. Windows and macOS automatic setup remain unqualified. [Validation record](docs/VALIDATION.md)
 
-Install the package with Tern's ordinary installer:
+Install the reviewed package with Tern's ordinary installer:
 
 ```sh
-tern plugin install github.com/blastworksai/tools/plugins/tern/TODO
+tern plugin install /absolute/path/to/TODO
 ```
 
 ### Update
@@ -117,12 +116,13 @@ A copy installed before the updater existed needs one manual update:
 
 A linked development checkout (`tern plugin link`) is never updated by the plugin; `git pull` it yourself.
 
-Plugin ID is `todo`; displayed name is **TODO**. Install on the actual session host/client combination; do not run a deployed service/plugin from a group-writable development checkout. See [docs/RUNBOOK.md](docs/RUNBOOK.md). The current helper source hashes for a later coordinated companion/plugin rollout are recorded in [docs/VALIDATION.md](docs/VALIDATION.md); recording them performs no rollout.
+Plugin ID is `todo` and its displayed name is **TODO**. Install on the actual session host and client. The runbook covers setup, native trust, verification and rollback. [Rollout runbook](docs/RUNBOOK.md)
 
 ## Verification
 
 ```sh
 python3 -m unittest discover -s tests -p todo_test.py
+python3 -m unittest discover -s tests -p install_hooks_test.py
 python3 tests/todo_smoke.py --published --evidence /absolute/private/evidence.json
 ```
 
@@ -133,7 +133,3 @@ The package contains only its active implementation and tests. Upstream legacy r
 ## Attribution
 
 Original plugin/native-checklist approach: Felipe Carneiro (`felipevdc1/tern-session-list`), MIT, based on f5920de0cc1018fa9814e5f0c6cca83a7ddf34dc. Original LICENSE remains. Explicit checkpoint reader, local/SSH source path and workflow contract: BlastworksAI, MIT. This fork does not claim independent origin of the native checklist design.
-
-### Quick invocation
-
-Click **TODO** in the status bar (or press `Ctrl+Shift+P` and run **TODO: Open Settings**), choose a live agent session under **Attach to**, then let TODO resolve that session’s published canonical plan. The list shows native agents and terminal panes (including CLI agents), labelled with their host, program and pane identity. Closed, parked or disconnected targets are excluded. **TODO: attach to this panel** in the command palette remains the direct route for the focused panel. The existing bindable actions are `plugin.todo.show` and `plugin.todo.settings`.

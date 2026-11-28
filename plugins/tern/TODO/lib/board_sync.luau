@@ -21,7 +21,8 @@ local ID_TAG = "todo-id-"
 local KIND_LABEL = { checkpoint = "Checkpoint", task = "Task", file = "File", step = "Step", validation = "Check" }
 
 local function oneLine(value: string): string
-    return (value:gsub("%s+", " "):match("^ ?(.-) ?$"))
+    -- The capture can match every string, including an empty one.
+    return value:gsub("%s+", " "):match("^ ?(.-) ?$") :: string
 end
 
 -- Absolute board file for a plan; `data` is tern.plugin.data. Nothing ever shares a board between plans.

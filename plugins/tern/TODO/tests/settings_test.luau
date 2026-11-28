@@ -75,7 +75,7 @@ return {
         local native = joined(settings.draw(ui, settings.normalize(nil), settings.eligible(settings.normalize(nil), cands), nil))
         assert(native:find("Board", 1, true) and not native:find(settings.EMPTY, 1, true) and not native:find("Sync Glitch Plan", 1, true))
         local glitch = joined(settings.draw(ui, settings.normalize({ glitch = true }), cands, "Board synced"))
-        assert(glitch:find("/glitch-plan progress will be shown in the TODO pane.", 1, true))
+        assert(glitch:find("Start the plan with /glitch-execute in Claude Code or $glitch-execute in Codex.", 1, true))
         assert(glitch:find("Sync Glitch Plan to Tern Board?", 1, true) and glitch:find("ACT:sync=on", 1, true) and glitch:find("Board synced", 1, true))
         assert(glitch:find("ACT:attach=1", 1, true))
     end},
@@ -126,11 +126,11 @@ return {
         assert(settings.syncBlocker(s, nil, "none", false):find("no longer open", 1, true))
         local local1, remote2 = cand(1, false), cand(2, true)
         assert(settings.syncBlocker(s, local1, "none", false):find("plan view", 1, true))
-        assert(settings.syncBlocker(s, local1, "match", false):find("/glitch-plan", 1, true))
+        assert(settings.syncBlocker(s, local1, "match", false):find("/glitch-execute", 1, true))
         -- A remote session waits like a local one; only a view that cannot be read says the limit.
-        assert(settings.syncBlocker(s, remote2, "match", false):find("/glitch-plan", 1, true))
+        assert(settings.syncBlocker(s, remote2, "match", false):find("/glitch-execute", 1, true))
         assert(settings.syncBlocker(s, remote2, "match", false, "unreadable") == settings.REMOTE_ONLY)
-        assert(settings.syncBlocker(s, local1, "match", false, "unreadable"):find("/glitch-plan", 1, true), "a local session never gets the remote limit")
+        assert(settings.syncBlocker(s, local1, "match", false, "unreadable"):find("/glitch-execute", 1, true), "a local session never gets the remote limit")
         assert(settings.syncBlocker(s, local1, "match", false, "too_large") == settings.TOO_LARGE)
         assert(settings.syncBlocker(s, remote2, "match", false, "too_large") == settings.REMOTE_TOO_LARGE)
         assert(settings.syncBlocker(s, local1, "match", true) == nil)

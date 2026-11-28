@@ -1,4 +1,27 @@
-# TODO 0.6.0+ — validation
+# TODO validation
+
+## 0.8.0 native execute and setup
+
+Blastworks.ai · 28 November 2026. Native Linux probes used Tern `0.9.22 (3fd4def)`, Claude Code `2.1.332` and Codex `0.172.0`. The checkpoint receipts below describe their tested sources and disposable environments. Rollout still requires the reviewed release head and target readback.
+
+| Checkpoint source | Check | Observed result |
+| --- | --- | --- |
+| `e66f8acb37ef5d93e139ed2d6427266d2238ec13` | Focused Python source, process, publication and hook contracts | 40 passed, 2 platform skips. Tests covered exact inputs, repeated events, reset isolation and preservation of an existing binding on refusal. |
+| `e66f8acb37ef5d93e139ed2d6427266d2238ec13` | Native Claude typed execute and `Skill` | Both published the same fixture through TODO discovery. Canonical bytes stayed unchanged. `/clear` removed the old session's binding in the same process. A shell wrapper left the native Claude parent verifiable. A `--print` run still had a terminal, so the adapter also checks launch mode. |
+| `e66f8acb37ef5d93e139ed2d6427266d2238ec13` | Native Codex default launcher and `--no-daemon` | The exact `$glitch-execute` prompt published. Explicit read-only refused. Codex's TUI rejected `/glitch-execute`. `/new` left an idle gap and cleared the old binding at the first new input. `/quit` could then emit end events for both IDs. |
+| `e66f8acb37ef5d93e139ed2d6427266d2238ec13` | Native Claude legacy plan | The hook returned a single scoped continuation with no plan edit and no active publication. The fixture added the agreed block. Claude's native Bash tool ran that exact continuation, and TODO discovery returned the active legacy plan. The provider exchange used a loopback mock. |
+| `e66f8acb37ef5d93e139ed2d6427266d2238ec13` | Native Tern remote transport in a private loopback network | Codex published on the execution daemon. The connected client rendered the title and a checkpoint change through the explicit attach command. Canonical bytes stayed unchanged. This covers native transport and display through that command. |
+| `45828491470117d915b71f86eba6dcc81159586f` | Python installer contracts | 10 passed. They covered install, upgrade, re-run, recovery, ownership, unrelated settings, unsafe targets and scoped rollback. |
+| `45828491470117d915b71f86eba6dcc81159586f` | Native install, opt-in and forced update | Glitch off left setup inactive. An opted-in window installed the owned callbacks. The update preserved consent and verified a new staged generation. Fresh Claude panes published after install and update. Fresh Codex kept hooks inactive until native `/hooks` approval, then published through TODO discovery. Fixture bytes stayed unchanged. |
+| `45828491470117d915b71f86eba6dcc81159586f` | Installed package on an isolated native remote host | The host set up the callback after opt-in. Native Codex published with unchanged plan bytes. The connected window showed the title and a checkpoint change through the existing attach command. Both ends ran in the same private loopback network. |
+| One-pane candidate before the version bump | Native Luau contracts and SDK analysis | `todo_smoke.py --contracts-only` passed 120 checks on Tern `0.9.22` and reaped its owned processes. Luau-LSP `1.70.1` found no diagnostics in `host.luau`, `window.luau` or their imports using the generated Tern SDK. This covers controller contracts and static types. |
+| One-pane candidate, `window.luau` SHA-256 beginning `535ab85925d6` | Real local status-bar click | The real **TODO** segment opened the local native board for one pane, opened the exact plan with a pane on another tab, and kept the selector for two panes on the same tab. **TODO: Open Settings** opened settings on a one-pane tab. The isolated daemon socket was gone at cleanup. |
+
+The isolated ordinary Codex hook process stayed silent. The sample took a median of 41.5 ms and a maximum of 46.5 ms, including Python startup. The native packages ran in private configurations with owned process supervision. No production hooks, settings, credentials or provider work were used.
+
+Automatic macOS and Windows setup, an independently deployed remote host, and a prestarted shared Codex app server remain separate qualification targets. A remote execution account owns its own setup and consent. The checked native remote transport used a disposable loopback host. The native remote status-click result belongs in the final plan receipt for the release candidate.
+
+## Historical viewer and publication receipts (0.6.0–0.7.3)
 
 Blastworks.ai · 9 November 2026. This receipt supersedes the older 0.5.x validation headings for the current TODO reliability lane. Earlier 0.5.0, 0.5.1 and 0.5.2 receipts are historical and are not carried forward as evidence for this source.
 
@@ -159,6 +182,6 @@ Linux group-readable metadata does not grant process inspection or canonical-pla
 
 macOS and Windows publication stores are owner-only and cross-account viewing is not claimed. Inaccessible process inspection is a visible nonterminal unknown, not proof of process exit; initial discovery can recover after that unknown clears. An in-process conversation reset without explicit clear can leave the old publication visible until clear or process exit. Multi-window ambiguity fails closed. These limitations require honest UI/rollout evidence and must not be converted into silent fallback behavior.
 
-## Status bar, schema 2 and board sync (this change)
+## Historical status bar, schema 2 and board sync
 
 `python3 -m unittest discover -s tests -p todo_test.py` covers schema 1 and 2, every entity kind and state, rename and reorder, duplicates, bounds, malformed nesting, maximal Unicode and the static window contract. `python3 tests/todo_smoke.py --contracts-only` runs the Luau suites (plan view, board projection, settings, attach, host selection) inside a real Tern host. The full `todo_smoke.py` run also opens the TODO Settings pane through its command and asserts that no Files-pane button exists. Not yet exercised against the real engine: clicking the status segment itself, the Markdown board file format Tern's board accepts for the managed board, and two windows syncing the same plan at once.

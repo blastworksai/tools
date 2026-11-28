@@ -94,7 +94,7 @@ return {
         assert(a.shown:find("Plan X", 1, true) and a.shown:find("Open board", 1, true), a.shown)
         -- X's plan is no longer readable: the blocker is the publication wait; the cached board stays beside it.
         a.tick({ [1] = { panel = 10, entry = nil, title = "Plan X" } }, 2000); a.flush(); a.draw()
-        assert(a.status.get():find("Waiting for this session to publish", 1, true), tostring(a.status.get()))
+        assert(a.status.get():find("Waiting for this session to publish a plan. Run /glitch-execute", 1, true), tostring(a.status.get()))
         assert(a.shown:find("Open board", 1, true), a.shown)
         change(kv, "attach", "2") -- window B selects unpublished Y
         a.tick({ [2] = { panel = 11, entry = nil, title = "Plan Y" } }, 3000) -- same blocker text as before

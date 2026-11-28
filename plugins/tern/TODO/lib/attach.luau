@@ -3,6 +3,7 @@
 -- Blastworks.ai; MIT.
 local binding = require("./selected_binding")
 local attach = {}
+attach.CHANGED = "The panel or connection changed. Attach again in the intended panel."
 
 export type AttachApi = {
     plugin: { id: string },
@@ -13,16 +14,38 @@ export type AttachApi = {
     bind: ((panel: number, target: number) -> ())?,
     -- Called just before the host is asked to resolve the split: tells the view (a plain event, so it works whichever
     -- machine the session runs on) whether to keep waiting for a plan that is not published yet.
-    configure: ((cx: WindowCx, panel: number, target: number) -> ())?,
+    configure: ((cx: WindowCx, panel: number, target: number, direct: boolean?) -> ())?,
     -- Called when the tab already has a plan view and the window selects a session again: the window wakes the view
     -- if it serves that session, so a dormant view looks for the plan at once (the owner never closes it).
     wake: ((cx: WindowCx, panel: number, target: number) -> ())?,
 }
 export type Controller = {
     viewFor: (cx: WindowCx, target: number, boundTo: (panel: number) -> number?) -> (string, number?),
-    start: (cx: WindowCx, forceManual: boolean, selected: number?) -> (),
+    singlePane: (cx: WindowCx) -> Origin?,
+    sameSingle: (cx: WindowCx, origin: Origin) -> boolean,
+    start: (cx: WindowCx, forceManual: boolean, selected: number?, direct: Origin?) -> (),
 }
-type Origin = { target: number, tab: number, host: number }
+export type Origin = {
+    target: number,
+    tab: number,
+    host: number,
+    hostKind: "local" | "remote",
+    address: string?,
+}
+
+local function leaf(tree: TabTree?, pane: number): boolean
+    return tree ~= nil and tree.pane == pane and tree.split == nil and tree[1] == nil and tree[2] == nil
+end
+
+local function directLayout(layout: TabLayout?, origin: Origin): boolean
+    return layout ~= nil and layout.tab == origin.tab and layout.focus == origin.target
+        and layout.zoomed == false and type(layout.floats) == "table" and next(layout.floats) == nil
+end
+
+local function visibleAgent(pane: PaneInfo?): boolean
+    return pane ~= nil and not pane.parked and not pane.floating and pane.exited == nil and pane.error == nil
+        and (pane.kind == "agent" or pane.kind == "terminal")
+end
 
 function attach.new(api: AttachApi): Controller
     local KIND = api.plugin.id .. ".list"
@@ -48,21 +71,55 @@ function attach.new(api: AttachApi): Controller
         end
         return "none", nil
     end
-    local function same(cx: WindowCx, origin: Origin): boolean
+    local function same(cx: WindowCx, origin: Origin, direct: boolean?): boolean
         local pane = cx.session:pane(origin.target)
         local host = cx.hosts:current()
-        return pane ~= nil and pane.tab == origin.tab and pane.exited == nil and host.id == origin.host and host.state == "connected"
+        if not pane or pane.tab ~= origin.tab or pane.exited ~= nil or not host
+            or host.id ~= origin.host or host.state ~= "connected" then return false end
+        if not direct then return true end
+        if not visibleAgent(pane) or cx.session:focused() ~= origin.target
+            or host.kind ~= origin.hostKind or host.address ~= origin.address then return false end
+        if type(host.panes) ~= "table" then return false end
+        local member = table.find(host.panes, origin.target)
+        if member == nil or table.find(host.panes, origin.target, member + 1) ~= nil then return false end
+        local memberships = 0
+        for _, candidate in cx.hosts:list() do
+            for _, paneId in candidate.panes do
+                if paneId == origin.target then
+                    if candidate.id ~= origin.host or candidate.state ~= "connected" or candidate.kind ~= origin.hostKind
+                        or candidate.address ~= origin.address then return false end
+                    memberships += 1
+                end
+            end
+        end
+        return memberships == 1
+    end
+    function controller.sameSingle(cx: WindowCx, origin: Origin): boolean
+        if not same(cx, origin, true) then return false end
+        local layout = cx.session:layout(origin.tab)
+        return layout ~= nil and directLayout(layout, origin) and leaf(layout.root, origin.target)
+    end
+    function controller.singlePane(cx: WindowCx): Origin?
+        local target = cx.session:focused()
+        if target == nil then return nil end
+        local pane = cx.session:pane(target)
+        if not pane or not pane.tab then return nil end
+        local host = cx.hosts:current()
+        if not host or (host.kind ~= "local" and host.kind ~= "remote") then return nil end
+        local origin: Origin = { target = target, tab = pane.tab, host = host.id, hostKind = host.kind, address = host.address }
+        return if controller.sameSingle(cx, origin) then origin else nil
     end
     local function changed(cx: WindowCx)
-        cx:toast("error", "The panel or connection changed. Attach again in the intended panel.")
+        cx:toast("error", attach.CHANGED)
     end
-    function controller.start(cx: WindowCx, _forceManual: boolean, selected: number?)
+    function controller.start(cx: WindowCx, _forceManual: boolean, selected: number?, direct: Origin?)
         local target = selected or cx.session:focused()
         if not target then return end
         local pane = cx.session:pane(target)
         local host = cx.hosts:current()
-        if not pane or pane.tab == nil or pane.exited ~= nil or host.state ~= "connected" then changed(cx); return end
+        if not pane or pane.tab == nil or pane.exited ~= nil or not host or host.state ~= "connected" then changed(cx); return end
         local has, view = existing(cx, target)
+        if direct and (target ~= direct.target or not controller.sameSingle(cx, direct)) then changed(cx); return end
         if has then
             cx:toast("info", "This tab already has a plan view.")
             if view and api.wake then api.wake(cx, view, target) end
@@ -70,8 +127,8 @@ function attach.new(api: AttachApi): Controller
         end
         -- Settings holds the focus, but confirmation needs the target focused: bring it forward.
         -- The new block opens with focus = false, so the target keeps it.
-        if cx.session:focused() ~= target then cx.layout:focus(target) end
-        local origin: Origin = { target = target, tab = pane.tab, host = host.id }
+        if not direct and cx.session:focused() ~= target then cx.layout:focus(target) end
+        local origin: Origin = direct or { target = target, tab = pane.tab, host = host.id, hostKind = host.kind, address = host.address }
         -- Tern makes the split in the selected host's native namespace. The host
         -- resolves that split; client-side CLI ids cannot address a remote host.
         -- SKILLS-174: the client window key is never sent; it is not host identity.
@@ -84,13 +141,26 @@ function attach.new(api: AttachApi): Controller
         local function confirm(fresh: WindowCx?)
             if not fresh then return end
             local own = fresh.session:pane(panel)
-            if not same(fresh, origin) or (own and (own.block ~= KIND or own.tab ~= origin.tab)) then
+            if not same(fresh, origin, direct ~= nil) or (own and (own.block ~= KIND or own.tab ~= origin.tab)) then
                 if own and own.block == KIND then fresh.layout:close(panel) end
                 changed(fresh); return
             end
             local layout = fresh.session:layout(origin.tab)
-            if own and layout and fresh.session:focused() == target and binding.windowPair(layout.root, target, panel) then
-                if api.configure then api.configure(fresh, panel, target) end
+            local paired = false
+            if direct then
+                local root = layout and layout.root
+                local stable = directLayout(layout, origin)
+                paired = stable and root ~= nil and root.pane == nil and root.split == "right"
+                    and leaf(root[1], target) and leaf(root[2], panel)
+                if not paired and (own or not stable or not leaf(root, target)) then
+                    if own and own.block == KIND then fresh.layout:close(panel) end
+                    changed(fresh); return
+                end
+            elseif layout then
+                paired = binding.windowPair(layout.root, target, panel)
+            end
+            if own and paired and fresh.session:focused() == target then
+                if api.configure then api.configure(fresh, panel, target, if direct then true else nil) end
                 fresh.session:event(panel, { ev = "action", id = "main", act = "confirm-selection", value = request })
             elseif api.now() < deadline then api.timer(100, confirm)
             else

@@ -10,6 +10,7 @@ local sync_status = require("./lib/sync_status")
 local sync_pane = require("./lib/sync_pane")
 local wait_requests = require("./lib/wait_requests")
 local plan_read = require("./lib/plan_read")
+local attach = require("./lib/attach")
 local KIND = tern.plugin.id .. ".list"
 local TITLE = "TODO Settings"
 local SYNC_MS, RETRY_MS = 2000, 10000
@@ -24,15 +25,23 @@ end
 local waitCx: any = nil
 local waits = wait_requests.new(function(panel: number, on: boolean) if waitCx then sendWait(waitCx, panel, on) end end)
 
-local controller = require("./lib/attach").new({
+local controller = attach.new({
     plugin = { id = tern.plugin.id },
     now = function(): number return tern.now() end,
     timer = function(ms: number, callback: (WindowCx?) -> ()) return tern.timer(ms, callback) end,
     -- The window remembers which session each view serves; both halves of this binding live in this window's own store.
     bind = function(panel: number, target: number) pcall(tern.kv.set, "target/" .. string.format("%.0f", panel), target) end,
     -- The view's host may run on another machine: it is told by event, never through this machine's plugin store.
-    configure = function(cx: WindowCx, panel: number, target: number)
-        if settings.waitsForPublication(settings.load(tern.kv), target) then
+    configure = function(cx: WindowCx, panel: number, target: number, direct: boolean?)
+        local current = settings.load(tern.kv)
+        -- A confirmed split can initialize an enabled sync. An existing choice still owns sync.
+        if direct and settings.mode(current) == "glitch-sync" and current.attach == nil then
+            local initial = table.clone(current)
+            initial.attach = target
+            settings.save(tern.kv, initial, current)
+            current = settings.load(tern.kv)
+        end
+        if settings.waitsForPublication(current, target) then
             waitCx = cx; waits.sync(panel)
         end
     end,
@@ -57,7 +66,7 @@ local function candidates(cx: any): { any }
         local host = hosts[pane.pane]
         if host and pane.tab and not pane.parked and pane.exited == nil and (pane.kind == "agent" or pane.kind == "terminal") then
             table.insert(out, {
-                pane = pane.pane, tab = pane.tab, cwd = pane.cwd, live = true, remote = host.kind == "remote",
+                pane = pane.pane, tab = pane.tab, host = host.id, cwd = pane.cwd, live = true, remote = host.kind == "remote",
                 label = (if pane.title ~= "" and pane.title ~= nil then pane.title else pane.program or "Terminal") .. " · " .. string.format("%.0f", pane.pane),
                 detail = (host.address or host.name) .. " · " .. (pane.program or "Terminal"),
             })
@@ -65,6 +74,13 @@ local function candidates(cx: any): { any }
     end
     table.sort(out, function(a, b) return a.label < b.label end)
     return out
+end
+
+local function directTarget(cx: WindowCx, s: any, origin: attach.Origin): any
+    for _, pane in settings.eligible(s, candidates(cx)) do
+        if pane.pane == origin.target and pane.tab == origin.tab and pane.host == origin.host then return pane end
+    end
+    return nil
 end
 
 -- The TODO view in the target's tab, and whether it serves the target ("match") or another
@@ -123,16 +139,40 @@ local function openSettings(cx: any)
 end
 
 -- Native board: open or select Tern's ordinary board in the attached pane's folder.
-local function openBoard(cx: any, pane: any)
+local function openBoard(cx: any, pane: any, direct: attach.Origin?)
     if not pane.cwd or pane.cwd == "" then cx:toast("info", "The attached session has no folder to hold a board."); return end
+    if direct and not controller.sameSingle(cx, direct) then cx:toast("error", attach.CHANGED); return end
     local prefix = pane.cwd .. "/"
     cx.board:boards():next(function(list: any, _err: any, fresh: any)
+        if direct then
+            if not fresh then return end
+            local current = settings.load(tern.kv)
+            local target = if settings.mode(current) == "native-board" then directTarget(fresh, current, direct) else nil
+            if not target or target.cwd ~= pane.cwd or not controller.sameSingle(fresh, direct) then
+                fresh:toast("error", attach.CHANGED)
+                return
+            end
+        end
         local live = fresh or cx
         for _, entry in list or {} do
             if entry.path:sub(1, #prefix) == prefix then live.board:open(entry.path); return end
         end
         live.board:open(prefix .. "TODO.md")
     end)
+end
+
+local function openTodo(cx: WindowCx)
+    local origin = controller.singlePane(cx)
+    if not origin then openSettings(cx); return end
+    local s = settings.load(tern.kv)
+    local target = directTarget(cx, s, origin)
+    if not target then openSettings(cx); return end
+    if settings.mode(s) == "native-board" then
+        if not target.cwd or target.cwd == "" then openSettings(cx); return end
+        openBoard(cx, target, origin)
+    else
+        controller.start(cx, false, target.pane, origin)
+    end
 end
 
 local function attached(cx: any, s: any): any
@@ -272,10 +312,11 @@ end)
 
 tern.command({ id = "show", title = "TODO: attach to this panel", icon = "list-checks", run = function(cx: WindowCx) controller.start(cx, false) end })
 tern.command({ id = "settings", title = "TODO: Open Settings", icon = "list-checks", run = function(cx: WindowCx) openSettings(cx) end })
+tern.command({ id = "open", title = "TODO: Open", icon = "list-checks", run = openTodo })
 
 -- The status segment is TODO's one launcher (it is no longer in the Files pane).
 tern.chrome.status(function(_pane: StatusPaneInfo)
-    return { { icon = "list-checks", text = "TODO", tone = "muted", command = "plugin." .. tern.plugin.id .. ".settings" } }
+    return { { icon = "list-checks", text = "TODO", tone = "muted", command = "plugin." .. tern.plugin.id .. ".open" } }
 end)
 
 require("./updater/window").register({ name = "TODO", dir = "TODO", title_prefix = "TODO: " })
