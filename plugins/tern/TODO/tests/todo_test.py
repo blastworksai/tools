@@ -7,16 +7,20 @@ import json
 import importlib.util
 import os
 from pathlib import Path
+import shlex
 import shutil
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 READER = ROOT/'bin/todo.py'
+ENTRY_HOOK = ROOT/'integrations/glitch-plan-session-view/entry_hook.py'
 sys.path.insert(0, str(READER.parent))
 import publication
 import process_identity
@@ -27,6 +31,17 @@ def reader_module():
     reader = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(reader)
     return reader
+
+
+def write_glitch_fixture(root: Path) -> Path:
+    root = root.resolve()
+    for relative in ('.claude/scripts/plan_check.py', '.claude/skills/glitch-execute/SKILL.md'):
+        marker = root / relative
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text('disposable Glitch fixture\n', encoding='utf-8')
+    plans = root / 'plans'
+    (plans / 'archive').mkdir(parents=True)
+    return plans
 
 
 def plan(plan_id='plan-123456abcdef', state='pending'):
@@ -204,6 +219,32 @@ class SourceContract(unittest.TestCase):
 
 
 class ProcessIdentityContract(unittest.TestCase):
+    @unittest.skipUnless(sys.platform.startswith('linux'), 'native execute process contract uses Linux procfs')
+    def test_codex_native_verification_requires_foreground_tern_and_rejects_explicit_read_only(self) -> None:
+        reader = reader_module()
+        executable = Path(sys.executable).resolve()
+        agent = {'pid': 470001, 'owner': 'fixture-owner', 'birth': 'fixture:agent'}
+        tern = {'pid': 470002, 'owner': agent['owner'], 'birth': 'fixture:tern'}
+        facts = {agent['pid']: agent, tern['pid']: tern, os.getpid(): {'owner': agent['owner']}}
+        invocations = {
+            agent['pid']: (executable, ['--sandbox', 'workspace-write']),
+            tern['pid']: (Path('/fixture/bin/tern'), ['daemon']),
+        }
+        with patch.object(process_identity, 'ancestors', return_value=[agent, tern]), \
+                patch.object(process_identity, 'process', side_effect=facts.__getitem__), \
+                patch.object(reader, '_linux_invocation', side_effect=invocations.__getitem__), \
+                patch.object(reader, '_linux_foreground_terminal', return_value=True) as tty:
+            self.assertEqual(reader.verify_execute_process('codex', executable=executable),
+                             (agent['pid'], agent['birth']))
+            for mode in (['--sandbox', 'read-only'], ['-s', 'read-only'], ['--sandbox=read-only']):
+                with self.subTest(mode=mode), self.assertRaisesRegex(ValueError, 'not the interactive pane process'):
+                    invocations[agent['pid']] = (executable, mode)
+                    reader.verify_execute_process('codex', executable=executable)
+            invocations[agent['pid']] = (executable, ['--sandbox', 'workspace-write'])
+            tty.return_value = False
+            with self.assertRaisesRegex(ValueError, 'not the interactive pane process'):
+                reader.verify_execute_process('codex', executable=executable)
+
     def test_linux_disappearance_is_definitively_ended(self):
         with patch('process_identity.sys.platform', 'linux'), \
                 patch('process_identity.Path.read_text', side_effect=FileNotFoundError(2, 'missing')):
@@ -774,12 +815,147 @@ class PublicationContract(unittest.TestCase):
             self.assertGreater(current['published_ns'], old_revision)
             self.assertEqual(current['anchors'], anchors_b)
 
+    def test_native_execute_paths_accept_canonical_aliases_and_refuse_ambiguous_or_escaping_names(self) -> None:
+        reader = reader_module()
+        plans = write_glitch_fixture(self.base)
+        direct = plans / 'Plan with spaces.md'
+        write_plan(direct, plan())
+        alias = plans / 'alias.md'
+        alias.symlink_to(direct)
+        archive = plans / 'archive' / 'old.md'
+        write_plan(archive, plan())
+        operands = (direct.name, f'plans/{direct.name}', str(direct), alias.name, archive.name)
+        self.assertEqual([reader.resolve_execute_plan(self.base, operand) for operand in operands],
+                         [direct, direct, direct, direct, archive])
+        nested = archive.parent / 'next'
+        nested.mkdir()
+        write_plan(nested / archive.name, plan())
+        outside = self.base / 'outside.md'
+        write_plan(outside, plan())
+        (plans / 'out.md').symlink_to(outside)
+        for operand in ('', archive.name, 'plans/../outside.md', str(outside), 'out.md'):
+            with self.subTest(operand=operand), self.assertRaises(ValueError):
+                reader.resolve_execute_plan(self.base, operand)
+        project_plans = self.base / 'workspaces' / 'other' / 'plans'
+        project_plans.mkdir(parents=True)
+        write_plan(project_plans / 'workspace.md', plan())
+        with self.assertRaises(FileNotFoundError):
+            reader.resolve_execute_plan(self.base, 'workspace.md')
+
+    def test_synthetic_adapter_publishes_two_panes_without_a_harness_and_deduplicates_delivery(self) -> None:
+        reader = reader_module()
+        plans = write_glitch_fixture(self.base)
+        anchors_b = [
+            {**self.anchors[0], 'pid': self.agent_pid + 10, 'ppid': self.native_pid + 10, 'birth': 'fixture:agent-b'},
+            {**self.anchors[1], 'pid': self.native_pid + 10, 'birth': 'fixture:native-b'},
+            self.anchors[2],
+        ]
+        self.facts.update({item['pid']: copy.deepcopy(item) for item in anchors_b})
+        fixtures = (
+            (self.anchors, plans / 'pane-a.md', plan()),
+            (anchors_b, plans / 'pane-b.md', plan('plan-234567abcdef')),
+        )
+        for _, path, value in fixtures:
+            write_plan(path, value)
+        original_bytes = [path.read_bytes() for _, path, _ in fixtures]
+        by_agent = {anchors[0]['pid']: anchors for anchors, _, _ in fixtures}
+        start_together = threading.Barrier(2, timeout=3)
+
+        def publish_one(index: int, wait: bool = False) -> dict:
+            anchors, path, _ = fixtures[index]
+            if wait:
+                start_together.wait()
+            return reader.publish_execute_plan(
+                self.base, path.name, agent_pid=anchors[0]['pid'], expected_birth=anchors[0]['birth'],
+                session_id=f'fixture-session-{index}', observed_ns=time.monotonic_ns(),
+                invocation_id=f'exact-event-{index}',
+            )
+
+        with patch('publication.session_process', side_effect=lambda pid: by_agent[pid]):
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                pending = [pool.submit(publish_one, index, True) for index in range(len(fixtures))]
+                self.assertEqual([item.result(timeout=5)['state'] for item in pending], ['active', 'active'])
+            target = self.target()
+            saved = target.read_bytes()
+            publish_one(0)
+            self.assertEqual(target.read_bytes(), saved)
+        actual = []
+        for anchors, path, _ in fixtures:
+            source = publication.discover(anchors[-2]['pid'])['source']
+            actual.append((publication.read_binding(source, reader.read_plan)['plan'], path.read_bytes()))
+        self.assertEqual(actual, [(value, before) for (_, _, value), before in zip(fixtures, original_bytes)])
+        reader.clear_execute_plan(
+            agent_pid=self.agent_pid, expected_birth=self.anchors[0]['birth'],
+            session_id='fixture-reset-a', observed_ns=time.monotonic_ns(), startup=True,
+        )
+        self.assertEqual([publication.discover(anchors[-2]['pid'])['state'] for anchors, _, _ in fixtures],
+                         ['none', 'active'])
+
+    def test_reset_and_delayed_end_cannot_remove_the_replacement_generation(self) -> None:
+        reader = reader_module()
+        plans = write_glitch_fixture(self.base)
+        path = plans / 'selected.md'
+        write_plan(path, plan())
+        identity = {'agent_pid': self.agent_pid, 'expected_birth': self.anchors[0]['birth']}
+
+        def attach(session: str) -> dict:
+            return reader.publish_execute_plan(
+                self.base, path.name, **identity, session_id=session, observed_ns=time.monotonic_ns(),
+            )
+
+        def clear(session: str, observed_ns: int, *, startup: bool = False) -> dict:
+            return reader.clear_execute_plan(
+                **identity, session_id=session, observed_ns=observed_ns, startup=startup,
+            )
+
+        attach('first-session')
+        clear('second-session', time.monotonic_ns(), startup=True)
+        self.assertEqual(publication.discover(self.native_pid)['state'], 'none')
+        delayed_startup = time.monotonic_ns()
+        attach('second-session')
+        clear('first-session', time.monotonic_ns())
+        clear('unexpected-session', delayed_startup, startup=True)
+        self.assertEqual(self.source()['plan_id'], plan()['plan_id'])
+        delayed_execute = time.monotonic_ns()
+        clear('second-session', time.monotonic_ns())
+        reader.publish_execute_plan(
+            self.base, path.name, **identity, session_id='second-session', observed_ns=delayed_execute,
+        )
+        self.assertEqual(publication.discover(self.native_pid)['state'], 'none')
+
+    def test_legacy_adoption_needs_the_reserved_plan_and_invalid_block_cannot_fall_back(self) -> None:
+        reader = reader_module()
+        plans = write_glitch_fixture(self.base)
+        legacy = plans / 'legacy.md'
+        legacy.write_text('# Original text\n', encoding='utf-8')
+        original = legacy.read_bytes()
+
+        def execute(path: Path) -> dict:
+            return reader.publish_execute_plan(
+                self.base, path.name, agent_pid=self.agent_pid, expected_birth=self.anchors[0]['birth'],
+                session_id='exact-session', observed_ns=time.monotonic_ns(),
+            )
+
+        pending = execute(legacy)
+        self.assertEqual((pending['state'], publication.discover(self.native_pid)['state'], legacy.read_bytes()),
+                         ('legacy', 'none', original))
+        write_plan(legacy, plan())
+        with patch('publication.ancestors', return_value=self.anchors):
+            with self.assertRaises(ValueError):
+                publication.adopt(str(legacy), '0' * 32, reader.read_plan)
+            self.assertEqual(publication.adopt(str(legacy), pending['token'], reader.read_plan)['state'], 'active')
+        malformed = plans / 'malformed.md'
+        malformed.write_text('<!-- TERN-SESSION:START -->\n```json\n{}\n```\n<!-- TERN-SESSION:END -->\n', encoding='utf-8')
+        write_plan(plans / 'archive' / malformed.name, plan('plan-234567abcdef'))
+        with self.assertRaises(reader.InvalidCheckpointBlock):
+            execute(malformed)
+        self.assertEqual(self.source()['path'], str(legacy))
+
 
 class WorkflowEntryContract(unittest.TestCase):
     """Boundary: actual skill entry receives adoption; unrelated work is untouched."""
     def hook(self, value):
-        path = ROOT/'integrations/glitch-plan-session-view/entry_hook.py'
-        return subprocess.run([sys.executable, '-I', str(path)], input=json.dumps(value),
+        return subprocess.run([sys.executable, '-I', str(ENTRY_HOOK)], input=json.dumps(value),
                               text=True, capture_output=True, timeout=3)
 
 
@@ -790,6 +966,69 @@ class WorkflowEntryContract(unittest.TestCase):
              'tool_input': {'file_path': '/work/plans/other-pane.md'}},
         ]
         self.assertEqual([(r.returncode, r.stdout) for r in map(self.hook, cases)], [(0, ''), (0, '')])
+
+    def test_native_payloads_publish_only_the_exact_execute_operand(self) -> None:
+        spec = importlib.util.spec_from_file_location('todo_entry_contract', ENTRY_HOOK)
+        entry = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(entry)
+        path = Path('/disposable-glitch/plans/Fixture with spaces.md')
+        root = path.parent.parent
+        operand = f'plans/{path.name}'
+        argument = f'"{operand}"'
+        common = {'cwd': str(root), 'session_id': 'fixture-session-id',
+                  'transcript_path': str(root / 'synthetic-transcript.jsonl')}
+        codex = {**common, 'hook_event_name': 'UserPromptSubmit', 'turn_id': 'fixture-turn',
+                 'permission_mode': 'bypassPermissions', 'prompt': f'$glitch-execute {argument}',
+                 'model': 'private-hook-fixture'}
+        claude = {**common, 'hook_event_name': 'UserPromptExpansion', 'prompt_id': 'fixture-prompt',
+                  'expansion_type': 'slash_command', 'command_name': 'glitch-execute',
+                  'command_args': argument, 'command_source': 'projectSettings',
+                  'prompt': f'/glitch-execute {argument}', 'permission_mode': 'auto'}
+        claude_tool = {**common, 'hook_event_name': 'PreToolUse', 'tool_name': 'Skill',
+                       'tool_input': {'skill': 'glitch-execute', 'args': argument},
+                       'prompt_id': 'fixture-prompt', 'tool_use_id': 'toolu_fixture', 'permission_mode': 'auto'}
+        core = Mock()
+        core.verify_execute_process.return_value = (470001, 'fixture:birth')
+        core.publish_execute_plan.return_value = {'ok': True, 'state': 'active'}
+
+        def dispatch(event: dict, harness: str) -> str | None:
+            return entry.handle_event(
+                event, root=root, harness=harness, executable=Path(f'/fixture/bin/{harness}'), observed_ns=12345,
+            )
+
+        with patch.object(entry, '_load_core', return_value=core), patch.dict(os.environ, {'CLAUDE_PID': '470001'}, clear=True):
+            supported = (('codex', codex, 'fixture-turn'), ('claude', claude, 'fixture-prompt'),
+                         ('claude', claude_tool, 'fixture-prompt'))
+            for harness, event, invocation in supported:
+                with self.subTest(event=event['hook_event_name']):
+                    self.assertIsNone(dispatch(event, harness))
+                    core.publish_execute_plan.assert_called_with(
+                        root, operand, agent_pid=470001, expected_birth='fixture:birth',
+                        session_id='fixture-session-id', observed_ns=12345, invocation_id=invocation,
+                    )
+            core.publish_execute_plan.reset_mock()
+            ignored = ({**codex, 'prompt': 'Discuss $glitch-execute only'},
+                       {**codex, 'prompt': '$glitch-execute'},
+                       {**codex, 'prompt': f'$glitch-execute {argument} other.md'},
+                       {**codex, 'hook_event_name': 'Stop'},
+                       {**codex, 'hook_event_name': 'PostCompact'})
+            self.assertEqual([dispatch(event, 'codex') for event in ignored], [None] * len(ignored))
+            self.assertIsNone(dispatch({**claude_tool, 'tool_input': {'skill': 'other-skill', 'args': argument}}, 'claude'))
+            core.publish_execute_plan.assert_not_called()
+            core.clear_execute_plan.assert_not_called()
+            core.publish_execute_plan.return_value = {'ok': True, 'state': 'legacy', 'path': str(path), 'token': 'a' * 32}
+            result = dispatch(claude, 'claude')
+            self.assertIn(f'adopt --plan {shlex.quote(str(path))} --token ' + 'a' * 32, result)
+
+            for event, startup in (
+                ({**common, 'hook_event_name': 'SessionStart', 'source': 'startup'}, True),
+                ({**common, 'hook_event_name': 'SessionEnd', 'reason': 'other'}, False),
+            ):
+                self.assertIsNone(dispatch(event, 'codex'))
+                core.clear_execute_plan.assert_called_with(
+                    agent_pid=470001, expected_birth='fixture:birth', session_id='fixture-session-id',
+                    observed_ns=12345, startup=startup,
+                )
 
 
 def detailed_plan(plan_id='plan-0123456789ab'):

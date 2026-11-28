@@ -2,6 +2,9 @@
 
 This metadata is not a second plan or a work queue. No input reaches an agent.
 """
+from __future__ import annotations
+
+from collections.abc import Callable, Iterator
 import contextlib
 import ctypes
 import errno
@@ -9,18 +12,22 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
+import secrets
 import stat
 import sys
 import tempfile
 import time
 
-from process_identity import ProcessEnded, process, session_process
+from process_identity import ProcessEnded, ancestors, process, session_process
 
 LIMIT = 16384
 PREFIX = 'tern-todo-publications-'
 LIVE = 'live'
 ENDED = 'ended-or-changed'
 UNKNOWN = 'unknown'
+HOOK_LOCK_TIMEOUT = 0.15
+ADOPTION_TOKEN = re.compile(r'[a-f0-9]{32}')
 
 
 class PublicationEnded(ValueError):
@@ -235,7 +242,7 @@ def directory(identity, create=False):
 
 
 @contextlib.contextmanager
-def _writer_lock(target, identity):
+def _writer_lock(target, identity, *, timeout=5):
     lock_path = target.with_name(target.name+'.lock')
     flags = os.O_RDWR | os.O_CREAT | getattr(os, 'O_NOFOLLOW', 0)
     descriptor = os.open(lock_path, flags, 0o600)
@@ -254,7 +261,7 @@ def _writer_lock(target, identity):
                 os.fchown(descriptor, -1, _group()); os.fchmod(descriptor, 0o640)
             else:
                 os.fchmod(descriptor, 0o600)
-        deadline = time.monotonic()+5
+        deadline = time.monotonic()+timeout
         while True:
             try:
                 if os.name == 'nt':
@@ -381,6 +388,10 @@ def _read(path, identity):
     anchors = record.get('anchors')
     if not isinstance(anchors,list) or not 2<=len(anchors)<=48:
         raise ValueError('invalid publication process chain')
+    if 'session_id' in record:
+        _check_event_id(record['session_id'])
+        if type(record.get('event_ns')) is not int or record['event_ns'] <= 0:
+            raise ValueError('invalid native execute event time')
     return record
 
 
@@ -452,6 +463,202 @@ def _retract_observed(target, identity, expected):
     target.unlink()
 
 
+def _next_revision(existing: dict | None) -> int:
+    now = time.time_ns()
+    return now if existing is None else max(now, existing['published_ns'] + 1)
+
+
+def _local_plan(path: str | Path) -> Path:
+    selected = Path(path)
+    if not selected.is_absolute() or str(selected).startswith(('\\\\', '//')):
+        raise ValueError('the published plan must be an absolute local path')
+    if os.name == 'nt':
+        drive = ctypes.windll.kernel32.GetDriveTypeW(ctypes.c_wchar_p(selected.anchor))
+        if drive == 4:
+            raise ValueError('network plan roots are not accepted')
+        for part in [*reversed(selected.parents), selected]:
+            if getattr(part.lstat(), 'st_file_attributes', 0) & 0x400:
+                raise ValueError('published plan paths must not cross reparse points')
+    canonical = selected.resolve(strict=True)
+    if str(canonical).startswith(('\\\\', '//')):
+        raise ValueError('network plan roots are not accepted')
+    return canonical
+
+
+@contextlib.contextmanager
+def _stage_record(folder: Path, record: dict) -> Iterator[str]:
+    data = json.dumps(record, ensure_ascii=True, separators=(',', ':')).encode()
+    if len(data) > LIMIT:
+        raise ValueError('publication exceeds its size limit')
+    descriptor, temporary = tempfile.mkstemp(prefix='.publish-', dir=folder)
+    try:
+        with os.fdopen(descriptor, 'wb') as stream:
+            if os.name != 'nt':
+                if _linux():
+                    os.fchown(stream.fileno(), -1, _group())
+                    os.fchmod(stream.fileno(), 0o640)
+                else:
+                    os.fchmod(stream.fileno(), 0o600)
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        yield temporary
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def _active_result(record: dict) -> dict:
+    return {'ok': True, 'state': 'active', 'publication': _source(record)['publication']}
+
+
+def _check_event_id(value: str) -> None:
+    if not isinstance(value, str) or not 1 <= len(value) <= 160 or not re.fullmatch(r'[A-Za-z0-9._:-]+', value):
+        raise ValueError('invalid native execute event identity')
+
+
+def _scope_agent(agent_pid: int, expected_birth: str) -> list[dict]:
+    anchors = session_process(agent_pid)
+    if not isinstance(expected_birth, str) or anchors[0]['birth'] != expected_birth:
+        raise ValueError('the verified execute process has changed')
+    return anchors
+
+
+def _same_agent(record: dict, agent: dict) -> bool:
+    return all(record['anchors'][0][key] == agent[key] for key in ('pid', 'birth', 'owner'))
+
+
+def _read_optional(target: Path, identity: str) -> dict | None:
+    try:
+        return _read(target, identity)
+    except FileNotFoundError:
+        return None
+
+
+def _validate_observed_ns(observed_ns: int) -> None:
+    if type(observed_ns) is not int or not 0 < observed_ns <= time.monotonic_ns():
+        raise ValueError('invalid native execute event time')
+
+
+def _commit_scoped(target: Path, record: dict) -> None:
+    identity = record['owner']
+    with _stage_record(target.parent, record) as temporary:
+        if 'path' in record:
+            canonical = Path(record['path'])
+            if _local_plan(canonical) != canonical:
+                raise ValueError('the canonical execute plan moved before publication')
+        if not _valid(record):
+            raise ValueError('the verified execute process has changed')
+        _replace_publication(temporary, target, identity)
+
+
+def _scoped_result(record: dict) -> dict:
+    if record['state'] == 'active':
+        return _active_result(record)
+    return {'ok': True, 'state': 'legacy', 'path': record['path'], 'token': record['adoption_token']}
+
+
+def _same_invocation(existing: dict, record: dict) -> bool:
+    if any(existing.get(key) != record.get(key) for key in ('session_id', 'path', 'state', 'plan_id')):
+        return False
+    invocation_id = record.get('invocation_id')
+    return invocation_id is None or invocation_id == existing.get('invocation_id')
+
+
+def publish_execute(path: Path, read_plan: Callable[[Path], dict | None], agent_pid: int, *, expected_birth: str,
+                    session_id: str, observed_ns: int, invocation_id: str | None = None) -> dict:
+    """Publish a verified native execute request or reserve its exact legacy path."""
+    _check_event_id(session_id)
+    _validate_observed_ns(observed_ns)
+    if invocation_id is not None:
+        _check_event_id(invocation_id)
+    anchors = _scope_agent(agent_pid, expected_birth)
+    identity = anchors[0]['owner']
+    target = directory(identity, True) / _key(anchors[-2])
+    with _writer_lock(target, identity, timeout=HOOK_LOCK_TIMEOUT):
+        existing = _read_optional(target, identity)
+        same_agent = existing is not None and _same_agent(existing, anchors[0])
+        if existing is not None and not same_agent and _valid(existing):
+            raise ValueError('another live publisher already owns this native session')
+        if same_agent and existing.get('event_ns', 0) > observed_ns:
+            return {'ok': True, 'state': 'unchanged'}
+        canonical = _local_plan(path)
+        if canonical != path:
+            raise ValueError('the canonical execute plan moved before publication')
+        plan = read_plan(canonical)
+        record = {'schema': 1, 'owner': identity, 'anchors': anchors, 'state': 'none',
+                  'published_ns': _next_revision(existing), 'session_id': session_id,
+                  'event_ns': observed_ns, 'path': str(canonical)}
+        if invocation_id is not None:
+            record['invocation_id'] = invocation_id
+        if plan is not None:
+            record = {**record, 'state': 'active', 'plan_id': plan['plan_id']}
+        if same_agent and existing['anchors'] == anchors and _same_invocation(existing, record):
+            return _scoped_result(existing)
+        if plan is None:
+            record = {**record, 'adoption_token': secrets.token_hex(16)}
+        result = _scoped_result(record)
+        _commit_scoped(target, record)
+        return result
+
+
+def clear_execute(agent_pid: int, *, expected_birth: str, session_id: str,
+                  observed_ns: int, startup: bool = False) -> dict:
+    """Retract only the matching native session observed before this event."""
+    _check_event_id(session_id)
+    _validate_observed_ns(observed_ns)
+    anchors = _scope_agent(agent_pid, expected_birth)
+    identity = anchors[0]['owner']
+    try:
+        target = directory(identity) / _key(anchors[-2])
+    except FileNotFoundError:
+        return {'ok': True, 'state': 'none'}
+    with _writer_lock(target, identity, timeout=HOOK_LOCK_TIMEOUT):
+        record = _read_optional(target, identity)
+        if record is None:
+            return {'ok': True, 'state': 'none'}
+        saved_session = record.get('session_id')
+        matching_lifecycle = saved_session != session_id if startup else saved_session == session_id
+        if (not _same_agent(record, anchors[0]) or saved_session is None or not matching_lifecycle
+                or record['event_ns'] >= observed_ns):
+            return {'ok': True, 'state': 'unchanged'}
+        tombstone = {'schema': 1, 'owner': identity, 'anchors': anchors, 'state': 'none',
+                     'published_ns': _next_revision(record), 'session_id': session_id,
+                     'event_ns': observed_ns}
+        _commit_scoped(target, tombstone)
+        return {'ok': True, 'state': 'none'}
+
+
+def adopt(path: str, token: str, read_plan: Callable[[Path], dict]) -> dict:
+    """Complete one legacy plan reserved in this exact live execute process."""
+    if not ADOPTION_TOKEN.fullmatch(token):
+        raise ValueError('invalid execute adoption token')
+    chain = ancestors(os.getppid())
+    identity = owner()
+    rejected = 'no matching legacy execute request in this native session'
+    if len(chain) < 2:
+        raise ValueError(rejected)
+    target = directory(identity) / _key(chain[-2])
+    with _writer_lock(target, identity, timeout=HOOK_LOCK_TIMEOUT):
+        record = _read_optional(target, identity)
+        if (record is None or record['state'] != 'none' or record.get('path') != path
+                or record.get('adoption_token') != token):
+            raise ValueError(rejected)
+        if len(record['anchors']) > len(chain) or not all(
+            left == right for left, right in zip(reversed(record['anchors']), reversed(chain))
+        ):
+            raise ValueError(rejected)
+        canonical = _local_plan(path)
+        if str(canonical) != path:
+            raise ValueError('the canonical execute plan moved before adoption')
+        plan = read_plan(canonical)
+        replacement = {key: value for key, value in record.items() if key != 'adoption_token'}
+        replacement = {**replacement, 'state': 'active', 'plan_id': plan['plan_id'],
+                       'published_ns': _next_revision(record)}
+        _commit_scoped(target, replacement)
+        return _active_result(replacement)
+
+
 def publish(path, read_plan, agent_pid):
     anchors = session_process(agent_pid); identity = anchors[0]['owner']
     folder=directory(identity,True);target=folder/_key(anchors[-2])
@@ -481,36 +688,15 @@ def publish(path, read_plan, agent_pid):
         replacement_attempted = False
         replaced = False
         try:
-            revision = time.time_ns()
-            if existing is not None: revision = max(revision, existing['published_ns']+1)
+            revision = _next_revision(existing)
             record = {'schema':1,'owner':identity,'anchors':anchors,'state':'none','published_ns':revision}
-            selected=Path(path)
-            if not selected.is_absolute() or str(selected).startswith(('\\\\','//')):
-                raise ValueError('the published plan must be an absolute local path')
-            if os.name=='nt':
-                drive=ctypes.windll.kernel32.GetDriveTypeW(ctypes.c_wchar_p(selected.anchor))
-                if drive==4:raise ValueError('network plan roots are not accepted')
-                for part in [*reversed(selected.parents),selected]:
-                    if getattr(part.lstat(),'st_file_attributes',0)&0x400:
-                        raise ValueError('published plan paths must not cross reparse points')
-            canonical = selected.resolve(strict=True)
-            if str(canonical).startswith(('\\\\','//')): raise ValueError('network plan roots are not accepted')
+            canonical = _local_plan(path)
             plan = read_plan(canonical)
             record.update(state='active',path=str(canonical),plan_id=plan['plan_id'])
-            data=json.dumps(record,ensure_ascii=True,separators=(',',':')).encode()
-            if len(data)>LIMIT: raise ValueError('publication exceeds its size limit')
-            descriptor,temporary=tempfile.mkstemp(prefix='.publish-',dir=folder)
-            try:
-                with os.fdopen(descriptor,'wb') as stream:
-                    if os.name!='nt':
-                        if _linux(): os.fchown(stream.fileno(),-1,_group());os.fchmod(stream.fileno(),0o640)
-                        else: os.fchmod(stream.fileno(),0o600)
-                    stream.write(data);stream.flush();os.fsync(stream.fileno())
+            with _stage_record(folder, record) as temporary:
                 replacement_attempted = True
                 _replace_publication(temporary, target, identity)
                 replaced = True
-            finally:
-                if os.path.exists(temporary): os.unlink(temporary)
         except (OSError,ValueError,KeyError,TypeError):
             if replaced:
                 _retract_observed(target, identity, _revision(record))

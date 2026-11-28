@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 """Read explicit interactive-plan checkpoints locally or over SSH. Blastworks.ai; MIT."""
+from __future__ import annotations
+
 import argparse
 import json
 import os
@@ -20,6 +22,14 @@ STATES = {'pending', 'active', 'blocked', 'done'}
 class Parser(argparse.ArgumentParser):
     def error(self, message):
         raise ValueError(message)
+
+
+class LegacyPlan(ValueError):
+    """The canonical plan lacks both markers and can be deliberately adopted."""
+
+
+class InvalidCheckpointBlock(ValueError):
+    """An existing checkpoint block is malformed or does not match its schema."""
 
 
 MAX_CHECKPOINTS = 30
@@ -112,14 +122,191 @@ def read_plan(path):
     if len(raw) > LIMIT:
         raise ValueError('PLAN exceeds 1 MiB')
     text = raw.decode('utf-8').replace('\r\n', '\n')
-    if text.count(START) != 1 or text.count(END) != 1:
-        raise ValueError('PLAN needs one explicit TERN-SESSION checkpoint block; deliberately adopt it through the planning workflow')
-    before, block = text.split(START, 1)
-    block, after = block.split(END, 1)
+    start_count, end_count = text.count(START), text.count(END)
+    if (start_count, end_count) != (1, 1):
+        error = LegacyPlan if (start_count, end_count) == (0, 0) else InvalidCheckpointBlock
+        raise error('PLAN needs one explicit TERN-SESSION checkpoint block; deliberately adopt it through the planning workflow')
+    _, _, after_start = text.partition(START)
+    block, end, _ = after_start.partition(END)
+    if not end:
+        raise InvalidCheckpointBlock('checkpoint block markers are out of order')
     block = block.strip()
     if not block.startswith('```json\n') or not block.endswith('\n```'):
-        raise ValueError('checkpoint block must contain one fenced JSON object')
-    return validate(json.loads(block[len('```json\n'):-len('\n```')]))
+        raise InvalidCheckpointBlock('checkpoint block must contain one fenced JSON object')
+    try:
+        return validate(json.loads(block[len('```json\n'):-len('\n```')]))
+    except (ValueError, RecursionError, TypeError) as error:
+        raise InvalidCheckpointBlock(str(error)) from error
+
+
+def verify_glitch_root(path: Path) -> Path:
+    """Verify the configured local Glitch root by its managed execute entry points."""
+    if not path.is_absolute() or str(path).startswith(('\\\\', '//')):
+        raise ValueError('Glitch root must be an absolute local path')
+    root = path.resolve(strict=True)
+    markers = (root / '.claude/scripts/plan_check.py',
+               root / '.claude/skills/glitch-execute/SKILL.md')
+    for marker in markers:
+        canonical = marker.resolve(strict=True)
+        if not canonical.is_relative_to(root) or not canonical.is_file():
+            raise ValueError('configured path is not a Glitch root')
+    _plan_area(root)
+    return root
+
+
+def _plan_area(root: Path) -> Path:
+    plans = root / 'plans'
+    canonical = plans.resolve(strict=True)
+    if canonical == root or not canonical.is_relative_to(root) or not canonical.is_dir():
+        raise ValueError('Glitch plans must be a directory inside the configured root')
+    return canonical
+
+
+def _canonical_plan(candidate: Path, area: Path) -> Path:
+    canonical = candidate.resolve(strict=True)
+    if not canonical.is_relative_to(area):
+        raise ValueError('the plan resolves outside the canonical plan area')
+    if canonical.suffix.lower() != '.md' or not canonical.is_file() or any(ord(c) < 32 for c in str(canonical)):
+        raise ValueError('the plan must be a regular Markdown file')
+    return canonical
+
+
+def _raise_walk_error(error: OSError) -> None:
+    raise error
+
+
+def resolve_execute_plan(root: Path, argument: str) -> Path:
+    """Resolve one decoded execute operand without examining other workspaces."""
+    if not isinstance(argument, str) or not argument.strip() or any(ord(c) < 32 for c in argument):
+        raise ValueError('execute needs one explicit plan path')
+    requested = Path(argument)
+    if requested.suffix.lower() != '.md' or '..' in requested.parts:
+        raise ValueError('execute needs a Markdown plan path within Glitch plans')
+    root = verify_glitch_root(root)
+    plans = _plan_area(root)
+    bare_name = not requested.is_absolute() and len(requested.parts) == 1
+    candidate = plans / requested if bare_name else root / requested
+    if not (candidate.is_relative_to(plans) or candidate.is_relative_to(root / 'plans')):
+        raise ValueError('execute plan must be in the canonical plan area')
+    try:
+        candidate.lstat()
+    except FileNotFoundError:
+        if not bare_name:
+            raise
+    else:
+        return _canonical_plan(candidate, plans)
+
+    archive = (plans / 'archive').resolve(strict=True)
+    if archive == plans or not archive.is_relative_to(plans) or not archive.is_dir():
+        raise ValueError('Glitch plan archive must be inside the canonical plan area')
+    matches = set()
+    for directory, _, files in os.walk(archive, onerror=_raise_walk_error):
+        if requested.name in files:
+            matches.add(_canonical_plan(Path(directory) / requested, archive))
+            if len(matches) > 1:
+                raise ValueError('the explicit plan name matches multiple archived plans')
+    if not matches:
+        raise FileNotFoundError('the explicit plan is absent from Glitch plans and archive')
+    return matches.pop()
+
+
+def _read_scoped_plan(path: Path) -> dict | None:
+    try:
+        return read_plan(path)
+    except LegacyPlan:
+        return None
+
+
+def _linux_invocation(pid: int) -> tuple[Path, list[str]]:
+    folder = Path('/proc') / str(pid)
+    image = (folder / 'exe').readlink()
+    with (folder / 'cmdline').open('rb') as stream:
+        raw = stream.read(64 * 1024 + 1)
+    if not raw.endswith(b'\0') or len(raw) > 64 * 1024:
+        raise ValueError('cannot verify native process arguments')
+    return image, [os.fsdecode(part) for part in raw[:-1].split(b'\0')][1:]
+
+
+def _linux_foreground_terminal(pid: int) -> bool:
+    folder = Path('/proc') / str(pid)
+    fields = (folder / 'stat').read_text().rpartition(') ')[2].split()
+    if len(fields) <= 5:
+        raise ValueError('cannot verify native terminal ownership')
+    tty, process_group, foreground_group = int(fields[4]), int(fields[2]), int(fields[5])
+    if tty <= 0 or process_group != foreground_group:
+        return False
+    stdin = (folder / 'fd' / '0').stat()
+    return stat.S_ISCHR(stdin.st_mode) and stdin.st_rdev == tty
+
+
+def _interactive_invocation(harness: str, arguments: list[str]) -> bool:
+    if harness == 'claude':
+        return not any(arg.startswith('-p') or arg.partition('=')[0] in {'--print', '--sdk-url'}
+                       for arg in arguments)
+    if harness == 'codex':
+        noninteractive = {'exec', 'e', 'app-server', 'app-server-client', 'mcp-server',
+                          'review', 'cloud', 'debug', 'stdio-to-uds'}
+        if any(arg in noninteractive or arg in {'--sandbox=read-only', '-s=read-only', '-sread-only'}
+               for arg in arguments):
+            return False
+        return not any(flag in {'--sandbox', '-s'} and mode == 'read-only'
+                       for flag, mode in zip(arguments, arguments[1:]))
+    raise ValueError('unsupported native execute adapter')
+
+
+def verify_execute_process(harness: str, *, executable: Path, declared_pid: int | None = None) -> tuple[int, str]:
+    """Find the verified interactive agent process that owns this Linux Tern hook."""
+    from process_identity import ancestors, process
+
+    if not sys.platform.startswith('linux'):
+        raise ValueError('native execute process verification is unavailable on this OS')
+    if not executable.is_absolute():
+        raise ValueError('the configured agent executable must be an absolute path')
+    configured = executable.resolve(strict=True)
+    identity = process(os.getpid())['owner']
+    chain = ancestors(os.getppid())
+    tern_image, tern_arguments = _linux_invocation(chain[-1]['pid'])
+    if tern_image.name != 'tern' or 'daemon' not in tern_arguments:
+        raise ValueError('the caller has no verified native Tern daemon ancestor')
+
+    matches = []
+    for item in chain[:-1]:
+        if item['owner'] != identity:
+            break
+        pid = item['pid']
+        image, arguments = _linux_invocation(pid)
+        if image == configured:
+            matches.append((item, arguments))
+    if len(matches) != 1:
+        raise ValueError('cannot identify one verified native agent process')
+    agent, arguments = matches[0]
+    pid = agent['pid']
+    if declared_pid is not None and pid != declared_pid:
+        raise ValueError('the native agent identity conflicts with the runtime declaration')
+    if not _interactive_invocation(harness, arguments) or not _linux_foreground_terminal(pid):
+        raise ValueError('the native agent is not the interactive pane process')
+    if process(pid) != agent or process(chain[-1]['pid']) != chain[-1]:
+        raise ValueError('the native execute process chain changed during verification')
+    return pid, agent['birth']
+
+
+def publish_execute_plan(root: Path, argument: str, *, agent_pid: int, expected_birth: str,
+                         session_id: str, observed_ns: int, invocation_id: str | None = None) -> dict:
+    """Use the common publisher for one explicit native execute event."""
+    import publication
+
+    plan_path = resolve_execute_plan(root, argument)
+    return publication.publish_execute(plan_path, _read_scoped_plan, agent_pid,
+                                       expected_birth=expected_birth, session_id=session_id,
+                                       observed_ns=observed_ns, invocation_id=invocation_id)
+
+
+def clear_execute_plan(*, agent_pid: int, expected_birth: str, session_id: str,
+                       observed_ns: int, startup: bool = False) -> dict:
+    import publication
+
+    return publication.clear_execute(agent_pid, expected_birth=expected_birth,
+                                     session_id=session_id, observed_ns=observed_ns, startup=startup)
 
 
 def _source_envelope(plan):
@@ -173,6 +360,9 @@ def main(argv=None):
         publish = commands.add_parser('publish', help='publish this agent session’s existing active plan identity')
         publish.add_argument('--plan', required=True)
         publish.add_argument('--agent-pid', required=True, type=int)
+        adopt = commands.add_parser('adopt', help='publish a legacy plan this native execute event reserved')
+        adopt.add_argument('--plan', required=True)
+        adopt.add_argument('--token', required=True)
         clear = commands.add_parser('clear', help='clear this agent session’s published plan identity')
         clear.add_argument('--agent-pid', required=True, type=int)
         commands.add_parser('ancestry', help='show native caller process facts so the agent can identify its own durable process')
@@ -186,13 +376,15 @@ def main(argv=None):
         template.add_argument('--title', required=True)
         template.add_argument('--step', action='append', required=True)
         args = parser.parse_args(argv)
-        if args.command in {'publish','clear','discover','published','ancestry'}:
+        if args.command in {'publish','clear','discover','published','ancestry','adopt'}:
             # Python -I intentionally ignores environment/CWD imports. Only our
             # installed, adjacent implementation modules are added here.
             sys.path.insert(0,str(Path(__file__).resolve().parent))
             import publication
             if args.command in {'publish','clear'}:
                 result=publication.publish(args.plan if args.command=='publish' else None,read_plan,args.agent_pid)
+            elif args.command == 'adopt':
+                result = publication.adopt(args.plan, args.token, read_plan)
             elif args.command=='ancestry':
                 from process_identity import ancestors
                 result={'ok':True,'ancestors':ancestors(os.getppid())}
