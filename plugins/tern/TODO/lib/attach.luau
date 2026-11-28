@@ -134,7 +134,8 @@ function attach.new(api: AttachApi): Controller
         -- SKILLS-174: the client window key is never sent; it is not host identity.
         local request = tostring(api.now()) .. ":" .. tostring(target)
         local label = (if host.kind == "remote" then "SSH · " else "Local · ") .. (host.address or host.name)
-        local panel = cx:new_block(KIND, { api.json.encode({ mode = "selected", label = label, request = request }) }, "beside", { target = target, dir = "right", ratio = 0.3, focus = false })
+        local args = { mode = "selected", label = label, request = request, cwd = pane.cwd }
+        local panel = cx:new_block(KIND, { api.json.encode(args) }, "beside", { target = target, dir = "right", ratio = 0.3, focus = false })
         if not panel then changed(cx); return end
         if api.bind then api.bind(panel, target) end
         local deadline = api.now() + 2500

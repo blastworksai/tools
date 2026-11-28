@@ -1,4 +1,5 @@
 local selection=require("../lib/host_selection")
+local picker=require("../lib/plan_picker")
 local function fixture()
     local f={calls=0,timers={},delivered={},active=true,clock=1}
     function f.inventory()
@@ -22,6 +23,12 @@ local function fixture()
     return f
 end
 return {
+    {"a delayed picker click cannot choose a different plan after refresh",function()
+        local plan={path="/glitch/plans/example.md",name="example.md",title="Example",plan_id="plan-123456abcdef"}
+        local data={ok=true,root="/glitch",plans={plan}}
+        assert(picker.selected(picker.catalog(1,0,data),"1:1")==plan)
+        assert(picker.selected(picker.catalog(2,0,data),"1:1")==nil)
+    end},
     {"host resolves selected sibling and fences membership around its process read",function()
         local f=fixture();f.run();assert(#f.delivered==1 and f.delivered[1].pid==88 and f.calls==3)
         local g=fixture();g.drift=true;g.run();assert(#g.delivered==1 and g.delivered[1].pid==nil)

@@ -7,6 +7,7 @@ TODO shows the active Glitch plan in a read-only Tern checklist. It displays the
 1. Enable **Do you use Glitch?** on the execution host. The installed package sets up eligible local Claude and Codex hooks. In a fresh Codex session, review and trust the TODO hooks through `/hooks`.
 2. In a fresh native Tern agent pane, enter `/glitch-execute "plans/Example plan.md"` in Claude Code or `$glitch-execute "plans/Example plan.md"` in Codex. Use one explicit canonical plan path. A quoted path can contain spaces.
 3. Click **TODO** in the status bar. If the current tab has exactly one real pane and it is eligible, TODO opens its plan view or native board directly. With multiple panes, no eligible pane or an ambiguous selection, TODO opens settings. Choose a session under **Attach to** when available.
+4. If TODO cannot find a verified publication, **Choose a plan** lists readable checkpoint plans on the pane's host. Pick a plan to open its live, read-only checklist. This works with any agent launch. A manual choice stays on that plan and does not become a board sync source.
 
 ## Status bar, settings and boards
 

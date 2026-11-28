@@ -4,6 +4,7 @@
 local view = require("./lib/plan_view")
 local polling = require("./lib/polling")
 local selection = require("./lib/host_selection")
+local picker = require("./lib/plan_picker")
 local settings = require("./lib/settings")
 local plan_publish = require("./lib/plan_publish")
 local status_prompt = require("./status/status_prompt")
@@ -16,8 +17,9 @@ type Source = {
     publication: { [string]: any }?,
     ssh: string?,
     label: string?,
+    manual_root: string?,
 }
-type Selection = { mode: string, label: string, request: string }
+type Selection = { mode: string, label: string, request: string, cwd: string? }
 type Plan = { schema: number?, plan_id: string, title: string, current: string?, checkpoints: { any } }
 type State = {
     panel: number,
@@ -34,6 +36,9 @@ type State = {
     hadWait: boolean?,
     dormant: boolean?,
     discovery_label: string?,
+    discovery_cwd: string?,
+    picker: picker.Catalog?,
+    picker_revision: number?,
     finished: boolean?,
     reading: boolean?,
     plan: Plan?,
@@ -110,11 +115,16 @@ local function sourceValid(source: any): boolean
     return type(source) == "table" and type(source.path) == "string" and source.path ~= ""
         and (source.ssh == nil or (type(source.ssh) == "string" and source.ssh ~= ""))
         and (source.label == nil or (type(source.label) == "string" and #source.label <= 400))
+        and (source.manual_root == nil or (type(source.manual_root) == "string" and source.manual_root ~= ""
+            and source.ssh == nil and source.publication == nil))
 end
 -- The window half reads the last plan this panel validated from this view's own hidden node (board sync), through
 -- the pane surface, so it works whichever machine the session runs on (lib/plan_publish, lib/plan_read).
 -- A failed read, a closed panel or a fresh start removes it, so a window never syncs a stale success.
-local function publish(state: State, plan: Plan?) state.publisher.publish(plan) end
+local function publish(state: State, plan: Plan?)
+    -- A plan chosen for display does not become the session's automatic sync source.
+    state.publisher.publish(if state.source and state.source.manual_root then nil else plan)
+end
 local function live(state: State): boolean
     return selection.live(state, instances, tern.pane.list(), KIND, publish)
 end
@@ -123,6 +133,26 @@ local function later(state: State, ms: number, fn: () -> ())
 end
 local function redraw(state: State, cx: BlockCx)
     if live(state) then pcall(function() cx:render() end) end
+end
+local function offerPlans(state: State, cx: BlockCx)
+    if state.picker then return end
+    local revision = (state.picker_revision or 0) + 1
+    state.picker_revision = revision
+    local pending: picker.Catalog = { revision = revision }
+    state.picker = pending
+    redraw(state, cx)
+    local arguments = { "-I", tern.plugin.dir .. "/bin/todo.py", "plans" }
+    if state.discovery_cwd then table.insert(arguments, "--cwd"); table.insert(arguments, state.discovery_cwd) end
+    python.run(arguments, { timeout_ms = 6000 }, function(result, problem)
+        if not live(state) or state.picker ~= pending then return end
+        if result then
+            local ok, envelope = pcall(tern.json.decode, result.stdout or "")
+            state.picker = picker.catalog(revision, result.status, if ok then envelope else nil)
+        else
+            state.picker = { revision = revision, error = problem or "Could not list plans on this host." }
+        end
+        redraw(state, cx)
+    end)
 end
 local function helperArguments(state: State, helper: string): { string }
     if state.discover_pid then
@@ -139,15 +169,18 @@ local function helperArguments(state: State, helper: string): { string }
     end
     local arguments = { "-I", helper, "source", "--plan", source.path }
     if source.ssh then table.insert(arguments, "--ssh"); table.insert(arguments, source.ssh) end
+    if source.manual_root then table.insert(arguments, "--glitch-root"); table.insert(arguments, source.manual_root) end
     return arguments
 end
 local function refresh(state: State, cx: BlockCx)
     if not live(state) or not selection.hasWork(state) or state.reading then return end
     state.reading = true
+    local discovering = state.discover_pid ~= nil
     local helper = tern.plugin.dir .. "/bin/todo.py"
     python.run(helperArguments(state, helper), { timeout_ms = 6000 }, function(result, problem)
         if not live(state) then return end
         state.reading = false
+        if discovering and not state.discover_pid then refresh(state, cx); return end
         if result == nil then
             state.plan = nil; publish(state, nil)
             state.error = problem or "Could not start the read-only source reader. Tern 0.9.8+ and Python 3 are required."
@@ -169,6 +202,7 @@ local function refresh(state: State, cx: BlockCx)
                 publish(state, nil)
                 -- Persist the waiting view (selection.saveState) so a plugin reload resumes it.
                 if not state.waitSaved then state.waitSaved = pcall(function() cx:save() end) end
+                offerPlans(state, cx)
                 redraw(state, cx)
                 later(state, delay :: number, function() refresh(state, cx) end)
                 return
@@ -177,19 +211,20 @@ local function refresh(state: State, cx: BlockCx)
                 -- No window asked recently: keep the binding and the open view, say so, and poll slowly (the same
                 -- discovery step) so a later plan is found, a closed pane is dropped and an ended process ends the view.
                 publish(state, nil)
+                offerPlans(state, cx)
                 redraw(state, cx)
                 later(state, delay :: number, function() refresh(state, cx) end)
                 return
             end
             if outcome.action == "none" then
-                state.finished = true; instances[state.panel] = nil
-                pcall(function() cx:toast("info", "No active plan is published for this session.") end)
-                cx:exit(0); return
+                offerPlans(state, cx)
+                return
             end
             if outcome.action == "active" then
                 local discovered: Source = outcome.source
                 discovered.label = state.discovery_label
                 state.source = discovered
+                state.picker = nil
                 state.plan_id = discovered.plan_id; state.discover_pid = nil
                 state.error = nil; state.terminal = false; state.failures = 0; state.dormant = false
                 refresh(state, cx); return
@@ -201,6 +236,7 @@ local function refresh(state: State, cx: BlockCx)
                 pcall(function() cx:toast("error", message) end)
                 cx:exit(1); return
             end
+            offerPlans(state, cx)
             state.terminal = false
             state.failures = (state.failures or 0) + 1
             redraw(state, cx)
@@ -256,6 +292,7 @@ tern.block.define("list", {
             local ok, source = pcall(tern.json.decode, args[1])
             if ok and type(source) == "table" and source.mode == "selected" and type(source.request) == "string" and #source.request <= 128 and type(source.label) == "string" and #source.label <= 400 then
                 state.selection = source
+                state.discovery_cwd = if type(source.cwd) == "string" and #source.cwd <= 4096 then source.cwd else nil
             elseif ok and sourceValid(source) then
                 state.source = source
                 if type(args[2]) == "string" and #args[2] <= 80 and args[2]:match("^plan%-%x+$") then state.plan_id = args[2] end
@@ -275,15 +312,35 @@ tern.block.define("list", {
         return state
     end,
     view = function(state: State, _cx: BlockCx): BlockView
+        local sync = state.publisher.payload(selection.patience(state, tern.now()))
+        if state.picker then return picker.draw(tern.ui, state.picker, view.syncNode(tern.ui, sync)) end
         local selected = state.source
         local source = if selected then (if selected.label then selected.label .. ": " elseif selected.ssh then "SSH " .. selected.ssh .. ": " else "Local: ") .. selected.path else ""
-        return view.draw(tern.ui, state.plan, source, state.error, state.updated, state.publisher.payload(selection.patience(state, tern.now())))
+        return view.draw(tern.ui, state.plan, source, state.error, state.updated, sync)
     end,
     title = function(state: State): string return if state.plan then state.plan.title else "TODO" end,
     save = function(state: State): any
         return selection.saveState(state)
     end,
     event = function(state: State, event: UiEvent, cx: BlockCx)
+        local catalog = state.picker
+        if catalog and event.ev == "action" and live(state) then
+            if event.act == "refresh-plans" then
+                state.picker = nil
+                offerPlans(state, cx)
+                return
+            end
+            local chosen = if event.act == "choose-plan" and type(event.value) == "string" then picker.selected(catalog, event.value) else nil
+            if chosen and catalog.root then
+                state.source = { path = chosen.path, manual_root = catalog.root, label = state.discovery_label }
+                state.plan_id = chosen.plan_id
+                state.picker = nil; state.discover_pid = nil
+                state.error = nil; state.failures = 0; state.terminal = false
+                redraw(state, cx)
+                refresh(state, cx)
+                return
+            end
+        end
         -- The window tells this view whether to keep waiting for a plan; it is shown back in the plan-sync node.
         local lease = selection.waitLease(event)
         if lease ~= nil then

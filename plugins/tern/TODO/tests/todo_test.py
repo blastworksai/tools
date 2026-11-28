@@ -842,6 +842,26 @@ class PublicationContract(unittest.TestCase):
         with self.assertRaises(FileNotFoundError):
             reader.resolve_execute_plan(self.base, 'workspace.md')
 
+    def test_picker_lists_only_readable_checkpoint_plans_in_the_selected_host_root(self) -> None:
+        reader = reader_module()
+        plans = write_glitch_fixture(self.base)
+        direct = plans / 'Plan with spaces.md'
+        archive = plans / 'archive' / 'Old plan.md'
+        write_plan(direct, plan())
+        write_plan(archive, plan('plan-234567abcdef'))
+        (plans / 'legacy.md').write_text('# No checkpoint block', encoding='utf-8')
+        outside = self.base / 'outside.md'
+        write_plan(outside, plan('plan-999999999999'))
+        if os.name != 'nt':
+            (plans / 'escape.md').symlink_to(outside)
+        with patch.dict(os.environ, {'GLITCH_ROOT': ''}):
+            catalog = reader.list_plans(plans)
+        self.assertEqual(Path(catalog['root']), self.base)
+        self.assertEqual([(Path(item['path']), item['plan_id']) for item in catalog['plans']],
+                         [(direct, 'plan-123456abcdef'), (archive, 'plan-234567abcdef')])
+        with self.assertRaisesRegex(ValueError, 'canonical plan area'):
+            reader.resolve_execute_plan(self.base, str(outside))
+
     def test_synthetic_adapter_publishes_two_panes_without_a_harness_and_deduplicates_delivery(self) -> None:
         reader = reader_module()
         plans = write_glitch_fixture(self.base)

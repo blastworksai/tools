@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import Iterator
+from itertools import islice
 import json
 import os
 from pathlib import Path
@@ -16,6 +18,9 @@ import uuid
 START = '<!-- TERN-SESSION:START -->'
 END = '<!-- TERN-SESSION:END -->'
 LIMIT = 1024 * 1024
+CATALOG_SCAN_LIMIT = 512
+CATALOG_LIMIT = 100
+CATALOG_BYTES = 16 * LIMIT
 STATES = {'pending', 'active', 'blocked', 'done'}
 
 
@@ -169,6 +174,64 @@ def _canonical_plan(candidate: Path, area: Path) -> Path:
     if canonical.suffix.lower() != '.md' or not canonical.is_file() or any(ord(c) < 32 for c in str(canonical)):
         raise ValueError('the plan must be a regular Markdown file')
     return canonical
+
+
+def _catalog_root(cwd: Path | None) -> Path:
+    configured = os.environ.get('GLITCH_ROOT')
+    if configured:
+        return verify_glitch_root(Path(configured))
+    home = Path.home()
+    candidates = (home / 'glitch', home / 'Glitch', home / '.glitch', Path('/opt/glitch'))
+    if cwd is not None and cwd.is_absolute():
+        candidates = (cwd, *cwd.parents, *candidates)
+    for candidate in candidates:
+        try:
+            return verify_glitch_root(candidate)
+        except (OSError, ValueError):
+            continue
+    raise ValueError('Could not find a Glitch plans folder on this host.')
+
+
+def _catalog_candidates(area: Path) -> Iterator[Path]:
+    yield from area.iterdir()
+    archive = area / 'archive'
+    if not archive.is_symlink():
+        for directory, _, files in os.walk(archive):
+            yield from (Path(directory) / name for name in files)
+
+
+def list_plans(cwd: Path | None) -> dict:
+    """Offer readable checkpoint plans from the current host without reading across workspaces."""
+    root = _catalog_root(cwd)
+    area = _plan_area(root)
+    plans, seen = [], set()
+    remaining = CATALOG_BYTES
+    truncated = False
+    for index, candidate in enumerate(islice(_catalog_candidates(area), CATALOG_SCAN_LIMIT + 1)):
+        if index == CATALOG_SCAN_LIMIT or len(plans) == CATALOG_LIMIT:
+            truncated = True
+            break
+        if candidate.suffix.lower() != '.md' or candidate.is_symlink():
+            continue
+        try:
+            canonical = _canonical_plan(candidate, area)
+            if canonical in seen:
+                continue
+            size = canonical.stat().st_size
+            if size > LIMIT:
+                continue
+            if size > remaining:
+                truncated = True
+                continue
+            remaining -= size
+            plan = read_plan(canonical)
+        except (OSError, ValueError):
+            continue
+        seen.add(canonical)
+        plans.append({'path': str(canonical), 'name': canonical.relative_to(area).as_posix(),
+                      'plan_id': plan['plan_id'], 'title': plan['title'].strip()})
+    plans.sort(key=lambda plan: (plan['name'].startswith('archive/'), plan['title'].casefold(), plan['name']))
+    return {'ok': True, 'root': str(root), 'plans': plans, 'truncated': truncated}
 
 
 def _raise_walk_error(error: OSError) -> None:
@@ -352,7 +415,11 @@ def main(argv=None):
         commands = parser.add_subparsers(dest='command', required=True, parser_class=Parser)
         source = commands.add_parser('source', help='read the agent’s canonical checkpoint block')
         source.add_argument('--plan', required=True)
-        source.add_argument('--ssh', help='explicitly reviewed ordinary SSH destination; remote host needs Python 3 and a POSIX shell')
+        source_kind = source.add_mutually_exclusive_group()
+        source_kind.add_argument('--ssh', help='explicitly reviewed ordinary SSH destination; remote host needs Python 3 and a POSIX shell')
+        source_kind.add_argument('--glitch-root', type=Path, help='revalidate an explicitly selected plan against this host’s Glitch root')
+        plans = commands.add_parser('plans', help='list readable canonical plans on this execution host')
+        plans.add_argument('--cwd', type=Path, help='working directory of the selected Tern pane')
         publish = commands.add_parser('publish', help='publish this agent session’s existing active plan identity')
         publish.add_argument('--plan', required=True)
         publish.add_argument('--agent-pid', required=True, type=int)
@@ -391,8 +458,13 @@ def main(argv=None):
             plan = validate({'schema': 2, 'plan_id': 'plan-' + uuid.uuid4().hex[:12], 'title': args.title,
                              'current': None, 'checkpoints': [{'id': f'cp{i}', 'text': text, 'state': 'pending'} for i, text in enumerate(args.step, 1)]})
             print(START+'\n```json\n'+json.dumps(plan, indent=2, ensure_ascii=False)+'\n```\n'+END)
+        elif args.command == 'plans':
+            print(json.dumps(list_plans(args.cwd), ensure_ascii=True, separators=(',', ':')))
         else:
-            plan = read_ssh(args.ssh, args.plan) if args.ssh else read_plan(Path(args.plan))
+            path = Path(args.plan)
+            if args.glitch_root is not None:
+                path = resolve_execute_plan(args.glitch_root, args.plan)
+            plan = read_ssh(args.ssh, args.plan) if args.ssh else read_plan(path)
             print(_source_envelope(plan))
         return 0
     except (ValueError, OSError, KeyError, TypeError, subprocess.TimeoutExpired) as error:

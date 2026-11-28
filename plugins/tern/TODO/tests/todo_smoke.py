@@ -12,7 +12,7 @@ import subprocess
 import tempfile
 import sys
 import time
-from todo_test import plan, write_plan
+from todo_test import plan, write_glitch_fixture, write_plan
 from ssh_fixture import loopback_ssh
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -27,6 +27,18 @@ def wait_for(check, description, seconds=10):
             return value
         time.sleep(.15)
     raise AssertionError('timeout: '+description)
+
+
+def native_button(tree, title):
+    if isinstance(tree, list):
+        for child in tree:
+            if node := native_button(child, title):
+                return node
+    if isinstance(tree, dict):
+        if tree.get('text') == title and 'sf-act' in tree.get('class', ''):
+            return tree
+        return native_button(list(tree.values()), title)
+    return None
 
 
 def main():
@@ -47,6 +59,12 @@ def main():
         manifest.write_text(manifest.read_text().replace('id = "todo"','id = "todo-test"'))
         local = base/'Local plan.md'
         remote = base/'SSH plan.md'
+        glitch = base/'glitch'
+        plans = write_glitch_fixture(glitch)
+        manual_a = plans/'First selected plan.md'
+        manual_b = plans/'Second selected plan.md'
+        write_plan(manual_a, {**plan('plan-111111111111'), 'title': 'First selected plan'})
+        write_plan(manual_b, {**plan('plan-222222222222'), 'title': 'Second selected plan'})
         write_plan(local, plan())
         remote_value = plan('plan-abcdef123456')
         remote_value['title'] = 'SSH interactive task'
@@ -54,7 +72,7 @@ def main():
         path = stack.enter_context(loopback_ssh(base/'ssh'))
         env = dict(os.environ, PATH=str(base/'cli')+os.pathsep+path, TERN_CONFIG_DIR=str(config),
                    TERN_DAEMON_SOCKET=str(base/'daemon.sock'), TODO_PUBLICATION_ROOT=str(base/'publications'), STENCIL_GPU='cpu',
-                   STENCIL_LOG_DIR=str(base/'logs'), STENCIL_LOG='warn,stencil=info,tern::plugin=debug')
+                   STENCIL_LOG_DIR=str(base/'logs'), STENCIL_LOG='warn,stencil=info,tern::plugin=debug', GLITCH_ROOT=str(glitch))
         (base/'cli').mkdir()
         (base/'cli/tern').symlink_to(TERN)
         control = base/'window.sock'
@@ -106,6 +124,15 @@ tern.timer(100, captureFixtureState)
             return value.get('plan',{}).get('checkpoints',[{}])[0].get('state')==state
         def action(name):
             ctl('plugins', 'run', 'plugin.todo-test.'+name)
+        def choose_plan(title):
+            for _ in range(4):
+                tree = json.dumps(ctl('tree'))
+                if 'tn-signin-pill' not in tree and 'Yes, show plugin buttons' not in tree:
+                    break
+                ctl('key', 'Escape')
+            node = wait_for(lambda:native_button(ctl('tree'), title), f'native button for {title}', 8)
+            x, y, width, height = node['rect']
+            ctl('click', str(int(x + width / 2)), str(int(y + height / 2)))
         log = open(base/'process.log', 'w+')
         try:
             processes.append(subprocess.Popen([TERN,'daemon','--socket',str(base/'daemon.sock')],env=env,stdout=log,stderr=log,start_new_session=True))
@@ -127,6 +154,7 @@ tern.timer(100, captureFixtureState)
                 processes.append(subprocess.Popen(launch,env=env,cwd=base,stdout=log,stderr=log,start_new_session=True))
                 wait_for(lambda:control.exists(),'private window',40)
                 command('ctl', '--control', control, 'state', timeout=45)
+                ctl('account', 'signed-out')
                 command('focus',first)
                 wait_for(lambda: any(p.get('id')==first for p in ctl('state').get('panes',[])), 'native window attached to fixture')
                 metadata=json.loads(command('process',first,'--window','','--json'))
@@ -191,10 +219,18 @@ tern.timer(100, captureFixtureState)
                     command('focus',first)
                     wait_for(lambda:all(p.get('id')!=old for p in ctl('state').get('panes',[])),'old TODO panel closes')
                     action('show')
-                    wait_for(lambda:'No active plan is published for this session.' in json.dumps(ctl('tree')),'no-plan notice after real attach',8)
-                    time.sleep(.3)
+                    choose_plan('First selected plan')
+                    wait_for(lambda:source_state(manual_a, 'pending'), 'first chosen plan renders')
+                    third = int(command('new','tab','interactive-test','--','/bin/sh').strip())
+                    command('focus',third)
+                    action('show')
+                    choose_plan('Second selected plan')
+                    wait_for(lambda:source_state(manual_b, 'pending'), 'second chosen plan renders')
+                    write_plan(manual_a, {**plan('plan-111111111111', state='done'), 'title': 'First selected plan'})
+                    wait_for(lambda:source_state(manual_a, 'done'), 'first chosen plan refreshes')
+                    assert source_state(manual_b, 'pending') and observed(manual_a)['panel'] != observed(manual_b)['panel']
                     os.kill(json.loads((base/'publication-ready.json').read_text())['pid'],0)
-                    evidence['checks'].append('no published plan exits the TODO flow and leaves the selected program alive')
+                    evidence['checks'].append('the native picker opens independent read-only plans in two panes without verified publication')
                     (base/'publication-command.json').write_text(json.dumps({'command':'publish'}))
                     wait_for(lambda:json.loads((base/'publication-ready.json').read_text()).get('command')=='publish','republish for process lifetime check')
                     def helper(*parts):
@@ -212,11 +248,11 @@ tern.timer(100, captureFixtureState)
                     assert status==1 and ended.get('terminal') is True and vacant['state']=='none'
                     evidence['checks'].append('replacement agent in the same unlisted live launcher cannot inherit the ended agent publication')
 
-                evidence['visual_qualification']='Initial local pending/done rows observed; later checks use actual host callback state because the closed-beta sign-in overlay hides the client UI. Remote/restored visual qualification remains open.'
+                evidence['visual_qualification']='Native checklists and picker actions observed; additional source lifecycle checks use host callback state.'
             else:
                 evidence['visual_qualification']='Native module/controller contracts only; no window or live agent queried.'
             evidence['runtime']=command('--version').strip()
-            evidence['source_hashes']={name:hashlib.sha256((ROOT/name).read_bytes()).hexdigest() for name in ['host.luau','window.luau','lib/plan_view.luau','lib/polling.luau','lib/attach.luau','lib/selected_binding.luau','lib/host_selection.luau','lib/native_cli.luau','lib/settings.luau','lib/board_sync.luau','lib/plan_publish.luau','lib/plan_read.luau','lib/sync_pane.luau','lib/sync_status.luau','lib/wait_requests.luau','bin/todo.py','bin/publication.py','bin/process_identity.py']}
+            evidence['source_hashes']={name:hashlib.sha256((ROOT/name).read_bytes()).hexdigest() for name in ['host.luau','window.luau','lib/plan_view.luau','lib/plan_picker.luau','lib/polling.luau','lib/attach.luau','lib/selected_binding.luau','lib/host_selection.luau','lib/native_cli.luau','lib/settings.luau','lib/board_sync.luau','lib/plan_publish.luau','lib/plan_read.luau','lib/sync_pane.luau','lib/sync_status.luau','lib/wait_requests.luau','bin/todo.py','bin/publication.py','bin/process_identity.py']}
             evidence['passed']=True
         except Exception as error:
             evidence['passed']=False;evidence['error']=str(error)
@@ -227,6 +263,7 @@ tern.timer(100, captureFixtureState)
             evidence['process_exit_codes']=[p.poll() for p in processes]
             try:
                 evidence['last_native_rows']=rows()
+                evidence['last_native_tree']=ctl('tree')
                 evidence['last_native_state']=ctl('state')
                 evidence['last_native_tree']=ctl('tree')
             except Exception:pass
