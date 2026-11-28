@@ -1,6 +1,6 @@
 # Interactive plan checkpoint contract
 
-Blastworks.ai, COMMANDER-993. English-first integration contract for the existing `/glitch-plan` and `/glitch-execute` workflows. This is documentation for integrating the existing workflows, not a separate installable skill or an override of managed files.
+Blastworks.ai · MIT. This companion adds a checkpoint block to the existing `/glitch-plan` and `/glitch-execute` workflows. Managed Glitch files stay under engine ownership.
 
 ## When writing or deliberately revising an interactive plan
 
@@ -38,9 +38,11 @@ Update the dated Progress evidence, checkpoint state and START HERE consistently
 
 ## Publishing and attaching the view
 
-After creating or deliberately resuming/revising an agreed checkpoint plan, the planning agent runs `todo publish --agent-pid <verified agent PID> --plan <absolute canonical path>` from its own tool session. When that session stops working on a plan, it runs `todo clear --agent-pid <verified agent PID>`. See README.md beside this contract for the installed companion path. These operations change only metadata, never canonical content or another session's binding.
+On a qualified native Tern host, Claude's typed `/glitch-execute` and exact `Skill` call deliver the execute argument. Codex uses a leading `$glitch-execute` in the user prompt. The hook takes one literal plan path relative to the verified Glitch root or an absolute path inside its canonical `plans/` area. A bare filename can also match a unique archive entry. Missing, ambiguous and outside paths follow the normal execute resolution flow. An ordinary discussion about the command does not publish.
 
-The TODO status-bar entry opens TODO Settings, where **Attach to** selects the agent session (the Files pane has no TODO button; with the status bar off, `Ctrl+Shift+P` then **TODO: Open Settings** does the same). Native process metadata identifies that session on its Tern execution host; the host resolves its process-owned publication and reads the canonical plan. The operator is not asked for a source or plan path. No publication means a notice and exit from TODO only; the agent stays running. Invalid or unreadable publication metadata fails visibly, without a guessed plan or agent prompt.
+The hook verifies the live interactive agent's native executable, Tern ancestry, process birth and ownership before publishing. It uses the same block reader and metadata publisher as the generic manual interface. The native binding includes the session identity. A repeated callback for one invocation cannot publish the plan again. Startup and reset clear only an earlier binding for that process. Session end clears only the matching binding. Compaction and ordinary turns keep it. Codex's `/new` clears at the next native session-start event, which can arrive with the first new prompt.
+
+Open TODO and choose the intended session if the selector appears. Native process metadata identifies the session and its execution host. The host resolves the process-owned publication and reads the canonical plan. Missing publication affects the TODO view alone. Invalid or unreadable publication metadata produces an error. **TODO: Open Settings** opens the explicit settings view.
 
 The publication is bound to OS ownership, the agent process birth and its native Tern ancestry. Persisted view identity includes the canonical source/plan id and that process binding, never a bare pane number. Process exit/reuse, clear or a different publication invalidates prior success. A different plan is not adopted automatically.
 
@@ -48,6 +50,6 @@ TODO shows every checkpoint, task, file change, step and validation check in a r
 
 ## Adoption boundary
 
-This is an explicit agent-side publication contract with a discoverable local companion. Managed engine skills/hooks stay unchanged. Evidence that the helper and viewer work is separate from evidence that every planning session follows the companion. Existing plans gain the agreed block and publication only on deliberate resume/revision. No fleet/BWPM/FORGE state is read or written.
+The hook leaves canonical content untouched. On an explicit execute of a legacy plan with no markers, it reserves that plan for the current session and supplies one scoped continuation. The executor writes the agreed block through the normal authorized workflow before implementation, then runs the supplied `adopt` command in that session. The command checks the same canonical plan, process chain and one-use reservation. A malformed block produces a diagnostic and no adoption command. Existing plans gain the agreed block only on deliberate resume or revision.
 
-Publisher identity is explicit (--agent-pid), verified against the caller’s live owned ancestry; it is never selected by shell-name filtering. Identify the durable agent from runtime facts or helper ancestry. Clear before conversation reset/end and on fresh startup. A reset retaining the same process cannot be detected automatically; skipped clearing leaves the old pointer active.
+For other interactive agents, use the generic `publish` and `clear` commands in [README.md](README.md). Verify the explicit `--agent-pid` against the caller's live owned Tern ancestry. Clear that binding before a reset or when leaving the plan. The generic interface cannot observe a reset that keeps the same process.

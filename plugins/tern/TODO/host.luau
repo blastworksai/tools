@@ -4,6 +4,7 @@
 local view = require("./lib/plan_view")
 local polling = require("./lib/polling")
 local selection = require("./lib/host_selection")
+local settings = require("./lib/settings")
 local plan_publish = require("./lib/plan_publish")
 local status_prompt = require("./status/status_prompt")
 local board_claim = require("./lib/board_claim")
@@ -49,6 +50,64 @@ local python = selection.interpreter({
     end,
 })
 
+local HOOK_SETUP_POLL_MS = 1000
+local HOOK_SETUP_TIMEOUT_MS = 12000
+
+local function hookSetupResult(result: ProcessResult?, problem: string?)
+    if result == nil then
+        tern.log.warn("TODO hook setup: " .. (problem or "Could not start Python 3."))
+        return
+    end
+    if result.timed_out then
+        tern.log.warn("TODO hook setup: timed out. The next eligible load can retry.")
+        return
+    end
+    local decoded, envelope = pcall(tern.json.decode, result.stdout)
+    if not decoded or type(envelope) ~= "table" or type(envelope.message) ~= "string"
+        or type(envelope.state) ~= "string" then
+        tern.log.warn("TODO hook setup: the installer did not return a result.")
+        return
+    end
+    local message = "TODO hook setup (" .. envelope.state .. "): " .. envelope.message
+    if result.status == 0 and envelope.ok == true then
+        tern.log.info(message)
+    else
+        tern.log.warn(message)
+    end
+end
+
+local function serveHookSetup()
+    local plugin = tern.plugin
+    local directory = plugin.dir:gsub("\\", "/")
+    local data = plugin.data:gsub("\\", "/")
+    local config = directory:match("^(.+)/plugins/[^/]+$")
+    if config == nil or directory ~= config .. "/plugins/" .. plugin.id
+        or data ~= config .. "/plugin-data/" .. plugin.id then return end
+    local wasEnabled = false
+    local pending = false
+    local running = false
+    local function step()
+        local enabled = settings.load(tern.kv).glitch == true
+        if enabled ~= wasEnabled then pending = enabled end
+        wasEnabled = enabled
+        if pending and not running then
+            pending = false
+            if tern.runtime.os ~= "linux" then
+                tern.log.warn("TODO hook setup: automatic setup is qualified on Linux only.")
+            else
+                running = true
+                local helper = plugin.dir .. "/integrations/glitch-plan-session-view/install_hooks.py"
+                python.run({ "-I", helper, "--plugin-data", plugin.data }, { timeout_ms = HOOK_SETUP_TIMEOUT_MS }, function(result, problem)
+                    running = false
+                    hookSetupResult(result, problem)
+                end)
+            end
+        end
+        tern.timer(HOOK_SETUP_POLL_MS, step)
+    end
+    tern.timer(0, step)
+end
+
 local function sourceValid(source: any): boolean
     return type(source) == "table" and type(source.path) == "string" and source.path ~= ""
         and (source.ssh == nil or (type(source.ssh) == "string" and source.ssh ~= ""))
@@ -61,7 +120,9 @@ local function publish(state: State, plan: Plan?) state.publisher.publish(plan) 
 local function live(state: State): boolean
     return selection.live(state, instances, tern.pane.list(), KIND, publish)
 end
-local function later(state: State, ms: number, fn: () -> ()) selection.schedule(state, function(delay: number, f: () -> ()) tern.timer(delay, f) end, ms, fn) end
+local function later(state: State, ms: number, fn: () -> ())
+    selection.schedule(state, function(delay: number, f: () -> ()) return tern.timer(delay, f) end, ms, fn)
+end
 local function redraw(state: State, cx: BlockCx)
     if live(state) then pcall(function() cx:render() end) end
 end
@@ -267,5 +328,6 @@ tern.block.define("list", {
 
 require("./updater/host").register()
 status_prompt.host_serve()
+serveHookSetup()
 -- One host per daemon serialises board writes: only one window at a time may add cards to a board.
 board_claim.host_serve({ kv = tern.kv, now = os.time, timer = function(ms: number, fn: (any?) -> ()) return tern.timer(ms, fn) end, token = function(): string return "host" end })
