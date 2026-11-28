@@ -66,7 +66,32 @@ def write_plan(path, value):
     # Estate prose is untouched; only the deliberate explicit block is interpreted.
     path.write_text('# Interactive task\n## Progress\n3 Nov: initial discussion.\n'
                     '## START HERE — next action\nFollow the agreed task.\n'
-                    '<!-- TERN-SESSION:START -->\n```json\n'+json.dumps(value)+'\n```\n<!-- TERN-SESSION:END -->\n')
+                    '<!-- TERN-SESSION:START -->\n```json\n'+json.dumps(value)+'\n```\n<!-- TERN-SESSION:END -->\n',
+                    encoding='utf-8')
+
+
+class PlanCatalogContract(unittest.TestCase):
+    def test_picker_lists_only_readable_checkpoint_plans_in_the_selected_host_root(self) -> None:
+        reader = reader_module()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            plans = write_glitch_fixture(root)
+            direct = plans / 'Plan with spaces.md'
+            archive = plans / 'archive' / 'Old plan.md'
+            write_plan(direct, plan())
+            write_plan(archive, plan('plan-234567abcdef'))
+            (plans / 'legacy.md').write_text('# No checkpoint block', encoding='utf-8')
+            outside = root / 'outside.md'
+            write_plan(outside, plan('plan-999999999999'))
+            if os.name != 'nt':
+                (plans / 'escape.md').symlink_to(outside)
+            with patch.dict(os.environ, {'GLITCH_ROOT': ''}):
+                catalog = reader.list_plans(plans)
+            self.assertEqual(Path(catalog['root']), root)
+            self.assertEqual([(Path(item['path']), item['plan_id']) for item in catalog['plans']],
+                             [(direct, 'plan-123456abcdef'), (archive, 'plan-234567abcdef')])
+            with self.assertRaisesRegex(ValueError, 'canonical plan area'):
+                reader.resolve_execute_plan(root, str(outside))
 
 
 class SourceContract(unittest.TestCase):
@@ -841,26 +866,6 @@ class PublicationContract(unittest.TestCase):
         write_plan(project_plans / 'workspace.md', plan())
         with self.assertRaises(FileNotFoundError):
             reader.resolve_execute_plan(self.base, 'workspace.md')
-
-    def test_picker_lists_only_readable_checkpoint_plans_in_the_selected_host_root(self) -> None:
-        reader = reader_module()
-        plans = write_glitch_fixture(self.base)
-        direct = plans / 'Plan with spaces.md'
-        archive = plans / 'archive' / 'Old plan.md'
-        write_plan(direct, plan())
-        write_plan(archive, plan('plan-234567abcdef'))
-        (plans / 'legacy.md').write_text('# No checkpoint block', encoding='utf-8')
-        outside = self.base / 'outside.md'
-        write_plan(outside, plan('plan-999999999999'))
-        if os.name != 'nt':
-            (plans / 'escape.md').symlink_to(outside)
-        with patch.dict(os.environ, {'GLITCH_ROOT': ''}):
-            catalog = reader.list_plans(plans)
-        self.assertEqual(Path(catalog['root']), self.base)
-        self.assertEqual([(Path(item['path']), item['plan_id']) for item in catalog['plans']],
-                         [(direct, 'plan-123456abcdef'), (archive, 'plan-234567abcdef')])
-        with self.assertRaisesRegex(ValueError, 'canonical plan area'):
-            reader.resolve_execute_plan(self.base, str(outside))
 
     def test_synthetic_adapter_publishes_two_panes_without_a_harness_and_deduplicates_delivery(self) -> None:
         reader = reader_module()

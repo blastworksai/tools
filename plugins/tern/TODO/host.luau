@@ -287,12 +287,13 @@ tern.block.define("list", {
         elseif restored.discover_pid then
             -- Only a view that waits for a plan is saved with a session, so it was patient; the window says otherwise by event.
             state.discover_pid = restored.discover_pid; state.discover_birth = restored.discover_birth
-            state.discovery_label = restored.discovery_label; state.waitSaved = true; state.leases = restored.leases; state.hadWait = true
+            state.discovery_label = restored.discovery_label; state.discovery_cwd = restored.discovery_cwd
+            state.waitSaved = true; state.leases = restored.leases; state.hadWait = true
         elseif saved == nil and type(args[1]) == "string" then
             local ok, source = pcall(tern.json.decode, args[1])
             if ok and type(source) == "table" and source.mode == "selected" and type(source.request) == "string" and #source.request <= 128 and type(source.label) == "string" and #source.label <= 400 then
                 state.selection = source
-                state.discovery_cwd = if type(source.cwd) == "string" and #source.cwd <= 4096 then source.cwd else nil
+                state.discovery_cwd = selection.validCwd(source.cwd)
             elseif ok and sourceValid(source) then
                 state.source = source
                 if type(args[2]) == "string" and #args[2] <= 80 and args[2]:match("^plan%-%x+$") then state.plan_id = args[2] end

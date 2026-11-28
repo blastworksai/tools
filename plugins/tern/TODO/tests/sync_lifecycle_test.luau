@@ -134,12 +134,14 @@ return {
     end},
     {"a view saved while it waits for a plan resumes waiting after a reload", function()
         local valid = function(src) return type(src) == "table" and type(src.path) == "string" end
-        local waiting = { discover_pid = 4242, discover_birth = "linux:boot:1", discovery_label = "Local · host" }
+        local waiting = { discover_pid = 4242, discover_birth = "linux:boot:1",
+            discovery_label = "Local · host", discovery_cwd = "/work/custom-glitch" }
         local saved = selection.saveState(waiting)
         assert(saved.schema == 2 and saved.discover_pid == 4242 and saved.label == "Local · host")
         local restored = selection.restoreState(saved, valid)
         assert(selection.hasWork(restored), "a reloaded waiting view has nothing to read")
         assert(restored.discover_pid == 4242 and restored.discovery_label == "Local · host" and restored.source == nil)
+        assert(restored.discovery_cwd == waiting.discovery_cwd, "reloaded picker lost the originating directory")
         -- the old behaviour: nothing saved, nothing to read, and the window still believes the view serves the session
         assert(not selection.hasWork(selection.restoreState({ schema = 2 }, valid)))
         -- a plan found later saves its source, which wins over the waiting record

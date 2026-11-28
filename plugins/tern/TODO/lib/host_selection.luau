@@ -361,9 +361,12 @@ function selection.wake(state: any): boolean
     state.dormant = false
     return true
 end
--- What a view persists across a plugin reload (`cx:save`). A view that is still waiting for its session's plan keeps
--- the native session it serves (discover_pid) and its label, so after a reload it resumes waiting instead of
--- coming back with nothing to read while the window still believes it serves the session.
+function selection.validCwd(value: any): string?
+    if type(value) == "string" and #value > 0 and #value <= 4096 and not value:find("%c") then return value end
+    return nil
+end
+
+-- A waiting view keeps its native process proof and the originating folder for the picker.
 function selection.saveState(state: any): any
     if state.source and state.plan_id then return { schema = 2, source = state.source, plan_id = state.plan_id } end
     -- The PID alone is not an identity: it may name another process after a restart. Save the process birth the
@@ -374,7 +377,10 @@ function selection.saveState(state: any): any
             if #rids < selection.MAX_LEASES then table.insert(rids, rid) end
         end
         table.sort(rids)
-        return { schema = 2, discover_pid = state.discover_pid, birth = state.discover_birth, label = state.discovery_label, leases = rids }
+        return {
+            schema = 2, discover_pid = state.discover_pid, birth = state.discover_birth,
+            label = state.discovery_label, cwd = state.discovery_cwd, leases = rids,
+        }
     end
     return { schema = 2 }
 end
@@ -398,7 +404,10 @@ function selection.restoreState(saved: any, sourceValid: (any) -> boolean, now: 
         if #leases == 0 then table.insert(leases, LEGACY) end
         local stamped = {}
         for _, rid in leases do stamped[rid] = now or 0 end
-        return { discover_pid = saved.discover_pid, discover_birth = saved.birth, discovery_label = saved.label, leases = stamped, hadWait = true }
+        return {
+            discover_pid = saved.discover_pid, discover_birth = saved.birth, discovery_label = saved.label,
+            discovery_cwd = selection.validCwd(saved.cwd), leases = stamped, hadWait = true,
+        }
     end
     return {}
 end
