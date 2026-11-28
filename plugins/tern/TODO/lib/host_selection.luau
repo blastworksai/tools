@@ -35,26 +35,32 @@ local function argvWith(prefix: { string }, suffix: { string }): { string }
     return argv
 end
 
-local function python3Version(result: ProcessResult): string?
+local function python3Version(result: ProcessResult): number?
     if result.status ~= 0 or result.timed_out then return nil end
     local output = result.stdout:gsub("\r\n", "\n"):gsub("\n$", "")
-    return output:match("^(TODO_PYTHON_3=3%.%d+)$")
+    return tonumber(output:match("^TODO_PYTHON_3=3%.(%d+)$"))
 end
 
 -- Only an unsuccessful probe selects another interpreter. Once a real Python 3
 -- answers, the helper runs once and its own result is returned without fallback.
-function selection.interpreter(api: InterpreterApi): Interpreter
+function selection.interpreter(api: InterpreterApi, operatingSystem: string?, minimumMinor: number?): Interpreter
     local selectedPrefix: { string }? = nil
+    local candidates = table.clone(INTERPRETERS)
+    if operatingSystem == "macos" then
+        table.insert(candidates, { "/opt/homebrew/bin/python3" })
+        table.insert(candidates, { "/usr/local/bin/python3" })
+    end
 
     local function probe(index: number, done: (prefix: { string}?) -> ())
-        local candidate = INTERPRETERS[index]
+        local candidate = candidates[index]
         if candidate == nil then done(nil); return end
         local finished = false
         local started = pcall(function()
             api.run(argvWith(candidate, { "-I", "-c", VERSION_PROBE }), { timeout_ms = 3000 }, function(result)
                 if finished then return end
                 finished = true
-                if python3Version(result) ~= nil then done(candidate) else probe(index + 1, done) end
+                local version = python3Version(result)
+                if version ~= nil and version >= (minimumMinor or 0) then done(candidate) else probe(index + 1, done) end
             end)
         end)
         if not started and not finished then finished = true; probe(index + 1, done) end
@@ -80,7 +86,9 @@ function selection.interpreter(api: InterpreterApi): Interpreter
         run = function(arguments, options, callback)
             local function withPrefix(prefix: { string }?)
                 if prefix == nil then
-                    callback(nil, "Python 3 is required. Tried py -3, python and python3; Microsoft Store aliases are not Python installations.")
+                    local problem = if minimumMinor then "Python 3." .. tostring(minimumMinor) .. " or later is required."
+                        else "Python 3 is required. Tried py -3, python and python3; Microsoft Store aliases are not Python installations."
+                    callback(nil, problem)
                 else
                     execute(prefix, arguments, options, callback)
                 end

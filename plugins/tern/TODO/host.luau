@@ -44,11 +44,13 @@ type State = {
     publisher: plan_publish.Publisher,
 }
 local instances: { [number]: State } = {}
-local python = selection.interpreter({
+local pythonApi: selection.InterpreterApi = {
     run = function(argv: { string }, options: selection.RunOptions, callback: (result: ProcessResult) -> ())
         tern.process.run(argv, options, function(result: ProcessResult) callback(result) end)
     end,
-})
+}
+local python = selection.interpreter(pythonApi, tern.runtime.os)
+local setupPython = selection.interpreter(pythonApi, tern.runtime.os, 11)
 
 local HOOK_SETUP_POLL_MS = 1000
 local HOOK_SETUP_TIMEOUT_MS = 12000
@@ -92,16 +94,12 @@ local function serveHookSetup()
         wasEnabled = enabled
         if pending and not running then
             pending = false
-            if tern.runtime.os ~= "linux" then
-                tern.log.warn("TODO hook setup: automatic setup is qualified on Linux only.")
-            else
-                running = true
-                local helper = plugin.dir .. "/integrations/glitch-plan-session-view/install_hooks.py"
-                python.run({ "-I", helper, "--plugin-data", plugin.data }, { timeout_ms = HOOK_SETUP_TIMEOUT_MS }, function(result, problem)
-                    running = false
-                    hookSetupResult(result, problem)
-                end)
-            end
+            running = true
+            local helper = plugin.dir .. "/integrations/glitch-plan-session-view/install_hooks.py"
+            setupPython.run({ "-I", helper, "--plugin-data", plugin.data }, { timeout_ms = HOOK_SETUP_TIMEOUT_MS }, function(result, problem)
+                running = false
+                hookSetupResult(result, problem)
+            end)
         end
         tern.timer(HOOK_SETUP_POLL_MS, step)
     end
@@ -240,6 +238,7 @@ local function refresh(state: State, cx: BlockCx)
 end
 
 tern.block.define("list", {
+    font = "sans",
     init = function(cx: BlockCx, args: { string }, saved: any): State
         local state: State = { panel = cx.pane, publisher = plan_publish.new(tern.json.encode, tern.now) }
         -- A plan an earlier instance of this panel published must not outlive a reload.

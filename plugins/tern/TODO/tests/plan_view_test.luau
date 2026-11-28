@@ -46,7 +46,7 @@ return {
     {"current blocked checkpoint remains visible",function()
         local plan={title="Task",current="cp1",checkpoints={{id="cp1",text="Review",state="blocked",reason="Owner approval required"}}}
         local card=view.draw(ui,plan,"Local",nil,"now")
-        local item=card.main.children[2].props.phases[1].items[1]
+        local item=card.main.children[3].props.phases[1].items[1]
         assert(item.text=="Current · Review")
         assert(item.status=="blocked")
         assert(item.note=="Owner approval required")
@@ -92,15 +92,19 @@ return {
     end},
     {"hierarchy keeps ownership: tasks and items sit under their checkpoint's group, current and reasons show",function()
         local card=view.draw(ui,detailed(),"Local",nil,"now")
-        local groups={}
-        for _,child in card.main.children do if child.head then table.insert(groups,child) end end
-        assert(#groups==3 and groups[2].head[1].text=="UI")
-        local items=groups[2].children[1].props.phases[1].items
+        local groups=card.main.children[3].props.phases
+        assert(#groups==3 and groups[2].title=="UI")
+        local items=groups[2].items
         assert(#items==4 and items[1].id=="ui" and items[2].id=="impl" and items[3].id=="impl-file")
         assert(items[2].text:find("Current · ",1,true)==1 and items[3].text:find("File · Segment",1,true))
         assert(items[3].note=="window.luau" and items[4].note=="Waiting for owner")
-        local progress=card.main.children[1].text
+        local progress=card.main.children[2].text
         assert(progress[1].text:find("Checkpoints 1/3",1,true) and progress[1].text:find("Tasks 1/2",1,true) and progress[1].text:find("Files 1/2",1,true) and progress[1].text:find("Checks 1/1",1,true))
+    end},
+    {"the plan uses a native heading and keeps its source in the dock",function()
+        local card=view.draw(ui,detailed(),"Local plan.md",nil,"now")
+        assert(card.main.children[1].text[1].style=="title" and card.main.children[3].kind=="checklist")
+        assert(card.dock.children[1].text[1].style=="path")
     end},
     {"rename and reorder update rows in place: same ids, no stale or duplicate rows",function()
         local _,before=rows(view.draw(ui,detailed(),"L",nil,"t"))

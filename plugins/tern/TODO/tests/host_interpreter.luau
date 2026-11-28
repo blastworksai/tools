@@ -12,7 +12,7 @@ local function isProbe(argv)
     return false
 end
 
-local function fixture(probes, helper)
+local function fixture(probes, helper, operatingSystem, minimumMinor)
     local f = { probes = {}, helpers = {}, delivered = {} }
     f.interpreter = selection.interpreter({
         run = function(argv, _options, callback)
@@ -27,7 +27,7 @@ local function fixture(probes, helper)
                 callback(helper or result(0, '{"ok":true}'))
             end
         end,
-    })
+    }, operatingSystem, minimumMinor)
     function f.run(arguments)
         f.interpreter.run(arguments or { "-I", "todo.py", "source", "--plan", "/plan.md" }, { timeout_ms = 6000 }, function(value, problem)
             table.insert(f.delivered, { value = value, problem = problem })
@@ -37,6 +37,14 @@ local function fixture(probes, helper)
 end
 
 return {
+    { "macOS setup skips an old system Python and selects verified Homebrew Python", function()
+        local f = fixture({
+            python3 = result(0, "TODO_PYTHON_3=3.9\n"),
+            ["/opt/homebrew/bin/python3"] = result(0, "TODO_PYTHON_3=3.13\n"),
+        }, nil, "macos", 11)
+        f.run()
+        assert(#f.helpers == 1 and f.helpers[1][1] == "/opt/homebrew/bin/python3")
+    end },
     { "hidden py falls through to a verified python and caches the real version probe", function()
         local f = fixture({ py = "hidden", python = result(0, "TODO_PYTHON_3=3.12\r\n") })
         f.run()

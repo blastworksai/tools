@@ -96,7 +96,7 @@ The reader returns the validated checkpoint object. Each panel refreshes indepen
 
 ## Runtime and rollout
 
-The viewer requires **Tern 0.9.8 or later** on the server and client. Automatic execute hooks have been exercised in disposable interactive Linux panes with Tern 0.9.22, Claude Code 2.1.332 and Codex 0.172.0. Setup requires Python 3.11 or later, an owned Glitch root and the execution account's consent. Each native remote host configures its own hooks. Windows and macOS automatic setup remain unqualified. [Validation record](docs/VALIDATION.md)
+The viewer requires **Tern 0.9.8 or later** on the server and client. The plan pane uses Tern's UI font, native checklist phases and source dock, which follow the active theme. Automatic setup on macOS, Windows and Linux requires Python 3.11 or later, a verified local Glitch root and the existing Glitch opt-in. A remote pane uses the hook on the machine where the agent runs. In Codex, approve the hook through its native trust prompt. [Validation record](docs/VALIDATION.md)
 
 Install the reviewed package with Tern's ordinary installer:
 

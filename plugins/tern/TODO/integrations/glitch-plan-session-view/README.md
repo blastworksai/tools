@@ -2,7 +2,7 @@
 
 Blastworks.ai · MIT.
 
-On Linux, enable **Do you use Glitch?** in the installed TODO package on the host and account that run the agent. TODO configures the supported local Claude and Codex hooks when that host loads the package, including after an update. Use a fresh agent session. In Codex, review and trust the TODO hooks through `/hooks`. Setup does not change Codex trust. See the package runbook for the host logs, supported versions and rollback.
+Enable **Do you use Glitch?** in the installed TODO package where the agent runs. TODO configures the supported local Claude and Codex hooks when native Tern loads the package on macOS, Windows or Linux, including after an update. Use a fresh agent session. In Codex, review and trust the TODO hooks through `/hooks`. See the package runbook for the host logs, supported versions and rollback.
 
 Enter `/glitch-execute "plans/Example plan.md"` in Claude Code or `$glitch-execute "plans/Example plan.md"` in Codex. Use one explicit canonical plan path. Quote paths with spaces. A supported Claude `Skill` call also supplies the exact plan argument. When the plan has a valid `TERN-SESSION` block, the hook publishes its identity to TODO for this pane. Open TODO and select the session if asked. Edits to the block refresh the view.
 

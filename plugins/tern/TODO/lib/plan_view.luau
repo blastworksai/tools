@@ -147,9 +147,9 @@ end
 
 -- `sync` (optional): the text of the hidden plan-sync node, drawn with every state of the view.
 function view.draw(ui, plan, source, errorText, updated, sync)
-    local function main(children)
+    local function main(children, dock)
         if sync then table.insert(children, view.syncNode(ui, sync)) end
-        return {main = ui.col(children)}
+        return { main = ui.col(children), dock = dock }
     end
     if errorText then
         return main({
@@ -157,45 +157,30 @@ function view.draw(ui, plan, source, errorText, updated, sync)
         })
     end
     if not plan then
-        return main({
-            ui.text({ui.span("Reading the selected interactive plan…", "muted")}),
-        })
+        return main({ ui.node("progress", { label = "Reading plan…" }) })
     end
-    local footer = {
-        ui.text({ui.span(source, "muted")}),
-        ui.text({ui.span("Read-only plan view · Last read " .. tostring(updated), "muted")}),
-    }
     local detailed = false
-    for _, cp in plan.checkpoints do if cp.tasks and #cp.tasks > 0 then detailed = true end end
-    if not detailed then
-        local items, done = {}, 0
-        for _, cp in plan.checkpoints do
-            table.insert(items, row(plan, { id = cp.id, depth = 1, text = cp.text, state = cp.state, reason = cp.reason }))
-            if cp.state == "done" then done += 1 end
+    for _, checkpoint in plan.checkpoints do
+        if checkpoint.tasks and #checkpoint.tasks > 0 then detailed = true; break end
+    end
+    local phase = { id = "checkpoints", items = {} }
+    local phases = if detailed then {} else { phase }
+    for _, entity in view.entities(plan) do
+        if detailed and entity.depth == 1 then
+            phase = { id = entity.id, title = entity.text, items = {} }
+            table.insert(phases, phase)
         end
-        return main({
-            ui.text({ui.span(plan.title .. " · " .. tostring(done) .. "/" .. tostring(#items), "muted")}),
-            -- Use the same unframed native checklist family as OMP's ACP todos.
-            ui.node("checklist", {mode = "full", phases = {{id = "checkpoints", items = items}}}),
-            footer[1], footer[2],
-        })
+        table.insert(phase.items, row(plan, entity))
     end
-    -- One disclosure group per checkpoint keeps ownership: its tasks and their steps stay under it.
-    local children = { ui.text({ui.span(plan.title .. " · " .. progress(plan), "muted")}) }
-    local head, groupId, items = nil, nil, nil
-    local function close()
-        if head then table.insert(children, ui.section(head, { ui.node("checklist", {mode = "full", phases = {{id = groupId, items = items}}}) })) end
-    end
-    for _, e in view.entities(plan) do
-        if e.depth == 1 then
-            close()
-            head, groupId, items = { ui.span(e.text, "muted") }, e.id, {}
-        end
-        table.insert(items, row(plan, e))
-    end
-    close()
-    table.insert(children, footer[1]); table.insert(children, footer[2])
-    return main(children)
+    local sourceInfo = ui.col({
+        ui.text({ ui.span(source, "path") }),
+        ui.text({ ui.span("Last read " .. tostring(updated), "muted") }),
+    })
+    return main({
+        ui.text({ ui.span(plan.title, "title") }),
+        ui.text({ ui.span(progress(plan), "muted") }),
+        ui.node("checklist", { key = "checkpoints", mode = "full", phases = phases }),
+    }, sourceInfo)
 end
 
 return view

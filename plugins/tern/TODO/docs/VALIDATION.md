@@ -1,5 +1,17 @@
 # TODO validation
 
+## 0.9.0 desktop execute and native view
+
+| Host | Tern | Claude Code | Codex |
+| --- | --- | --- | --- |
+| Linux | 0.9.22 | 2.1.332 | 0.172.0 |
+| macOS | 0.9.32 | 2.1.330 | 0.169.0 |
+| Windows | 0.9.36 | 2.1.329 | 0.159.2 |
+
+On macOS and Windows, disposable native Tern installs registered both hooks. A forced update preserved consent and callback readback. Native Claude and Codex execute each published the literal fixture from its own pane. All fixture plan bytes stayed unchanged. Windows used native console attachment for the verified agent. Codex required native trust in both fixtures.
+
+The Linux regression suite used the native Tern window and loopback SSH. The visual check used the UI font, title, checklist and source dock on a real split pane. The view introduced no custom CSS. See the earlier Linux receipts below for the native execute and lifecycle inputs.
+
 ## 0.8.0 native execute and setup
 
 Blastworks.ai · 28 November 2026. Native Linux probes used Tern `0.9.22 (3fd4def)`, Claude Code `2.1.332` and Codex `0.172.0`. The checkpoint receipts below describe their tested sources and disposable environments. Rollout still requires the reviewed release head and target readback.

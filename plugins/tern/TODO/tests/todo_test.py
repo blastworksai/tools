@@ -419,7 +419,7 @@ class WindowsReadContract(unittest.TestCase):
                 patch('publication._windows_security', side_effect=ValueError('unsafe publication owner or permissions')) as security:
             with self.assertRaisesRegex(ValueError, 'unsafe publication'):
                 publication._windows_read(Path('publication.json'), 'S-1-5-21-42')
-        security.assert_called_once_with(Path('publication.json'), 'S-1-5-21-42', handle=77)
+        security.assert_called_once_with(Path('publication.json'), 'S-1-5-21-42', handle=77, trusted_installation=False)
         kernel.ReadFile.assert_not_called()
         kernel.CloseHandle.assert_called_once_with(77)
 
@@ -1030,6 +1030,18 @@ class WorkflowEntryContract(unittest.TestCase):
                     observed_ns=12345, startup=startup,
                 )
 
+    def test_windows_hook_command_and_plan_operand_keep_literal_paths(self) -> None:
+        spec = importlib.util.spec_from_file_location('todo_entry_windows_contract', ENTRY_HOOK)
+        entry = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(entry)
+        root = r"C:\Users\A Person\Glitch's root"
+        values = [r'C:\Program Files\Python312\python.exe', '-I', root + r'\entry_hook.py']
+        with patch.object(entry, 'windows_system_directory', return_value=entry.PureWindowsPath(r'C:\Windows\System32')), \
+                patch.object(entry.os, 'name', 'nt'):
+            self.assertEqual(entry.command_words(entry.command_line(values)), values)
+            self.assertEqual(entry._operand(r'"plans\Native plan.md"'), r'plans\Native plan.md')
+            self.assertIsNone(entry._operand(r'"plans\Native plan.md" another.md'))
+
 
 def detailed_plan(plan_id='plan-0123456789ab'):
     """Every entity kind and every state, three levels deep."""
@@ -1248,7 +1260,7 @@ class WindowContract(unittest.TestCase):
 
     def test_manifest_keeps_version_and_icon(self):
         manifest = self.source('plugin.toml')
-        self.assertIn('version = "0.8.0"', manifest)
+        self.assertIn('version = "0.9.0"', manifest)
         self.assertIn('icon = "list-checks"', manifest)
 
 

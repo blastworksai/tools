@@ -218,13 +218,9 @@ def _read_scoped_plan(path: Path) -> dict | None:
 
 
 def _linux_invocation(pid: int) -> tuple[Path, list[str]]:
-    folder = Path('/proc') / str(pid)
-    image = (folder / 'exe').readlink()
-    with (folder / 'cmdline').open('rb') as stream:
-        raw = stream.read(64 * 1024 + 1)
-    if not raw.endswith(b'\0') or len(raw) > 64 * 1024:
-        raise ValueError('cannot verify native process arguments')
-    return image, [os.fsdecode(part) for part in raw[:-1].split(b'\0')][1:]
+    from process_identity import invocation
+
+    return invocation(pid)
 
 
 def _linux_foreground_terminal(pid: int) -> bool:
@@ -255,18 +251,18 @@ def _interactive_invocation(harness: str, arguments: list[str]) -> bool:
 
 
 def verify_execute_process(harness: str, *, executable: Path, declared_pid: int | None = None) -> tuple[int, str]:
-    """Find the verified interactive agent process that owns this Linux Tern hook."""
-    from process_identity import ancestors, process
+    """Find the verified interactive agent process that owns this Tern hook."""
+    from process_identity import ancestors, invocation, interactive_terminal, process
 
-    if not sys.platform.startswith('linux'):
-        raise ValueError('native execute process verification is unavailable on this OS')
     if not executable.is_absolute():
         raise ValueError('the configured agent executable must be an absolute path')
+    if sys.platform.startswith('linux'):
+        invocation, interactive_terminal = _linux_invocation, _linux_foreground_terminal
     configured = executable.resolve(strict=True)
     identity = process(os.getpid())['owner']
     chain = ancestors(os.getppid())
-    tern_image, tern_arguments = _linux_invocation(chain[-1]['pid'])
-    if tern_image.name != 'tern' or 'daemon' not in tern_arguments:
+    tern_image, tern_arguments = invocation(chain[-1]['pid'])
+    if tern_image.name.lower().removesuffix('.exe') != 'tern' or 'daemon' not in tern_arguments:
         raise ValueError('the caller has no verified native Tern daemon ancestor')
 
     matches = []
@@ -274,7 +270,7 @@ def verify_execute_process(harness: str, *, executable: Path, declared_pid: int 
         if item['owner'] != identity:
             break
         pid = item['pid']
-        image, arguments = _linux_invocation(pid)
+        image, arguments = invocation(pid)
         if image == configured:
             matches.append((item, arguments))
     if len(matches) != 1:
@@ -283,7 +279,7 @@ def verify_execute_process(harness: str, *, executable: Path, declared_pid: int 
     pid = agent['pid']
     if declared_pid is not None and pid != declared_pid:
         raise ValueError('the native agent identity conflicts with the runtime declaration')
-    if not _interactive_invocation(harness, arguments) or not _linux_foreground_terminal(pid):
+    if not _interactive_invocation(harness, arguments) or not interactive_terminal(pid):
         raise ValueError('the native agent is not the interactive pane process')
     if process(pid) != agent or process(chain[-1]['pid']) != chain[-1]:
         raise ValueError('the native execute process chain changed during verification')

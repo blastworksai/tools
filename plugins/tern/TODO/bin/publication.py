@@ -80,7 +80,7 @@ def _group():
     return os.getegid()
 
 
-def _windows_security(path, identity, create=False, *, handle=None):
+def _windows_security(path, identity, create=False, *, handle=None, trusted_installation=False):
     from ctypes import wintypes as w
     api=ctypes.WinDLL('advapi32',use_last_error=True);kernel=ctypes.WinDLL('kernel32',use_last_error=True)
     pointer=ctypes.c_void_p
@@ -107,13 +107,18 @@ def _windows_security(path, identity, create=False, *, handle=None):
     if status!=0:
         raise OSError('cannot inspect publication permissions')
     allowed={identity,'S-1-5-18','S-1-5-32-544'}
+    if trusted_installation:
+        # Windows Modules Installer owns system-managed programs and directories.
+        allowed.add('S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464')
     def sid_text(value):
         text=w.LPWSTR()
         if not api.ConvertSidToStringSidW(value,ctypes.byref(text)):raise OSError('cannot read publication owner')
         try:return text.value
         finally:kernel.LocalFree(ctypes.cast(text,pointer))
     try:
-        if sid_text(sid) not in allowed or not acl:raise ValueError('unsafe publication owner or permissions')
+        if not sid or sid_text(sid) not in allowed or not acl:raise ValueError('unsafe publication owner or permissions')
+        # OWNER RIGHTS grants to the already-checked owner, not another account.
+        allowed.add('S-1-3-4')
         # ACL's public header carries its ACE count at byte 4; plain allowed ACEs
         # contain mask then SID. Other grant forms fail closed.
         count=ctypes.c_ushort.from_address(acl.value+4).value
@@ -123,6 +128,8 @@ def _windows_security(path, identity, create=False, *, handle=None):
             kind=ctypes.c_ubyte.from_address(ace.value).value
             if kind==1:continue
             if kind!=0:raise ValueError('unsupported publication permissions')
+            if trusted_installation and ctypes.c_ubyte.from_address(ace.value+1).value & 0x08:
+                continue  # Inherit-only entries confer no rights on this object.
             mask=ctypes.c_uint32.from_address(ace.value+4).value
             if mask & 0x500d0156 and sid_text(pointer(ace.value+8)) not in allowed:
                 raise ValueError('publication permits another account to write')
@@ -295,7 +302,7 @@ def _key(agent):
 
 
 @contextlib.contextmanager
-def _windows_checked_handle(path, identity, access):
+def _windows_checked_handle(path, identity, access, *, trusted_installation=False):
     from ctypes import wintypes as w
     kernel = ctypes.WinDLL('kernel32', use_last_error=True)
     kernel.CreateFileW.argtypes = [w.LPCWSTR, w.DWORD, w.DWORD, ctypes.c_void_p,
@@ -322,7 +329,7 @@ def _windows_checked_handle(path, identity, access):
             raise OSError('cannot inspect the open publication')
         if info.attributes & 0x410 or info.links != 1:
             raise ValueError('publication changed while opening')
-        _windows_security(path, identity, handle=handle)
+        _windows_security(path, identity, handle=handle, trusted_installation=trusted_installation)
         yield kernel, handle
     finally:
         kernel.CloseHandle(handle)

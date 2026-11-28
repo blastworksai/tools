@@ -10,7 +10,6 @@ from pathlib import Path
 import platform
 import re
 import secrets
-import shlex
 import shutil
 import stat
 import subprocess
@@ -20,9 +19,10 @@ COMPANION = Path(__file__).resolve().parent
 PACKAGE = COMPANION.parents[1]
 # Isolated Python does not add the script directory to its import path.
 sys.dont_write_bytecode = True
-sys.path.insert(0, str(COMPANION))
+sys.path[:0] = [str(COMPANION), str(PACKAGE / 'bin')]
+from entry_hook import command_line, command_words, windows_system_directory
 from install_files import (
-    Refused, Snapshot, _absolute, _digest, _directory, _locked,
+    Refused, Snapshot, _absolute, _darwin_acl_is_safe, _digest, _directory, _locked,
     _private_group_write, _private_primary_group, _snapshot, _snapshot_at, _write,
 )
 
@@ -41,6 +41,10 @@ EVENTS = {
 VERSION = {
     'claude': (re.compile(r'([0-9]+\.[0-9]+\.[0-9]+) \(Claude Code\)'), (2, 1, 332)),
     'codex': (re.compile(r'codex-cli ([0-9]+\.[0-9]+\.[0-9]+)'), (0, 172, 0)),
+}
+DESKTOP_MINIMUM = {
+    'darwin': {'claude': (2, 1, 330), 'codex': (0, 169, 0)},
+    'win32': {'claude': (2, 1, 329), 'codex': (0, 159, 2)},
 }
 DIGEST = re.compile(r'[0-9a-f]{64}')
 
@@ -101,7 +105,8 @@ def _root(explicit: Path | None) -> Path:
             _markers(root)
         except (Refused, OSError):
             continue
-        matches.append(root)
+        if not any(root.samefile(match) for match in matches):
+            matches.append(root)
     if len(matches) != 1:
         raise Unconfigured('TODO setup needs one verified Glitch root owned by this account.')
     return matches[0]
@@ -120,18 +125,13 @@ def _package_manifest() -> tuple[str, str]:
 
 
 def _native_daemon() -> None:
-    sys.dont_write_bytecode = True
-    sys.path.insert(0, str(PACKAGE / 'bin'))
-    from process_identity import ancestors, process
+    from process_identity import ancestors, invocation, process
 
     try:
         daemon = ancestors(os.getppid())[-1]
-        folder = Path('/proc') / str(daemon['pid'])
-        image = (folder / 'exe').readlink()
-        with (folder / 'cmdline').open('rb') as stream:
-            arguments = stream.read(64 * 1024)
-        native = (daemon['owner'] == str(os.geteuid()) and image.name == 'tern'
-                  and b'daemon' in arguments.split(b'\0')[1:]
+        image, arguments = invocation(daemon['pid'])
+        native = (daemon['owner'] == process(os.getpid())['owner']
+                  and image.name.lower().removesuffix('.exe') == 'tern' and 'daemon' in arguments
                   and process(daemon['pid']) == daemon)
     except (ValueError, OSError):
         native = False
@@ -161,15 +161,32 @@ def _consent(plugin_data: Path | None) -> None:
 
 def _system_executable(path: Path) -> Path:
     native = _absolute(path).resolve(strict=True)
-    private_group = _private_primary_group()
-    with _directory(native.parent, private_group=private_group) as parent:
+    if os.name == 'nt':
+        from publication import owner, _windows_checked_handle
+
+        with _directory(native.parent), _windows_checked_handle(
+            native, owner(), 0x20080, trusted_installation=True,
+        ):
+            return native
+    if sys.platform == 'darwin':
+        import grp
+
+        # Homebrew directories can be writable by the macOS administrators group.
+        try:
+            trusted_group = grp.getgrnam('admin').gr_gid
+        except KeyError:
+            trusted_group = None
+    else:
+        trusted_group = _private_primary_group()
+    with _directory(native.parent, private_group=trusted_group) as parent:
         fd = os.open(native.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
         try:
             info = os.fstat(fd)
             if (not stat.S_ISREG(info.st_mode) or not info.st_mode & 0o111
-                    or info.st_uid not in (0, os.geteuid()) or info.st_mode & 0o7000):
+                    or info.st_uid not in (0, os.geteuid()) or info.st_mode & 0o7000
+                    or not _darwin_acl_is_safe(fd, directory=False)):
                 raise Refused('TODO setup could not verify an installed executable.')
-            if info.st_mode & 0o022 and not _private_group_write(info, fd, private_group):
+            if info.st_mode & 0o022 and not _private_group_write(info, fd, trusted_group):
                 raise Refused('TODO setup found an unsafe executable write permission.')
         finally:
             os.close(fd)
@@ -178,28 +195,63 @@ def _system_executable(path: Path) -> Path:
 
 def _codex_native(launcher: Path) -> Iterator[Path]:
     yield launcher
+    if os.name == 'nt' and launcher.suffix.lower() == '.cmd':
+        launcher = launcher.parent / 'node_modules/@openai/codex/bin/codex.js'
     if launcher.name != 'codex.js' or launcher.parent.parent.name != 'codex':
         return
-    arches = {'x86_64': ('x64', 'x86_64'), 'aarch64': ('arm64', 'aarch64')}
-    arch = arches.get(platform.machine())
+    arches = {'x86_64': ('x64', 'x86_64'), 'amd64': ('x64', 'x86_64'),
+              'aarch64': ('arm64', 'aarch64'), 'arm64': ('arm64', 'aarch64')}
+    arch = arches.get(platform.machine().lower())
     if arch is None:
         return
     platform_name, triple = arch
     npm = launcher.parent.parent
-    native = (Path('codex-linux-' + platform_name) / 'vendor'
-              / (triple + '-unknown-linux-musl') / 'bin/codex')
+    if sys.platform == 'darwin':
+        build, target, binary = 'darwin', triple + '-apple-darwin', 'codex'
+    elif os.name == 'nt':
+        build, target, binary = 'win32', triple + '-pc-windows-msvc', 'codex.exe'
+    else:
+        build, target, binary = 'linux', triple + '-unknown-linux-musl', 'codex'
+    native = Path(f'codex-{build}-{platform_name}') / 'vendor' / target / 'bin' / binary
     yield npm / 'node_modules' / '@openai' / native
     yield npm.parent / native
 
 
+def _native_binary(path: Path) -> bool:
+    with path.open('rb') as stream:
+        magic = stream.read(4)
+    if os.name == 'nt':
+        return magic.startswith(b'MZ') and path.suffix.lower() == '.exe'
+    if sys.platform == 'darwin':
+        return magic.hex() in {'feedface', 'cefaedfe', 'feedfacf', 'cffaedfe', 'cafebabe', 'cafebabf'}
+    return magic == b'\x7fELF'
+
+
+def _runtime_environment() -> dict[str, str]:
+    if os.name == 'nt':
+        system_directory = windows_system_directory()
+        system = str(system_directory.parent)
+        return {'SYSTEMROOT': system, 'WINDIR': system, 'USERPROFILE': str(Path.home()),
+                'PATH': os.pathsep.join((str(system_directory), system))}
+    return {'PATH': os.defpath, 'HOME': str(Path.home()), 'LANG': 'C'}
+
+
 def _detect_runtime(harness: str, explicit: Path | None) -> tuple[Path, str] | None:
     on_path = shutil.which(harness)
-    defaults = (Path('/usr/bin') / harness, Path('/usr/local/bin') / harness,
-                Path.home() / '.local/bin' / harness)
+    home = Path.home()
+    if os.name == 'nt':
+        defaults = tuple(directory / (harness + '.exe') for directory in (
+            home / '.local/bin', home / 'AppData/Local/Microsoft/WinGet/Links',
+        ))
+    else:
+        defaults = tuple(directory / harness for directory in (
+            Path('/usr/bin'), Path('/usr/local/bin'), Path('/opt/homebrew/bin'), home / '.local/bin',
+        ))
     candidates = (explicit,) if explicit is not None else (
         (Path(on_path).absolute(), *defaults) if on_path else defaults
     )
     pattern, minimum = VERSION[harness]
+    minimum = DESKTOP_MINIMUM.get(sys.platform, {}).get(harness, minimum)
     seen = set()
     for candidate in candidates:
         try:
@@ -208,19 +260,17 @@ def _detect_runtime(harness: str, explicit: Path | None) -> tuple[Path, str] | N
             continue
         paths = _codex_native(resolved) if harness == 'codex' else (resolved,)
         for path in paths:
-            if path in seen or path.name != harness:
+            if path in seen:
                 continue
             seen.add(path)
             try:
                 native = _system_executable(path)
-                if explicit is None:
-                    with native.open('rb') as stream:
-                        if stream.read(4) != b'\x7fELF':
-                            continue
+                if (explicit is None or os.name == 'nt') and not _native_binary(native):
+                    continue
                 result = subprocess.run([str(native), '--version'], capture_output=True, text=True,
-                                        timeout=VERSION_TIMEOUT, cwd='/', check=False,
-                                        env={'PATH': os.defpath, 'HOME': str(Path.home()), 'LANG': 'C'})
-            except (OSError, subprocess.TimeoutExpired, UnicodeError, Refused):
+                                        timeout=VERSION_TIMEOUT, cwd=native.anchor, check=False,
+                                        env=_runtime_environment())
+            except (OSError, subprocess.TimeoutExpired, ValueError):
                 continue
             match = pattern.fullmatch(result.stdout.strip())
             if result.returncode == 0 and match and tuple(map(int, match[1].split('.'))) >= minimum:
@@ -379,8 +429,8 @@ def _patch_hooks(document: dict, remove: list, add: list) -> dict:
 
 
 def _new_refs(harness: str, python: Path, adapter: Path, root: Path, native: Path) -> list:
-    command = shlex.join([str(python), '-I', str(adapter), '--root', str(root),
-                          '--harness', harness, '--executable', str(native)])
+    command = command_line([str(python), '-I', str(adapter), '--root', str(root),
+                            '--harness', harness, '--executable', str(native)])
     call = {'type': 'command', 'command': command, 'timeout': HOOK_TIMEOUT}
     return [[event, matcher, call] for event, matcher in EVENTS[harness]]
 
@@ -390,7 +440,7 @@ def _words(call: dict) -> list[str]:
     if call.get('type') != 'command' or not isinstance(command, str):
         return []
     try:
-        return shlex.split(command)
+        return command_words(command)
     except ValueError:
         return []
 
@@ -414,9 +464,9 @@ def _owned_refs(document: dict, harness: str, known: list, companion: Path, pyth
         if ref in known or (harness == 'claude' and _legacy(ref, companion, python)):
             owned.append(ref)
             continue
-        for word in _words(ref[2]):
-            if word.endswith('/entry_hook.py') and '/_local/tern-todo/' in word:
-                raise Refused('TODO setup found an unrecognized TODO callback and left it in place.')
+        if any('/_local/tern-todo/' in word.replace('\\', '/').lower()
+               and word.replace('\\', '/').lower().endswith('/entry_hook.py') for word in _words(ref[2])):
+            raise Refused('TODO setup found an unrecognized TODO callback and left it in place.')
     return owned
 
 
@@ -456,7 +506,7 @@ def _validate_refs(harness: str, refs: list, root: Path, generation: str | None)
             adapter = str(companion / 'versions' / generation / 'entry_hook.py')
             if ((ref[0], ref[1]) in EVENTS[harness] and len(words) == 9
                     and words[1:8] == ['-I', adapter, '--root', str(root), '--harness', harness, '--executable']
-                    and ref[2] == {'type': 'command', 'command': shlex.join(words), 'timeout': HOOK_TIMEOUT}):
+                    and ref[2] == {'type': 'command', 'command': command_line(words), 'timeout': HOOK_TIMEOUT}):
                 continue
         raise Refused('TODO setup found invalid callback metadata.')
 
@@ -724,9 +774,9 @@ def _setup_locked(args: argparse.Namespace, root: Path, meta: Path, companion: P
 
 
 def _setup(args: argparse.Namespace) -> dict:
-    if not sys.platform.startswith('linux') or sys.version_info < (3, 11):
-        raise Unconfigured('TODO native hook setup requires Linux and Python 3.11 or later.')
-    if os.geteuid() == 0 or os.geteuid() != os.getuid():
+    if sys.platform not in {'linux', 'darwin', 'win32'} or sys.version_info < (3, 11):
+        raise Unconfigured('TODO native hook setup requires macOS, Windows or Linux and Python 3.11 or later.')
+    if os.name != 'nt' and (os.geteuid() == 0 or os.geteuid() != os.getuid()):
         raise Unconfigured('Run TODO setup as the unprivileged Glitch account.')
     ident, version = _package_manifest()
     if args.plugin_data is not None:
